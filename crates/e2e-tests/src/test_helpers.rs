@@ -207,28 +207,26 @@ pub async fn create_deposit_and_wait(
 /// leader's GC decided on the cleanup from its mirror, and every node's
 /// mirror applied the resulting Field deletions from the object stream
 /// alone — no rescrape exists to paper over a miss.
-pub async fn wait_for_spent_utxo_cleanup(
-    networks: &TestNetworks,
-    timeout: Duration,
-) -> Result<()> {
+pub async fn wait_for_spent_utxo_cleanup(networks: &TestNetworks, timeout: Duration) -> Result<()> {
     info!("Waiting for the spent-UTXO cleanup to reach every node's mirror...");
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let laggard = networks
-            .hashi_network
-            .nodes()
-            .iter()
-            .enumerate()
-            .find_map(|(index, node)| {
-                let state = node.hashi().onchain_state();
-                let pending = state
-                    .utxo_records()
-                    .values()
-                    .filter(|record| record.spent_epoch.is_some())
-                    .count();
-                let tombstones = state.spent_utxos_entries().len();
-                (pending > 0 || tombstones == 0).then_some((index, pending, tombstones))
-            });
+        let laggard =
+            networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    let state = node.hashi().onchain_state();
+                    let pending = state
+                        .utxo_records()
+                        .values()
+                        .filter(|record| record.spent_epoch.is_some())
+                        .count();
+                    let tombstones = state.spent_utxos_entries().len();
+                    (pending > 0 || tombstones == 0).then_some((index, pending, tombstones))
+                });
         let Some((index, pending, tombstones)) = laggard else {
             info!("Every node's mirror shows the spent UTXOs cleaned up");
             return Ok(());

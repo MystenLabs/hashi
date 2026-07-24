@@ -41,7 +41,9 @@ pub(super) enum WithdrawalBroadcastOutcome {
     /// Carries the checkpoint the confirm transaction landed in, so the
     /// cleanup scan can wait for the mirror to reflect the spent-UTXO
     /// markings before deciding.
-    ConfirmedOnSui { checkpoint: u64 },
+    ConfirmedOnSui {
+        checkpoint: u64,
+    },
     WaitForNextBitcoinBlock,
 }
 
