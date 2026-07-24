@@ -213,6 +213,7 @@ impl LeaderService {
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
+        let mut was_leader = false;
 
         loop {
             trace!("Waiting for next checkpoint or task completion...");
@@ -230,8 +231,13 @@ impl LeaderService {
                     let is_leader = self.is_current_leader(checkpoint_height);
                     self.inner.metrics.is_leader.set(i64::from(is_leader));
                     if is_leader {
+                        was_leader = true;
                         debug!("Checkpoint {checkpoint_height}: We are the leader node");
                     } else {
+                        if was_leader {
+                            self.reset_approved_deposit_metrics();
+                            was_leader = false;
+                        }
                         trace!("We are not the leader node");
                         continue;
                     }

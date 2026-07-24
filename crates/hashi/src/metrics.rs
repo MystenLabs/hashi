@@ -92,7 +92,7 @@ pub struct Metrics {
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
     pub deposit_lookup_cache_requests_total: IntCounterVec,
-    pub approved_deposit_requests_ignored: IntGaugeVec,
+    pub leader_approved_deposit_requests_ignored_current: IntGaugeVec,
     pub never_retry_deposit_ids: IntGauge,
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
@@ -601,9 +601,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            approved_deposit_requests_ignored: register_int_gauge_vec_with_registry!(
-                "hashi_approved_deposit_requests_ignored",
-                "Approved deposit requests currently ignored by the leader",
+            leader_approved_deposit_requests_ignored_current: register_int_gauge_vec_with_registry!(
+                "hashi_leader_approved_deposit_requests_ignored_current",
+                "Number of approved deposit requests currently ignored by this leader",
                 &["reason"],
                 registry,
             )

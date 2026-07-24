@@ -144,6 +144,10 @@ impl LeaderService {
             })
             .collect();
 
+        let approved_deposit_ids: Vec<Address> = deposit_confirmation_candidates
+            .iter()
+            .map(|r| r.id)
+            .collect();
         let spent_or_active_utxo_ids = self.inner.onchain_state().find_spent_or_active_utxo_ids(
             deposit_confirmation_candidates.iter().map(|r| r.utxo.id),
         );
@@ -155,19 +159,15 @@ impl LeaderService {
 
         self.inner
             .metrics
-            .approved_deposit_requests_ignored
+            .leader_approved_deposit_requests_ignored_current
             .with_label_values(&["duplicate_utxo"])
             .set(duplicate_utxo_count as i64);
         self.inner
             .metrics
-            .approved_deposit_requests_ignored
+            .leader_approved_deposit_requests_ignored_current
             .with_label_values(&["utxo_already_used"])
             .set(utxo_already_used_count as i64);
 
-        let approved_deposit_ids: Vec<Address> = deposit_confirmation_candidates
-            .iter()
-            .map(|r| r.id)
-            .collect();
         self.approved_deposit_retry_tracker
             .prune(&approved_deposit_ids);
         self.inner
@@ -315,6 +315,7 @@ impl LeaderService {
         self.approved_deposit_tasks.abort_all();
         self.pending_unapproved_deposit_requests.clear();
         self.inflight_deposits.clear();
+        self.reset_approved_deposit_metrics();
         true
     }
 
@@ -496,6 +497,21 @@ impl LeaderService {
             })
             .ok()
     }
+
+    pub(super) fn reset_approved_deposit_metrics(&self) {
+        for reason in ["duplicate_utxo", "utxo_already_used"] {
+            self.inner
+                .metrics
+                .leader_approved_deposit_requests_ignored_current
+                .with_label_values(&[reason])
+                .set(0);
+        }
+        self.inner
+            .metrics
+            .leader_items_in_backoff
+            .with_label_values(&["approved_deposit_confirmation"])
+            .set(0);
+    }
 }
 
 fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequest {
@@ -523,11 +539,22 @@ fn filter_deposit_confirmation_candidates(
     candidates.retain(|r| !spent_or_active_utxo_ids.contains(&r.utxo.id));
     let utxo_already_used_count = count_before_filter - candidates.len();
 
-    // Keep the first request per UTXO and count later duplicates.
+    // Keep the earliest-approved request per UTXO and count later duplicates.
     let count_before_filter = candidates.len();
+    candidates.sort_by_key(|r| {
+        (
+            r.approved_timestamp_ms.is_none(),
+            r.approved_timestamp_ms.unwrap_or_default(),
+            r.created_timestamp_ms,
+            r.id,
+        )
+    });
     let mut selected_utxo_ids = HashSet::new();
     candidates.retain(|r| selected_utxo_ids.insert(r.utxo.id));
     let duplicate_utxo_count = count_before_filter - candidates.len();
+
+    // Preserve the existing scheduling order between unrelated UTXOs.
+    candidates.sort_by_key(|r| (r.created_timestamp_ms, r.id));
 
     (utxo_already_used_count, duplicate_utxo_count)
 }
@@ -579,5 +606,24 @@ mod tests {
 
         assert_eq!(candidates, vec![first, distinct]);
         assert_eq!(counts, (2, 1));
+    }
+
+    #[test]
+    fn selects_earliest_approved_deposit_confirmation_candidate() {
+        let mut oldest = deposit_request(1, 1);
+        oldest.approved_timestamp_ms = Some(200);
+        let mut earliest_approved = deposit_request(2, 1);
+        earliest_approved.approved_timestamp_ms = Some(100);
+        let missing_approval_timestamp = deposit_request(3, 1);
+        let mut candidates = vec![
+            oldest,
+            earliest_approved.clone(),
+            missing_approval_timestamp,
+        ];
+
+        let counts = filter_deposit_confirmation_candidates(&mut candidates, &HashSet::new());
+
+        assert_eq!(candidates, vec![earliest_approved]);
+        assert_eq!(counts, (0, 2));
     }
 }

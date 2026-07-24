@@ -662,9 +662,7 @@ impl OnchainState {
         let mut utxo_ids: HashSet<_> = utxo_ids.into_iter().collect();
         let state = self.state();
         let utxo_pool = &state.hashi().utxo_pool;
-        utxo_ids.retain(|id| {
-            utxo_pool.utxo_records().contains_key(id) || utxo_pool.spent_utxos().contains_key(id)
-        });
+        utxo_ids.retain(|id| utxo_pool.is_active_or_spent(id));
         utxo_ids
     }
 
