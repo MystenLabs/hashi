@@ -745,6 +745,10 @@ impl UtxoPool {
             .map(|(id, r)| (id, &r.utxo))
     }
 
+    pub fn is_active_or_spent(&self, id: &UtxoId) -> bool {
+        self.utxo_records.contains_key(id) || self.spent_utxos.contains_key(id)
+    }
+
     pub fn spent_utxos_id(&self) -> &Address {
         &self.spent_utxos_id
     }
