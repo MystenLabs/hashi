@@ -229,7 +229,8 @@ impl NonceCollectionWindow {
         self.weight += reduced_weight;
         if matches!(self.state, NonceCollectionState::Floor) && self.weight >= self.required_weight
         {
-            self.state = if self.window_ms == 0 {
+            // A zero crossing stamp marks the bare (pre-stamped-package) cert path.
+            self.state = if self.window_ms == 0 || admission.timestamp_ms == 0 {
                 NonceCollectionState::Closed { cutoff_ms: None }
             } else {
                 NonceCollectionState::Window {
@@ -1408,6 +1409,19 @@ mod tests {
         assert!(window.closed());
         assert_eq!(window.cutoff_ms(), None);
         assert!(window.try_admit(100).is_none());
+    }
+
+    #[test]
+    fn nonce_collection_window_zero_crossing_stamp_forces_floor_only() {
+        let mut window = NonceCollectionWindow::new(10, 700);
+        let admission = window.try_admit(0).unwrap();
+        window.record(admission, 6);
+        assert!(!window.closed());
+        let admission = window.try_admit(0).unwrap();
+        window.record(admission, 4);
+        assert!(window.closed());
+        assert_eq!(window.cutoff_ms(), None);
+        assert!(window.try_admit(0).is_none());
     }
 
     #[test]

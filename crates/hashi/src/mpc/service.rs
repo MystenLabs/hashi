@@ -731,11 +731,7 @@ impl MpcService {
         let weight = match protocol {
             NonceGenerationProtocol::Vanilla => {
                 let Some(certs) = onchain_state
-                    .fetch_stamped_certs(
-                        epoch,
-                        Some(batch_index),
-                        move_types::ProtocolType::NonceGeneration,
-                    )
+                    .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
                     .await?
                 else {
                     return Ok(None);
@@ -958,11 +954,7 @@ impl MpcService {
     > {
         loop {
             let certs = onchain_state
-                .fetch_stamped_certs(
-                    epoch,
-                    Some(batch_index),
-                    move_types::ProtocolType::NonceGeneration,
-                )
+                .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
                 .await?
                 .unwrap_or_default();
             let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;

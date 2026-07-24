@@ -41,6 +41,9 @@ pub fn presignature_derivation_activation_epoch(chain_id: &str) -> u64 {
     }
 }
 
+/// The `versioning::PACKAGE_VERSION` at which the stamped nonce-cert path becomes available on-chain.
+pub const STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION: u64 = 2;
+
 #[cfg(test)]
 mod tests {
     use super::*;

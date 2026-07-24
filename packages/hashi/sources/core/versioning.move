@@ -14,7 +14,7 @@ use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{
 
 // ~~~~~~~ Constants ~~~~~~~
 
-const PACKAGE_VERSION: u64 = 1;
+const PACKAGE_VERSION: u64 = 2;
 
 // ~~~~~~~ Errors ~~~~~~~
 

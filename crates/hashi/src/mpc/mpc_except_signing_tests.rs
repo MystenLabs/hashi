@@ -10741,6 +10741,22 @@ fn test_legacy_derivation_ignores_accumulation_window() {
     assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), None);
 }
 
+#[test]
+fn test_bare_zero_stamp_certs_force_floor_only_window() {
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.presignature_derivation_version =
+        PresignatureDerivationVersion::PrivacyThreshold;
+    mgr.mpc_config.max_faulty = 25;
+    mgr.mpc_config.nonce_accumulation_window_ms = 700;
+
+    let cert = |i: usize| valid_dealer_submission(&setup, i, 0);
+    let certs = vec![cert(0), cert(1), cert(2), cert(3)];
+
+    assert_eq!(mgr.window_certified_nonce_dealers(&certs).0.len(), 3);
+    assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), None);
+}
+
 #[tokio::test]
 async fn test_verified_nonce_certs_drops_unverified() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);

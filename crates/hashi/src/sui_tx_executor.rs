@@ -368,6 +368,7 @@ pub struct SuiTxExecutor {
     signer: SimpleKeypair,
     hashi_ids: HashiIds,
     timeout: Duration,
+    uses_stamped_nonce_certs: bool,
 }
 
 impl SuiTxExecutor {
@@ -378,6 +379,7 @@ impl SuiTxExecutor {
             signer,
             hashi_ids,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            uses_stamped_nonce_certs: false,
         }
     }
 
@@ -386,11 +388,9 @@ impl SuiTxExecutor {
     /// This is a convenience constructor for use within the Hashi system.
     pub fn from_config(config: &Config, onchain_state: &OnchainState) -> anyhow::Result<Self> {
         let signer = config.operator_private_key()?;
-        Ok(Self::new(
-            onchain_state.client(),
-            signer,
-            config.hashi_ids(),
-        ))
+        let mut executor = Self::new(onchain_state.client(), signer, config.hashi_ids());
+        executor.uses_stamped_nonce_certs = onchain_state.supports_stamped_nonce_certs();
+        Ok(executor)
     }
 
     /// Create a new executor from an `Arc<Hashi>`.
@@ -410,6 +410,11 @@ impl SuiTxExecutor {
     /// Override the execution timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_stamped_nonce_certs(mut self, stamped: bool) -> Self {
+        self.uses_stamped_nonce_certs = stamped;
         self
     }
 
@@ -1218,7 +1223,7 @@ impl SuiTxExecutor {
         let cert_arg =
             build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, committee_sig);
         args.extend([dealer_arg, message_hash_arg, cert_arg]);
-        if batch_index.is_some() {
+        if batch_index.is_some() && self.uses_stamped_nonce_certs {
             let clock_arg = builder.object(
                 ObjectInput::new(SUI_CLOCK_OBJECT_ID)
                     .as_shared()

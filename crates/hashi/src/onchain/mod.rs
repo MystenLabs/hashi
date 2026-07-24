@@ -866,6 +866,51 @@ impl OnchainState {
         };
         Ok(Some(self.fetch_cert_table(&epoch_certs.certs).await?))
     }
+
+    pub fn supports_stamped_nonce_certs(&self) -> bool {
+        self.state()
+            .hashi()
+            .config
+            .enabled_versions
+            .contains(&crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
+    }
+
+    pub async fn fetch_nonce_certs_stamped_or_bare(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
+        if self.supports_stamped_nonce_certs() {
+            self.fetch_stamped_certs(
+                epoch,
+                batch_index,
+                move_types::ProtocolType::NonceGeneration,
+            )
+            .await
+        } else {
+            let bare = self
+                .fetch_certs(
+                    epoch,
+                    batch_index,
+                    move_types::ProtocolType::NonceGeneration,
+                )
+                .await?;
+            Ok(bare.map(|certs| {
+                certs
+                    .into_iter()
+                    .map(|(dealer, submission)| {
+                        (
+                            dealer,
+                            move_types::StampedDealerSubmissionV1 {
+                                submission,
+                                timestamp_ms: 0,
+                            },
+                        )
+                    })
+                    .collect()
+            }))
+        }
+    }
 }
 
 impl State {
