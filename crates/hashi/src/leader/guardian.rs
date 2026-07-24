@@ -344,26 +344,13 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         from_epoch: u64,
     ) -> anyhow::Result<SignedMessage<CommitteeTransitionRequest>> {
-        let (to_epoch, from_committee, new_committee) = {
-            let onchain = inner.onchain_state();
-            let state = onchain.state();
-            let committees_map = state.hashi().committees.committees();
-            let from = committees_map
-                .get(&from_epoch)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no on-chain committee for epoch {from_epoch}"))?;
-            // Hashi committee epochs are sparse: each reconfig only adds a
-            // new entry when Sui's epoch advances past hashi's AND the MPC
-            // reconfig completes, so the next entry is generally not
-            // `from_epoch + 1`. Both leader and followers derive the same
-            // `to_epoch` from on-chain state, so they sign the same transition.
-            let (to_epoch, to) = committees_map
-                .range((from_epoch + 1)..)
-                .next()
-                .map(|(&k, c)| (k, c.clone()))
-                .ok_or_else(|| anyhow::anyhow!("no on-chain committee epoch after {from_epoch}"))?;
-            (to_epoch, from, to)
-        };
+        let (from_committee, new_committee) = inner
+            .onchain_state()
+            .committee_transition(from_epoch)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no on-chain committee transition from epoch {from_epoch}")
+            })?;
+        let to_epoch = new_committee.epoch();
 
         let transition = CommitteeTransitionRequest {
             new_committee: hashi_types::move_types::Committee::from(&new_committee),

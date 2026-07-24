@@ -285,8 +285,13 @@ impl LeaderService {
     }
 
     fn check_halt_deposit_processing(&mut self) -> bool {
-        if !(self.inner.onchain_state().state().hashi().config.paused() || self.is_reconfiguring())
-        {
+        // Evaluate both predicates from one consistent state snapshot.
+        let halt = {
+            let state = self.inner.onchain_state().state();
+            state.hashi().config.paused()
+                || state.hashi().committees.pending_epoch_change().is_some()
+        };
+        if !halt {
             return false;
         }
 

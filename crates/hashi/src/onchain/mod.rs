@@ -492,6 +492,21 @@ impl OnchainState {
             .cloned()
     }
 
+    /// The committee transition out of `from_epoch`: that epoch's committee
+    /// and its on-chain successor. Hashi committee epochs are sparse — each
+    /// reconfig only adds an entry when Sui's epoch advances past hashi's and
+    /// the MPC reconfig completes — so the successor is generally not
+    /// `from_epoch + 1`. Both leader and followers derive the same successor
+    /// from on-chain state, so they sign the same transition. Returns owned
+    /// clones so no state guard escapes to the caller.
+    pub fn committee_transition(&self, from_epoch: u64) -> Option<(Committee, Committee)> {
+        let state = self.state();
+        let committees = state.hashi().committees.committees();
+        let from = committees.get(&from_epoch)?.clone();
+        let to = committees.range((from_epoch + 1)..).next()?.1.clone();
+        Some((from, to))
+    }
+
     /// Returns the MPC public key bytes.
     pub fn mpc_public_key(&self) -> Vec<u8> {
         self.state().hashi.committees.mpc_public_key().to_vec()
