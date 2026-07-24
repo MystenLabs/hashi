@@ -285,10 +285,7 @@ impl LeaderService {
     }
 
     fn check_halt_deposit_processing(&mut self) -> bool {
-        // Evaluate both predicates from one scoped snapshot. The temporary
-        // guard from the `||`'s first operand lives until the whole condition
-        // finishes evaluating, so `is_reconfiguring()` in the second operand
-        // would reacquire the same state lock while it is held.
+        // Evaluate both predicates from one consistent state snapshot.
         let halt = {
             let state = self.inner.onchain_state().state();
             state.hashi().config.paused()
