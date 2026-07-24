@@ -56,6 +56,7 @@ const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const USE_LEGACY_PRESIG_DERIVATION: bool = false;
 /// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
 /// constant name (the `#[error]` abort code encodes a source line, so the
 /// numeric code is not stable).
@@ -496,7 +497,7 @@ impl MpcService {
         drop(_timer);
         let nonce_outputs =
             nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
-        let (batch_size_per_weight, params, use_legacy) = {
+        let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
@@ -504,16 +505,19 @@ impl MpcService {
                     t: mgr.mpc_config.threshold,
                     f: mgr.mpc_config.max_faulty,
                 },
-                mgr.mpc_config.presignature_derivation_version.use_legacy(),
             )
         };
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let presignatures =
-            Presignatures::new(nonce_outputs, batch_size_per_weight, params, use_legacy)
-                .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let presignatures = Presignatures::new(
+            nonce_outputs,
+            batch_size_per_weight,
+            params,
+            USE_LEGACY_PRESIG_DERIVATION,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
         Ok((committee, presignatures))
     }
@@ -590,7 +594,7 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
-        let (batch_size_per_weight, params, use_legacy, protocol, floor) = {
+        let (batch_size_per_weight, params, protocol, floor) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
@@ -598,7 +602,6 @@ impl MpcService {
                     t: mgr.mpc_config.threshold,
                     f: mgr.mpc_config.max_faulty,
                 },
-                mgr.mpc_config.presignature_derivation_version.use_legacy(),
                 mgr.mpc_config.nonce_generation_protocol,
                 mgr.required_nonce_weight(),
             )
@@ -615,7 +618,6 @@ impl MpcService {
                     batch_index,
                     protocol,
                     params,
-                    use_legacy,
                     batch_size_per_weight,
                     floor,
                 )
@@ -716,7 +718,6 @@ impl MpcService {
         batch_index: u32,
         protocol: NonceGenerationProtocol,
         params: Parameters,
-        use_legacy: bool,
         batch_size_per_weight: u16,
         floor: u32,
     ) -> anyhow::Result<Option<usize>> {
@@ -757,7 +758,6 @@ impl MpcService {
         Ok(Some(presig_count(
             weight as usize,
             params,
-            use_legacy,
             batch_size_per_weight,
         )))
     }
@@ -973,11 +973,10 @@ impl MpcService {
             epoch,
             MPC_LABEL_NONCE_GENERATION,
         );
-        let (protocol, use_legacy, floor) = {
+        let (protocol, floor) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.mpc_config.nonce_generation_protocol,
-                mgr.mpc_config.presignature_derivation_version.use_legacy(),
                 mgr.required_nonce_weight(),
             )
         };
@@ -987,12 +986,7 @@ impl MpcService {
                 "nonce batch {batch_index} for epoch {epoch} refetched below floor \
                  ({weight} < {floor}); certificate set shrank during recovery",
             );
-            Ok(presig_count(
-                weight as usize,
-                params,
-                use_legacy,
-                batch_size_per_weight,
-            ))
+            Ok(presig_count(weight as usize, params, batch_size_per_weight))
         };
         let (outputs, expected_size) = match protocol {
             NonceGenerationProtocol::Vanilla => {
@@ -1053,8 +1047,13 @@ impl MpcService {
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
             ));
         }
-        let presignatures = Presignatures::new(outputs, batch_size_per_weight, params, use_legacy)
-            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let presignatures = Presignatures::new(
+            outputs,
+            batch_size_per_weight,
+            params,
+            USE_LEGACY_PRESIG_DERIVATION,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         if let Some(expected) = expected_size {
             anyhow::ensure!(
                 presignatures.len() == expected,
@@ -1626,14 +1625,9 @@ impl MpcService {
 pub(crate) fn presig_count(
     total_weight: usize,
     params: Parameters,
-    use_legacy: bool,
     batch_size_per_weight: u16,
 ) -> usize {
-    let consumed = if use_legacy {
-        params.f as usize
-    } else {
-        params.t as usize - 1
-    };
+    let consumed = params.t as usize - 1;
     total_weight.saturating_sub(consumed) * batch_size_per_weight as usize
 }
 
@@ -1705,18 +1699,16 @@ mod presig_count_tests {
     fn matches_height_times_batch_width() {
         let params = Parameters { t: 3, f: 1 };
         // height = W - (t - 1)
-        assert_eq!(presig_count(5, params, false, 2), (5 - 2) * 2);
-        assert_eq!(presig_count(3, params, false, 7), 7);
-        // height = W - f
-        assert_eq!(presig_count(5, params, true, 2), (5 - 1) * 2);
-        assert_eq!(presig_count(10, params, true, 4), (10 - 1) * 4);
+        assert_eq!(presig_count(5, params, 2), (5 - 2) * 2);
+        assert_eq!(presig_count(3, params, 7), 7);
+        assert_eq!(presig_count(10, params, 4), (10 - 2) * 4);
     }
 
     #[test]
     fn saturates_below_floor_without_underflow() {
         let params = Parameters { t: 3, f: 1 };
-        assert_eq!(presig_count(1, params, false, 2), 0);
-        assert_eq!(presig_count(0, params, true, 5), 0);
+        assert_eq!(presig_count(1, params, 2), 0);
+        assert_eq!(presig_count(0, params, 5), 0);
     }
 }
 
