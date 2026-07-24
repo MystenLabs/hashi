@@ -341,13 +341,12 @@ impl CoinSelectionParams {
 
     /// Default maximum total inputs selected for a withdrawal transaction,
     /// including both funding inputs and consolidation inputs.
-    pub const DEFAULT_MAX_INPUTS: usize = 700;
+    pub const DEFAULT_MAX_INPUTS: usize = 400;
 
-    /// Maximum number of withdrawal requests per batch. Larger
-    /// configured values are clamped to this because Sui runtime object
-    /// limits constrain the commit transaction to roughly
-    /// `inputs + 3 * requests + 12` runtime objects (budget: 922).
-    pub const MAX_WITHDRAWAL_REQUESTS: usize = 70;
+    /// Maximum number of withdrawal requests per batch. In the production
+    /// flow, the per-request input budget limits this to 400 inputs, leaving
+    /// room under Bitcoin's 101 kvB descendant-size budget for a direct child.
+    pub const MAX_WITHDRAWAL_REQUESTS: usize = 40;
 
     /// Default minimum fee rate floor (1 sat/vB), matching Bitcoin
     /// Core's minimum relay fee.

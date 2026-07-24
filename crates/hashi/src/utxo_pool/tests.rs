@@ -502,15 +502,17 @@ fn test_low_fee_consolidation_active_smallest_first() {
 }
 
 #[test]
-fn test_low_fee_absolute_request_cap_can_use_default_input_cap() {
-    let utxos: Vec<UtxoCandidate> = (0..CoinSelectionParams::DEFAULT_MAX_INPUTS as u32)
+fn test_low_fee_absolute_request_cap_uses_request_input_budget() {
+    let max_inputs =
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS * CoinSelectionParams::DEFAULT_INPUT_BUDGET;
+    let utxos: Vec<UtxoCandidate> = (0..max_inputs as u32)
         .map(|i| confirmed_utxo_with_vout(i, 40_000))
         .collect();
     let requests: Vec<WithdrawalRequest> = (0..CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
         .map(|i| make_request(i as u8, 100_001, i as u64))
         .collect();
     let params = CoinSelectionParams {
-        max_inputs: CoinSelectionParams::DEFAULT_MAX_INPUTS,
+        max_inputs,
         max_withdrawal_requests: CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
         ..default_params()
     };
@@ -521,13 +523,13 @@ fn test_low_fee_absolute_request_cap_can_use_default_input_cap() {
         &params,
         FeeRate::from_sat_per_vb_unchecked(1),
     )
-    .expect("should select the absolute request / default input envelope at low fee");
+    .expect("should select the absolute request / input budget envelope at low fee");
 
     assert_eq!(
         result.selected_requests.len(),
         CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
     );
-    assert_eq!(result.inputs.len(), CoinSelectionParams::DEFAULT_MAX_INPUTS);
+    assert_eq!(result.inputs.len(), max_inputs);
     assert_conservation(&result);
 }
 

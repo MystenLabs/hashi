@@ -2154,19 +2154,17 @@ mod tests {
         Ok(())
     }
 
-    /// Stress-test withdrawal at the production default batch size (50
-    /// requests / 500 inputs). Verifies that commit, sign, confirm, and
+    /// Stress-test withdrawal at the production default batch size (40
+    /// requests / 400 inputs). Verifies that commit, sign, confirm, and
     /// cleanup all stay within Sui's runtime-object and effects-size limits.
     ///
-    /// Before the two-phase spent optimization, confirm at 50 req / 500 inputs
-    /// would exceed Sui's 1000-object limit (~1053 objects). After the
-    /// optimization, confirm emits events only (0 objects per input) and a
-    /// separate `cleanup_spent_utxos` transaction does the bookkeeping.
+    /// The 400 input signatures exceed Sui's 16 KiB pure-argument limit, so
+    /// this also exercises chunked signature commits at the production cap.
     ///
     /// Test outline:
-    /// 1. Create 500 deposits (one UTXO each).
-    /// 2. Submit 50 withdrawal requests; low-fee consolidation fills the
-    ///    500-input cap.
+    /// 1. Create 400 deposits (one UTXO each).
+    /// 2. Submit 40 withdrawal requests; low-fee consolidation fills the
+    ///    400-input cap.
     /// 3. Assert commit, sign, and confirm transactions are under all Sui
     ///    limits (tx size, effects size, runtime objects).
     /// 4. Mine blocks and wait for confirmation.
@@ -2176,14 +2174,14 @@ mod tests {
         init_test_logging();
         info!("=== Starting Large Withdrawal Stress Test ===");
 
-        let num_withdrawals: usize = 50;
-        let num_deposits: usize = 500;
+        let num_withdrawals: usize = 40;
+        let num_deposits: usize = 400;
 
-        // 24-hour batching delay: the batch fires only at capacity (50), not
-        // on a timer. This ensures all 50 requests end up in one Bitcoin tx.
+        // 24-hour batching delay: the batch fires only at capacity (40), not
+        // on a timer. This ensures all 40 requests end up in one Bitcoin tx.
         // With 4 nodes at weight 25 each (total_weight=100), the presig pool
         // is batch_size_per_weight * total_weight. We need enough
-        // presignatures for 500 inputs.
+        // presignatures for 400 inputs.
         let mut networks = avid_override(
             TestNetworksBuilder::new()
                 .with_nodes(4)
@@ -2201,15 +2199,15 @@ mod tests {
 
         let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
 
-        // --- Create 500 Bitcoin deposits ---
+        // --- Create 400 Bitcoin deposits ---
         // Each deposit is 40,000 sats (above the 30,000 on-chain minimum),
-        // totalling 20,000,000 sats. The withdrawals request
-        // 50 x 30,000 = 1,500,000 sats. Coin selection picks enough UTXOs
+        // totalling 16,000,000 sats. The withdrawals request
+        // 40 x 30,001 = 1,200,040 sats. Coin selection picks enough UTXOs
         // for value and consolidation at low fee rates pulls in the rest up
-        // to the 500-input cap.
+        // to the 400-input cap.
         let deposit_amount_sats = 40_000u64;
-        // With 500 inputs and 64-byte Schnorr signatures, the BCS-encoded
-        // signatures vector is ~32.5 KiB -- well above the 16 KiB per-pure-arg
+        // With 400 inputs and 64-byte Schnorr signatures, the BCS-encoded
+        // signatures vector is ~26 KiB -- well above the 16 KiB per-pure-arg
         // limit that the chunking fix addresses.
         info!(
             "Creating {} Bitcoin deposits of {} sats each...",
@@ -2292,7 +2290,7 @@ mod tests {
                 break;
             }
             let confirmed = num_deposits - remaining;
-            if confirmed / 50 > last_logged / 50 {
+            if confirmed / 40 > last_logged / 40 {
                 info!(
                     active_utxos,
                     "Deposit confirmations: {}/{}", confirmed, num_deposits
@@ -2304,8 +2302,8 @@ mod tests {
         info!("All deposits confirmed");
         drop(_deposit_miner);
 
-        // --- Submit 50 withdrawal requests ---
-        let withdrawal_amount_sats = 30_000u64;
+        // --- Submit 40 withdrawal requests ---
+        let withdrawal_amount_sats = 30_001u64;
         info!(
             "Submitting {} withdrawal requests of {} sats each...",
             num_withdrawals, withdrawal_amount_sats
@@ -2386,7 +2384,7 @@ mod tests {
             num_withdrawals,
         );
 
-        // With 500 UTXOs at 40,000 sats and 1,500,000 sats of withdrawals,
+        // With 400 UTXOs at 40,000 sats and 1,200,040 sats of withdrawals,
         // coin selection should pick most UTXOs for value and consolidate the
         // rest. Verify that enough inputs were selected to exceed the old
         // 16 KiB per-pure-arg limit (~252 signatures at 65 BCS bytes each).
