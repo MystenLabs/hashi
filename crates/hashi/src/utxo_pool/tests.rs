@@ -1746,13 +1746,9 @@ fn test_consolidation_undo_when_fee_cap_exceeded() {
 
 // ── Stalled-settlement regression (signet, 2026-07-24) ────────────────────
 
-/// A settlement that paid the old 1 sat/vB floor stalled on signet for
-/// hours: at a 1 sat/vB target its own rate already met the target, so
-/// `cpfp_deficit` was zero and the child never boosted it. Selecting
-/// against the current floor must produce a real deficit.
-///
-/// Shape is the transaction from the incident: 314,662 wu (78,666 vb)
-/// paying 78,680 sat, i.e. 1.0002 sat/vB.
+/// A settlement paying the old 1 sat/vB floor already met the target, so
+/// `cpfp_deficit` was zero and no child could boost it. Shape is the
+/// transaction from the incident: 314,662 wu paying 78,680 sat.
 #[test]
 fn test_cpfp_boosts_ancestor_stalled_at_relay_floor() {
     const STALLED_WEIGHT_WU: u64 = 314_662;
@@ -1765,7 +1761,6 @@ fn test_cpfp_boosts_ancestor_stalled_at_relay_floor() {
     let result = select_coins(&[stalled], &requests, &default_params(), floor)
         .expect("selection should succeed");
 
-    // The deficit is what lifts the stalled ancestor to the floor.
     let deficit = floor
         .fee_wu(Weight::from_wu(STALLED_WEIGHT_WU))
         .expect("fee fits")
@@ -1773,16 +1768,13 @@ fn test_cpfp_boosts_ancestor_stalled_at_relay_floor() {
         - STALLED_FEE;
     assert!(deficit > 0, "a 1 sat/vB ancestor must leave a deficit");
 
-    // The child pays that deficit on top of its own fee, so the whole
-    // package clears the floor — which is what gets the parent mined.
     assert!(
         result.fee > deficit,
         "fee {} must cover the CPFP deficit {deficit} plus its own fee",
         result.fee
     );
 
-    // Regression guard: at the old 1 sat/vB floor this was zero, which
-    // is precisely why the settlement could not be rescued.
+    // At the old 1 sat/vB floor this was zero — the original bug.
     let old_floor = FeeRate::from_sat_per_vb_unchecked(1);
     assert_eq!(
         old_floor
@@ -1797,8 +1789,8 @@ fn test_cpfp_boosts_ancestor_stalled_at_relay_floor() {
     assert_conservation(&result);
 }
 
-/// The floor itself must stay above the relay minimum, or the deficit
-/// above collapses to zero again for any ancestor that paid 1 sat/vB.
+/// The floor must stay above the relay minimum, or the deficit collapses
+/// to zero again for any ancestor that paid 1 sat/vB.
 #[test]
 fn test_min_fee_rate_floor_exceeds_relay_minimum() {
     assert!(
@@ -1807,9 +1799,8 @@ fn test_min_fee_rate_floor_exceeds_relay_minimum() {
     );
 }
 
-/// Unconfirmed ancestors that would push the mempool cluster past the
-/// configured package budget must be refused before signing — Bitcoin
-/// would reject the broadcast, wedging every batch behind it.
+/// Ancestors pushing the cluster past the package budget must be refused
+/// before signing; Bitcoin would reject the broadcast otherwise.
 #[test]
 fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
     let over = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() + 4_000;
@@ -1839,4 +1830,15 @@ fn test_ancestor_package_budget_reserves_cpfp_headroom() {
         budget_vb < CLUSTER_LIMIT_VB,
         "package budget {budget_vb} vB leaves no room for a CPFP child under {CLUSTER_LIMIT_VB} vB"
     );
+}
+
+/// The configured floor must not be able to invert the clamp against
+/// `DEFAULT_HIGH_FEE_RATE_THRESHOLD`, which would panic every node.
+#[test]
+fn test_configured_floor_capped_at_high_fee_threshold() {
+    let ceiling = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
+    let absurd = FeeRate::from_sat_per_vb_unchecked(500);
+    let floor = absurd.min(ceiling);
+    assert!(floor <= ceiling, "floor must never exceed the ceiling");
+    let _ = FeeRate::from_sat_per_vb_unchecked(1).clamp(floor, ceiling);
 }

@@ -401,13 +401,10 @@ impl Hashi {
             }
         }
 
-        // 6. Validate fee is reasonable.
-        //
-        // The ceiling is evaluated over the whole CPFP package, not the
-        // transaction alone. A leader spending unconfirmed change must
-        // also cover the shortfall its ancestors owe, so judging the fee
-        // in isolation would reject every legitimate rescue of a stalled
-        // settlement.
+        // 6. Validate fee is reasonable. The ceiling covers the whole CPFP
+        //    package: a leader spending unconfirmed change must also cover
+        //    what its ancestors owe, so judging the transaction alone
+        //    would reject every legitimate rescue of a stalled settlement.
         {
             // Estimate transaction weight.
             let num_inputs = selected_utxos.len() as u64;
@@ -432,10 +429,8 @@ impl Hashi {
                 "Fee {fee} sats is below minimum relay fee {relay_min_fee} sats"
             );
 
-            // Fee ceiling: clamp the node's estimate to the configured
-            // floor, then allow the tolerance multiplier over what a
-            // correct leader would pay — its own fee plus the CPFP
-            // deficit owed by any unconfirmed ancestors.
+            // Allow the tolerance multiplier over what a correct leader
+            // would pay: its own fee plus any ancestor CPFP deficit.
             let kyoto_fee_rate = self
                 .btc_monitor()
                 .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
@@ -1141,8 +1136,9 @@ impl Hashi {
             .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
-        let min_fee_rate = CoinSelectionParams::DEFAULT_MIN_FEE_RATE;
         let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
+        // Cap the configured floor at the ceiling: `clamp` panics if inverted.
+        let min_fee_rate = self.config.withdrawal_min_fee_rate().min(max_fee_rate);
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
         let change_address = self
@@ -1207,6 +1203,7 @@ impl Hashi {
 
             let params = CoinSelectionParams {
                 max_inputs,
+                min_fee_rate,
                 long_term_fee_rate: configured_long_term_fee_rate,
                 max_fee_per_request: self.onchain_state().worst_case_network_fee(),
                 max_withdrawal_requests: request_count,
@@ -1599,12 +1596,12 @@ fn unconfirmed_ancestor_depth(
 /// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
 /// The walk is a BFS over the ancestor DAG, capped at
 /// [`MAX_ANCESTOR_DEPTH`] levels.
-/// Aggregate weight and fee of every unconfirmed ancestor of `records`.
+/// Aggregate weight and fee of every unconfirmed ancestor of `records`,
+/// counting each ancestor once.
 ///
-/// Mirrors [`unconfirmed_ancestor_depth`]: any ancestor still present in
-/// `withdrawal_txns` is treated as unconfirmed, so no Bitcoin round-trip
-/// is needed on the validation path. Each ancestor is counted once even
-/// when several selected UTXOs descend from it.
+/// Mirrors `unconfirmed_ancestor_depth`: anything still in
+/// `withdrawal_txns` is treated as unconfirmed, so validation needs no
+/// Bitcoin round-trip.
 fn unconfirmed_ancestor_package(
     hashi: &Hashi,
     records: &[&UtxoRecord],
@@ -1648,14 +1645,11 @@ fn unconfirmed_ancestor_package(
 
 /// Weight of a withdrawal transaction once signed.
 ///
-/// [`Hashi::build_unsigned_withdrawal_tx`] leaves every witness empty, so
-/// `Transaction::weight` on its result is base-only — for a 700-input
-/// settlement that is 127,060 wu against a real 314,662 wu, a 2.5x
-/// undercount. Feeding that to the CPFP calculation would compute a
-/// deficit far too small to lift a stalled ancestor.
-///
-/// Adds each input's witness satisfaction weight plus the 2 wu segwit
-/// marker and flag, which an all-empty-witness transaction omits.
+/// [`Hashi::build_unsigned_withdrawal_tx`] leaves witnesses empty, so its
+/// `weight()` is base-only — 127,060 wu for a 700-input settlement that
+/// weighs 314,662 wu on-chain. Sizing a CPFP deficit against that would
+/// badly underpay. Adds each input's satisfaction weight plus the 2 wu
+/// segwit marker and flag that an empty-witness transaction omits.
 fn signed_weight_of(unsigned: &bitcoin::Transaction, input_count: usize) -> Weight {
     let satisfaction = SpendPath::TaprootScriptPath2of2
         .satisfaction_weight()
@@ -1959,12 +1953,8 @@ mod tests {
         );
     }
 
-    /// The signed weight of the settlement that stalled on signet
-    /// (2026-07-24): 700 inputs, 71 outputs, 314,662 wu on-chain.
-    ///
-    /// The unsigned transaction is base-only at 127,060 wu. Using that
-    /// figure for CPFP would compute a deficit against 2.5x too little
-    /// weight and fail to lift a stalled ancestor.
+    /// The settlement that stalled on signet: 700 inputs, 71 outputs,
+    /// 314,662 wu on-chain against 127,060 wu unsigned.
     #[test]
     fn test_signed_weight_matches_onchain_weight() {
         use bitcoin::Amount;

@@ -209,12 +209,10 @@ pub struct Config {
 
     /// Floor (sat/vB) for the withdrawal settlement fee rate, applied
     /// after `estimatesmartfee`. Raising this is the lever for rescuing a
-    /// settlement that has stalled in the mempool: the boost that lifts an
-    /// underpaying unconfirmed ancestor is only computed for the amount by
-    /// which this floor exceeds what that ancestor already paid.
+    /// stalled settlement: the CPFP boost only covers the amount by which
+    /// this floor exceeds what the stalled ancestor already paid.
     ///
-    /// Defaults to
-    /// [`CoinSelectionParams::DEFAULT_MIN_FEE_RATE`](crate::utxo_pool::CoinSelectionParams::DEFAULT_MIN_FEE_RATE).
+    /// Defaults to `CoinSelectionParams::DEFAULT_MIN_FEE_RATE`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_min_fee_rate_sat_vb: Option<u64>,
 

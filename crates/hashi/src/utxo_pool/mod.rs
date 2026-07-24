@@ -258,10 +258,9 @@ pub struct CoinSelectionParams {
     /// transaction that exceeds this limit.
     pub max_tx_weight: Weight,
 
-    /// Upper bound on the weight of this transaction plus all of its
-    /// unconfirmed ancestors. Keeps the resulting mempool cluster
-    /// inside Bitcoin's 101 kvB limit, which `max_tx_weight` alone
-    /// does not constrain.
+    /// Upper bound on this transaction plus all of its unconfirmed
+    /// ancestors, keeping the mempool cluster inside Bitcoin's 101 kvB
+    /// limit. `max_tx_weight` alone does not constrain this.
     pub max_ancestor_package_weight: Weight,
 
     /// Hard cap on the total number of transaction inputs, covering both the
@@ -348,16 +347,12 @@ impl CoinSelectionParams {
     /// Default cap on this transaction plus its unconfirmed ancestors
     /// (360 kWU = 90 kvB).
     ///
-    /// Bitcoin Core bounds a mempool cluster at 101 kvB
-    /// (`getmempoolinfo.limitclustersize`; pre-cluster-mempool nodes
-    /// apply the same figure as `-limitancestorsize`). A transaction
-    /// whose ancestors push the cluster past that is rejected outright,
-    /// which is how one stalled settlement blocks every batch behind it.
-    ///
-    /// [`Self::DEFAULT_MAX_TX_WEIGHT`] bounds only the transaction
-    /// itself, so it cannot catch this. The 11 kvB held back from the
-    /// 101 kvB budget is deliberate: it keeps room for a CPFP child to
-    /// rescue the package if it does stall.
+    /// Bitcoin rejects a mempool cluster over 101 kvB
+    /// (`getmempoolinfo.limitclustersize`), which is how one stalled
+    /// settlement blocks every batch behind it.
+    /// [`Self::DEFAULT_MAX_TX_WEIGHT`] bounds only the transaction, so
+    /// it cannot catch this. The 11 kvB held back leaves room for a
+    /// CPFP child to rescue the package.
     pub const DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT: Weight = Weight::from_wu(360_000);
 
     /// Default maximum total inputs selected for a withdrawal transaction,
@@ -369,19 +364,14 @@ impl CoinSelectionParams {
     /// room under Bitcoin's 101 kvB descendant-size budget for a direct child.
     pub const MAX_WITHDRAWAL_REQUESTS: usize = 40;
 
-    /// Default minimum fee rate floor (3 sat/vB).
+    /// Default minimum fee rate floor (3 sat/vB), deliberately above
+    /// Bitcoin Core's 1 sat/vB relay minimum.
     ///
-    /// Deliberately above Bitcoin Core's 1 sat/vB minimum relay fee. A
-    /// batched withdrawal is both the largest and (at the relay floor)
-    /// the cheapest entry in a mempool, so it is the first candidate
-    /// evicted under memory pressure — and nothing re-announces an
-    /// evicted transaction. Small transactions at 1 sat/vB confirm
-    /// fine; an ~80 kvB one can sit indefinitely.
-    ///
-    /// The floor also has to exceed the rate an already-broadcast
-    /// parent paid, or [`TransactionBuilder::cpfp_deficit`] computes a
-    /// zero deficit and the CPFP boost silently never fires — leaving
-    /// no way to rescue a stalled settlement.
+    /// A batched withdrawal at the relay floor is both the largest and
+    /// the cheapest mempool entry, so it is evicted first and nothing
+    /// re-announces it. The floor must also exceed what an unconfirmed
+    /// parent already paid, or the CPFP deficit is zero and a stalled
+    /// settlement cannot be rescued.
     pub const DEFAULT_MIN_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(3);
 
     /// Default long-term average fee rate (10 sat/vB), matching
@@ -578,9 +568,8 @@ pub enum CoinSelectionError {
     },
 
     /// The transaction plus its unconfirmed ancestors exceeds
-    /// `params.max_ancestor_package_weight`. Broadcasting it would be
-    /// rejected by Bitcoin's 101 kvB cluster-size policy, so the batch is
-    /// refused before signing rather than after.
+    /// `params.max_ancestor_package_weight`. Refused before signing
+    /// rather than after, since Bitcoin would reject the broadcast.
     #[error(
         "transaction weight {weight:#} plus unconfirmed ancestor weight \
          {ancestor_weight:#} exceeds the configured package maximum {max_weight:#}"
@@ -978,12 +967,10 @@ impl<'a> TransactionBuilder<'a> {
     /// Combined weight of every unconfirmed ancestor of the selected
     /// inputs.
     ///
-    /// Inputs sharing an unconfirmed parent count that parent once per
-    /// input, so this can overestimate. Both callers — the package
-    /// bound and [`Self::cpfp_deficit`] — fail safe on an overestimate
-    /// (a tighter bound, a larger fee), so it is left conservative
-    /// rather than deduplicated, which would require tracking ancestor
-    /// identity.
+    /// Inputs sharing a parent count it once each, so this can
+    /// overestimate. Both callers fail safe on an overestimate — a
+    /// tighter bound, a larger fee — and deduplicating would require
+    /// tracking ancestor identity.
     fn unconfirmed_ancestor_weight(&self) -> Weight {
         self.inputs
             .iter()
@@ -996,9 +983,8 @@ impl<'a> TransactionBuilder<'a> {
         self.weight() > self.params.max_tx_weight
     }
 
-    /// Whether this transaction plus its unconfirmed ancestors exceeds
-    /// the configured package maximum — i.e. whether broadcasting it
-    /// would breach Bitcoin's cluster-size policy.
+    /// Whether the transaction plus its unconfirmed ancestors exceeds
+    /// the configured package maximum.
     fn exceeds_max_ancestor_package_weight(&self) -> bool {
         self.weight() + self.unconfirmed_ancestor_weight() > self.params.max_ancestor_package_weight
     }
