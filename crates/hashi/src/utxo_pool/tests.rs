@@ -53,9 +53,8 @@ fn confirmed_utxo_with_vout(vout: u32, amount: u64) -> UtxoCandidate {
     }
 }
 
-/// Distinct identity for a test ancestor. Ancestors are deduplicated by
-/// id, so fixtures that expect their weights and fees to sum must not
-/// share one.
+/// Distinct identity for a test ancestor. Ancestors dedupe by id, so
+/// fixtures expecting their weights to sum must not share one.
 fn ancestor_id(utxo: u8, idx: usize) -> Address {
     let mut b = [0u8; 32];
     b[0] = utxo;
@@ -1773,8 +1772,7 @@ fn test_consolidation_undo_when_fee_cap_exceeded() {
 // ── Stalled-settlement regression (signet, 2026-07-24) ────────────────────
 
 /// A settlement paying the old 1 sat/vB floor already met the target, so
-/// `cpfp_deficit` was zero and no child could boost it. Shape is the
-/// transaction from the incident: 314,662 wu paying 78,680 sat.
+/// the deficit was zero and no child could boost it.
 #[test]
 fn test_cpfp_boosts_ancestor_stalled_at_relay_floor() {
     const STALLED_WEIGHT_WU: u64 = 314_662;
@@ -1825,10 +1823,8 @@ fn test_min_fee_rate_floor_exceeds_relay_minimum() {
     );
 }
 
-/// Ancestors that individually fit but jointly overflow the package
-/// budget must be refused before signing; Bitcoin would reject the
-/// broadcast otherwise. A single oversized candidate is filtered out
-/// earlier, so this exercises the combined case.
+/// Ancestors that individually fit but jointly overflow the budget must
+/// be refused; a single oversized candidate is filtered out earlier.
 #[test]
 fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
     let half = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() * 2 / 3;
@@ -1850,15 +1846,14 @@ fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
     );
 }
 
-/// A pending UTXO whose ancestors alone fill the budget can never be
-/// spent. Because selection is largest-first it would be picked every
-/// time, so it must be skipped rather than failing the batch — otherwise
-/// one stalled settlement wedges every withdrawal that the remaining
-/// confirmed UTXOs could have funded.
+/// Selection is largest-first, so an unspendable pending UTXO would be
+/// picked every retry. It must be skipped, not fail the batch.
 #[test]
 fn test_infeasible_pending_candidate_is_skipped_not_fatal() {
-    let over = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() + 4_000;
-    let stalled = pending_utxo_mixed(1, 100_000_000, &[(0, over, 1_000)]);
+    // Ancestors alone fit; ancestors plus the input this UTXO would add
+    // do not. Selecting it can never produce a valid package.
+    let just_under = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() - 100;
+    let stalled = pending_utxo_mixed(1, 100_000_000, &[(0, just_under, 1_000)]);
     let usable = confirmed_utxo(2, 5_000_000);
     let requests = vec![make_request(1, 1_000_000, 0)];
 
@@ -1883,9 +1878,8 @@ fn test_infeasible_pending_candidate_is_skipped_not_fatal() {
     assert_conservation(&result);
 }
 
-/// Inputs sharing a parent must count it once. A parent paying above the
-/// target carries a fee surplus; crediting it twice can cancel out a
-/// genuinely underpaying ancestor and leave the package short.
+/// A shared parent must count once: one paying above target carries a
+/// surplus that, credited twice, cancels an underpayer's deficit.
 #[test]
 fn test_shared_ancestor_counted_once() {
     let over_payer = (0u32, 1_000u64, 2_000u64); // 250 vB @ 8 sat/vB, target is 5
@@ -1922,9 +1916,8 @@ fn test_shared_ancestor_counted_once() {
     assert_conservation(&deduped);
 }
 
-/// The budget must sit under Bitcoin's cluster limit so we never build a
-/// package the network rejects, but not so far under that it blocks a
-/// rescue child the network would have accepted.
+/// The budget must sit under Bitcoin's cluster limit, but not so far
+/// under that it blocks a rescue the network would have accepted.
 #[test]
 fn test_ancestor_package_budget_tracks_cluster_limit() {
     const CLUSTER_LIMIT_VB: u64 = 101_000;

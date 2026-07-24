@@ -1092,10 +1092,8 @@ impl Hashi {
 
     /// The configured fee-rate floor, capped at the high-fee threshold.
     ///
-    /// Leader and validator must derive this identically: the leader builds
-    /// to it and the validator prices its ceiling from it, so an uncapped
-    /// value on either side would put them on different fee policies. It
-    /// also keeps `clamp`, which panics when inverted, well-formed.
+    /// Leader and validator must derive this identically or they price
+    /// fees differently. The cap also keeps `clamp` from inverting.
     fn effective_min_fee_rate(&self) -> FeeRate {
         self.config
             .withdrawal_min_fee_rate()
@@ -1606,17 +1604,14 @@ fn unconfirmed_ancestor_depth(
 /// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
 /// The walk is a BFS over the ancestor DAG, capped at
 /// [`MAX_ANCESTOR_DEPTH`] levels.
-/// Aggregate weight and fee of every unconfirmed ancestor of `records`,
-/// counting each ancestor once.
+/// Aggregate weight and fee of the unconfirmed ancestors of `records`,
+/// counted once each.
 ///
 /// Mirrors `unconfirmed_ancestor_depth`: anything still in
-/// `withdrawal_txns` is treated as unconfirmed, so validation stays
-/// deterministic across the committee with no Bitcoin round-trip. Entries
-/// linger until the finality threshold, so an ancestor already in a block
-/// still contributes a deficit here even though CPFP cannot boost it.
-/// That only widens the fee *ceiling* — the binding limit is the on-chain
-/// per-request cap — but it makes this an upper bound on the leader's
-/// figure rather than a match for it.
+/// `withdrawal_txns` counts as unconfirmed, keeping validation
+/// deterministic without a Bitcoin round-trip. Entries linger until
+/// finality, so this is an upper bound on the leader's figure — it
+/// widens only the ceiling, which the on-chain per-request cap bounds.
 fn unconfirmed_ancestor_package(
     hashi: &Hashi,
     records: &[&UtxoRecord],
@@ -1690,9 +1685,8 @@ fn build_ancestor_chain(
             continue;
         }
 
-        // The ancestor set is a DAG, not a tree: a batch spending two
-        // change outputs of the same parent would otherwise record it
-        // twice and double its weight and fee in the CPFP arithmetic.
+        // A DAG, not a tree: spending two change outputs of one parent
+        // would otherwise record it twice.
         if !seen.insert(wid) {
             continue;
         }
@@ -1977,8 +1971,8 @@ mod tests {
         );
     }
 
-    /// The settlement that stalled on signet: 700 inputs, 71 outputs,
-    /// 314,662 wu on-chain against 127,060 wu unsigned.
+    /// The settlement that stalled on signet: 314,662 wu on-chain
+    /// against 127,060 wu unsigned.
     #[test]
     fn test_signed_weight_matches_onchain_weight() {
         use bitcoin::Amount;
