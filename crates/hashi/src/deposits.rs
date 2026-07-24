@@ -114,7 +114,13 @@ impl Hashi {
                 // already approved by the current committee. The on-chain
                 // `approve_deposit` would reject it anyway, so we don't
                 // want to waste a signature exchange or a transaction.
-                let current_epoch = self.onchain_state().epoch();
+                //
+                // Read the epoch from the `state` snapshot held above: the
+                // state lock is a non-reentrant `std::sync::RwLock`, so
+                // going through `OnchainState::epoch()` here re-locks it and
+                // self-deadlocks as soon as the watcher has a write queued
+                // (readers block behind a waiting writer).
+                let current_epoch = state.hashi().committees.epoch();
                 if let Some(cert) = &onchain_request.approval_cert
                     && cert.epoch == current_epoch
                 {
