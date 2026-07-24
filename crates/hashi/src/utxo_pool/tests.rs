@@ -1820,15 +1820,23 @@ fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
     );
 }
 
-/// The package budget must leave room under Bitcoin's 101 kvB cluster
-/// limit for a rescue child.
+/// The budget must sit under Bitcoin's cluster limit so we never build a
+/// package the network rejects, but not so far under that it blocks a
+/// rescue child the network would have accepted.
 #[test]
-fn test_ancestor_package_budget_reserves_cpfp_headroom() {
+fn test_ancestor_package_budget_tracks_cluster_limit() {
     const CLUSTER_LIMIT_VB: u64 = 101_000;
     let budget_vb = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_vbytes_ceil();
     assert!(
         budget_vb < CLUSTER_LIMIT_VB,
-        "package budget {budget_vb} vB leaves no room for a CPFP child under {CLUSTER_LIMIT_VB} vB"
+        "budget {budget_vb} vB must stay under the {CLUSTER_LIMIT_VB} vB cluster limit"
+    );
+    // A stalled ~78.7 kvB settlement must still leave room for a rescue.
+    let stalled_vb = 78_666;
+    assert!(
+        budget_vb - stalled_vb >= 20_000,
+        "budget leaves only {} vB for descendants of a stalled settlement",
+        budget_vb - stalled_vb
     );
 }
 

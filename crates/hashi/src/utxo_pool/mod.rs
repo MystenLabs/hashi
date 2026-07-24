@@ -345,15 +345,20 @@ impl CoinSelectionParams {
     pub const DEFAULT_MAX_TX_WEIGHT: Weight = Weight::from_wu(400_000);
 
     /// Default cap on this transaction plus its unconfirmed ancestors
-    /// (360 kWU = 90 kvB).
+    /// (400 kWU = 100 kvB), just under the 101 kvB mempool cluster limit
+    /// (`getmempoolinfo.limitclustersize`) that Bitcoin rejects above.
     ///
-    /// Bitcoin rejects a mempool cluster over 101 kvB
-    /// (`getmempoolinfo.limitclustersize`), which is how one stalled
-    /// settlement blocks every batch behind it.
-    /// [`Self::DEFAULT_MAX_TX_WEIGHT`] bounds only the transaction, so
-    /// it cannot catch this. The 11 kvB held back leaves room for a
-    /// CPFP child to rescue the package.
-    pub const DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT: Weight = Weight::from_wu(360_000);
+    /// [`Self::DEFAULT_MAX_TX_WEIGHT`] bounds only the transaction, so it
+    /// cannot catch a batch whose ancestors push the cluster over — which
+    /// is how one stalled settlement blocks every batch behind it.
+    ///
+    /// This tracks what the network accepts rather than reserving CPFP
+    /// headroom. A rescue child is subject to this same bound, so holding
+    /// weight back here would block the rescues it is meant to enable.
+    /// Headroom comes from [`Self::MAX_WITHDRAWAL_REQUESTS`] and
+    /// [`Self::DEFAULT_MAX_INPUTS`] keeping each settlement well under the
+    /// cluster budget.
+    pub const DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT: Weight = Weight::from_wu(400_000);
 
     /// Default maximum total inputs selected for a withdrawal transaction,
     /// including both funding inputs and consolidation inputs.
