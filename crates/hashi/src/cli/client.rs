@@ -200,9 +200,7 @@ impl HashiClient {
         self.onchain_state
             .state()
             .package_versions()
-            .keys()
-            .copied()
-            .max()
+            .latest_version()
     }
 
     /// Fetch current epoch from on-chain state

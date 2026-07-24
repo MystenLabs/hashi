@@ -1184,7 +1184,7 @@ impl Metrics {
             let version_str = version.to_string();
             let package_id_str = guard
                 .package_versions()
-                .get(version)
+                .get(*version)
                 .map(|addr| addr.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             self.package_version_enabled

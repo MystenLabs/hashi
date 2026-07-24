@@ -177,9 +177,10 @@ pub(super) enum Effect {
     /// The root's `pending_epoch_change` became set for this epoch.
     ReconfigStarted(u64),
     /// The root's `UpgradeCap` now points at a new package id. The
-    /// cap's version counter is not the package version, so the caller
-    /// reconciles versions via `list_package_versions`.
-    PackageUpgraded { package: Address },
+    /// cap's counter starts at 1 on publish and increments in lockstep
+    /// with the package chain, so `version` is the new package's
+    /// version and the caller extends its version map directly.
+    PackageUpgraded { package: Address, version: u64 },
     /// A withdrawal transaction transitioned to fully signed in this
     /// transaction (2-of-2 witness complete). Drives the local limiter
     /// and the pick-to-sign metric.
@@ -348,6 +349,7 @@ fn apply_root(
     {
         out.effects.push(Effect::PackageUpgraded {
             package: new.package,
+            version: new.version,
         });
     }
     // The cap always points at the latest package version; keep the
@@ -969,14 +971,14 @@ mod tests {
     fn move_root(
         num_consumed_presigs: u64,
         pending_epoch: Option<u64>,
-        upgrade_cap_package: Option<Address>,
+        upgrade_cap: Option<(Address, u64)>,
     ) -> move_types::Hashi {
         // Round-trip through the BCS encoder twin because several of
         // the nested structs only derive Deserialize.
         bcs::from_bytes(&root_bytes(
             num_consumed_presigs,
             pending_epoch,
-            upgrade_cap_package,
+            upgrade_cap,
         ))
         .unwrap()
     }
@@ -1105,7 +1107,7 @@ mod tests {
     fn root_bytes(
         num_consumed_presigs: u64,
         pending_epoch: Option<u64>,
-        upgrade_cap_package: Option<Address>,
+        upgrade_cap: Option<(Address, u64)>,
     ) -> Vec<u8> {
         bcs::to_bytes(&HashiEnc {
             id: hashi_id(),
@@ -1122,10 +1124,10 @@ mod tests {
             config: move_types::Config::from_entries(vec![]),
             versioning: VersioningEnc {
                 enabled_versions: VecSetEnc { contents: vec![1] },
-                upgrade_cap: upgrade_cap_package.map(|package| UpgradeCapEnc {
+                upgrade_cap: upgrade_cap.map(|(package, version)| UpgradeCapEnc {
                     id: addr(0x40),
                     package,
-                    version: 1,
+                    version,
                     policy: 0,
                 }),
             },
@@ -1378,7 +1380,7 @@ mod tests {
             root_tag.clone(),
             1,
             Owner::Shared(1),
-            root_bytes(5, None, Some(pkg_a)),
+            root_bytes(5, None, Some((pkg_a, 1))),
         ))]));
         assert!(out.effects.is_empty());
         assert_eq!(fixture.hashi.num_consumed_presigs, 5);
@@ -1390,7 +1392,7 @@ mod tests {
             root_tag.clone(),
             2,
             Owner::Shared(1),
-            root_bytes(6, Some(8), Some(pkg_a)),
+            root_bytes(6, Some(8), Some((pkg_a, 1))),
         ))]));
         assert!(matches!(
             out.effects.as_slice(),
@@ -1403,7 +1405,7 @@ mod tests {
             root_tag.clone(),
             3,
             Owner::Shared(1),
-            root_bytes(6, Some(8), Some(pkg_a)),
+            root_bytes(6, Some(8), Some((pkg_a, 1))),
         ))]));
         assert!(out.effects.is_empty());
 
@@ -1412,10 +1414,10 @@ mod tests {
             root_tag,
             4,
             Owner::Shared(1),
-            root_bytes(6, Some(8), Some(pkg_b)),
+            root_bytes(6, Some(8), Some((pkg_b, 2))),
         ))]));
         assert!(
-            matches!(out.effects.as_slice(), [Effect::PackageUpgraded { package }] if *package == pkg_b)
+            matches!(out.effects.as_slice(), [Effect::PackageUpgraded { package, version: 2 }] if *package == pkg_b)
         );
     }
 

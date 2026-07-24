@@ -120,13 +120,14 @@ The bump is a version-number change, not a migration.
 > set, checkpoint, and `transaction_index`. Transactions arrive in
 > chain order, and the shadow ratchets over
 > `(checkpoint, transaction_index)` so replay/live overlap applies
-> exactly once. Caveats found empirically: `Watermark.checkpoint` is
-> unset on this build (only the opaque cursor is populated), so the
-> replay target comes from the clock sampled after subscribing, replay
-> completion is proven by the response's indexed-height header at
-> LedgerTip, and coverage advances from applied transactions' own
-> checkpoints plus clock heartbeats — all replaced by
-> `Watermark.checkpoint` when the server fills it. The
+> exactly once. The server now populates `Watermark.checkpoint` on
+> subscription frames (an earlier build left it unset), so the replay
+> target is the first frame's watermark checkpoint — the
+> subscription's own starting coverage point — and coverage advances
+> from watermark claims plus applied transactions' own checkpoints;
+> replay completion is proven by reaching the target, with the
+> response's indexed-height header at LedgerTip covering the case
+> where the list index still trails it. The
 > checkpoint-granular fallback transport was removed once the
 > object-set fix rolled out to the fleet; servers without the filtered
 > transaction APIs are unsupported. Verified on localnet e2e (deposit
@@ -455,8 +456,10 @@ Keep — justified reads outside the mirror's scope:
   sampled from the clock stream, which the same outage freezes — if
   the mirror's floor had caught up to the stale height, replay was
   skipped and a later coverage claim ratcheted the watermark over the
-  gap. The mirror now demands the clock advance two checkpoints past a
-  post-subscribe snapshot before trusting it as the replay target.
+  gap. The clock-freshness workaround that followed is gone: the
+  replay target now comes from the first subscription frame's
+  `Watermark.checkpoint`, which speaks for the new subscription itself
+  and cannot be frozen by the outage.
 - Metrics to watch in staging: unrouted-objects counter, replay-window
   length on reconnects, `hashi_watcher_state_watermark` lag against
   `hashi_latest_checkpoint_height`.

@@ -22,9 +22,10 @@
 //! withdrawal duration metrics.
 //!
 //! The transport requires a server that renders per-transaction object
-//! sets on the filtered APIs (Sui v1.76 with the object-set fix).
-//! Older servers are not supported: the stream fails and the watcher
-//! keeps reconnecting rather than degrading to a lossy mode.
+//! sets on the filtered APIs and populates `Watermark.checkpoint` on
+//! subscription frames (Sui v1.76 with the object-set and watermark
+//! fixes). Older servers are not supported: the stream fails and the
+//! watcher keeps reconnecting rather than degrading to a lossy mode.
 
 use std::time::Duration;
 
@@ -60,9 +61,6 @@ use super::types;
 const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
-
-/// Bound on the `list_package_versions` reconcile an upgrade triggers.
-const PACKAGE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Read mask for `ExecutedTransaction` frames on the transaction
 /// stream and the replay list.
@@ -166,7 +164,18 @@ async fn ensure_bootstrapped(
         objects = seed.index.len(),
         "object mirror re-bootstrapped from scrape"
     );
+    // An upgrade that landed during the gap produces no cap diff (the
+    // scrape installs state wholesale), so no `PackageUpgraded` effect
+    // fires; the scraped cap itself carries the latest version pair.
+    let latest_package = hashi
+        .config
+        .upgrade_cap
+        .as_ref()
+        .map(|cap| (cap.version, cap.package));
     state.replace_hashi_state(hashi);
+    if let Some((version, package)) = latest_package {
+        state.add_package_version(version, package);
+    }
     state.advance_state_watermark(seed.floor);
     *mirror = Some(Mirror::from_seed(seed));
     state.request_limiter_reconcile();
@@ -201,19 +210,24 @@ async fn run_transactions(
         .context("subscribe_transactions failed")?
         .into_inner();
 
-    // Wait for the first frame: it proves the stream is live. The
-    // initial frame's watermark never carries `checkpoint` (verified
-    // against testnet v1.76 — only later progress frames claim
-    // coverage), so the replay target comes from the clock instead:
-    // sampled after the subscription opened, the clock height
-    // upper-bounds the subscription's start, and the position ratchet
+    // Wait for the first frame: it proves the stream is live, and its
+    // watermark checkpoint is the subscription's starting coverage
+    // point — everything at or before it must come from replay, and
+    // the subscription delivers everything after. That makes it
+    // exactly the replay target, and — unlike a clock-stream sample —
+    // it speaks for this subscription itself, so it cannot be frozen
+    // by an outage that severed both streams. The position ratchet
     // absorbs the overlap between replay and stream.
     let first = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
         .await
         .context("timed out waiting for the first transaction frame")?
         .context("transaction stream closed before the first frame")??;
+    let target = first
+        .watermark
+        .as_ref()
+        .and_then(|watermark| watermark.checkpoint)
+        .context("the first transaction frame carried no watermark checkpoint")?;
     ensure_bootstrapped(&client, state, mirror).await?;
-    let target = fresh_replay_target(state).await?;
 
     if let Err(e) = replay_transactions(&mut client, &filter, state, mirror, metrics, target).await
     {
@@ -232,8 +246,7 @@ async fn run_transactions(
         first.transaction.as_ref(),
         first.watermark.as_ref(),
         metrics,
-    )
-    .await?;
+    )?;
     loop {
         let item = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
             .await
@@ -245,41 +258,11 @@ async fn run_transactions(
             response.transaction.as_ref(),
             response.watermark.as_ref(),
             metrics,
-        )
-        .await?;
+        )?;
         // Coverage advances from the server's own watermark claims:
         // progress frames carry `Watermark.checkpoint` periodically
         // (observed every 25 checkpoints on quiet filters) — plus each
         // applied transaction's own checkpoint.
-    }
-}
-
-/// A replay target that upper-bounds the live subscription's start.
-///
-/// The clock height is served by an independent stream that may itself
-/// still be recovering from the same outage that broke the state
-/// stream; sampling it blindly can return a frozen pre-outage height.
-/// If the mirror's floor had caught up to that stale height, replay
-/// would be skipped entirely and a later coverage claim (which speaks
-/// only for the new subscription, live from the tip) would ratchet the
-/// watermark straight over the outage gap — silently dropping its
-/// transactions. Demanding the clock advance by two checkpoints beyond
-/// a snapshot taken after the subscription opened proves the observed
-/// height is fresh, at or past the chain tip at subscription-open
-/// time. On a halted or still-broken clock this times out and the
-/// caller retries the whole connection rather than guessing.
-async fn fresh_replay_target(state: &OnchainState) -> Result<u64> {
-    let mut rx = state.subscribe_checkpoint();
-    let start = rx.borrow_and_update().height;
-    loop {
-        let height = rx.borrow_and_update().height;
-        if height >= start + 2 {
-            return Ok(height);
-        }
-        tokio::time::timeout(STREAM_STALL_TIMEOUT, rx.changed())
-            .await
-            .context("clock did not advance; cannot bound the replay target")?
-            .context("clock checkpoint channel closed")?;
     }
 }
 
@@ -333,8 +316,7 @@ async fn replay_transactions(
                 response.transaction.as_ref(),
                 response.watermark.as_ref(),
                 metrics,
-            )
-            .await?;
+            )?;
             if let Some(end) = response.end.as_ref() {
                 end_reason = end.reason.and_then(|r| QueryEndReason::try_from(r).ok());
             }
@@ -372,7 +354,7 @@ fn advance_watermark(state: &OnchainState, mirror: &mut Mirror, covered: u64) {
 /// Handle one transaction-stream frame: apply the transaction (if the
 /// frame carries one and the position ratchet hasn't passed it), then
 /// fold in the watermark.
-async fn handle_tx_frame(
+fn handle_tx_frame(
     state: &OnchainState,
     mirror: &mut Mirror,
     tx: Option<&proto::ExecutedTransaction>,
@@ -380,7 +362,7 @@ async fn handle_tx_frame(
     metrics: Option<&Metrics>,
 ) -> Result<()> {
     if let Some(tx) = tx {
-        apply_tx_frame(state, mirror, tx, metrics).await?;
+        apply_tx_frame(state, mirror, tx, metrics)?;
     }
     if let Some(watermark) = frame_watermark {
         if let Some(cursor) = watermark.cursor.as_ref() {
@@ -399,7 +381,7 @@ async fn handle_tx_frame(
 /// Apply one filtered-stream transaction to the mirror, ratcheting on
 /// its `(checkpoint, transaction_index)` position, then act on the
 /// transition-derived effects.
-async fn apply_tx_frame(
+fn apply_tx_frame(
     state: &OnchainState,
     mirror: &mut Mirror,
     tx: &proto::ExecutedTransaction,
@@ -437,7 +419,7 @@ async fn apply_tx_frame(
     if let Some(metrics) = metrics {
         metrics.watcher_applied_txns_total.inc();
     }
-    handle_effects(state, view.timestamp_ms, out.effects).await;
+    handle_effects(state, view.timestamp_ms, out.effects);
     Ok(())
 }
 
@@ -445,7 +427,7 @@ async fn apply_tx_frame(
 /// transitions. Replay re-derives the same effects in order, and the
 /// apply layer's version guards make each transition fire exactly once
 /// across replay/live overlap.
-async fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<apply::Effect>) {
+fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<apply::Effect>) {
     for effect in effects {
         tracing::debug!(?effect, "object mirror effect");
         match effect {
@@ -455,8 +437,9 @@ async fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<ap
             apply::Effect::ReconfigStarted(epoch) => {
                 state.notify(Notification::StartReconfig(epoch));
             }
-            apply::Effect::PackageUpgraded { package } => {
-                reconcile_package_versions(state, package).await;
+            apply::Effect::PackageUpgraded { package, version } => {
+                tracing::info!(%package, version, "package upgraded; version map extended");
+                state.add_package_version(version, package);
             }
             apply::Effect::WithdrawalTxnFullySigned(txn) => {
                 withdrawal_txn_fully_signed(state, timestamp_ms, &txn);
@@ -464,30 +447,6 @@ async fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<ap
             apply::Effect::WithdrawalTxnRemoved(txn) => {
                 withdrawal_txn_removed(state, timestamp_ms, &txn);
             }
-        }
-    }
-}
-
-/// The root's `UpgradeCap` points at a new package: reconcile the
-/// version map from `list_package_versions` (the cap's version counter
-/// is not the package version). On failure the map goes stale until
-/// the next upgrade or restart, so log loudly.
-async fn reconcile_package_versions(state: &OnchainState, package: sui_sdk_types::Address) {
-    let scrape = super::scrape_package_versions(state.client(), state.package_id_original());
-    match tokio::time::timeout(PACKAGE_RECONCILE_TIMEOUT, scrape).await {
-        Ok(Ok(versions)) => {
-            tracing::info!(
-                %package,
-                versions = versions.len(),
-                "package upgraded; version map reconciled"
-            );
-            state.set_package_versions(versions);
-        }
-        Ok(Err(e)) => {
-            tracing::error!(%package, "failed to reconcile package versions after an upgrade: {e}");
-        }
-        Err(_) => {
-            tracing::error!(%package, "timed out reconciling package versions after an upgrade");
         }
     }
 }

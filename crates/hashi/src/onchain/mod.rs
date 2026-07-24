@@ -118,7 +118,7 @@ struct Inner {
 
 #[derive(Debug)]
 pub struct State {
-    package_versions: BTreeMap<u64, Address>,
+    package_versions: move_types::PackageVersions,
     hashi: types::Hashi,
     withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
@@ -327,11 +327,15 @@ impl OnchainState {
         self.state_mut().hashi = hashi;
     }
 
-    /// Replace the package-version map after an on-chain upgrade. The
-    /// mirror's `PackageUpgraded` effect carries only the new package
-    /// id; versions are reconciled from `list_package_versions`.
-    fn set_package_versions(&self, package_versions: BTreeMap<u64, Address>) {
-        self.state_mut().package_versions = package_versions;
+    /// Record an on-chain package upgrade. The root's `UpgradeCap`
+    /// carries both the new package id and its version — the cap's
+    /// counter starts at 1 on publish and increments in lockstep with
+    /// the package chain — so the mirror's `PackageUpgraded` effect
+    /// extends the map directly, no chain read needed.
+    fn add_package_version(&self, version: u64, package_id: Address) {
+        self.state_mut()
+            .package_versions
+            .insert(version, package_id);
     }
 
     pub fn client(&self) -> Client {
@@ -340,10 +344,7 @@ impl OnchainState {
 
     /// Returns the latest package id (highest version).
     pub fn package_id(&self) -> Option<Address> {
-        self.state()
-            .package_versions
-            .last_key_value()
-            .map(|(_, id)| *id)
+        self.state().package_versions.latest_id()
     }
 
     pub fn hashi_id(&self) -> Address {
@@ -756,7 +757,7 @@ impl OnchainState {
 }
 
 impl State {
-    pub fn package_versions(&self) -> &BTreeMap<u64, Address> {
+    pub fn package_versions(&self) -> &move_types::PackageVersions {
         &self.package_versions
     }
 
@@ -775,7 +776,7 @@ impl State {
 
         Ok((
             State {
-                package_versions,
+                package_versions: move_types::PackageVersions::new(package_versions),
                 hashi,
                 withdrawal_signed_at_ms: BTreeMap::new(),
             },

@@ -1426,11 +1426,15 @@ mod tests {
 
         let client = test_networks.sui_network().client.clone();
         let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
-        let new_tls_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
-            .verifying_key()
-            .to_bytes()
-            .to_vec();
-        super::hashi_network::update_tls_public_key(client, v1_config, new_tls_key)
+        let mut updated_config = v1_config.clone();
+        use ed25519_dalek::pkcs8::EncodePrivateKey as _;
+        updated_config.tls_private_key = Some(
+            ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+                .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+                .unwrap()
+                .to_string(),
+        );
+        super::hashi_network::update_tls_public_key(client, &updated_config)
             .await
             .unwrap();
 
