@@ -2,6 +2,13 @@ name: Deterministic Docker Builds
 
 on:
   pull_request:
+  workflow_call:
+    inputs:
+      hashi_only:
+        description: Only build and verify the hashi binary
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
   schedule: [cron: "20 3 * * *"]
 
@@ -14,17 +21,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-22.04]
-        image:
-          - name: hashi
-            dir: hashi
-          - name: hashi-screener
-            dir: hashi-screener
-          - name: hashi-guardian
-            dir: hashi-guardian-k8s
+        image: ${{ fromJSON(inputs.hashi_only && '[{"name":"hashi","dir":"hashi"}]' || '[{"name":"hashi","dir":"hashi"},{"name":"hashi-screener","dir":"hashi-screener"},{"name":"hashi-guardian","dir":"hashi-guardian-k8s"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
 
       - name: Build ${{ matrix.image.name }} image
         env:
@@ -41,15 +42,17 @@ jobs:
           echo "${HASH}  ${{ matrix.image.name }}" > "out/${{ matrix.image.name }}.sha256"
 
       - name: Upload sha256
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
         with:
           name: ${{ matrix.image.name }}-${{ matrix.os }}-sha256
+          if-no-files-found: error
           path: out/${{ matrix.image.name }}.sha256
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
         with:
           name: ${{ matrix.image.name }}-${{ matrix.os }}-binary
+          if-no-files-found: error
           path: out/${{ matrix.image.name }}
 
   verify:
@@ -58,16 +61,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [hashi, hashi-screener, hashi-guardian]
+        image: ${{ fromJSON(inputs.hashi_only && '["hashi"]' || '["hashi","hashi-screener","hashi-guardian"]') }}
     steps:
       - name: Download ubuntu-latest hash
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
         with:
           name: ${{ matrix.image }}-ubuntu-latest-sha256
           path: hash-latest
 
       - name: Download ubuntu-22.04 hash
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
         with:
           name: ${{ matrix.image }}-ubuntu-22.04-sha256
           path: hash-22
