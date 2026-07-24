@@ -285,8 +285,18 @@ impl LeaderService {
     }
 
     fn check_halt_deposit_processing(&mut self) -> bool {
-        if !(self.inner.onchain_state().state().hashi().config.paused() || self.is_reconfiguring())
-        {
+        // Evaluate both predicates from one scoped snapshot: the state lock
+        // is a non-reentrant `std::sync::RwLock`, and the temporary read
+        // guard from the `||`'s first operand lives until the whole condition
+        // finishes evaluating — so calling `is_reconfiguring()` (which
+        // re-locks) in the second operand self-deadlocks as soon as the
+        // watcher has a write queued (readers block behind a waiting writer).
+        let halt = {
+            let state = self.inner.onchain_state().state();
+            state.hashi().config.paused()
+                || state.hashi().committees.pending_epoch_change().is_some()
+        };
+        if !halt {
             return false;
         }
 

@@ -838,32 +838,39 @@ impl Hashi {
             .validator_address()
             .map_err(|e| anyhow!("No validator address configured: {e}"))?;
 
-        let onchain = self.onchain_state();
-        let state = onchain.state();
-        let committees_map = state.hashi().committees.committees();
-        let from_committee = committees_map
-            .get(&from_epoch)
-            .ok_or_else(|| anyhow!("no on-chain committee for epoch {from_epoch}"))?;
-        if !from_committee
-            .members()
-            .iter()
-            .any(|m| m.validator_address() == validator_address)
-        {
-            anyhow::bail!("not a member of the committee at epoch {from_epoch}");
-        }
+        // Scope the state read guard so it drops before signing: the state
+        // lock is a non-reentrant `std::sync::RwLock`, and
+        // `sign_message_proto_at_epoch` re-acquires it — a nested read
+        // self-deadlocks as soon as the watcher has a write queued (readers
+        // block behind a waiting writer).
+        let transition = {
+            let onchain = self.onchain_state();
+            let state = onchain.state();
+            let committees_map = state.hashi().committees.committees();
+            let from_committee = committees_map
+                .get(&from_epoch)
+                .ok_or_else(|| anyhow!("no on-chain committee for epoch {from_epoch}"))?;
+            if !from_committee
+                .members()
+                .iter()
+                .any(|m| m.validator_address() == validator_address)
+            {
+                anyhow::bail!("not a member of the committee at epoch {from_epoch}");
+            }
 
-        // Hashi committee epochs are sparse: the next entry after `from_epoch`
-        // is generally not `from_epoch + 1`. Both leader and followers derive
-        // the same `to_epoch` from on-chain state, so they sign the same
-        // transition.
-        let new_committee = committees_map
-            .range((from_epoch + 1)..)
-            .next()
-            .map(|(_, c)| c)
-            .ok_or_else(|| anyhow!("no on-chain committee epoch after {from_epoch}"))?;
+            // Hashi committee epochs are sparse: the next entry after `from_epoch`
+            // is generally not `from_epoch + 1`. Both leader and followers derive
+            // the same `to_epoch` from on-chain state, so they sign the same
+            // transition.
+            let new_committee = committees_map
+                .range((from_epoch + 1)..)
+                .next()
+                .map(|(_, c)| c)
+                .ok_or_else(|| anyhow!("no on-chain committee epoch after {from_epoch}"))?;
 
-        let transition = hashi_types::guardian::CommitteeTransitionRequest {
-            new_committee: hashi_types::move_types::Committee::from(new_committee),
+            hashi_types::guardian::CommitteeTransitionRequest {
+                new_committee: hashi_types::move_types::Committee::from(new_committee),
+            }
         };
 
         let signature = self.sign_message_proto_at_epoch(&transition, from_epoch)?;
