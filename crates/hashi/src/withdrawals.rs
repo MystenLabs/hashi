@@ -403,13 +403,11 @@ impl Hashi {
 
         // 6. Validate fee is reasonable.
         //
-        // TODO: When spending unconfirmed change UTXOs the effective fee
-        // rate that matters for mining is the *package* fee rate across
-        // the entire ancestor chain (CPFP). This check currently
-        // evaluates the transaction in isolation, which may over- or
-        // under-estimate the true cost to get the package mined. A
-        // future revision should compute the aggregate ancestor weight
-        // and fees and validate the package fee rate instead.
+        // The ceiling is evaluated over the whole CPFP package, not the
+        // transaction alone. A leader spending unconfirmed change must
+        // also cover the shortfall its ancestors owe, so judging the fee
+        // in isolation would reject every legitimate rescue of a stalled
+        // settlement.
         {
             // Estimate transaction weight.
             let num_inputs = selected_utxos.len() as u64;
@@ -424,35 +422,52 @@ impl Hashi {
             let tx_weight =
                 Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight);
 
-            let min_fee_rate = FeeRate::from_sat_per_vb_unchecked(1);
-
             // Fee must be at least the minimum relay fee (1 sat/vB).
-            let min_fee = min_fee_rate
+            let relay_min_fee = FeeRate::from_sat_per_vb_unchecked(1)
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
                 .unwrap_or(0);
             anyhow::ensure!(
-                fee >= min_fee,
-                "Fee {fee} sats is below minimum relay fee {min_fee} sats"
+                fee >= relay_min_fee,
+                "Fee {fee} sats is below minimum relay fee {relay_min_fee} sats"
             );
 
-            // Fee ceiling: clamp the fee rate from our Bitcoin node to
-            // a floor of 1 sat/vB, then cap at the tolerance multiplier.
+            // Fee ceiling: clamp the node's estimate to the configured
+            // floor, then allow the tolerance multiplier over what a
+            // correct leader would pay — its own fee plus the CPFP
+            // deficit owed by any unconfirmed ancestors.
             let kyoto_fee_rate = self
                 .btc_monitor()
                 .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
                 .await?;
-            let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, min_fee_rate);
+            let clamped_fee_rate =
+                std::cmp::max(kyoto_fee_rate, self.config.withdrawal_min_fee_rate());
+
+            let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
+                self,
+                &selected_records,
+                &withdrawal_txns,
+                &utxo_records,
+            );
+            let cpfp_deficit = clamped_fee_rate
+                .fee_wu(ancestor_weight)
+                .map(|a| a.to_sat())
+                .unwrap_or(0)
+                .saturating_sub(ancestor_fee);
+
             let estimated_fee = clamped_fee_rate
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
-                .unwrap_or(0);
+                .unwrap_or(0)
+                .saturating_add(cpfp_deficit);
             let max_fee = estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
             anyhow::ensure!(
                 fee <= max_fee,
                 "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
                  ({FEE_RATE_TOLERANCE_MULTIPLIER}x the clamped estimate of \
-                 {estimated_fee} sats at {clamped_fee_rate})"
+                 {estimated_fee} sats at {clamped_fee_rate}, including a \
+                 {cpfp_deficit} sat CPFP deficit for {ancestor_weight} of \
+                 unconfirmed ancestors)"
             );
         }
 
@@ -1584,6 +1599,71 @@ fn unconfirmed_ancestor_depth(
 /// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
 /// The walk is a BFS over the ancestor DAG, capped at
 /// [`MAX_ANCESTOR_DEPTH`] levels.
+/// Aggregate weight and fee of every unconfirmed ancestor of `records`.
+///
+/// Mirrors [`unconfirmed_ancestor_depth`]: any ancestor still present in
+/// `withdrawal_txns` is treated as unconfirmed, so no Bitcoin round-trip
+/// is needed on the validation path. Each ancestor is counted once even
+/// when several selected UTXOs descend from it.
+fn unconfirmed_ancestor_package(
+    hashi: &Hashi,
+    records: &[&UtxoRecord],
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+) -> (Weight, u64) {
+    let mut seen: std::collections::HashSet<Address> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<Address> = records
+        .iter()
+        .filter_map(|r| r.produced_by)
+        .collect::<std::collections::VecDeque<_>>();
+
+    let mut weight = Weight::ZERO;
+    let mut fee = 0u64;
+
+    while let Some(wid) = queue.pop_front() {
+        if !seen.insert(wid) {
+            continue;
+        }
+        let Some(txn) = withdrawal_txns.get(&wid) else {
+            continue;
+        };
+        let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs()) else {
+            continue;
+        };
+
+        weight += signed_weight_of(&tx, txn.inputs.len());
+        let input_total: u64 = txn.inputs.iter().map(|u| u.amount).sum();
+        let output_total: u64 = txn.all_outputs().iter().map(|o| o.amount).sum();
+        fee = fee.saturating_add(input_total.saturating_sub(output_total));
+
+        for input_utxo in &txn.inputs {
+            if let Some(parent) = utxo_records.get(&input_utxo.id).and_then(|r| r.produced_by) {
+                queue.push_back(parent);
+            }
+        }
+    }
+
+    (weight, fee)
+}
+
+/// Weight of a withdrawal transaction once signed.
+///
+/// [`Hashi::build_unsigned_withdrawal_tx`] leaves every witness empty, so
+/// `Transaction::weight` on its result is base-only — for a 700-input
+/// settlement that is 127,060 wu against a real 314,662 wu, a 2.5x
+/// undercount. Feeding that to the CPFP calculation would compute a
+/// deficit far too small to lift a stalled ancestor.
+///
+/// Adds each input's witness satisfaction weight plus the 2 wu segwit
+/// marker and flag, which an all-empty-witness transaction omits.
+fn signed_weight_of(unsigned: &bitcoin::Transaction, input_count: usize) -> Weight {
+    let satisfaction = SpendPath::TaprootScriptPath2of2
+        .satisfaction_weight()
+        .checked_mul(input_count as u64)
+        .expect("ancestor satisfaction weight overflow");
+    unsigned.weight() + satisfaction + Weight::from_wu(2)
+}
+
 fn build_ancestor_chain(
     hashi: &Hashi,
     producing_id: Address,
@@ -1614,7 +1694,7 @@ fn build_ancestor_chain(
 
         chain.push(AncestorTx {
             confirmations,
-            tx_weight: tx.weight(),
+            tx_weight: signed_weight_of(&tx, txn.inputs.len()),
             tx_fee: input_total.saturating_sub(output_total),
         });
 
@@ -1876,6 +1956,60 @@ mod tests {
             safe_withdrawal_flow_max_inputs(10, CoinSelectionParams::DEFAULT_MAX_INPUTS),
             10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
             "at low request counts, the per-request input budget is binding",
+        );
+    }
+
+    /// The signed weight of the settlement that stalled on signet
+    /// (2026-07-24): 700 inputs, 71 outputs, 314,662 wu on-chain.
+    ///
+    /// The unsigned transaction is base-only at 127,060 wu. Using that
+    /// figure for CPFP would compute a deficit against 2.5x too little
+    /// weight and fail to lift a stalled ancestor.
+    #[test]
+    fn test_signed_weight_matches_onchain_weight() {
+        use bitcoin::Amount;
+        use bitcoin::OutPoint;
+        use bitcoin::ScriptBuf;
+        use bitcoin::Sequence;
+        use bitcoin::TxIn;
+        use bitcoin::TxOut;
+        use bitcoin::Witness;
+
+        const INPUTS: usize = 700;
+        const OUTPUTS: usize = 71;
+        const ONCHAIN_WEIGHT_WU: u64 = 314_662;
+
+        let unsigned = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: (0..INPUTS)
+                .map(|_| TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                })
+                .collect(),
+            output: (0..OUTPUTS)
+                .map(|_| TxOut {
+                    value: Amount::from_sat(28_876),
+                    // P2TR: OP_1 <32-byte x-only key> = 34 bytes.
+                    script_pubkey: ScriptBuf::from_bytes(
+                        [vec![0x51, 0x20], vec![0u8; 32]].concat(),
+                    ),
+                })
+                .collect(),
+        };
+
+        assert_eq!(
+            unsigned.weight().to_wu(),
+            127_060,
+            "unsigned weight is base-only, as expected"
+        );
+        assert_eq!(
+            signed_weight_of(&unsigned, INPUTS).to_wu(),
+            ONCHAIN_WEIGHT_WU,
+            "signed weight must match the transaction actually broadcast"
         );
     }
 }
