@@ -1689,6 +1689,58 @@ mod presig_count_tests {
         assert_eq!(presig_count(1, params, 2), 0);
         assert_eq!(presig_count(0, params, 5), 0);
     }
+
+    #[test]
+    fn matches_fastcrypto_presignature_count() {
+        use fastcrypto::groups::GroupElement;
+        use fastcrypto::groups::Scalar;
+        use fastcrypto_tbls::threshold_schnorr::S;
+        use fastcrypto_tbls::threshold_schnorr::batch_avss;
+        use fastcrypto_tbls::types::ShareIndex;
+
+        use super::G;
+        use super::Presignatures;
+        use super::USE_LEGACY_PRESIG_DERIVATION;
+
+        let mut rng = rand::thread_rng();
+        let params = Parameters { t: 3, f: 1 };
+        let batch_size_per_weight = 2u16;
+        let total_weight = 5usize;
+        let index = ShareIndex::new(1).unwrap();
+        let outputs: Vec<batch_avss::ReceiverOutput> = (0..total_weight)
+            .map(|_| batch_avss::ReceiverOutput {
+                my_shares: batch_avss::SharesForNode {
+                    shares: vec![batch_avss::ShareBatch {
+                        index,
+                        batch: (0..batch_size_per_weight)
+                            .map(|_| S::rand(&mut rng))
+                            .collect(),
+                        blinding_share: S::zero(),
+                    }],
+                },
+                public_keys: (0..batch_size_per_weight)
+                    .map(|_| G::generator() * S::rand(&mut rng))
+                    .collect(),
+            })
+            .collect();
+
+        let expected = presig_count(total_weight, params, batch_size_per_weight);
+        assert_eq!(
+            Presignatures::new(
+                outputs,
+                batch_size_per_weight,
+                params,
+                USE_LEGACY_PRESIG_DERIVATION
+            )
+            .unwrap()
+            .len(),
+            expected
+        );
+        assert_ne!(
+            expected,
+            (total_weight - params.f as usize) * batch_size_per_weight as usize
+        );
+    }
 }
 
 fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
