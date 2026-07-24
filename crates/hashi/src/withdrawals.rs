@@ -838,11 +838,8 @@ impl Hashi {
             .validator_address()
             .map_err(|e| anyhow!("No validator address configured: {e}"))?;
 
-        // Scope the state read guard so it drops before signing: the state
-        // lock is a non-reentrant `std::sync::RwLock`, and
-        // `sign_message_proto_at_epoch` re-acquires it — a nested read
-        // self-deadlocks as soon as the watcher has a write queued (readers
-        // block behind a waiting writer).
+        // Scope the read guard so it drops before signing;
+        // `sign_message_proto_at_epoch` reacquires the same state lock.
         let transition = {
             let onchain = self.onchain_state();
             let state = onchain.state();
