@@ -290,7 +290,6 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -908,7 +907,6 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
@@ -974,7 +972,6 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     );
 
@@ -1007,7 +1004,6 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     );
 
@@ -1096,7 +1092,6 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1183,7 +1178,6 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .expect(
@@ -7146,7 +7140,6 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8447,7 +8440,6 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8626,7 +8618,6 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8761,7 +8752,6 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8790,7 +8780,6 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8894,7 +8883,6 @@ fn test_recover_current_dkg() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -9046,7 +9034,6 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9143,7 +9130,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9179,7 +9165,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9292,7 +9277,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9379,7 +9363,6 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9455,7 +9438,6 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -9577,7 +9559,6 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9658,7 +9639,6 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -10622,7 +10602,7 @@ fn test_handle_complain_request_nonce_caches_response() {
 }
 
 #[test]
-fn test_required_nonce_weight_follows_derivation_version() {
+fn test_required_nonce_weight_is_the_privacy_threshold_floor() {
     const THRESHOLD: u16 = 52;
     const MAX_FAULTY: u16 = 20;
 
@@ -10632,22 +10612,12 @@ fn test_required_nonce_weight_follows_derivation_version() {
     mgr.mpc_config.max_faulty = MAX_FAULTY;
     let total_weight = mgr.mpc_config.nodes.total_weight() as u32;
 
-    let legacy_gate = 2 * MAX_FAULTY as u32 + 1;
-    let privacy_gate = total_weight - MAX_FAULTY as u32;
-    assert_ne!(
-        legacy_gate, privacy_gate,
-        "params must distinguish the two gates or this test proves nothing"
+    assert_eq!(
+        mgr.required_nonce_weight(),
+        total_weight - MAX_FAULTY as u32
     );
-
-    mgr.mpc_config.presignature_derivation_version = PresignatureDerivationVersion::Legacy;
-    assert_eq!(mgr.required_nonce_weight(), legacy_gate);
-
-    mgr.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
-    assert_eq!(mgr.required_nonce_weight(), privacy_gate);
-
-    assert!(legacy_gate < mgr.mpc_config.threshold as u32);
-    assert!(privacy_gate >= mgr.mpc_config.threshold as u32);
+    assert!(mgr.required_nonce_weight() >= mgr.mpc_config.threshold as u32);
+    assert!(2 * MAX_FAULTY as u32 + 1 < mgr.mpc_config.threshold as u32);
 }
 
 #[tokio::test]
@@ -12225,9 +12195,7 @@ fn test_serve_avid_nonce_retrieval() {
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     let mut rng = rand::thread_rng();
-    // Weighted so a single dealer (weight 5) meets the party's required dealer weight
-    // (2f+1 = 5 at W=10, f=2).
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let mut dealer = setup.create_manager(0);
@@ -12235,8 +12203,6 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
         .unwrap();
 
-    // Hand-deliver the optimistic messages and aggregate two Confirm certs over H(v): a thin
-    // one (dealer + nodes 1, 2 = weight 7 < 10) and the full one (all members).
     let mut managers: HashMap<Address, MpcManager> = (1..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
@@ -12270,8 +12236,8 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
             cert: agg.finish().unwrap(),
         }
     };
-    let thin_cert = make_cert(3); // weight 5 + 1 + 1 = 7 < 10
-    let full_cert = make_cert(6); // weight 10
+    let thin_cert = make_cert(3); // weight 16 + 1 + 1 = 18 < 21
+    let full_cert = make_cert(6); // weight 21
 
     // The party (node 1, holding its output) must ignore the thin Confirm cert and consume the
     // full one — the fast path is only consume-safe at full weight.
@@ -12308,7 +12274,7 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let mut dealer = setup.create_manager(0);
@@ -12443,9 +12409,7 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
-    // Weighted pessimistic round: dealer 0 (weight 5) deals with node 5 unreachable, so a Vote
-    // cert posts; voter node 1 resolves its kind from the vote it holds (no pull) and consumes.
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let others: HashMap<_, _> = (1..5)
@@ -12491,7 +12455,7 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
 #[tokio::test]
 async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let mut dealer = setup.create_manager(0);
@@ -12529,8 +12493,6 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
         cert: agg.finish().unwrap(),
     };
 
-    // The coordinator's certified-weight precheck sees dealer 0 (weight 5 >= required 5), skips
-    // its own dealer phase, consumes via the AVID party, and returns legacy-typed outputs.
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert]);
@@ -12687,7 +12649,7 @@ fn test_decoded_shares_match_optimistic_shares() {
 #[tokio::test]
 async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let mut dealer = setup.create_manager(0);

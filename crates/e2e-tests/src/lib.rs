@@ -211,13 +211,6 @@ impl TestNetworksBuilder {
         self
     }
 
-    pub fn with_presignature_derivation_activation_epoch(mut self, epoch: u64) -> Self {
-        self.hashi_builder = self
-            .hashi_builder
-            .with_presignature_derivation_activation_epoch(epoch);
-        self
-    }
-
     pub fn with_full_voting_power(mut self) -> Self {
         self.hashi_builder = self.hashi_builder.with_full_voting_power();
         self
@@ -2423,6 +2416,7 @@ mod tests {
             .signing_manager_for(epoch)
             .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
         let pool_size = signing_manager.initial_presig_count();
+        assert_pool_derivation(pool_size, &nodes[0]);
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
         let num_signings = pool_size + 1;
@@ -2455,7 +2449,7 @@ mod tests {
         Ok(())
     }
 
-    fn assert_pool_derivation(pool_size: usize, node: &HashiNodeHandle, expect_legacy: bool) {
+    fn assert_pool_derivation(pool_size: usize, node: &HashiNodeHandle) {
         let (w_total, w_node, t, f, bspw) = {
             let mpc_manager = node.hashi().mpc_manager().unwrap();
             let mgr = mpc_manager.read().unwrap();
@@ -2470,119 +2464,26 @@ mod tests {
                 mgr.batch_size_per_weight as usize,
             )
         };
-        let (c_expected, c_other) = if expect_legacy {
-            (f, t - 1)
-        } else {
-            (t - 1, f)
-        };
+        let consumed = t - 1;
         assert_ne!(
-            c_expected % w_node,
-            c_other % w_node,
-            "params cannot distinguish the two formulas"
+            consumed, f,
+            "params make t-1 and f coincide, so this cannot pin the derivation"
         );
         assert_eq!(pool_size % bspw, 0, "pool must be whole positions");
         let height = pool_size / bspw;
-        let w_out = height + c_expected;
+        let w_out = height + consumed;
         assert!(
             w_out.is_multiple_of(w_node) && t <= w_out && w_out <= w_total,
-            "pool of {pool_size} (height {height}) does not match the expected \
-             derivation (c = {c_expected}); it implies output weight {w_out}"
+            "pool of {pool_size} (height {height}) does not match privacy-threshold \
+             derivation (c = {consumed}); it implies output weight {w_out}"
         );
-        let gate = if expect_legacy {
-            2 * f + 1
-        } else {
-            w_total - f
-        };
+        let gate = w_total - f;
         let expected_w_out = w_node * gate.div_ceil(w_node);
         assert_eq!(
-            w_out,
-            expected_w_out,
-            "pool of {pool_size} implies output weight {w_out}, but the \
-             {} gate ({gate}) should collect {expected_w_out}",
-            if expect_legacy {
-                "legacy 2f+1"
-            } else {
-                "privacy-threshold W-f"
-            }
+            w_out, expected_w_out,
+            "pool of {pool_size} implies output weight {w_out}, but the W-f gate \
+             ({gate}) should collect {expected_w_out}"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_presignature_derivation_version_flips_at_epoch_boundary() -> Result<()> {
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
-
-        let mut test_networks = TestNetworksBuilder::new()
-            .with_nodes(4)
-            .with_presignature_derivation_activation_epoch(1)
-            .build()
-            .await?;
-
-        let initial_epoch = {
-            let nodes = test_networks.hashi_network().nodes();
-            let mpc_key_futures: Vec<_> = nodes
-                .iter()
-                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
-                .collect();
-            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
-            for (i, result) in results.into_iter().enumerate() {
-                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
-            }
-            nodes[0].current_epoch().unwrap()
-        };
-        assert_eq!(
-            initial_epoch, 0,
-            "activation at epoch 1 assumes genesis at 0"
-        );
-
-        {
-            let nodes = test_networks.hashi_network().nodes();
-            let signing_manager = nodes[0]
-                .hashi()
-                .signing_manager_for(initial_epoch)
-                .expect("SigningManager for the initial epoch");
-            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], true);
-            let results = sign_on_all_nodes(
-                nodes,
-                b"derivation flip: legacy epoch",
-                initial_epoch,
-                sui_sdk_types::Address::new([0xD1; 32]),
-                0,
-                None,
-            )
-            .await;
-            assert_all_signatures_match(results);
-        }
-
-        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
-
-        {
-            let nodes = test_networks.hashi_network().nodes();
-            let epoch = initial_epoch + 1;
-            wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
-            let signing_manager = nodes[0]
-                .hashi()
-                .signing_manager_for(epoch)
-                .expect("SigningManager for the post-activation epoch");
-            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], false);
-            let results = sign_on_all_nodes(
-                nodes,
-                b"derivation flip: privacy-threshold epoch",
-                epoch,
-                sui_sdk_types::Address::new([0xD2; 32]),
-                0,
-                None,
-            )
-            .await;
-            assert_all_signatures_match(results);
-        }
-        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2755,6 +2656,7 @@ mod tests {
             .signing_manager_for(epoch)
             .expect("just waited for it");
         let pool_size = signing_manager.initial_presig_count();
+        assert_pool_derivation(pool_size, &nodes[0]);
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         let num_signings = pool_size + 1;
         let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
