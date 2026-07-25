@@ -207,6 +207,15 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_fee_conf_target: Option<u16>,
 
+    /// Floor (sat/vB) for the withdrawal settlement fee rate, applied
+    /// after `estimatesmartfee`. Raising this is the lever for rescuing a
+    /// stalled settlement: the CPFP boost only covers the amount by which
+    /// this floor exceeds what the stalled ancestor already paid.
+    ///
+    /// Defaults to `CoinSelectionParams::DEFAULT_MIN_FEE_RATE`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_min_fee_rate_sat_vb: Option<u64>,
+
     /// Interval (ms) between watcher polls of the on-chain Hashi config while
     /// the launch is pending — the safety net for `finish_publish`, which sets
     /// `guardian_url` and the guardian BTC key with no event. Polling stops
@@ -451,6 +460,12 @@ impl Config {
 
     pub fn withdrawal_fee_conf_target(&self) -> u16 {
         self.withdrawal_fee_conf_target.unwrap_or(3)
+    }
+
+    pub fn withdrawal_min_fee_rate(&self) -> bitcoin::FeeRate {
+        self.withdrawal_min_fee_rate_sat_vb
+            .and_then(bitcoin::FeeRate::from_sat_per_vb)
+            .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MIN_FEE_RATE)
     }
 
     // Creates a new config suitable for testing. In particular this config will:

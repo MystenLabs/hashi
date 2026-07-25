@@ -115,6 +115,10 @@ impl SpendPath {
 /// ancestor.
 #[derive(Clone, Debug)]
 pub struct AncestorTx {
+    /// Identity of the withdrawal that produced this transaction.
+    /// Inputs can share a parent; the CPFP arithmetic is only correct
+    /// if it is counted once.
+    pub id: Address,
     /// Number of confirmations. `0` means the transaction is in the
     /// mempool only (not yet included in a block). Values `1..N`
     /// mean it has been included but has not yet reached the
@@ -192,19 +196,6 @@ impl UtxoStatus {
                 .sum(),
         }
     }
-
-    /// Returns the total fee paid by all unconfirmed ancestors
-    /// (transactions with 0 confirmations).
-    pub fn unconfirmed_ancestor_fee(&self) -> u64 {
-        match self {
-            UtxoStatus::Confirmed => 0,
-            UtxoStatus::Pending { chain } => chain
-                .iter()
-                .filter(|a| a.confirmations == 0)
-                .map(|a| a.tx_fee)
-                .sum(),
-        }
-    }
 }
 
 // ── UTXO Candidate ───────────────────────────────────────────────────────────
@@ -257,6 +248,11 @@ pub struct CoinSelectionParams {
     /// Upper bound on transaction weight. The algorithm will not propose a
     /// transaction that exceeds this limit.
     pub max_tx_weight: Weight,
+
+    /// Upper bound on this transaction plus all of its unconfirmed
+    /// ancestors, keeping the mempool cluster inside Bitcoin's 101 kvB
+    /// limit. `max_tx_weight` alone does not constrain this.
+    pub max_ancestor_package_weight: Weight,
 
     /// Hard cap on the total number of transaction inputs, covering both the
     /// primary inputs selected in Step 2 and any consolidation inputs added in
@@ -339,6 +335,22 @@ impl CoinSelectionParams {
     /// will not propagate through the standard P2P network.
     pub const DEFAULT_MAX_TX_WEIGHT: Weight = Weight::from_wu(400_000);
 
+    /// Default cap on this transaction plus its unconfirmed ancestors
+    /// (400 kWU = 100 kvB), just under the 101 kvB mempool cluster limit
+    /// (`getmempoolinfo.limitclustersize`) that Bitcoin rejects above.
+    ///
+    /// [`Self::DEFAULT_MAX_TX_WEIGHT`] bounds only the transaction, so it
+    /// cannot catch a batch whose ancestors push the cluster over — which
+    /// is how one stalled settlement blocks every batch behind it.
+    ///
+    /// This tracks what the network accepts rather than reserving CPFP
+    /// headroom. A rescue child is subject to this same bound, so holding
+    /// weight back here would block the rescues it is meant to enable.
+    /// Headroom comes from [`Self::MAX_WITHDRAWAL_REQUESTS`] and
+    /// [`Self::DEFAULT_MAX_INPUTS`] keeping each settlement well under the
+    /// cluster budget.
+    pub const DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT: Weight = Weight::from_wu(400_000);
+
     /// Default maximum total inputs selected for a withdrawal transaction,
     /// including both funding inputs and consolidation inputs.
     pub const DEFAULT_MAX_INPUTS: usize = 400;
@@ -348,9 +360,15 @@ impl CoinSelectionParams {
     /// room under Bitcoin's 101 kvB descendant-size budget for a direct child.
     pub const MAX_WITHDRAWAL_REQUESTS: usize = 40;
 
-    /// Default minimum fee rate floor (1 sat/vB), matching Bitcoin
-    /// Core's minimum relay fee.
-    pub const DEFAULT_MIN_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(1);
+    /// Default minimum fee rate floor (3 sat/vB), deliberately above
+    /// Bitcoin Core's 1 sat/vB relay minimum.
+    ///
+    /// A batched withdrawal at the relay floor is both the largest and
+    /// the cheapest mempool entry, so it is evicted first and nothing
+    /// re-announces it. The floor must also exceed what an unconfirmed
+    /// parent already paid, or the CPFP deficit is zero and a stalled
+    /// settlement cannot be rescued.
+    pub const DEFAULT_MIN_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(3);
 
     /// Default long-term average fee rate (10 sat/vB), matching
     /// Bitcoin Core's `-consolidatefeerate` default. Below this rate,
@@ -415,6 +433,7 @@ impl CoinSelectionParams {
 
         Self {
             max_tx_weight: Self::DEFAULT_MAX_TX_WEIGHT,
+            max_ancestor_package_weight: Self::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT,
             max_inputs: Self::DEFAULT_MAX_INPUTS,
             max_withdrawal_requests: Self::MAX_WITHDRAWAL_REQUESTS,
             max_fee_per_request,
@@ -541,6 +560,22 @@ pub enum CoinSelectionError {
         /// Estimated weight of a single-request transaction.
         weight: Weight,
         /// Configured maximum (`params.max_tx_weight`).
+        max_weight: Weight,
+    },
+
+    /// The transaction plus its unconfirmed ancestors exceeds
+    /// `params.max_ancestor_package_weight`. Refused before signing
+    /// rather than after, since Bitcoin would reject the broadcast.
+    #[error(
+        "transaction weight {weight:#} plus unconfirmed ancestor weight \
+         {ancestor_weight:#} exceeds the configured package maximum {max_weight:#}"
+    )]
+    ExceedsMaxAncestorPackageWeight {
+        /// Weight of the candidate transaction itself.
+        weight: Weight,
+        /// Combined weight of its unconfirmed ancestors.
+        ancestor_weight: Weight,
+        /// Configured maximum (`params.max_ancestor_package_weight`).
         max_weight: Weight,
     },
 
@@ -704,6 +739,12 @@ pub fn select_coins(
                 // Also ensure that if this UTXO were to be selected, the resulting unconfirmed
                 // chain depth would be less than the max relay limit
                 && u.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
+                // Unspendable: its ancestors plus the input it would add
+                // already fill the package budget. Skipped rather than left
+                // to fail the selection, since largest-first would pick it
+                // on every retry and block withdrawals the others could fund.
+                && u.status.unconfirmed_ancestor_weight() + u.spend_path.input_weight()
+                    < params.max_ancestor_package_weight
         })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
@@ -786,7 +827,7 @@ pub fn select_coins(
             // could theoretically eliminate dust padding and lower
             // total_deduction enough to pass. We accept this
             // approximation for simplicity.
-            if builder.check_fees().is_err() || builder.exceeds_max_weight() {
+            if builder.check_fees().is_err() || builder.exceeds_any_weight_limit() {
                 builder.inputs.pop();
                 builder.compute_raw_change();
                 break;
@@ -925,22 +966,67 @@ impl<'a> TransactionBuilder<'a> {
         raw_change
     }
 
+    /// Every unconfirmed ancestor of the selected inputs, counted once.
+    ///
+    /// Counting a shared parent twice re-applies `fee_rate × weight −
+    /// fee`, which is negative for one paying above the target: its
+    /// surplus is credited twice and can cancel out an underpaying
+    /// ancestor, leaving the package short.
+    fn unconfirmed_ancestors(&self) -> Vec<&AncestorTx> {
+        let mut seen = std::collections::HashSet::new();
+        self.inputs
+            .iter()
+            .filter_map(|u| match &u.status {
+                UtxoStatus::Confirmed => None,
+                UtxoStatus::Pending { chain } => Some(chain.iter()),
+            })
+            .flatten()
+            .filter(|a| a.confirmations == 0 && seen.insert(a.id))
+            .collect()
+    }
+
+    /// Combined weight of the unconfirmed ancestors, counted once each.
+    fn unconfirmed_ancestor_weight(&self) -> Weight {
+        self.unconfirmed_ancestors()
+            .iter()
+            .map(|a| a.tx_weight)
+            .sum()
+    }
+
     /// Whether the transaction weight exceeds the configured maximum.
     fn exceeds_max_weight(&self) -> bool {
         self.weight() > self.params.max_tx_weight
     }
 
-    /// Check that the transaction weight is within the configured
-    /// maximum. Returns an error if exceeded.
+    /// Whether the transaction plus its unconfirmed ancestors exceeds
+    /// the configured package maximum.
+    fn exceeds_max_ancestor_package_weight(&self) -> bool {
+        self.weight() + self.unconfirmed_ancestor_weight() > self.params.max_ancestor_package_weight
+    }
+
+    /// Whether either weight bound is exceeded. Used to back off while
+    /// adding consolidation inputs.
+    fn exceeds_any_weight_limit(&self) -> bool {
+        self.exceeds_max_weight() || self.exceeds_max_ancestor_package_weight()
+    }
+
+    /// Check that both the transaction weight and the unconfirmed
+    /// ancestor package weight are within their configured maximums.
     fn check_weight(&self) -> Result<(), CoinSelectionError> {
         if self.exceeds_max_weight() {
-            Err(CoinSelectionError::ExceedsMaxWeight {
+            return Err(CoinSelectionError::ExceedsMaxWeight {
                 weight: self.weight(),
                 max_weight: self.params.max_tx_weight,
-            })
-        } else {
-            Ok(())
+            });
         }
+        if self.exceeds_max_ancestor_package_weight() {
+            return Err(CoinSelectionError::ExceedsMaxAncestorPackageWeight {
+                weight: self.weight(),
+                ancestor_weight: self.unconfirmed_ancestor_weight(),
+                max_weight: self.params.max_ancestor_package_weight,
+            });
+        }
+        Ok(())
     }
 
     /// The total amount deducted from requests: the transaction's own
@@ -983,16 +1069,9 @@ impl<'a> TransactionBuilder<'a> {
     ///
     /// Returns 0 if the ancestors already pay enough.
     fn cpfp_deficit(&self) -> u64 {
-        let ancestor_weight: Weight = self
-            .inputs
-            .iter()
-            .map(|u| u.status.unconfirmed_ancestor_weight())
-            .sum();
-        let ancestor_fee: u64 = self
-            .inputs
-            .iter()
-            .map(|u| u.status.unconfirmed_ancestor_fee())
-            .sum();
+        let ancestors = self.unconfirmed_ancestors();
+        let ancestor_weight: Weight = ancestors.iter().map(|a| a.tx_weight).sum();
+        let ancestor_fee: u64 = ancestors.iter().map(|a| a.tx_fee).sum();
 
         let needed_ancestor_fee = fee_for_weight(self.fee_rate, ancestor_weight);
         needed_ancestor_fee.saturating_sub(ancestor_fee)
