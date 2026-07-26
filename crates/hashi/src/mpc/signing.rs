@@ -88,7 +88,18 @@ struct SigningPoolState {
     /// after withdrawal B advanced to batch 1) still works.
     batches: Vec<PresigBatch>,
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
-    next_batch: Option<Presignatures>,
+    next_batch: Option<PrefetchedBatch>,
+}
+
+/// A refill result staged for installation, tagged with the batch index it
+/// was generated for. The tag lets the install path refuse a stale or
+/// duplicated generation result: relabeling one under a later batch's index
+/// range would make this node evaluate different nonces than its peers at
+/// the same global presig indices (breaking aggregation), and reusing
+/// already-consumed nonces for new messages leaks this node's key shares.
+struct PrefetchedBatch {
+    batch_index: u32,
+    pool: Vec<Option<(Vec<S>, G)>>,
 }
 
 pub struct SigningManager {
@@ -217,12 +228,53 @@ impl SigningManager {
         })
     }
 
-    pub fn set_next_batch(&self, presignatures: Presignatures) {
-        self.state.write().unwrap().next_batch = Some(presignatures);
+    /// Stage a refill result for installation once signing advances past the
+    /// current batches. `batch_index` must be the index the presignatures
+    /// were generated for; a result that is not strictly newer than the
+    /// latest installed batch is discarded, since installing it under a
+    /// later index would re-serve already-consumed nonces.
+    pub fn set_next_batch(&self, batch_index: u32, presignatures: Presignatures) {
+        let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
+        let fingerprint = presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce));
+        let mut state = self.state.write().unwrap();
+        if let Some(latest) = state.batches.last()
+            && batch_index <= latest.batch_index
+        {
+            tracing::error!(
+                "Discarding stale presig refill result: batch_index={batch_index} is not \
+                 newer than the latest installed batch {} (size={}, fingerprint={fingerprint})",
+                latest.batch_index,
+                pool.len(),
+            );
+            return;
+        }
+        if let Some(existing) = &state.next_batch {
+            tracing::warn!(
+                "Replacing prefetched presig batch {} with batch {batch_index}",
+                existing.batch_index,
+            );
+        }
+        tracing::info!(
+            "Presig batch prefetched: address={}, batch_index={batch_index}, size={}, \
+             fingerprint={fingerprint}",
+            self.config.address,
+            pool.len(),
+        );
+        state.next_batch = Some(PrefetchedBatch { batch_index, pool });
     }
 
     pub fn has_next_batch(&self) -> bool {
         self.state.read().unwrap().next_batch.is_some()
+    }
+
+    /// The batch index of the currently staged refill result, if any.
+    pub fn prefetched_batch_index(&self) -> Option<u32> {
+        self.state
+            .read()
+            .unwrap()
+            .next_batch
+            .as_ref()
+            .map(|next| next.batch_index)
     }
 
     /// Size of the latest (most recent) batch.
@@ -258,9 +310,14 @@ impl SigningManager {
     pub fn available_presig_end_index(&self) -> u64 {
         let state = self.state.read().unwrap();
         let batch_end = state.batches.last().map_or(0, |b| b.end_index());
+        let next_index = state.batches.last().map_or(0, |b| b.batch_index) + 1;
         match &state.next_batch {
-            Some(next) => batch_end + next.len() as u64,
-            None => batch_end,
+            // Only a prefetch that will install as the immediately-next
+            // batch extends the contiguous index range; counting a
+            // future-tagged one would report capacity across a coverage
+            // gap and suppress the proactive refill.
+            Some(next) if next.batch_index == next_index => batch_end + next.pool.len() as u64,
+            _ => batch_end,
         }
     }
 
@@ -457,26 +514,51 @@ impl SigningManager {
                     &mut state.batches[b]
                 } else {
                     // Index not found in any current batch; try to swap in
-                    // the prefetched next batch.
+                    // the prefetched next batch. Only a prefetch generated
+                    // for exactly the next index may be installed: its
+                    // position in the global index space is derived from the
+                    // local install order, so relabeling any other result
+                    // would silently bind the wrong nonces to these indices.
                     if let Some(latest) = state.batches.last() {
                         let next_start = latest.end_index();
                         let next_batch_index = latest.batch_index + 1;
-                        if let Some(next) = state.next_batch.take() {
-                            let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
-                            tracing::info!(
-                                "Presig batch installed: address={}, batch_index={next_batch_index}, \
-                                 start_index={next_start}, size={}, fingerprint={}",
-                                config.address,
-                                pool.len(),
-                                presig_pool_fingerprint(
-                                    pool.iter().flatten().map(|(_, nonce)| nonce)
-                                ),
-                            );
-                            state.batches.push(PresigBatch {
-                                pool,
-                                start_index: next_start,
-                                batch_index: next_batch_index,
-                            });
+                        match &state.next_batch {
+                            Some(next) if next.batch_index == next_batch_index => {
+                                let next = state.next_batch.take().expect("checked above");
+                                tracing::info!(
+                                    "Presig batch installed: address={}, batch_index={next_batch_index}, \
+                                     start_index={next_start}, size={}, fingerprint={}",
+                                    config.address,
+                                    next.pool.len(),
+                                    presig_pool_fingerprint(
+                                        next.pool.iter().flatten().map(|(_, nonce)| nonce)
+                                    ),
+                                );
+                                state.batches.push(PresigBatch {
+                                    pool: next.pool,
+                                    start_index: next_start,
+                                    batch_index: next_batch_index,
+                                });
+                            }
+                            Some(next) => {
+                                tracing::error!(
+                                    "Prefetched presig batch {} does not match the expected \
+                                     next batch {next_batch_index}; refusing to install it",
+                                    next.batch_index,
+                                );
+                                if next.batch_index < next_batch_index {
+                                    // Stale: can only re-serve consumed
+                                    // nonces. Drop it so the refill request
+                                    // below fetches the right batch.
+                                    state.next_batch = None;
+                                } else {
+                                    // A future batch: keep it, but the gap
+                                    // means the expected batch was never
+                                    // staged, so request it explicitly.
+                                    let _ = self.refill_tx.send(next_batch_index);
+                                }
+                            }
+                            None => {}
                         }
                     }
                     // Check if the index is now covered.
@@ -1228,8 +1310,8 @@ mod tests {
             }
         }
 
-        /// Build fresh presignatures and set as next_batch on all managers.
-        fn set_next_batch_on_all(&self) {
+        /// Build one fresh batch of presignatures per manager.
+        fn build_presignatures(&self) -> Vec<Presignatures> {
             let batch_size_per_weight: u16 = 10;
             let mut rng = StdRng::seed_from_u64(99);
             let nonces_for_dealer: Vec<_> = (0..self.n)
@@ -1250,33 +1332,42 @@ mod tests {
                     (public_keys, nonce_shares)
                 })
                 .collect();
-            for (i, mgr) in self.managers.iter().enumerate() {
-                let index = ShareIndex::new(i as u16 + 1).unwrap();
-                let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
-                    .map(|j| batch_avss::ReceiverOutput {
-                        my_shares: batch_avss::SharesForNode {
-                            shares: vec![batch_avss::ShareBatch {
-                                index,
-                                batch: (0..batch_size_per_weight as usize)
-                                    .map(|l| nonces_for_dealer[j].1[l][i])
-                                    .collect(),
-                                blinding_share: S::zero(),
-                            }],
+            (0..self.managers.len())
+                .map(|i| {
+                    let index = ShareIndex::new(i as u16 + 1).unwrap();
+                    let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
+                        .map(|j| batch_avss::ReceiverOutput {
+                            my_shares: batch_avss::SharesForNode {
+                                shares: vec![batch_avss::ShareBatch {
+                                    index,
+                                    batch: (0..batch_size_per_weight as usize)
+                                        .map(|l| nonces_for_dealer[j].1[l][i])
+                                        .collect(),
+                                    blinding_share: S::zero(),
+                                }],
+                            },
+                            public_keys: nonces_for_dealer[j].0.clone(),
+                        })
+                        .collect();
+                    Presignatures::new(
+                        outputs,
+                        batch_size_per_weight,
+                        Parameters {
+                            t: self.t,
+                            f: self.f,
                         },
-                        public_keys: nonces_for_dealer[j].0.clone(),
-                    })
-                    .collect();
-                let presignatures = Presignatures::new(
-                    outputs,
-                    batch_size_per_weight,
-                    Parameters {
-                        t: self.t,
-                        f: self.f,
-                    },
-                    true,
-                )
-                .unwrap();
-                mgr.set_next_batch(presignatures);
+                        true,
+                    )
+                    .unwrap()
+                })
+                .collect()
+        }
+
+        /// Build fresh presignatures and set as next_batch on all managers.
+        fn set_next_batch_on_all(&self) {
+            for (mgr, presignatures) in self.managers.iter().zip(self.build_presignatures()) {
+                let next_index = mgr.batch_index() + 1;
+                mgr.set_next_batch(next_index, presignatures);
             }
         }
 
@@ -1294,9 +1385,8 @@ mod tests {
                 let next_start = latest.end_index();
                 let next_batch_index = latest.batch_index + 1;
                 let next = state.next_batch.take().unwrap();
-                let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
                 state.batches.push(PresigBatch {
-                    pool,
+                    pool: next.pool,
                     start_index: next_start,
                     batch_index: next_batch_index,
                 });
@@ -2045,6 +2135,124 @@ mod tests {
         assert!(!setup.managers[0].has_next_batch());
     }
 
+    /// `set_next_batch` discards a refill result that is not newer than the
+    /// latest installed batch, so a duplicated generation of an old batch
+    /// can never be staged for installation.
+    #[tokio::test]
+    async fn test_stale_refill_result_is_discarded() {
+        let setup = SigningTestSetup::new(4);
+
+        // Batch 0 is already installed, so a refill result for batch 0 is
+        // stale and must be dropped.
+        let presigs = setup.build_presignatures().swap_remove(0);
+        setup.managers[0].set_next_batch(0, presigs);
+        assert!(!setup.managers[0].has_next_batch());
+
+        // A result for the actual next batch is accepted.
+        let presigs = setup.build_presignatures().swap_remove(0);
+        setup.managers[0].set_next_batch(1, presigs);
+        assert!(setup.managers[0].has_next_batch());
+    }
+
+    /// A prefetched batch tagged with an older index than the expected next
+    /// batch must not be installed under the next batch's index range
+    /// (regression test for the testnet incident where a duplicated
+    /// batch-19 refill result was relabeled as batch 20, binding stale
+    /// nonces to fresh global presig indices).
+    #[tokio::test]
+    async fn test_stale_prefetch_is_not_relabeled_as_next_batch() {
+        let mut setup = SigningTestSetup::new(4);
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
+        setup.refill_rx.borrow_and_update();
+
+        // Force a stale prefetch (tagged with the already-installed batch 0)
+        // past the `set_next_batch` guard, straight into the state.
+        setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
+            batch_index: 0,
+            pool: vec![],
+        });
+
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"stale",
+            batch_size, // first index of the not-yet-generated batch 1
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await;
+
+        // The stale prefetch is dropped rather than installed: signing
+        // fails safe and a refill for the right batch is requested.
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+        assert!(!setup.managers[0].has_next_batch());
+        assert!(setup.refill_rx.has_changed().unwrap());
+        assert_eq!(*setup.refill_rx.borrow(), 1);
+    }
+
+    /// A prefetched batch tagged with a future index is kept (it will be
+    /// needed later) but not installed in place of the expected next batch.
+    #[tokio::test]
+    async fn test_future_prefetch_is_kept_but_not_installed() {
+        let mut setup = SigningTestSetup::new(4);
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
+        setup.refill_rx.borrow_and_update();
+
+        setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
+            batch_index: 2,
+            pool: vec![],
+        });
+
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            Address::new([0xFF; 32]),
+            b"future",
+            batch_size, // first index of the missing batch 1
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SigningError::PoolExhausted)));
+        assert!(setup.managers[0].has_next_batch());
+        assert!(setup.refill_rx.has_changed().unwrap());
+        assert_eq!(*setup.refill_rx.borrow(), 1);
+    }
+
+    /// `available_presig_end_index` only counts a prefetch that is
+    /// contiguous with the installed range; a future-tagged one would
+    /// report capacity across a coverage gap and suppress the leader's
+    /// proactive refill.
+    #[test]
+    fn test_available_end_index_ignores_non_contiguous_prefetch() {
+        let setup = SigningTestSetup::new(4);
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
+        assert_eq!(setup.managers[0].available_presig_end_index(), batch_size);
+
+        setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
+            batch_index: 2,
+            pool: vec![None; 5],
+        });
+        assert_eq!(setup.managers[0].available_presig_end_index(), batch_size);
+
+        setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
+            batch_index: 1,
+            pool: vec![None; 5],
+        });
+        assert_eq!(
+            setup.managers[0].available_presig_end_index(),
+            batch_size + 5
+        );
+    }
+
     #[tokio::test]
     async fn test_sign_pool_exhausted_no_next_batch() {
         // Exhaust pool without setting next_batch → PoolExhausted.
@@ -2227,9 +2435,8 @@ mod tests {
             let next_start = latest.end_index();
             let next_batch_index = latest.batch_index + 1;
             let next = state.next_batch.take().unwrap();
-            let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
             state.batches.push(PresigBatch {
-                pool,
+                pool: next.pool,
                 start_index: next_start,
                 batch_index: next_batch_index,
             });
