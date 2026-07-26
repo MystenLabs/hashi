@@ -930,11 +930,24 @@ impl MpcService {
             .inner
             .signing_manager_for(epoch)
             .ok_or_else(|| anyhow::anyhow!("SigningManager not available for epoch {epoch}"))?;
+        // A request for an already-installed batch can arrive via the
+        // coalescing refill channel (e.g., a pre-rebuild request replayed
+        // after `sync_if_stale` recovered the manager). Regenerating it
+        // would waste RPC budget and stage a batch that `set_next_batch`
+        // discards anyway, so skip it up front.
+        let latest = signing_manager.batch_index();
+        if batch_index <= latest {
+            info!(
+                "Skipping presignature refill for batch {batch_index}: \
+                 the latest installed batch is already {latest}"
+            );
+            return Ok(());
+        }
         let (_, presignatures) = self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {
             return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
         }
-        signing_manager.set_next_batch(presignatures);
+        signing_manager.set_next_batch(batch_index, presignatures);
         Ok(())
     }
 
