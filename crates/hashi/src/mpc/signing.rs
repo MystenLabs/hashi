@@ -267,6 +267,16 @@ impl SigningManager {
         self.state.read().unwrap().next_batch.is_some()
     }
 
+    /// The batch index of the currently staged refill result, if any.
+    pub fn prefetched_batch_index(&self) -> Option<u32> {
+        self.state
+            .read()
+            .unwrap()
+            .next_batch
+            .as_ref()
+            .map(|next| next.batch_index)
+    }
+
     /// Size of the latest (most recent) batch.
     pub fn initial_presig_count(&self) -> usize {
         self.state
@@ -300,9 +310,14 @@ impl SigningManager {
     pub fn available_presig_end_index(&self) -> u64 {
         let state = self.state.read().unwrap();
         let batch_end = state.batches.last().map_or(0, |b| b.end_index());
+        let next_index = state.batches.last().map_or(0, |b| b.batch_index) + 1;
         match &state.next_batch {
-            Some(next) => batch_end + next.pool.len() as u64,
-            None => batch_end,
+            // Only a prefetch that will install as the immediately-next
+            // batch extends the contiguous index range; counting a
+            // future-tagged one would report capacity across a coverage
+            // gap and suppress the proactive refill.
+            Some(next) if next.batch_index == next_index => batch_end + next.pool.len() as u64,
+            _ => batch_end,
         }
     }
 
@@ -2210,6 +2225,32 @@ mod tests {
         assert!(setup.managers[0].has_next_batch());
         assert!(setup.refill_rx.has_changed().unwrap());
         assert_eq!(*setup.refill_rx.borrow(), 1);
+    }
+
+    /// `available_presig_end_index` only counts a prefetch that is
+    /// contiguous with the installed range; a future-tagged one would
+    /// report capacity across a coverage gap and suppress the leader's
+    /// proactive refill.
+    #[test]
+    fn test_available_end_index_ignores_non_contiguous_prefetch() {
+        let setup = SigningTestSetup::new(4);
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
+        assert_eq!(setup.managers[0].available_presig_end_index(), batch_size);
+
+        setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
+            batch_index: 2,
+            pool: vec![None; 5],
+        });
+        assert_eq!(setup.managers[0].available_presig_end_index(), batch_size);
+
+        setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
+            batch_index: 1,
+            pool: vec![None; 5],
+        });
+        assert_eq!(
+            setup.managers[0].available_presig_end_index(),
+            batch_size + 5
+        );
     }
 
     #[tokio::test]
