@@ -6,3 +6,4 @@ mod proto_conversions;
 mod service;
 
 pub use p2p_channel::RpcP2PChannel;
+pub(crate) use service::signing_error_to_status;

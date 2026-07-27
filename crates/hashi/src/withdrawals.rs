@@ -1001,53 +1001,14 @@ impl Hashi {
             metrics_ref,
             result_tx,
         );
-        let forward = async {
-            while let Some((signing_id, sign_result)) = result_rx.recv().await {
-                let input_index = index_by_id[&signing_id];
-                let sign_duration = batch_start.elapsed().as_secs_f64();
-                match &sign_result {
-                    Ok(_) => {
-                        metrics_ref
-                            .mpc_sign_duration_seconds
-                            .with_label_values(&["success"])
-                            .observe(sign_duration);
-                        metrics_ref
-                            .presig_pool_remaining
-                            .set(signing_manager_ref.presignatures_remaining() as i64);
-                    }
-                    Err(e) => {
-                        metrics_ref
-                            .mpc_sign_duration_seconds
-                            .with_label_values(&["failure"])
-                            .observe(sign_duration);
-                        let reason = match e {
-                            crate::mpc::types::SigningError::Timeout { .. } => "timeout",
-                            crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
-                            crate::mpc::types::SigningError::TooManyInvalidSignatures {
-                                ..
-                            } => "too_many_invalid",
-                            crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
-                            _ => "other",
-                        };
-                        metrics_ref
-                            .mpc_sign_failures_total
-                            .with_label_values(&[reason])
-                            .inc();
-                    }
-                }
-                let partial = sign_result
-                    .map(|sig| hashi_types::proto::SignWithdrawalTransactionPartial {
-                        input_index: input_index as u32,
-                        signature: sig.to_byte_array().to_vec().into(),
-                    })
-                    .map_err(|e| {
-                        tonic::Status::internal(format!(
-                            "Failed to sign withdrawal transaction input {input_index}: {e}"
-                        ))
-                    });
-                let _ = sink_ref.send(partial).await;
-            }
-        };
+        let forward = forward_signing_results(
+            &mut result_rx,
+            &index_by_id,
+            sink_ref,
+            metrics_ref,
+            batch_start,
+            || signing_manager_ref.presignatures_remaining() as i64,
+        );
         tokio::join!(collect, forward);
         Ok(())
     }
@@ -1668,6 +1629,84 @@ fn signed_weight_of(unsigned: &bitcoin::Transaction, input_count: usize) -> Weig
     unsigned.weight() + satisfaction + Weight::from_wu(2)
 }
 
+async fn forward_signing_results(
+    results: &mut tokio::sync::mpsc::UnboundedReceiver<(
+        Address,
+        crate::mpc::types::SigningResult<SchnorrSignature>,
+    )>,
+    index_by_id: &HashMap<Address, usize>,
+    sink: &tokio::sync::mpsc::Sender<
+        Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+    >,
+    metrics: &crate::metrics::Metrics,
+    batch_start: std::time::Instant,
+    presigs_remaining: impl Fn() -> i64,
+) {
+    let mut deferred_failure: Option<tonic::Status> = None;
+    while let Some((signing_id, sign_result)) = results.recv().await {
+        let input_index = index_by_id[&signing_id];
+        let sign_duration = batch_start.elapsed().as_secs_f64();
+        match &sign_result {
+            Ok(_) => {
+                metrics
+                    .mpc_sign_duration_seconds
+                    .with_label_values(&["success"])
+                    .observe(sign_duration);
+                metrics.presig_pool_remaining.set(presigs_remaining());
+            }
+            Err(e) => {
+                metrics
+                    .mpc_sign_duration_seconds
+                    .with_label_values(&["failure"])
+                    .observe(sign_duration);
+                let reason = match e {
+                    crate::mpc::types::SigningError::Timeout { .. } => "timeout",
+                    crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                    crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
+                        "too_many_invalid"
+                    }
+                    crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                    _ => "other",
+                };
+                metrics
+                    .mpc_sign_failures_total
+                    .with_label_values(&[reason])
+                    .inc();
+            }
+        }
+        match sign_result {
+            Ok(sig) => {
+                let partial = hashi_types::proto::SignWithdrawalTransactionPartial {
+                    input_index: input_index as u32,
+                    signature: sig.to_byte_array().to_vec().into(),
+                };
+                let _ = sink.send(Ok(partial)).await;
+            }
+            Err(e) => {
+                deferred_failure
+                    .get_or_insert_with(|| withdrawal_input_signing_status(input_index, e));
+            }
+        }
+    }
+    if let Some(status) = deferred_failure {
+        let _ = sink.send(Err(status)).await;
+    }
+}
+
+fn withdrawal_input_signing_status(
+    input_index: usize,
+    err: crate::mpc::types::SigningError,
+) -> tonic::Status {
+    let status = crate::mpc::rpc::signing_error_to_status(err);
+    tonic::Status::new(
+        status.code(),
+        format!(
+            "Failed to sign withdrawal transaction input {input_index}: {}",
+            status.message()
+        ),
+    )
+}
+
 fn build_ancestor_chain(
     hashi: &Hashi,
     producing_id: Address,
@@ -1781,11 +1820,80 @@ pub fn build_guardian_withdrawal_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mpc::types::SigningError;
     use crate::onchain::types::OutputUtxo;
     use crate::onchain::types::Utxo;
     use crate::onchain::types::UtxoId;
     use crate::utxo_pool::CoinSelectionParams;
     use hashi_types::bitcoin_txid::BitcoinTxid;
+
+    fn a_signature() -> SchnorrSignature {
+        let bytes = hex::decode(
+            "403B12B0D8555A344175EA7EC746566303321E5DBFA8BE6F091635163ECA79A8\
+             585ED3E3170807E7C03B720FC54C7B23897FCBA0E9D0B4A06894CFD249F22367",
+        )
+        .unwrap();
+        SchnorrSignature::from_byte_array(&bytes.try_into().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forward_signing_results_sends_the_failure_last() {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sink, mut sink_rx) = tokio::sync::mpsc::channel(8);
+
+        let exhausted = Address::new([1u8; 32]);
+        let signed_a = Address::new([2u8; 32]);
+        let signed_b = Address::new([3u8; 32]);
+        let index_by_id: HashMap<Address, usize> = [(exhausted, 0), (signed_a, 1), (signed_b, 2)]
+            .into_iter()
+            .collect();
+
+        result_tx
+            .send((exhausted, Err(SigningError::PoolExhausted)))
+            .unwrap();
+        result_tx.send((signed_a, Ok(a_signature()))).unwrap();
+        result_tx.send((signed_b, Ok(a_signature()))).unwrap();
+        drop(result_tx);
+
+        forward_signing_results(
+            &mut result_rx,
+            &index_by_id,
+            &sink,
+            &crate::metrics::Metrics::new(&prometheus::Registry::new()),
+            std::time::Instant::now(),
+            || 0,
+        )
+        .await;
+        drop(sink);
+
+        let mut sent = Vec::new();
+        while let Some(item) = sink_rx.recv().await {
+            sent.push(item);
+        }
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0].as_ref().unwrap().input_index, 1);
+        assert_eq!(sent[1].as_ref().unwrap().input_index, 2);
+        assert_eq!(
+            sent[2].as_ref().unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn withdrawal_input_signing_status_keeps_the_error_code() {
+        let status = withdrawal_input_signing_status(7, SigningError::PoolExhausted);
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(
+            status.message().contains("input 7")
+                && status.message().contains("Presignature pool exhausted"),
+            "lost message detail: {}",
+            status.message()
+        );
+
+        let status =
+            withdrawal_input_signing_status(7, SigningError::CryptoError("boom".to_string()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
 
     fn input(amount: u64) -> Utxo {
         Utxo {
