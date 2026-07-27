@@ -93,38 +93,88 @@ pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction)
     inputs.saturating_sub(change)
 }
 
-/// Conservative runtime-object budget for withdrawal commit transactions.
+/// Conservative runtime-object budget shared by the withdrawal flow's Sui
+/// transactions.
 ///
-/// Sui's hard object-runtime cache limit is 1000 objects. Empirical
-/// measurements put withdrawal commit transactions at roughly
-/// `selected_utxos + 3 * requests + fixed_overhead` runtime objects. Target
-/// 922 to leave 7.8% headroom below the hard 1000 cap.
-const WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET: usize = 922;
+/// Sui's hard object-runtime cache limit is 1000 objects per transaction.
+/// Target 922 to leave 7.8% headroom below the hard cap.
+const WITHDRAWAL_RUNTIME_OBJECT_BUDGET: usize = 922;
+
+/// Runtime-object cost model for `commit_withdrawal_tx`. Empirical
+/// measurements put commit transactions at roughly
+/// `3 * requests + 1 * selected_utxos + fixed_overhead` runtime objects:
+/// each request is removed from the `requests` ObjectBag and re-added to
+/// `processed` (the `Field` wrapper, the child request object, and the new
+/// `Field`), and each input borrows and locks its `utxo_records` entry (one
+/// `Field` per input).
 const WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS: usize = 12;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 
-fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
-    let request_objects =
-        request_count.saturating_mul(WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST);
-    let runtime_input_budget = WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET
-        .saturating_sub(WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS)
+/// Runtime-object cost model for `confirm_withdrawal`, with conservative
+/// upper-bound coefficients. `update_requests_confirmed` borrows each
+/// request in the `processed` ObjectBag (at most the `Field` wrapper plus
+/// the child object, 2 per request), and `mark_spent` borrows each input's
+/// `utxo_records` entry (1 per input; the record removal itself is deferred
+/// to `cleanup_spent_utxos`). `finalize_withdrawal` has the same
+/// per-request shape via `update_requests_signed` but no per-input loop, so
+/// confirm dominates it and is the only post-commit transaction modeled
+/// here.
+///
+/// With these coefficients the commit model above binds at every request
+/// count that matters (3 objects per request versus 2), but confirm is
+/// checked alongside it so a future change to either cost cannot silently
+/// regress the other.
+const WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS: usize = 43;
+const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
+const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
+
+/// How many inputs fit in [`WITHDRAWAL_RUNTIME_OBJECT_BUDGET`] after the
+/// fixed overhead and the per-request cost of `request_count` requests.
+fn runtime_object_input_budget(
+    fixed_objects: usize,
+    objects_per_request: usize,
+    objects_per_input: usize,
+    request_count: usize,
+) -> usize {
+    let request_objects = request_count.saturating_mul(objects_per_request);
+    let input_objects = WITHDRAWAL_RUNTIME_OBJECT_BUDGET
+        .saturating_sub(fixed_objects)
         .saturating_sub(request_objects);
-    let input_budget = runtime_input_budget / WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT;
-    configured_max_inputs.min(input_budget)
+    input_objects / objects_per_input
 }
 
-/// Confirm is no longer input-bound: spent UTXOs emit events only (0
-/// objects per input). The confirm transaction's object count is
-/// `requests + ~43` fixed overhead — well within the 1000-object limit
-/// for any practical request count. The commit path is the binding
-/// constraint.
+fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+    configured_max_inputs.min(runtime_object_input_budget(
+        WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS,
+        WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST,
+        WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT,
+        request_count,
+    ))
+}
+
+fn safe_withdrawal_confirm_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+    configured_max_inputs.min(runtime_object_input_budget(
+        WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS,
+        WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST,
+        WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT,
+        request_count,
+    ))
+}
+
+/// The input cap for the whole withdrawal flow at a given request count:
+/// the configured cap, the per-request consolidation budget, and the
+/// runtime-object budgets of both the commit and confirm transactions.
 fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
     let request_input_budget =
         request_count.saturating_mul(CoinSelectionParams::DEFAULT_INPUT_BUDGET);
     configured_max_inputs
         .min(request_input_budget)
         .min(safe_withdrawal_commit_max_inputs(
+            request_count,
+            configured_max_inputs,
+        ))
+        .min(safe_withdrawal_confirm_max_inputs(
             request_count,
             configured_max_inputs,
         ))
@@ -1971,6 +2021,27 @@ mod tests {
             10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
             "at low request counts, the per-request input budget is binding",
         );
+    }
+
+    /// The confirm model has a lower per-request cost (2 versus 3) but a
+    /// higher fixed cost (43 versus 12) than the commit model, so it only
+    /// undercuts commit below 31 requests — where the 10-inputs-per-request
+    /// budget is far more restrictive anyway. Verify confirm never binds,
+    /// at any request count, so adding it to the flow minimum is a pure
+    /// safety net.
+    #[test]
+    fn withdrawal_confirm_budget_never_binds() {
+        for request_count in 1..=1000 {
+            let configured = CoinSelectionParams::DEFAULT_MAX_INPUTS;
+            let without_confirm = configured
+                .min(request_count * CoinSelectionParams::DEFAULT_INPUT_BUDGET)
+                .min(safe_withdrawal_commit_max_inputs(request_count, configured));
+            assert_eq!(
+                safe_withdrawal_flow_max_inputs(request_count, configured),
+                without_confirm,
+                "confirm budget unexpectedly binds at {request_count} requests",
+            );
+        }
     }
 
     /// The settlement that stalled on signet: 314,662 wu on-chain
