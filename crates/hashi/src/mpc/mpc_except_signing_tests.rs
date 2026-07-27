@@ -12475,6 +12475,17 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         "a cached kind for a different digest must not exclude the cert"
     );
     assert_eq!(weight, weight_of(&[0, 2]));
+
+    let cached_digest = MessageHash::from([2u8; 32]);
+    assert_eq!(
+        mgr.resolve_avid_cert_kind_for_sizing(batch_index, &setup.address(1), &cached_digest),
+        Some(CertKind::AvssVote)
+    );
+    assert_eq!(
+        mgr.resolve_avid_cert_kind_locally(batch_index, &setup.address(1), &cached_digest),
+        None,
+        "the replay's resolver must not see the pulled-kind cache"
+    );
 }
 
 #[tokio::test]

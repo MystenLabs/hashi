@@ -1132,7 +1132,7 @@ impl MpcManager {
                 false
             } else {
                 !matches!(
-                    self.resolve_avid_cert_kind_locally(
+                    self.resolve_avid_cert_kind_for_sizing(
                         batch_index,
                         dealer,
                         &cert.message().messages_hash,
@@ -3002,7 +3002,7 @@ impl MpcManager {
             .sum())
     }
 
-    fn resolve_avid_cert_kind_locally(
+    fn resolve_avid_cert_kind_for_sizing(
         &self,
         batch_index: u32,
         dealer: &Address,
@@ -3013,6 +3013,15 @@ impl MpcManager {
         {
             return Some(*kind);
         }
+        self.resolve_avid_cert_kind_locally(batch_index, dealer, digest)
+    }
+
+    fn resolve_avid_cert_kind_locally(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+        digest: &MessageHash,
+    ) -> Option<CertKind> {
         if let Some(common) = self.get_avid_round_common(batch_index, dealer)
             && MessageHash::from(common.hash().digest) == *digest
         {
