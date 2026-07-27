@@ -12437,12 +12437,24 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let (blind, _) = mgr.certified_nonce_dealers_from_certs(&certs);
     assert!(blind.contains(&setup.address(3)));
 
-    let (_, mismatched) = make_cert(0, &all);
-    let scrambled = vec![(setup.address(3), mismatched)];
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &scrambled);
-    assert!(
-        certified.is_empty() && weight == 0,
-        "table/message dealer mismatch must not be sized"
+    let (_, foreign_keyed) = make_cert(0, &all);
+    let rekeyed = vec![(setup.address(3), foreign_keyed)];
+    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &rekeyed);
+    assert_eq!(
+        certified,
+        HashSet::from([setup.address(0)]),
+        "sizing must key on the signed dealer"
+    );
+
+    let (_, dup_a) = make_cert(0, &all);
+    let (_, dup_b) = make_cert(0, &all);
+    let duplicated = vec![(setup.address(0), dup_a), (setup.address(3), dup_b)];
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &duplicated);
+    assert_eq!(certified, HashSet::from([setup.address(0)]));
+    assert_eq!(
+        weight,
+        weight_of(&[0]),
+        "a dealer served twice must not be double-counted"
     );
 
     mgr.pulled_avid_cert_kinds.insert(

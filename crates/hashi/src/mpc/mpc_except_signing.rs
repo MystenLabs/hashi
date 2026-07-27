@@ -1110,11 +1110,11 @@ impl MpcManager {
             let dealer = &cert.message().dealer_address;
             if dealer != table_dealer {
                 tracing::warn!(
-                    "Nonce cert keyed under {:?} but signed for dealer {:?}; skipping",
+                    "Nonce cert served under table key {:?} but signed for dealer {:?}; \
+                     sizing under the signed dealer",
                     table_dealer,
                     dealer
                 );
-                continue;
             }
             if certified.contains(dealer) {
                 continue;
