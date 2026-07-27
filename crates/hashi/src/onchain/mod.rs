@@ -48,25 +48,13 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
-/// How much of the on-chain state a scrape loads.
-///
-/// The Bitcoin-side collections (deposit queue, withdrawal queue, UTXO pool)
-/// live in dynamic-field tables paged [`SCRAPE_PAGE_SIZE`] at a time, so they
-/// dominate the cost of a scrape — a 70k-entry withdrawal queue alone is ~70
-/// extra round-trips, enough to trip a fullnode's rate limiter. Governance
-/// reads (config, committees, proposals) never touch them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How much of the on-chain state a scrape loads. The Bitcoin collections are
+/// paged [`SCRAPE_PAGE_SIZE`] at a time and dominate the cost — a 70k-entry
+/// withdrawal queue is ~70 extra round-trips, enough to draw a 429.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrapeScope {
-    /// Load everything. Required by the validator and by any reader of the
-    /// deposit/withdrawal queues or the UTXO pool.
-    #[default]
     Full,
-    /// Load governance state only: package versions, config, committees,
-    /// members, treasury and proposals.
-    ///
-    /// The Bitcoin collections keep their real table ids but come back empty,
-    /// so reading their *contents* under this scope yields silently wrong
-    /// answers. Only use it for callers that don't.
+    /// Everything but the Bitcoin collections, which are left `None`.
     GovernanceOnly,
 }
 
@@ -182,9 +170,8 @@ impl OnchainState {
         Ok((state, service))
     }
 
-    /// One-shot reader for short-lived callers such as the CLI: scrapes once
-    /// at `scope` and starts no watcher, so the state never refreshes.
-    /// Anything that needs live state must use [`OnchainState::new`].
+    /// One-shot reader: scrapes once and starts no watcher, so the state
+    /// never refreshes. Live state needs [`OnchainState::new`].
     pub async fn new_reader(
         sui_rpc_url: &str,
         ids: HashiIds,
@@ -203,9 +190,8 @@ impl OnchainState {
         Ok(state)
     }
 
-    /// Scrape once and assemble the shared state. Both constructors funnel
-    /// through here; only [`OnchainState::new`] goes on to start a watcher,
-    /// and only it needs the mirror seed.
+    /// Shared by both constructors; only [`OnchainState::new`] goes on to
+    /// start a watcher, and only it needs the seed.
     async fn scrape_into_state(
         sui_rpc_url: &str,
         ids: HashiIds,
@@ -1187,9 +1173,8 @@ async fn scrape_tob_entries(client: Client, tob_id: Address) -> Result<route::Co
     Ok(seed)
 }
 
-/// The three Bitcoin-side collections, scraped as a unit, or `None` when
-/// the caller skipped the `BitcoinState` read that hands them their
-/// table ids.
+/// `None` when the caller skipped the `BitcoinState` lookup, which exists only
+/// to hand these their table ids.
 async fn scrape_bitcoin_collections(
     client: Client,
     bitcoin_state: Option<move_types::BitcoinState>,

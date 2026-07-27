@@ -105,27 +105,18 @@ pub struct HashiClient {
 }
 
 impl HashiClient {
-    /// Create a client for governance and configuration commands.
-    ///
-    /// Skips the Bitcoin queues and UTXO pool, which are by far the most
-    /// expensive part of a scrape and which nothing in the proposal,
-    /// committee or config paths reads. Use
-    /// [`HashiClient::new_with_bitcoin_state`] for commands that list
-    /// deposits or withdrawals.
+    /// Client for governance and config commands. Skips the Bitcoin
+    /// collections, which none of them read.
     pub async fn new(config: &CliConfig) -> Result<Self> {
         Self::with_scope(config, ScrapeScope::GovernanceOnly).await
     }
 
-    /// Create a client that also loads the deposit queue, withdrawal queue and
-    /// UTXO pool. Only for commands that read them — on a busy chain this
-    /// pages through every entry and is orders of magnitude slower than
-    /// [`HashiClient::new`].
+    /// Client that also loads the Bitcoin collections. Much slower — only for
+    /// commands that read them.
     pub async fn new_with_bitcoin_state(config: &CliConfig) -> Result<Self> {
         Self::with_scope(config, ScrapeScope::Full).await
     }
 
-    /// Scrape at `scope` and optionally set up transaction execution if a
-    /// keypair is configured.
     async fn with_scope(config: &CliConfig, scope: ScrapeScope) -> Result<Self> {
         config.validate()?;
 
@@ -134,8 +125,6 @@ impl HashiClient {
             hashi_object_id: config.hashi_object_id(),
         };
 
-        // CLI commands are one-shot, so this reader starts no watcher and the
-        // scraped state is never refreshed.
         let onchain_state = OnchainState::new_reader(
             &config.sui_rpc_url,
             hashi_ids,
@@ -168,13 +157,12 @@ impl HashiClient {
         })
     }
 
-    /// Turn a missing-Bitcoin-state mistake into a CLI error rather than the
-    /// panic `OnchainState`'s accessors raise — those assume the validator's
-    /// always-`Full` scrape.
-    fn require_bitcoin_state(&self, accessor: &str) -> Result<()> {
+    /// `OnchainState`'s Bitcoin accessors panic on a governance-only scrape;
+    /// surface that as a CLI error instead.
+    fn require_bitcoin_state(&self) -> Result<()> {
         anyhow::ensure!(
             self.onchain_state.state().hashi().try_bitcoin().is_some(),
-            "{accessor} requires Bitcoin state; build the client with \
+            "this command needs Bitcoin state; build the client with \
              HashiClient::new_with_bitcoin_state",
         );
         Ok(())
@@ -383,30 +371,24 @@ impl HashiClient {
     }
 
     /// Fetch pending deposit requests.
-    ///
-    /// Requires [`HashiClient::new_with_bitcoin_state`].
     pub fn fetch_deposit_requests(&self) -> Result<Vec<crate::onchain::types::DepositRequest>> {
-        self.require_bitcoin_state("fetch_deposit_requests")?;
+        self.require_bitcoin_state()?;
         Ok(self.onchain_state.deposit_requests())
     }
 
     /// Fetch pending withdrawal requests.
-    ///
-    /// Requires [`HashiClient::new_with_bitcoin_state`].
     pub fn fetch_withdrawal_requests(
         &self,
     ) -> Result<Vec<crate::onchain::types::WithdrawalRequest>> {
-        self.require_bitcoin_state("fetch_withdrawal_requests")?;
+        self.require_bitcoin_state()?;
         Ok(self.onchain_state.withdrawal_requests())
     }
 
     /// Fetch committed/signed withdrawal transactions.
-    ///
-    /// Requires [`HashiClient::new_with_bitcoin_state`].
     pub fn fetch_withdrawal_txns(
         &self,
     ) -> Result<Vec<crate::onchain::types::WithdrawalTransaction>> {
-        self.require_bitcoin_state("fetch_withdrawal_txns")?;
+        self.require_bitcoin_state()?;
         Ok(self.onchain_state.withdrawal_txns())
     }
 

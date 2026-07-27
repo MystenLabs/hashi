@@ -155,9 +155,8 @@ async fn ensure_bootstrapped(
     if mirror.is_some() {
         return Ok(());
     }
-    // Always [`ScrapeScope::Full`]: this replaces the authoritative
-    // snapshot, so a partial scrape would drop the Bitcoin collections
-    // on the floor — and yields no seed to rebuild the mirror from.
+    // Always `Full` — this replaces the authoritative snapshot, and only
+    // a full scrape yields a seed to rebuild the mirror from.
     let (_, hashi, seed) = super::scrape_hashi(
         client.clone(),
         state.hashi_id(),
