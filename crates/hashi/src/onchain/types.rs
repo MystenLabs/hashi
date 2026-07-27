@@ -36,18 +36,66 @@ pub use hashi_types::move_types::WithdrawalRequest;
 pub use hashi_types::move_types::WithdrawalStatus;
 pub use hashi_types::move_types::WithdrawalTransaction;
 
+/// The Bitcoin-side collections. Scraped as a unit or not at all, so they
+/// share one `Option` on [`Hashi`] rather than three: there is no state in
+/// which some are loaded and others aren't.
+#[derive(Debug)]
+pub struct BitcoinCollections {
+    pub deposit_queue: DepositRequestQueue,
+    pub withdrawal_queue: WithdrawalRequestQueue,
+    pub utxo_pool: UtxoPool,
+}
+
 #[derive(Debug)]
 pub struct Hashi {
     pub id: Address,
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub deposit_queue: DepositRequestQueue,
-    pub withdrawal_queue: WithdrawalRequestQueue,
-    pub utxo_pool: UtxoPool,
+    /// `None` when scraped with `ScrapeScope::GovernanceOnly`.
+    ///
+    /// Deliberately an `Option` rather than empty collections: "not loaded"
+    /// and "loaded and empty" are different facts, and conflating them turns
+    /// a scope mistake into a silently wrong answer instead of a loud one.
+    pub(super) bitcoin: Option<BitcoinCollections>,
     pub proposals: Proposals,
     pub tob_id: Address,
     pub num_consumed_presigs: u64,
+}
+
+impl Hashi {
+    /// The Bitcoin collections.
+    ///
+    /// # Panics
+    ///
+    /// If the state was scraped with `ScrapeScope::GovernanceOnly`. The
+    /// validator always scrapes `Full`, so its paths can rely on this;
+    /// callers that may run against a governance-scoped scrape (the CLI)
+    /// must use [`Hashi::try_bitcoin`].
+    #[track_caller]
+    pub fn bitcoin(&self) -> &BitcoinCollections {
+        self.bitcoin
+            .as_ref()
+            .expect("Bitcoin state was not scraped (ScrapeScope::GovernanceOnly)")
+    }
+
+    /// The Bitcoin collections, or `None` under a governance-only scrape.
+    pub fn try_bitcoin(&self) -> Option<&BitcoinCollections> {
+        self.bitcoin.as_ref()
+    }
+
+    /// Mutable access for the watcher, which applies events to the scraped
+    /// snapshot. Only reachable from the always-`Full` validator paths.
+    ///
+    /// # Panics
+    ///
+    /// If the state was scraped with `ScrapeScope::GovernanceOnly`.
+    #[track_caller]
+    pub(super) fn bitcoin_mut(&mut self) -> &mut BitcoinCollections {
+        self.bitcoin
+            .as_mut()
+            .expect("Bitcoin state was not scraped (ScrapeScope::GovernanceOnly)")
+    }
 }
 
 pub struct CommitteeSet {

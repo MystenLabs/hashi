@@ -475,8 +475,13 @@ impl Hashi {
         let (utxo_records, withdrawal_txns) = {
             let state = self.onchain_state().state();
             (
-                state.hashi().utxo_pool.utxo_records().clone(),
-                state.hashi().withdrawal_queue.withdrawal_txns().clone(),
+                state.hashi().bitcoin().utxo_pool.utxo_records().clone(),
+                state
+                    .hashi()
+                    .bitcoin()
+                    .withdrawal_queue
+                    .withdrawal_txns()
+                    .clone(),
             )
         };
 
@@ -1305,8 +1310,13 @@ impl Hashi {
         let (withdrawal_txns, utxo_records) = {
             let state = self.onchain_state().state();
             (
-                state.hashi().withdrawal_queue.withdrawal_txns().clone(),
-                state.hashi().utxo_pool.utxo_records().clone(),
+                state
+                    .hashi()
+                    .bitcoin()
+                    .withdrawal_queue
+                    .withdrawal_txns()
+                    .clone(),
+                state.hashi().bitcoin().utxo_pool.utxo_records().clone(),
             )
         };
 

@@ -48,6 +48,28 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
+/// How much of the on-chain state a scrape loads.
+///
+/// The Bitcoin-side collections (deposit queue, withdrawal queue, UTXO pool)
+/// live in dynamic-field tables paged [`SCRAPE_PAGE_SIZE`] at a time, so they
+/// dominate the cost of a scrape — a 70k-entry withdrawal queue alone is ~70
+/// extra round-trips, enough to trip a fullnode's rate limiter. Governance
+/// reads (config, committees, proposals) never touch them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrapeScope {
+    /// Load everything. Required by the validator and by any reader of the
+    /// deposit/withdrawal queues or the UTXO pool.
+    #[default]
+    Full,
+    /// Load governance state only: package versions, config, committees,
+    /// members, treasury and proposals.
+    ///
+    /// The Bitcoin collections keep their real table ids but come back empty,
+    /// so reading their *contents* under this scope yields silently wrong
+    /// answers. Only use it for callers that don't.
+    GovernanceOnly,
+}
+
 mod apply;
 mod mirror;
 mod route;
@@ -138,6 +160,60 @@ impl OnchainState {
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Service)> {
+        let (state, seed) = Self::scrape_into_state(
+            sui_rpc_url,
+            ids,
+            ScrapeScope::Full,
+            tls_private_key,
+            grpc_max_decoding_message_size,
+            metrics.clone(),
+        )
+        .await?;
+        let seed = seed.context("a full scrape must produce a mirror seed")?;
+
+        let watcher_state = state.clone();
+        // The watcher rebuilds its client on every reconnect, so hand it the URL.
+        let sui_rpc_url = sui_rpc_url.to_owned();
+        let service = Service::new().spawn_aborting(async move {
+            watcher::watcher(sui_rpc_url, watcher_state, seed, metrics).await;
+            Ok(())
+        });
+
+        Ok((state, service))
+    }
+
+    /// One-shot reader for short-lived callers such as the CLI: scrapes once
+    /// at `scope` and starts no watcher, so the state never refreshes.
+    /// Anything that needs live state must use [`OnchainState::new`].
+    pub async fn new_reader(
+        sui_rpc_url: &str,
+        ids: HashiIds,
+        grpc_max_decoding_message_size: Option<usize>,
+        scope: ScrapeScope,
+    ) -> Result<Self> {
+        let (state, _seed) = Self::scrape_into_state(
+            sui_rpc_url,
+            ids,
+            scope,
+            None,
+            grpc_max_decoding_message_size,
+            None,
+        )
+        .await?;
+        Ok(state)
+    }
+
+    /// Scrape once and assemble the shared state. Both constructors funnel
+    /// through here; only [`OnchainState::new`] goes on to start a watcher,
+    /// and only it needs the mirror seed.
+    async fn scrape_into_state(
+        sui_rpc_url: &str,
+        ids: HashiIds,
+        scope: ScrapeScope,
+        tls_private_key: Option<ed25519_dalek::SigningKey>,
+        grpc_max_decoding_message_size: Option<usize>,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
+    ) -> Result<(Self, Option<route::MirrorSeed>)> {
         let mut client = crate::sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
         // The scrape client reads the full on-chain state (the largest
         // responses), so it needs the decode limit too — not just `committees`.
@@ -145,7 +221,7 @@ impl OnchainState {
             client = client.with_max_decoding_message_size(limit);
         }
 
-        let (mut state, checkpoint, seed) = State::scrape(client.clone(), ids).await?;
+        let (mut state, checkpoint, seed) = State::scrape(client.clone(), ids, scope).await?;
         if let Some(tls_private_key) = &tls_private_key {
             state
                 .hashi
@@ -164,32 +240,26 @@ impl OnchainState {
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
-        let (state_watermark, _) = watch::channel(seed.floor);
+        // No seed means no floor to claim; 0 makes a waiter block rather
+        // than see coverage no mirror is maintaining.
+        let (state_watermark, _) = watch::channel(seed.as_ref().map_or(0, |seed| seed.floor));
         let state = Inner {
             ids,
-            client: client.clone(),
+            client,
             sender,
             checkpoint,
             state_watermark,
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
-            metrics: metrics.clone(),
+            metrics,
             local_limiter: OnceLock::new(),
             guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
         }
         .pipe(Arc::new)
         .pipe(Self);
 
-        let watcher_state = state.clone();
-        // The watcher rebuilds its client on every reconnect, so hand it the URL.
-        let sui_rpc_url = sui_rpc_url.to_owned();
-        let service = Service::new().spawn_aborting(async move {
-            watcher::watcher(sui_rpc_url, watcher_state, seed, metrics).await;
-            Ok(())
-        });
-
-        Ok((state, service))
+        Ok((state, seed))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
@@ -512,6 +582,7 @@ impl OnchainState {
     pub fn deposit_requests(&self) -> Vec<types::DepositRequest> {
         self.state()
             .hashi()
+            .bitcoin()
             .deposit_queue
             .requests()
             .values()
@@ -522,6 +593,7 @@ impl OnchainState {
     pub fn has_deposit_request(&self, deposit_id: &Address) -> bool {
         self.state()
             .hashi()
+            .bitcoin()
             .deposit_queue
             .requests()
             .contains_key(deposit_id)
@@ -530,6 +602,7 @@ impl OnchainState {
     pub fn withdrawal_requests(&self) -> Vec<types::WithdrawalRequest> {
         self.state()
             .hashi()
+            .bitcoin()
             .withdrawal_queue
             .requests()
             .values()
@@ -540,6 +613,7 @@ impl OnchainState {
     pub fn withdrawal_request(&self, id: &Address) -> Option<types::WithdrawalRequest> {
         self.state()
             .hashi()
+            .bitcoin()
             .withdrawal_queue
             .requests()
             .get(id)
@@ -549,6 +623,7 @@ impl OnchainState {
     pub fn withdrawal_txns(&self) -> Vec<types::WithdrawalTransaction> {
         self.state()
             .hashi()
+            .bitcoin()
             .withdrawal_queue
             .withdrawal_txns()
             .values()
@@ -560,6 +635,7 @@ impl OnchainState {
     pub fn has_unsigned_withdrawal_txn(&self) -> bool {
         self.state()
             .hashi()
+            .bitcoin()
             .withdrawal_queue
             .withdrawal_txns()
             .values()
@@ -569,6 +645,7 @@ impl OnchainState {
     pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
         self.state()
             .hashi()
+            .bitcoin()
             .utxo_pool
             .spent_utxos()
             .iter()
@@ -579,6 +656,7 @@ impl OnchainState {
     pub fn active_utxos(&self) -> Vec<types::Utxo> {
         self.state()
             .hashi()
+            .bitcoin()
             .utxo_pool
             .active_utxos()
             .map(|(_, utxo)| utxo.clone())
@@ -591,7 +669,7 @@ impl OnchainState {
     ) -> HashSet<types::UtxoId> {
         let mut utxo_ids: HashSet<_> = utxo_ids.into_iter().collect();
         let state = self.state();
-        let utxo_pool = &state.hashi().utxo_pool;
+        let utxo_pool = &state.hashi().bitcoin().utxo_pool;
         utxo_ids.retain(|id| utxo_pool.is_active_or_spent(id));
         utxo_ids
     }
@@ -599,6 +677,7 @@ impl OnchainState {
     pub fn withdrawal_txn(&self, id: &Address) -> Option<types::WithdrawalTransaction> {
         self.state()
             .hashi()
+            .bitcoin()
             .withdrawal_queue
             .withdrawal_txns()
             .get(id)
@@ -608,6 +687,7 @@ impl OnchainState {
     pub fn active_utxo(&self, id: &types::UtxoId) -> Option<types::Utxo> {
         self.state()
             .hashi()
+            .bitcoin()
             .utxo_pool
             .active_utxos()
             .find(|(utxo_id, _)| *utxo_id == id)
@@ -615,7 +695,12 @@ impl OnchainState {
     }
 
     pub fn utxo_records(&self) -> std::collections::BTreeMap<types::UtxoId, types::UtxoRecord> {
-        self.state().hashi().utxo_pool.utxo_records().clone()
+        self.state()
+            .hashi()
+            .bitcoin()
+            .utxo_pool
+            .utxo_records()
+            .clone()
     }
 
     pub fn bitcoin_deposit_minimum(&self) -> u64 {
@@ -804,10 +889,11 @@ impl State {
     async fn scrape(
         client: Client,
         ids: HashiIds,
-    ) -> Result<(Self, CheckpointInfo, route::MirrorSeed)> {
+        scope: ScrapeScope,
+    ) -> Result<(Self, CheckpointInfo, Option<route::MirrorSeed>)> {
         let (package_versions, (checkpoint_info, hashi, seed)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
-            scrape_hashi(client, ids.hashi_object_id, ids.package_id),
+            scrape_hashi(client, ids.hashi_object_id, ids.package_id, scope),
         )?;
 
         Ok((
@@ -940,7 +1026,8 @@ async fn scrape_hashi(
     mut client: Client,
     hashi_object_id: Address,
     package_id: Address,
-) -> Result<(CheckpointInfo, types::Hashi, route::MirrorSeed)> {
+    scope: ScrapeScope,
+) -> Result<(CheckpointInfo, types::Hashi, Option<route::MirrorSeed>)> {
     let response = client
         .ledger_client()
         .get_object(
@@ -987,47 +1074,61 @@ async fn scrape_hashi(
         num_consumed_presigs,
     } = root;
 
-    let (bitcoin_state_height, bitcoin_state_version, bitcoin_state) =
-        fetch_bitcoin_state(client.clone(), id, package_id).await?;
-    seed.observe_height(bitcoin_state_height);
-    seed.routing.set_bitcoin_state_containers(&bitcoin_state);
-    seed.index.record(
-        seed.routing.bitcoin_state_field_id(),
-        bitcoin_state_version,
-        route::TrackedKind::BitcoinStateField,
-    );
+    // Under `GovernanceOnly` this read is skipped along with the
+    // collections: the `BitcoinState` exists only to hand them their
+    // table ids and the mirror its Bitcoin-side routing.
+    let bitcoin_state = match scope {
+        ScrapeScope::Full => {
+            let (bitcoin_state_height, bitcoin_state_version, bitcoin_state) =
+                fetch_bitcoin_state(client.clone(), id, package_id).await?;
+            seed.observe_height(bitcoin_state_height);
+            seed.routing.set_bitcoin_state_containers(&bitcoin_state);
+            seed.index.record(
+                seed.routing.bitcoin_state_field_id(),
+                bitcoin_state_version,
+                route::TrackedKind::BitcoinStateField,
+            );
+            Some(bitcoin_state)
+        }
+        ScrapeScope::GovernanceOnly => None,
+    };
 
     let (
         (member_seed, member_info),
         (committee_seed, (committees_per_epoch, raw_committees_per_epoch, committee_handoffs)),
         (treasury_seed, treasury),
-        (deposit_seed, deposit_queue),
-        (withdrawal_seed, withdrawal_queue),
-        (utxo_seed, utxo_pool),
         (proposal_seed, proposals),
         tob_seed,
+        bitcoin,
     ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
         scrape_treasury(client.clone(), treasury),
-        scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue),
-        scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
-        scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
         scrape_proposals(client.clone(), proposals),
         scrape_tob_entries(client.clone(), tob.id),
+        scrape_bitcoin_collections(client.clone(), bitcoin_state),
     )?;
     for container_seed in [
         member_seed,
         committee_seed,
         treasury_seed,
-        deposit_seed,
-        withdrawal_seed,
-        utxo_seed,
         proposal_seed,
         tob_seed,
     ] {
         seed.absorb(container_seed);
     }
+
+    // Withhold the seed on a governance-only scrape: it neither routes
+    // the Bitcoin containers nor folded their serving heights into the
+    // replay floor, so a mirror bootstrapped from it would silently miss
+    // every deposit, withdrawal and UTXO write below the floor.
+    let (bitcoin, seed) = match bitcoin {
+        Some((bitcoin_seed, collections)) => {
+            seed.absorb(bitcoin_seed);
+            (Some(collections), Some(seed))
+        }
+        None => (None, None),
+    };
 
     let mut committee_set =
         types::CommitteeSet::new(committees.members.id, committees.committees.id);
@@ -1047,9 +1148,7 @@ async fn scrape_hashi(
             committees: committee_set,
             config: convert_move_config(config, versioning),
             treasury,
-            deposit_queue,
-            withdrawal_queue,
-            utxo_pool,
+            bitcoin,
             proposals,
             tob_id: tob.id,
             num_consumed_presigs,
@@ -1086,6 +1185,36 @@ async fn scrape_tob_entries(client: Client, tob_id: Address) -> Result<route::Co
         seed.interior.push((certs.certs.id, route::Slot::TobCerts));
     }
     Ok(seed)
+}
+
+/// The three Bitcoin-side collections, scraped as a unit, or `None` when
+/// the caller skipped the `BitcoinState` read that hands them their
+/// table ids.
+async fn scrape_bitcoin_collections(
+    client: Client,
+    bitcoin_state: Option<move_types::BitcoinState>,
+) -> Result<Option<(route::ContainerSeed, types::BitcoinCollections)>> {
+    let Some(bitcoin_state) = bitcoin_state else {
+        return Ok(None);
+    };
+
+    let ((mut seed, deposit_queue), (withdrawal_seed, withdrawal_queue), (utxo_seed, utxo_pool)) =
+        tokio::try_join!(
+            scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue),
+            scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
+            scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
+        )?;
+    seed.merge(withdrawal_seed);
+    seed.merge(utxo_seed);
+
+    Ok(Some((
+        seed,
+        types::BitcoinCollections {
+            deposit_queue,
+            withdrawal_queue,
+            utxo_pool,
+        },
+    )))
 }
 
 fn convert_move_config(

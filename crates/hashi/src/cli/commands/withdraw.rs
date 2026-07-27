@@ -226,14 +226,14 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
 }
 
 async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
-    let client = HashiClient::new(config).await?;
+    let client = HashiClient::new_with_bitcoin_state(config).await?;
 
     let req_addr = request_id
         .parse::<sui_sdk_types::Address>()
         .context("Invalid request ID")?;
 
-    let withdrawal_requests = client.fetch_withdrawal_requests();
-    let withdrawal_txns = client.fetch_withdrawal_txns();
+    let withdrawal_requests = client.fetch_withdrawal_requests()?;
+    let withdrawal_txns = client.fetch_withdrawal_txns()?;
 
     println!("\n{}", "Withdrawal Status".bold());
     println!("{}", "━".repeat(60).dimmed());
@@ -365,10 +365,10 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
 }
 
 async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
-    let client = HashiClient::new(config).await?;
+    let client = HashiClient::new_with_bitcoin_state(config).await?;
 
-    let requests = client.fetch_withdrawal_requests();
-    let pending = client.fetch_withdrawal_txns();
+    let requests = client.fetch_withdrawal_requests()?;
+    let pending = client.fetch_withdrawal_txns()?;
     let signed_count = pending.iter().filter(|pw| pw.is_fully_signed()).count();
     let committed_count = pending.len() - signed_count;
 

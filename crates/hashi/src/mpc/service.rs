@@ -622,7 +622,7 @@ impl MpcService {
                 .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
                 .clone();
             let mut pending: HashSet<u64> = HashSet::new();
-            for txn in hashi.withdrawal_queue.withdrawal_txns().values() {
+            for txn in hashi.bitcoin().withdrawal_queue.withdrawal_txns().values() {
                 if txn.signing_epoch() != epoch {
                     continue;
                 }

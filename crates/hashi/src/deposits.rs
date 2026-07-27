@@ -89,7 +89,7 @@ impl Hashi {
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
         let state = self.onchain_state().state();
-        let deposit_queue = &state.hashi().deposit_queue;
+        let deposit_queue = &state.hashi().bitcoin().deposit_queue;
         match deposit_queue.requests().get(&deposit_request.id) {
             None => {
                 return Err(UnapprovedDepositError::InvalidOnchainRequest(anyhow!(
@@ -127,7 +127,7 @@ impl Hashi {
             }
         }
 
-        let utxo_pool = &state.hashi().utxo_pool;
+        let utxo_pool = &state.hashi().bitcoin().utxo_pool;
         if utxo_pool.is_active_or_spent(&deposit_request.utxo.id) {
             return Err(UnapprovedDepositError::DuplicateOrSpentOnSui(anyhow!(
                 "UTXO {:?} is already active or spent",
