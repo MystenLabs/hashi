@@ -2621,8 +2621,7 @@ mod tests {
         init_test_logging();
         info!("=== Starting Drain Mode Max Batch Test ===");
 
-        let num_withdrawals: usize =
-            hashi::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS;
+        let num_withdrawals: usize = hashi::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS;
         let num_deposits: usize = 8;
 
         // 24-hour batching delay: the batch fires only at capacity, not on
@@ -2702,8 +2701,7 @@ mod tests {
                 ));
             }
             let state = hashi.onchain_state();
-            if state.deposit_requests().is_empty() && state.active_utxos().len() >= num_deposits
-            {
+            if state.deposit_requests().is_empty() && state.active_utxos().len() >= num_deposits {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -2866,8 +2864,7 @@ mod tests {
         let confirm_runtime_objects = runtime_object_count(&confirmed_with_effects);
         info!(
             commit_runtime_objects,
-            confirm_runtime_objects,
-            "Compared drain-mode commit and confirm runtime object counts"
+            confirm_runtime_objects, "Compared drain-mode commit and confirm runtime object counts"
         );
         drop(miner);
 

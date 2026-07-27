@@ -199,6 +199,63 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
         ))
 }
 
+/// Estimate the weight of the unsigned withdrawal transaction described by
+/// a commitment: fixed segwit overhead, script-path 2-of-2 inputs, and the
+/// declared outputs.
+fn estimated_withdrawal_tx_weight(
+    input_count: usize,
+    outputs: &[OutputUtxo],
+) -> anyhow::Result<Weight> {
+    let input_weight = hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT * input_count as u64;
+    let output_weight: u64 = outputs
+        .iter()
+        .map(|o| hashi_bitcoin::output_weight_for_witness_program(&o.bitcoin_address))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .iter()
+        .sum();
+    Ok(Weight::from_wu(
+        hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight,
+    ))
+}
+
+/// Structural caps on a withdrawal commitment, checked before any state
+/// lookups. A commitment outside these bounds either cannot execute on Sui
+/// (the commit or confirm transaction would exceed the runtime-object
+/// cache limit), cannot relay on Bitcoin (past the standardness weight
+/// limit), or was not produced by the batching algorithm — no honest
+/// leader emits one, so validators refuse to certify it.
+fn validate_commitment_shape(
+    request_count: usize,
+    input_count: usize,
+    outputs: &[OutputUtxo],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        request_count <= CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+        "Commitment has {request_count} requests, exceeding the batch cap of {}",
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+    );
+
+    let max_inputs =
+        safe_withdrawal_flow_max_inputs(request_count, CoinSelectionParams::DEFAULT_MAX_INPUTS);
+    anyhow::ensure!(
+        input_count <= max_inputs,
+        "Commitment has {input_count} inputs for {request_count} requests, \
+         exceeding the flow cap of {max_inputs}",
+    );
+
+    // The counts above bound the input side, but the change-output count is
+    // otherwise unbounded, so an absurdly shaped commitment could still
+    // describe a transaction too heavy to relay.
+    let tx_weight = estimated_withdrawal_tx_weight(input_count, outputs)?;
+    anyhow::ensure!(
+        tx_weight <= CoinSelectionParams::DEFAULT_MAX_TX_WEIGHT,
+        "Estimated transaction weight {tx_weight} exceeds Bitcoin's \
+         standardness limit of {}",
+        CoinSelectionParams::DEFAULT_MAX_TX_WEIGHT,
+    );
+    Ok(())
+}
+
 /// The data that validators BLS-sign over to approve a single withdrawal request.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalRequestApproval {
@@ -329,6 +386,12 @@ impl Hashi {
             unique_utxo_ids.len() == approval.selected_utxos.len(),
             "Duplicate UTXO IDs"
         );
+
+        validate_commitment_shape(
+            approval.request_ids.len(),
+            approval.selected_utxos.len(),
+            &approval.outputs,
+        )?;
 
         // 1. Verify each request_id exists and is approved
         let requests: Vec<WithdrawalRequest> = approval
@@ -475,18 +538,8 @@ impl Hashi {
         //    what its ancestors owe, so judging the transaction alone
         //    would reject every legitimate rescue of a stalled settlement.
         {
-            // Estimate transaction weight.
-            let num_inputs = selected_utxos.len() as u64;
-            let input_weight = hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT * num_inputs;
-            let output_weight: u64 = approval
-                .outputs
-                .iter()
-                .map(|o| hashi_bitcoin::output_weight_for_witness_program(&o.bitcoin_address))
-                .collect::<anyhow::Result<Vec<_>>>()?
-                .iter()
-                .sum();
             let tx_weight =
-                Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight);
+                estimated_withdrawal_tx_weight(selected_utxos.len(), &approval.outputs)?;
 
             // Fee must be at least the minimum relay fee (1 sat/vB).
             let relay_min_fee = FeeRate::from_sat_per_vb_unchecked(1)
@@ -2055,6 +2108,56 @@ mod tests {
             10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
             "at low request counts, the per-request input budget is binding",
         );
+    }
+
+    /// One P2TR withdrawal output (32-byte witness program) per request,
+    /// the worst-case output shape a commitment can declare per request.
+    fn p2tr_outputs(count: usize) -> Vec<OutputUtxo> {
+        (0..count)
+            .map(|_| OutputUtxo {
+                amount: 100_000,
+                bitcoin_address: vec![0u8; 32],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn commitment_shape_accepts_production_envelopes() {
+        // (requests, inputs): the consolidation-heavy legacy shape, the
+        // drain-mode shape at the request cap, and a minimal batch.
+        for (requests, inputs) in [(40, 400), (298, 16), (1, 10)] {
+            validate_commitment_shape(requests, inputs, &p2tr_outputs(requests + 1))
+                .unwrap_or_else(|e| panic!("{requests} requests / {inputs} inputs rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn commitment_shape_rejects_request_count_above_cap() {
+        let err = validate_commitment_shape(299, 1, &p2tr_outputs(299)).unwrap_err();
+        assert!(err.to_string().contains("exceeding the batch cap"), "{err}");
+    }
+
+    #[test]
+    fn commitment_shape_rejects_inputs_above_flow_cap() {
+        // One over the per-request consolidation budget, the configured
+        // input cap, and the commit object budget's funding reserve.
+        for (requests, inputs) in [(1, 11), (40, 401), (298, 17)] {
+            let err =
+                validate_commitment_shape(requests, inputs, &p2tr_outputs(requests)).unwrap_err();
+            assert!(
+                err.to_string().contains("exceeding the flow cap"),
+                "{requests} requests / {inputs} inputs: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn commitment_shape_rejects_unrelayable_weight() {
+        // Request and input counts inside their caps, but enough change
+        // outputs to push the transaction past the 400 kWU standardness
+        // limit (~2,300 P2TR outputs).
+        let err = validate_commitment_shape(298, 16, &p2tr_outputs(3_000)).unwrap_err();
+        assert!(err.to_string().contains("standardness limit"), "{err}");
     }
 
     /// The confirm model has a lower per-request cost (2 versus 3) but a
