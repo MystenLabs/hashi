@@ -34,12 +34,12 @@ pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // TODO: Read threshold from on-chain config once it is made configurable.
-const THRESHOLD_NUMERATOR: u64 = 2;
-const THRESHOLD_DENOMINATOR: u64 = 3;
+const CERTIFICATE_THRESHOLD_BPS: u64 = 6667;
+const MAX_BPS: u64 = 10000;
 
 /// Matches Move's `threshold::certificate_threshold`.
 pub fn certificate_threshold(total_weight: u64) -> u64 {
-    total_weight * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
+    (total_weight * CERTIFICATE_THRESHOLD_BPS).div_ceil(MAX_BPS)
 }
 
 pub type EncryptionPrivateKey =
