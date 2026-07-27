@@ -111,6 +111,25 @@ const WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS: usize = 12;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 
+/// Funding-input reserve at the request-count cap. With largest-first
+/// selection a batch is normally funded by a handful of inputs; 16 leaves
+/// margin for a fragmented pool while giving the rest of the runtime-object
+/// budget to requests.
+const WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS: usize = 16;
+
+// `MAX_WITHDRAWAL_REQUESTS` is the largest request count that leaves at
+// least the funding-input reserve inside the commit object budget. Keep the
+// constant itself literal (it is quoted in operator-facing config docs) but
+// refuse to compile if it drifts from the cost model.
+const _: () = assert!(
+    CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        == (WITHDRAWAL_RUNTIME_OBJECT_BUDGET
+            - WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS
+            - WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS * WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT)
+            / WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST,
+    "MAX_WITHDRAWAL_REQUESTS must equal the Sui commit object-budget derivation"
+);
+
 /// Runtime-object cost model for `confirm_withdrawal`, with conservative
 /// upper-bound coefficients. `update_requests_confirmed` borrows each
 /// request in the `processed` ObjectBag (at most the `Field` wrapper plus
@@ -1994,23 +2013,38 @@ mod tests {
 
     #[test]
     fn withdrawal_flow_budget_at_absolute_cap() {
-        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 40);
+        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 298);
         assert_eq!(CoinSelectionParams::DEFAULT_MAX_INPUTS, 400);
         assert_eq!(
             safe_withdrawal_commit_max_inputs(
                 CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
             ),
-            400,
-            "the default input cap limits the commit to 400 inputs",
+            WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
+            "at the request cap, the commit object budget leaves exactly \
+             the funding-input reserve",
         );
         assert_eq!(
             safe_withdrawal_flow_max_inputs(
                 CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
             ),
+            WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
+            "a full drain-mode batch spends the object budget on requests, \
+             not inputs",
+        );
+    }
+
+    /// The pre-drain-mode production shape (40 requests / 400 inputs) must
+    /// keep working unchanged: at 40 requests, the per-request input budget
+    /// and the configured input cap both allow 400 inputs, and the commit
+    /// object budget does not bind.
+    #[test]
+    fn withdrawal_flow_budget_at_legacy_batch_size() {
+        assert_eq!(
+            safe_withdrawal_flow_max_inputs(40, CoinSelectionParams::DEFAULT_MAX_INPUTS),
             400,
-            "40 requests × 10 inputs/request limits the flow to 400 inputs",
+            "40 requests × 10 inputs/request still fills the configured input cap",
         );
     }
 
