@@ -12400,12 +12400,13 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         )
     };
 
-    let sub_quorum = [2usize];
+    let just_below_quorum = [0usize, 1];
     let in_band = [0usize, 1, 3];
     let all = [0usize, 1, 2, 3];
-    assert!(
-        weight_of(&sub_quorum) < vote_quorum,
-        "params must give a below-vote-quorum band or this test proves nothing"
+    assert_eq!(
+        weight_of(&just_below_quorum),
+        vote_quorum - 1,
+        "params must put the excluded cert one weight below the vote quorum"
     );
     assert!(
         weight_of(&in_band) >= vote_quorum && weight_of(&in_band) < total,
@@ -12413,7 +12414,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     );
 
     let certs = vec![
-        make_cert(3, &sub_quorum),
+        make_cert(3, &just_below_quorum),
         make_cert(0, &all),
         make_cert(1, &in_band),
         make_cert(2, &all),
@@ -12422,12 +12423,14 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs);
     assert!(
         !certified.contains(&setup.address(3)),
-        "cert below the vote quorum must not be counted by sizing"
+        "cert one weight below the vote quorum must not be counted by sizing"
     );
     assert!(certified.contains(&setup.address(0)));
     assert!(
         certified.contains(&setup.address(1)),
-        "over-vote-quorum cert with locally unknown kind stays counted"
+        "KNOWN GAP: this cert sits exactly at the vote quorum, so sizing admits it, \
+         but the replay gates AvssVote at full W — a Byzantine dealer aggregating to \
+         exactly W-f still diverges. Pinning current behaviour, not asserting it is correct."
     );
     assert!(
         weight >= mgr.required_nonce_weight(),

@@ -626,7 +626,7 @@ impl MpcService {
                 anyhow::ensure!(
                     batch_start >= num_consumed,
                     "nonce batch {batch_index} at start {batch_start} read sub-floor below cursor \
-                     {num_consumed} — partial cert fetch or quorum-excluded certs",
+                     {num_consumed} — fewer certs cleared sizing than the cursor requires",
                 );
                 break;
             };
@@ -984,7 +984,7 @@ impl MpcService {
             anyhow::ensure!(
                 weight >= floor,
                 "nonce batch {batch_index} for epoch {epoch} refetched below floor \
-                 ({weight} < {floor}); certificate set shrank or certs were quorum-excluded",
+                 ({weight} < {floor}); fewer certs cleared sizing than on the first pass",
             );
             Ok(presig_count(weight as usize, params, batch_size_per_weight))
         };
@@ -1059,7 +1059,7 @@ impl MpcService {
             anyhow::ensure!(
                 presignatures.len() == expected,
                 "Reconstructed nonce batch {batch_index} for epoch {epoch} has {} presigs but \
-                 certificates imply {expected}; message-incomplete reconstruction",
+                 certificates imply {expected}; sizing and replay admitted different dealers",
                 presignatures.len(),
             );
         }
