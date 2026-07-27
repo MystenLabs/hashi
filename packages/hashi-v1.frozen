@@ -1,0 +1,12 @@
+# Git tree hash of packages/hashi-v1, the source deployed on testnet. Move CI fails if the directory
+# no longer hashes to this, so an edit or an automated rewrite is caught rather than silently
+# redefining what "deployed" means. Context: packages/hashi-v1.README.md
+#
+# Documentation lives outside the snapshot so nothing routine requires changing this value. Re-cut
+# it only when deliberately retiring or replacing the snapshot:
+#   git rev-parse HEAD:packages/hashi-v1
+#
+# Staging note: a local .git/info/exclude rule can drop the package's own .gitignore, which would
+# change this hash and un-ignore build/. Stage with an explicit:
+#   git add packages/hashi-v1 && git add -f packages/hashi-v1/.gitignore
+729e36f5dd0f0615c9e45cf85cfd671cdcb5f369

@@ -11,11 +11,13 @@ use anyhow::Result;
 use hashi::cli::client::CreateProposalParams;
 use hashi::cli::client::build_create_proposal_transaction;
 use hashi::cli::client::build_vote_transaction;
+use hashi::cli::upgrade::PACKAGE_VERSION_SOURCE;
 use hashi::cli::upgrade::build_execute_proposal_transaction;
 use hashi::cli::upgrade::build_upgrade_execution_transaction;
 use hashi::cli::upgrade::build_upgrade_package;
 use hashi::cli::upgrade::extract_new_package_id_from_response;
 use hashi::cli::upgrade::extract_proposal_id_from_response;
+use hashi::cli::upgrade::read_package_version;
 use hashi::config::HashiIds;
 use hashi::sui_tx_executor::SuiTxExecutor;
 use std::path::Path;
@@ -28,16 +30,26 @@ use sui_sdk_types::TypeTag;
 use crate::TestNetworks;
 use crate::sui_network::sui_binary;
 
-/// Prepare an upgrade package by copying the deployed source and patching it.
+/// Prepare an upgrade package by copying `packages/<package_dir>` and pointing it at the
+/// package already on chain.
 ///
-/// 1. Copies `<test_dir>/packages/hashi` to `<test_dir>/packages/hashi-upgrade`
-/// 2. Bumps `PACKAGE_VERSION` from 1 to 2 in `versioning.move`
+/// 1. Copies `<test_dir>/packages/<package_dir>` to `<test_dir>/packages/<package_dir>-upgrade`
+/// 2. Raises the copy's `PACKAGE_VERSION` to `target_version` if it still declares less
 /// 3. Sets `published-at` in `Move.toml` to the original package ID
+/// 4. Adds a `upgrade_canary` module so the test can prove new code is callable, and drops any
+///    copied `build/` output
 ///
 /// Returns the path to the patched package directory.
-pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) -> Result<PathBuf> {
-    let src = test_dir.join("packages/hashi");
-    let dst = test_dir.join("packages/hashi-upgrade");
+pub fn prepare_upgrade_package(
+    test_dir: &Path,
+    package_dir: &str,
+    original_package_id: Address,
+    target_version: u64,
+) -> Result<PathBuf> {
+    let src = test_dir.join("packages").join(package_dir);
+    let dst = test_dir
+        .join("packages")
+        .join(format!("{package_dir}-upgrade"));
 
     anyhow::ensure!(
         src.exists(),
@@ -55,18 +67,43 @@ pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) ->
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Patch versioning.move: bump PACKAGE_VERSION from 1 to 2
-    let versioning_path = dst.join("sources/core/versioning.move");
-    let versioning_src = std::fs::read_to_string(&versioning_path)?;
-    let patched = versioning_src.replace(
-        "const PACKAGE_VERSION: u64 = 1;",
-        "const PACKAGE_VERSION: u64 = 2;",
-    );
+    let declared = read_package_version(&dst)?;
     anyhow::ensure!(
-        patched != versioning_src,
-        "PACKAGE_VERSION replacement failed — pattern not found in versioning.move"
+        declared <= target_version,
+        "{package_dir} declares PACKAGE_VERSION = {declared}, above the {target_version} this \
+         upgrade can reach."
     );
-    std::fs::write(&versioning_path, patched)?;
+    if declared < target_version {
+        let versioning_path = dst.join(PACKAGE_VERSION_SOURCE);
+        let versioning_src = std::fs::read_to_string(&versioning_path)?;
+        let mut rewrote = false;
+        let mut patched = versioning_src
+            .lines()
+            .map(|line| {
+                let body = line.trim_start();
+                if rewrote || !body.starts_with("const PACKAGE_VERSION") {
+                    return line.to_string();
+                }
+                rewrote = true;
+                let indent = &line[..line.len() - body.len()];
+                format!("{indent}const PACKAGE_VERSION: u64 = {target_version};")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::ensure!(
+            rewrote,
+            "no PACKAGE_VERSION declaration in {}",
+            versioning_path.display()
+        );
+        if versioning_src.ends_with('\n') {
+            patched.push('\n');
+        }
+        std::fs::write(&versioning_path, patched)?;
+        tracing::info!(
+            "raised upgrade copy's PACKAGE_VERSION {declared} -> {target_version} \
+             ({package_dir} does not declare a bump yet)"
+        );
+    }
 
     // Patch Move.toml: add published-at
     let move_toml_path = dst.join("Move.toml");
@@ -77,11 +114,12 @@ pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) ->
     );
     std::fs::write(&move_toml_path, patched_toml)?;
 
-    // Add a trivial v2-only module to prove new code is callable post-upgrade
     let test_module_path = dst.join("sources/upgrade_canary.move");
     std::fs::write(
         &test_module_path,
-        "module hashi::upgrade_canary;\n\npublic fun version(): u64 { 2 }\n",
+        format!(
+            "module hashi::upgrade_canary;\n\npublic fun version(): u64 {{ {target_version} }}\n"
+        ),
     )?;
 
     // Clean build artifacts from the copy
@@ -99,7 +137,10 @@ pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) ->
 /// Run the full upgrade lifecycle: prepare → build → propose → vote → execute+publish+finalize.
 ///
 /// Returns the new package ID on success.
-pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address> {
+pub async fn execute_full_upgrade(
+    networks: &mut TestNetworks,
+    upgrade_package_dir: &str,
+) -> Result<Address> {
     let nodes = networks.hashi_network.nodes();
     let hashi_ids = networks.hashi_network.ids();
 
@@ -112,16 +153,6 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         .collect::<Result<_>>()?;
 
     // 1. Prepare the upgrade package (copy + patch)
-    let test_dir = networks.dir();
-    let upgrade_path = prepare_upgrade_package(test_dir, hashi_ids.package_id)?;
-
-    let client_config_path = test_dir.join("sui/client.yaml");
-    let client_config = client_config_path
-        .exists()
-        .then_some(client_config_path.as_path());
-
-    // 2. Build the upgrade
-    tracing::info!("building upgrade package from {}", upgrade_path.display());
     let current_version = nodes[0]
         .hashi()
         .onchain_state()
@@ -131,12 +162,24 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         .copied()
         .max()
         .ok_or_else(|| anyhow::anyhow!("onchain state has no package versions yet"))?;
-    let (compiled, digest) = build_upgrade_package(
-        sui_binary(),
-        &upgrade_path,
-        client_config,
-        current_version + 1,
+    let target_version = current_version + 1;
+    let test_dir = networks.dir();
+    let upgrade_path = prepare_upgrade_package(
+        test_dir,
+        upgrade_package_dir,
+        hashi_ids.package_id,
+        target_version,
     )?;
+
+    let client_config_path = test_dir.join("sui/client.yaml");
+    let client_config = client_config_path
+        .exists()
+        .then_some(client_config_path.as_path());
+
+    // 2. Build the upgrade
+    tracing::info!("building upgrade package from {}", upgrade_path.display());
+    let (compiled, digest) =
+        build_upgrade_package(sui_binary(), &upgrade_path, client_config, target_version)?;
     tracing::info!("upgrade package built, digest: {digest:?}");
 
     // 3. Propose the upgrade
@@ -185,7 +228,9 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
     let upgrade_resp = executors[0].execute(upgrade_tx).await?;
     anyhow::ensure!(
         upgrade_resp.transaction().effects().status().success(),
-        "upgrade execute+publish+finalize failed: {:?}",
+        "upgrade execute+publish+finalize to version {target_version} failed (if this is a \
+         vec_set::insert abort, the published base already declares {target_version}; the base \
+         must declare one less): {:?}",
         upgrade_resp.transaction().effects().status()
     );
 

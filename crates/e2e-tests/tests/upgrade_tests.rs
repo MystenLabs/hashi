@@ -31,7 +31,11 @@ use tracing::info;
 #[tokio::test]
 async fn test_upgrade_v1_to_v2() -> Result<()> {
     init_test_logging();
-    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .with_move_package_dir(e2e_tests::FROZEN_V1_MOVE_PACKAGE_DIR)
+        .build()
+        .await?;
 
     let hashi_ids = networks.hashi_network.ids();
     info!("original package ID: {}", hashi_ids.package_id);
@@ -53,7 +57,9 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     info!("pre-upgrade balance: {balance_before} sats");
 
     // ── Upgrade ─────────────────────────────────────────────────────────
-    let new_package_id = upgrade_flow::execute_full_upgrade(&mut networks).await?;
+    let new_package_id =
+        upgrade_flow::execute_full_upgrade(&mut networks, e2e_tests::DEFAULT_MOVE_PACKAGE_DIR)
+            .await?;
     info!("upgraded to v2: {new_package_id}");
     assert_ne!(new_package_id, hashi_ids.package_id);
 
@@ -134,8 +140,8 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     );
     info!("post-upgrade deposit confirmed by validators, balance: {balance_after}");
 
-    // ── Bonus: v2-only canary module callable ───────────────────────────
-    info!("calling v2-only upgrade_canary::version()...");
+    // ── Bonus: newly-added module callable post-upgrade ──────────────────
+    info!("calling upgrade_canary::version() from the upgraded package...");
     let user_key = networks.sui_network.user_keys.first().unwrap();
     let hashi = networks.hashi_network.nodes()[0].hashi().clone();
     let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
@@ -153,9 +159,9 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     let canary_resp = executor.execute(builder).await?;
     assert!(
         canary_resp.transaction().effects().status().success(),
-        "v2-only canary module should be callable"
+        "canary module added by the upgrade should be callable"
     );
-    info!("v2 canary module call succeeded");
+    info!("canary module call succeeded");
 
     // ── Disable v1, verify rejection ────────────────────────────────────
     let mut executors: Vec<SuiTxExecutor> = networks

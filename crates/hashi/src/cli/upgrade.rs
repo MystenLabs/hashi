@@ -33,7 +33,7 @@ use sui_transaction_builder::TransactionBuilder;
 
 /// Relative path (from a package root) to the Move source file declaring the
 /// `PACKAGE_VERSION` constant.
-const PACKAGE_VERSION_SOURCE: &str = "sources/core/versioning.move";
+pub const PACKAGE_VERSION_SOURCE: &str = "sources/core/versioning.move";
 
 /// Parse the `PACKAGE_VERSION` constant from `sources/core/versioning.move`
 /// in a package source tree.

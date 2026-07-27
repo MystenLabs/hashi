@@ -9,17 +9,19 @@ use sui_rpc::Client;
 
 use crate::sui_network::sui_binary;
 
-/// Build and publish the Hashi package. Configuration and the launch switch
-/// (`hashi::finish_publish`) are deferred until the expected validators have
-/// registered — see `HashiNetwork::launch_genesis`.
+pub const DEFAULT_MOVE_PACKAGE_DIR: &str = "hashi";
+
+pub const FROZEN_V1_MOVE_PACKAGE_DIR: &str = "hashi-v1";
+
 pub async fn publish(
     dir: &Path,
+    package_dir: &str,
     client: &mut Client,
     private_key: &Ed25519PrivateKey,
 ) -> Result<PublishOutput> {
     let params = hashi::publish::BuildParams {
         sui_binary: sui_binary(),
-        package_path: &dir.join("packages/hashi"),
+        package_path: &dir.join("packages").join(package_dir),
         client_config: Some(&dir.join("sui/client.yaml")),
         environment: Some("testnet"),
     };

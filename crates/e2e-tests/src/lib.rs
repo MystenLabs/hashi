@@ -37,6 +37,8 @@ pub use sui_network::SuiNetworkBuilder;
 pub use sui_network::SuiNetworkHandle;
 use tempfile::TempDir;
 
+pub use crate::publish::DEFAULT_MOVE_PACKAGE_DIR;
+pub use crate::publish::FROZEN_V1_MOVE_PACKAGE_DIR;
 use crate::publish::publish;
 use crate::sui_network::sui_binary;
 
@@ -132,6 +134,7 @@ pub struct TestNetworksBuilder {
     /// When set, publish + point nodes at this external guardian instead of the
     /// in-process harness (and skip its finalize). See [`ExternalGuardian`].
     external_guardian: Option<ExternalGuardian>,
+    move_package_dir: String,
 }
 
 impl TestNetworksBuilder {
@@ -150,6 +153,7 @@ impl TestNetworksBuilder {
             bitcoin_builder: BitcoinNodeBuilder::new(),
             onchain_config_overrides,
             external_guardian: None,
+            move_package_dir: DEFAULT_MOVE_PACKAGE_DIR.to_string(),
         }
     }
 
@@ -158,6 +162,11 @@ impl TestNetworksBuilder {
     /// provisioned out-of-band via the CLI once the committee forms.
     pub fn with_external_guardian(mut self, guardian: ExternalGuardian) -> Self {
         self.external_guardian = Some(guardian);
+        self
+    }
+
+    pub fn with_move_package_dir(mut self, dir: impl Into<String>) -> Self {
+        self.move_package_dir = dir.into();
         self
     }
 
@@ -322,6 +331,7 @@ impl TestNetworksBuilder {
 
         let publish_output = publish(
             dir.as_ref(),
+            &self.move_package_dir,
             &mut sui_network.client,
             sui_network.user_keys.first().unwrap(),
         )

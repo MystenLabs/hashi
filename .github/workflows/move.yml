@@ -10,6 +10,38 @@ env:
   MOVE_PACKAGES_PATH: packages
 
 jobs:
+  frozen-snapshots:
+    name: Frozen snapshots unchanged
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          shopt -s nullglob
+          for dir in "${MOVE_PACKAGES_PATH}"/hashi-v*/; do
+            dir="${dir%/}"
+            pin="${dir}.frozen"
+            if [ ! -f "$pin" ]; then
+              echo "::error::$dir has no $pin. Add: git rev-parse HEAD:$dir"
+              exit 1
+            fi
+            expected=$(grep -v '^#' "$pin" | tr -d '[:space:]')
+            # Without this an empty or malformed pin compares as "" and blames the snapshot.
+            if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::$pin is not a 40-character tree hash."
+              exit 1
+            fi
+            # Tolerated so the message below prints instead of a bare git fatal.
+            if ! actual=$(git rev-parse "HEAD:$dir" 2>/dev/null); then
+              echo "::error::$dir is gone but $pin remains; retiring drops both."
+              exit 1
+            fi
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::$dir changed (tree $actual, pinned $expected)."
+              echo "It is a published package's source — change ${MOVE_PACKAGES_PATH}/hashi instead."
+              echo "Re-pin only when deliberately replacing the snapshot: set $pin to $actual"
+              exit 1
+            fi
+          done
   check-formatting:
     name: Formatting
     runs-on: ubuntu-latest
