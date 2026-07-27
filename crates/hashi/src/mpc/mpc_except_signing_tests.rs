@@ -12369,7 +12369,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
 #[test]
 fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
-    let mut mgr = setup.create_manager(0);
+    let mgr = setup.create_manager(0);
     let batch_index = 3u32;
     let total = mgr.mpc_config.nodes.total_weight() as u32;
     let vote_quorum = total - mgr.mpc_config.max_faulty as u32;
@@ -12419,7 +12419,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         make_cert(2, &all),
     ];
 
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &certs);
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs);
     assert!(
         !certified.contains(&setup.address(3)),
         "cert below the vote quorum must not be counted by sizing"
@@ -12439,7 +12439,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 
     let (_, foreign_keyed) = make_cert(0, &all);
     let rekeyed = vec![(setup.address(3), foreign_keyed)];
-    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &rekeyed);
+    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed);
     assert_eq!(
         certified,
         HashSet::from([setup.address(0)]),
@@ -12449,42 +12449,12 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let (_, dup_a) = make_cert(0, &all);
     let (_, dup_b) = make_cert(0, &all);
     let duplicated = vec![(setup.address(0), dup_a), (setup.address(3), dup_b)];
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &duplicated);
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated);
     assert_eq!(certified, HashSet::from([setup.address(0)]));
     assert_eq!(
         weight,
         weight_of(&[0]),
         "a dealer served twice must not be double-counted"
-    );
-
-    mgr.pulled_avid_cert_kinds.insert(
-        (batch_index, setup.address(1)),
-        (MessageHash::from([2u8; 32]), CertKind::AvssVote),
-    );
-    mgr.pulled_avid_cert_kinds.insert(
-        (batch_index, setup.address(2)),
-        (MessageHash::from([0xEE; 32]), CertKind::AvssVote),
-    );
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &certs);
-    assert!(
-        !certified.contains(&setup.address(1)),
-        "in-band cert with a pulled AvssVote resolution must be excluded"
-    );
-    assert!(
-        certified.contains(&setup.address(2)),
-        "a cached kind for a different digest must not exclude the cert"
-    );
-    assert_eq!(weight, weight_of(&[0, 2]));
-
-    let cached_digest = MessageHash::from([2u8; 32]);
-    assert_eq!(
-        mgr.resolve_avid_cert_kind_for_sizing(batch_index, &setup.address(1), &cached_digest),
-        Some(CertKind::AvssVote)
-    );
-    assert_eq!(
-        mgr.resolve_avid_cert_kind_locally(batch_index, &setup.address(1), &cached_digest),
-        None,
-        "the replay's resolver must not see the pulled-kind cache"
     );
 }
 

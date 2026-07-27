@@ -150,7 +150,6 @@ pub struct MpcManager {
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub current_avid_verified_common:
         HashMap<(u32, Address), batch_avss_avid::VerifiedAvssCommonMessage>,
-    pulled_avid_cert_kinds: HashMap<(u32, Address), (MessageHash, CertKind)>,
     pub avid_held_echoes: HashMap<(u32, Address), HeldAvidEchoes>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
@@ -308,7 +307,6 @@ impl MpcManager {
             current_nonce_messages: HashMap::new(),
             current_avid_round_state: HashMap::new(),
             current_avid_verified_common: HashMap::new(),
-            pulled_avid_cert_kinds: HashMap::new(),
             avid_held_echoes: HashMap::new(),
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
@@ -1095,7 +1093,6 @@ impl MpcManager {
 
     pub(crate) fn avid_certified_nonce_dealers_from_certs(
         &self,
-        batch_index: u32,
         certs: &[(Address, CertificateV1)],
     ) -> (HashSet<Address>, u32) {
         let required_weight = self.required_nonce_weight();
@@ -1126,28 +1123,13 @@ impl MpcManager {
                     continue;
                 }
             };
-            let admissible = if signer_weight >= total_reduced_weight {
-                true
-            } else if signer_weight < vote_quorum_weight {
-                false
-            } else {
-                !matches!(
-                    self.resolve_avid_cert_kind_for_sizing(
-                        batch_index,
-                        dealer,
-                        &cert.message().messages_hash,
-                    ),
-                    Some(CertKind::AvssVote)
-                )
-            };
-            if !admissible {
+            if signer_weight < vote_quorum_weight {
                 tracing::warn!(
                     "Excluding AVID nonce cert for dealer {:?} from recovery sizing: \
-                     signer weight {} below its kind's quorum (vote quorum {}, full {})",
+                     signer weight {} below the vote quorum {}",
                     dealer,
                     signer_weight,
                     vote_quorum_weight,
-                    total_reduced_weight,
                 );
                 continue;
             }
@@ -3002,20 +2984,6 @@ impl MpcManager {
             .sum())
     }
 
-    fn resolve_avid_cert_kind_for_sizing(
-        &self,
-        batch_index: u32,
-        dealer: &Address,
-        digest: &MessageHash,
-    ) -> Option<CertKind> {
-        if let Some((pinned, kind)) = self.pulled_avid_cert_kinds.get(&(batch_index, *dealer))
-            && pinned == digest
-        {
-            return Some(*kind);
-        }
-        self.resolve_avid_cert_kind_locally(batch_index, dealer, digest)
-    }
-
     fn resolve_avid_cert_kind_locally(
         &self,
         batch_index: u32,
@@ -3043,7 +3011,6 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) -> MpcResult<CertKind> {
-        let certified_digest = nonce_cert.message().messages_hash;
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
             let request = RetrieveMessagesRequest {
@@ -3185,11 +3152,6 @@ impl MpcManager {
         })
         .await?;
         let (kind, complaint) = outcome;
-        mpc_manager
-            .write()
-            .unwrap()
-            .pulled_avid_cert_kinds
-            .insert((batch_index, dealer), (certified_digest, kind));
         if let Some((complaint, verified_common)) = complaint
             && let Err(e) = Self::recover_avid_nonce_shares_via_complaint(
                 mpc_manager,
@@ -3532,7 +3494,6 @@ impl MpcManager {
             .retain(|(b, _), _| *b >= cutoff);
         mgr.current_avid_verified_common
             .retain(|(b, _), _| *b >= cutoff);
-        mgr.pulled_avid_cert_kinds.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_avid_nonce_outputs
             .retain(|(b, _), _| *b >= cutoff);

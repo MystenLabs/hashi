@@ -749,7 +749,7 @@ impl MpcService {
                     return Ok(None);
                 }
                 let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                avid_certified_nonce_weight(mpc_manager, batch_index, &certs)
+                avid_certified_nonce_weight(mpc_manager, &certs)
             }
         };
         if weight < floor {
@@ -1028,11 +1028,8 @@ impl MpcService {
                     ));
                 }
                 let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                let expected_size = expected_from(avid_certified_nonce_weight(
-                    mpc_manager,
-                    batch_index,
-                    &certs,
-                ))?;
+                let expected_size =
+                    expected_from(avid_certified_nonce_weight(mpc_manager, &certs))?;
                 let mut prefetched = PrefetchedTobChannel::new(certs);
                 let outputs = MpcManager::run_nonce_generation(
                     mpc_manager,
@@ -1648,13 +1645,12 @@ fn certified_nonce_weight<T>(
 
 fn avid_certified_nonce_weight(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    batch_index: u32,
     certs: &[(sui_sdk_types::Address, CertificateV1)],
 ) -> u32 {
     mpc_manager
         .read()
         .unwrap()
-        .avid_certified_nonce_dealers_from_certs(batch_index, certs)
+        .avid_certified_nonce_dealers_from_certs(certs)
         .1
 }
 
