@@ -49,7 +49,7 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
 /// How much of the on-chain state a scrape loads. The Bitcoin collections are
-/// paged [`SCRAPE_PAGE_SIZE`] at a time and dominate the cost — a 70k-entry
+/// paged `SCRAPE_PAGE_SIZE` at a time and dominate the cost — a 70k-entry
 /// withdrawal queue is ~70 extra round-trips, enough to draw a 429.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrapeScope {
