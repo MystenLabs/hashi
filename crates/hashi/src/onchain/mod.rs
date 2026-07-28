@@ -249,14 +249,12 @@ impl OnchainState {
     /// through checkpoint `target_seq`. Caller wraps with
     /// `tokio::time::timeout` for a bound.
     ///
-    /// One deliberate softness: a transaction applied at checkpoint C
-    /// counts C as covered even though later Hashi transactions of the
-    /// same checkpoint may still be in flight in the same delivery
-    /// burst (they apply milliseconds later). Callers waiting on the
-    /// checkpoint of a transaction they themselves executed therefore
-    /// resolve as soon as that checkpoint's first Hashi transaction
-    /// lands, which in the common single-transaction case is exactly
-    /// their own.
+    /// The guarantee is exact: an applied transaction only claims
+    /// coverage through its predecessor checkpoint, so a checkpoint
+    /// counts as covered once the server's watermark asserts every
+    /// matching transaction in it has been delivered (or a later
+    /// transaction proves it by arriving). Waiters never observe a
+    /// checkpoint whose Hashi transactions are still in flight.
     pub async fn wait_until_checkpoint(&self, target_seq: u64) {
         let mut rx = self.0.state_watermark.subscribe();
         loop {

@@ -81,9 +81,8 @@ const TX_READ_MASK: [&str; 7] = [
 struct Mirror {
     routing: route::RoutingTable,
     index: route::ObjectIndex,
-    /// Checkpoint through which the mirror is complete (see
-    /// `OnchainState::wait_until_checkpoint` for the one deliberate
-    /// softness within an applied transaction's own checkpoint).
+    /// Checkpoint through which the mirror is complete: every Hashi
+    /// transaction at or below it has been applied.
     watermark_checkpoint: u64,
     /// The last applied transaction's `(checkpoint, transaction_index)`.
     /// Transactions are delivered in chain order on every source, so
@@ -414,11 +413,16 @@ fn apply_tx_frame(
         }
     }
     mirror.applied_position = view.position();
-    // In-order delivery means everything before this transaction's
-    // checkpoint has been delivered; its own checkpoint counts as
-    // covered too, up to the same-burst stragglers documented on
-    // `wait_until_checkpoint`.
-    advance_watermark(state, mirror, view.checkpoint);
+    // In-order delivery proves everything before this transaction's
+    // checkpoint has been delivered, but not that its own checkpoint is
+    // complete — a later Hashi transaction of the same checkpoint may
+    // still be in flight, and claiming the full checkpoint here would
+    // wake `wait_until_checkpoint` waiters (the GC scan gate, the
+    // rejoin loop) before it applies. The transaction itself may only
+    // claim its predecessor; the frame's own watermark, folded by the
+    // caller right after this, claims the full checkpoint exactly when
+    // the server has delivered all of it.
+    advance_watermark(state, mirror, view.checkpoint.saturating_sub(1));
     if let Some(metrics) = metrics {
         metrics.watcher_applied_txns_total.inc();
     }

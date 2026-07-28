@@ -124,7 +124,9 @@ The bump is a version-number change, not a migration.
 > subscription frames (an earlier build left it unset), so the replay
 > target is the first frame's watermark checkpoint — the
 > subscription's own starting coverage point — and coverage advances
-> from watermark claims plus applied transactions' own checkpoints;
+> from watermark claims plus applied transactions' predecessor
+> checkpoints (a transaction cannot prove its own checkpoint is
+> complete, so full-checkpoint coverage always comes from a watermark);
 > replay completion is proven by reaching the target, with the
 > response's indexed-height header at LedgerTip covering the case
 > where the list index still trails it. The
