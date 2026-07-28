@@ -404,11 +404,22 @@ impl OnchainState {
     /// `from_epoch + 1`. Both leader and followers derive the same successor
     /// from on-chain state, so they sign the same transition. Returns owned
     /// clones so no state guard escapes to the caller.
-    pub fn committee_transition(&self, from_epoch: u64) -> Option<(Committee, Committee)> {
+    ///
+    /// The successor comes back in its verbatim on-chain form: its only
+    /// consumers embed it in a `CommitteeTransitionRequest`, and Move's
+    /// `submit_committee_handoff` verifies the cert over a request it
+    /// rebuilds from the stored on-chain committee — the signed bytes
+    /// must match those exactly (the enriched view may substitute a
+    /// fallback encryption key and must never be signed).
+    pub fn committee_transition(
+        &self,
+        from_epoch: u64,
+    ) -> Option<(Committee, move_types::Committee)> {
         let state = self.state();
-        let committees = state.hashi().committees.committees();
-        let from = committees.get(&from_epoch)?.clone();
-        let to = committees.range((from_epoch + 1)..).next()?.1.clone();
+        let committees = &state.hashi().committees;
+        let from = committees.committees().get(&from_epoch)?.clone();
+        let to_epoch = *committees.committees().range((from_epoch + 1)..).next()?.0;
+        let to = committees.raw_committee(to_epoch)?.clone();
         Some((from, to))
     }
 
@@ -988,7 +999,7 @@ async fn scrape_hashi(
 
     let (
         (member_seed, member_info),
-        (committee_seed, (committees_per_epoch, committee_handoffs)),
+        (committee_seed, (committees_per_epoch, raw_committees_per_epoch, committee_handoffs)),
         (treasury_seed, treasury),
         (deposit_seed, deposit_queue),
         (withdrawal_seed, withdrawal_queue),
@@ -1026,6 +1037,7 @@ async fn scrape_hashi(
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
         .set_committees(committees_per_epoch)
+        .set_raw_committees(raw_committees_per_epoch)
         .set_committee_handoffs(committee_handoffs);
 
     Ok((
@@ -1261,6 +1273,7 @@ async fn scrape_committees(
     route::ContainerSeed,
     (
         BTreeMap<u64, Committee>,
+        BTreeMap<u64, move_types::Committee>,
         BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
     ),
 )> {
@@ -1326,6 +1339,9 @@ async fn scrape_committees(
     let handoffs = raw_handoffs
         .into_iter()
         .map(|(from_epoch, handoff)| {
+            // Deliberately the raw decoded committee, never the
+            // enriched view: Move's `submit_committee_handoff` verified
+            // this cert over the stored on-chain committee's bytes.
             let new_committee = move_committees
                 .get(&handoff.next_epoch)
                 .ok_or_else(|| {
@@ -1341,11 +1357,11 @@ async fn scrape_committees(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let committees = move_committees
-        .into_iter()
-        .map(|(epoch, committee)| (epoch, convert_move_committee(committee)))
+        .iter()
+        .map(|(epoch, committee)| (*epoch, convert_move_committee(committee.clone())))
         .collect();
 
-    Ok((seed, (committees, handoffs)))
+    Ok((seed, (committees, move_committees, handoffs)))
 }
 
 fn convert_move_committee_member(
