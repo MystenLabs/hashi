@@ -398,8 +398,10 @@ fn apply_tx_frame(
     }
     let out = {
         let mut guard = state.state_mut();
+        let state = &mut *guard;
         apply::apply_transaction(
-            &mut guard.hashi,
+            &mut state.hashi,
+            &mut state.package_versions,
             &mut mirror.routing,
             &mut mirror.index,
             &view,
@@ -445,8 +447,9 @@ fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<apply::E
                 state.notify(Notification::StartReconfig(epoch));
             }
             apply::Effect::PackageUpgraded { package, version } => {
+                // The apply layer already extended the version map
+                // under the state guard; this is the operator signal.
                 tracing::info!(%package, version, "package upgraded; version map extended");
-                state.add_package_version(version, package);
             }
             apply::Effect::WithdrawalTxnFullySigned(txn) => {
                 withdrawal_txn_fully_signed(state, timestamp_ms, &txn);

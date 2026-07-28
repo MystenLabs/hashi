@@ -209,7 +209,8 @@ pub(super) enum Effect {
     /// The root's `UpgradeCap` now points at a new package id. The
     /// cap's counter starts at 1 on publish and increments in lockstep
     /// with the package chain, so `version` is the new package's
-    /// version and the caller extends its version map directly.
+    /// version. Apply extends the version map itself (under the same
+    /// state guard); this effect is the caller's signal to log.
     PackageUpgraded { package: Address, version: u64 },
     /// A withdrawal transaction transitioned to fully signed in this
     /// transaction (2-of-2 witness complete). Drives the local limiter
@@ -240,6 +241,7 @@ pub(super) struct ApplyOutcome {
 /// pre-deletion contents are needed.
 pub(super) fn apply_transaction(
     hashi: &mut types::Hashi,
+    packages: &mut move_types::PackageVersions,
     routing: &mut RoutingTable,
     index: &mut ObjectIndex,
     tx: &TxView,
@@ -256,7 +258,7 @@ pub(super) fn apply_transaction(
             continue;
         };
         if obj.object_id() == routing.hashi_id() {
-            apply_root(hashi, routing, index, obj, &mut out);
+            apply_root(hashi, packages, routing, index, obj, &mut out);
         } else if obj.object_id() == routing.bitcoin_state_field_id() {
             apply_bitcoin_state(routing, index, obj, &mut out);
         }
@@ -310,18 +312,18 @@ pub(super) fn apply_transaction(
             Some(Slot::Tob | Slot::UserRequests)
         ));
         if registers_interior {
-            apply_write(hashi, routing, index, obj, &mut out);
+            apply_write(hashi, packages, routing, index, obj, &mut out);
         } else {
             deferred.push(obj);
         }
     }
     for obj in deferred {
-        apply_write(hashi, routing, index, obj, &mut out);
+        apply_write(hashi, packages, routing, index, obj, &mut out);
     }
 
     // Pass 4: committee handoffs, after any same-transaction committee.
     for obj in handoffs {
-        apply_write(hashi, routing, index, obj, &mut out);
+        apply_write(hashi, packages, routing, index, obj, &mut out);
     }
 
     // Pass 5: deletions, routed by what the mirror knows the id to be.
@@ -345,6 +347,7 @@ fn is_committee_handoff(tag: &sui_sdk_types::StructTag) -> bool {
 
 fn apply_root(
     hashi: &mut types::Hashi,
+    packages: &mut move_types::PackageVersions,
     routing: &mut RoutingTable,
     index: &mut ObjectIndex,
     obj: &Object,
@@ -386,10 +389,11 @@ fn apply_root(
             version: new.version,
         });
     }
-    // The cap always points at the latest package version; keep the
-    // hashi-package set (the mirror-gap tripwire's scope) current.
+    // The cap always points at the latest package version; record it
+    // before pass 3 so objects of a just-upgraded package route (or
+    // trip the mirror-gap tripwire) within the same transaction.
     if let Some(cap) = &new_config.upgrade_cap {
-        routing.register_package(cap.package);
+        packages.insert(cap.version, cap.package);
     }
     hashi.config = new_config;
     hashi.num_consumed_presigs = num_consumed_presigs;
@@ -472,6 +476,7 @@ fn apply_wrapper(
 
 fn apply_write(
     hashi: &mut types::Hashi,
+    packages: &move_types::PackageVersions,
     routing: &mut RoutingTable,
     index: &mut ObjectIndex,
     obj: &Object,
@@ -504,9 +509,11 @@ fn apply_write(
     };
     let Some(slot) = slot else {
         // An unroutable object is a mirror gap only when it carries a
-        // hashi-package type; foreign objects under foreign owners are
-        // expected companions of root-touching transactions.
-        if routing.is_hashi_package(struct_.object_type().address()) {
+        // hashi-package type (from any published version — the boot
+        // scrape seeds the full history, and upgrades extend it);
+        // foreign objects under foreign owners are expected companions
+        // of root-touching transactions.
+        if packages.contains(struct_.object_type().address()) {
             out.unrouted.push((id, struct_.object_type().to_string()));
         } else {
             tracing::debug!(object = %id, r#type = %struct_.object_type(),
@@ -931,9 +938,10 @@ mod tests {
     }
 
     /// Mirror state plus routing/index, pre-seeded with the container
-    /// UIDs the way a bootstrap scrape would.
+    /// UIDs and package history the way a bootstrap scrape would.
     struct Fixture {
         hashi: types::Hashi,
+        packages: move_types::PackageVersions,
         routing: RoutingTable,
         index: ObjectIndex,
     }
@@ -943,7 +951,8 @@ mod tests {
             let mut routing = RoutingTable::new(hashi_id(), bs_field_id());
             routing.set_root_containers(&move_root(0, None, None));
             routing.set_bitcoin_state_containers(&move_bitcoin_state());
-            routing.register_package(addr(PACKAGE));
+            let packages =
+                move_types::PackageVersions::new(BTreeMap::from([(1, addr(PACKAGE))]));
 
             let hashi = types::Hashi {
                 id: hashi_id(),
@@ -989,13 +998,20 @@ mod tests {
 
             Self {
                 hashi,
+                packages,
                 routing,
                 index: ObjectIndex::new(),
             }
         }
 
         fn apply(&mut self, tx: &TxView) -> ApplyOutcome {
-            apply_transaction(&mut self.hashi, &mut self.routing, &mut self.index, tx)
+            apply_transaction(
+                &mut self.hashi,
+                &mut self.packages,
+                &mut self.routing,
+                &mut self.index,
+                tx,
+            )
         }
     }
 
@@ -1454,6 +1470,33 @@ mod tests {
         assert!(
             matches!(out.effects.as_slice(), [Effect::PackageUpgraded { package, version: 2 }] if *package == pkg_b)
         );
+        // Apply extends the version history itself, so the tripwire
+        // covers the new package from this transaction onward — and
+        // the earlier version stays in the history.
+        assert_eq!(fixture.packages.get(2), Some(pkg_b));
+        assert_eq!(fixture.packages.get(1), Some(pkg_a));
+    }
+
+    #[test]
+    fn unroutable_intermediate_version_types_trip_the_counter() {
+        let mut fixture = Fixture::new();
+        // The boot scrape's full history: an intermediate v2 that is
+        // neither the original package nor the cap's latest.
+        let pkg_v2 = addr(0x82);
+        let pkg_v3 = addr(0x83);
+        fixture.packages.insert(2, pkg_v2);
+        fixture.packages.insert(3, pkg_v3);
+
+        // An object typed by the intermediate version under an owner
+        // the routing table does not know is a mirror gap, not foreign
+        // state.
+        let out = fixture.apply(&tx(vec![written(obj(
+            tag(pkg_v2, "new_module", "NewThing", vec![]),
+            1,
+            Owner::Object(addr(0x97)),
+            addr(0x71).as_bytes().to_vec(),
+        ))]));
+        assert_eq!(out.unrouted.len(), 1);
     }
 
     #[test]
