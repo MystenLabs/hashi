@@ -238,6 +238,33 @@ impl OnchainState {
             *current = covered;
             true
         });
+        self.observe_state_watermark();
+    }
+
+    /// Set the state watermark to exactly `covered` after a
+    /// re-bootstrap installs a scraped state wholesale. The scrape can
+    /// come back below the mirror's previous position (a restarted
+    /// fullnode, or a load balancer with uneven backends); keeping the
+    /// higher claim would report coverage the just-installed state does
+    /// not have, so this is the one deliberately non-monotonic
+    /// transition. Replay re-covers the gap with version-guarded,
+    /// idempotent applies.
+    fn reset_state_watermark(&self, covered: u64) {
+        self.0.state_watermark.send_if_modified(|current| {
+            if covered < *current {
+                tracing::warn!(
+                    from = *current,
+                    to = covered,
+                    "state watermark reset backwards: the re-bootstrap scrape is older than \
+                     the mirror was"
+                );
+            }
+            std::mem::replace(current, covered) != covered
+        });
+        self.observe_state_watermark();
+    }
+
+    fn observe_state_watermark(&self) {
         if let Some(metrics) = &self.0.metrics {
             metrics
                 .watcher_state_watermark
