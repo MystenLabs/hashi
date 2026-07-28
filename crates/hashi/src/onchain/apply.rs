@@ -50,6 +50,11 @@ pub(super) struct TxView {
     /// advance and the withdrawal duration metrics.
     pub timestamp_ms: u64,
     pub changes: Vec<TxChange>,
+    /// Changed objects whose `output_state` was missing, unrecognized,
+    /// or introduced by a newer proto than this build knows. The mirror
+    /// cannot know what happened to them; apply surfaces each through
+    /// the unrouted tripwire rather than dropping it silently.
+    pub unknown_states: Vec<(Address, &'static str)>,
 }
 
 impl TxView {
@@ -120,6 +125,7 @@ impl TxView {
         let mut pool = decode_object_pool(tx.objects.as_ref())?;
 
         let mut changes = Vec::new();
+        let mut unknown_states = Vec::new();
         for changed in &effects.changed_objects {
             let id: Address = changed
                 .object_id
@@ -162,7 +168,10 @@ impl TxView {
                 // Accumulator writes carry no object contents and no
                 // Hashi state.
                 OutputObjectState::AccumulatorWrite => {}
-                OutputObjectState::Unknown | _ => {}
+                // Missing, unrecognized, or newer-than-this-build
+                // states: the one place a change could slip through
+                // undecoded, so it feeds the tripwire instead.
+                state => unknown_states.push((id, state.as_str_name())),
             }
         }
 
@@ -184,6 +193,7 @@ impl TxView {
             )
             .context("invalid ExecutedTransaction timestamp")?,
             changes,
+            unknown_states,
         }))
     }
 }
@@ -235,6 +245,10 @@ pub(super) fn apply_transaction(
     tx: &TxView,
 ) -> ApplyOutcome {
     let mut out = ApplyOutcome::default();
+
+    for (id, state) in &tx.unknown_states {
+        out.unrouted.push((*id, format!("output_state {state}")));
+    }
 
     // Pass 1: the Hashi root and the BitcoinState dynamic field.
     for change in &tx.changes {
@@ -908,6 +922,7 @@ mod tests {
             transaction_index: 0,
             timestamp_ms: 1_000,
             changes,
+            unknown_states: Vec::new(),
         }
     }
 
@@ -1584,5 +1599,34 @@ mod tests {
             .expect("successful transaction decodes to a view");
         assert_eq!(view.position(), (7, 0));
         assert_eq!(view.timestamp_ms, 1_234);
+    }
+
+    #[test]
+    fn unknown_output_state_feeds_the_unrouted_tripwire() {
+        let mut proto_tx = proto::ExecutedTransaction::default();
+        let mut status = proto::ExecutionStatus::default();
+        status.success = Some(true);
+        let mut changed = proto::ChangedObject::default();
+        changed.object_id = Some(addr(0x51).to_string());
+        // An output state this build does not recognize.
+        changed.output_state = Some(999);
+        let mut effects = proto::TransactionEffects::default();
+        effects.status = Some(status);
+        effects.changed_objects.push(changed);
+        proto_tx.effects = Some(effects);
+        proto_tx.set_checkpoint(7);
+        proto_tx.set_transaction_index(0);
+        proto_tx.timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(1_234));
+
+        let view = TxView::from_proto(&proto_tx)
+            .unwrap()
+            .expect("successful transaction decodes to a view");
+        assert_eq!(view.unknown_states.len(), 1);
+
+        let mut fixture = Fixture::new();
+        let out = fixture.apply(&view);
+        assert_eq!(out.unrouted.len(), 1);
+        assert_eq!(out.unrouted[0].0, addr(0x51));
+        assert!(out.unrouted[0].1.contains("output_state"));
     }
 }
