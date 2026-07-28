@@ -178,7 +178,10 @@ async fn ensure_bootstrapped(
     if let Some((version, package)) = latest_package {
         state.add_package_version(version, package);
     }
-    state.advance_state_watermark(seed.floor);
+    // A reset, not an advance: the scrape replaced the state wholesale,
+    // so the watermark must say exactly what the scrape covers — even
+    // if that is below where the mirror was before the replay failure.
+    state.reset_state_watermark(seed.floor);
     *mirror = Some(Mirror::from_seed(seed));
     state.request_limiter_reconcile();
     if let Some(metrics) = state.metrics() {

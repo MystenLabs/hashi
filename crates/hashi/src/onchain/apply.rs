@@ -951,8 +951,7 @@ mod tests {
             let mut routing = RoutingTable::new(hashi_id(), bs_field_id());
             routing.set_root_containers(&move_root(0, None, None));
             routing.set_bitcoin_state_containers(&move_bitcoin_state());
-            let packages =
-                move_types::PackageVersions::new(BTreeMap::from([(1, addr(PACKAGE))]));
+            let packages = move_types::PackageVersions::new(BTreeMap::from([(1, addr(PACKAGE))]));
 
             let hashi = types::Hashi {
                 id: hashi_id(),
