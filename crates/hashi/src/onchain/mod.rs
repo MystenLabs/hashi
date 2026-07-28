@@ -933,7 +933,6 @@ async fn scrape_hashi(
         hashi_object_id,
         bitcoin_state_field_id(hashi_object_id, package_id),
     );
-    seed.routing.register_package(package_id);
     seed.observe_height(checkpoint_info.height);
     seed.routing.set_root_containers(&root);
     seed.index
