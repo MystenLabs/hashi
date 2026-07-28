@@ -4,6 +4,7 @@
 //! Definitions of the raw Move structs in the hashi package
 
 use fastcrypto::traits::ToFromBytes;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use sui_rpc::proto::sui::rpc::v2::Bcs;
 use sui_sdk_types::Address;
@@ -15,24 +16,134 @@ use sui_sdk_types::bcs::ToBcs;
 
 use crate::bitcoin_txid::BitcoinTxid;
 
+/// The hashi package's publish history: version number to package id,
+/// plus the derived id set for package-membership checks.
+///
+/// Version 1 is the original publish; each successful upgrade appends
+/// the next version. A Move type's identity carries its defining
+/// package's address forever (an upgrade never re-addresses existing
+/// types), so [`MoveType::matches`] resolves a type's
+/// `PACKAGE_VERSION` through this history to the exact address the
+/// type must carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageVersions {
+    versions: BTreeMap<u64, Address>,
+    ids: BTreeSet<Address>,
+}
+
+impl PackageVersions {
+    pub fn new(versions: BTreeMap<u64, Address>) -> Self {
+        let ids = versions.values().copied().collect();
+        Self { versions, ids }
+    }
+
+    /// Record a published version. Inserting an existing version again
+    /// is a no-op when the id matches (replay-safe).
+    pub fn insert(&mut self, version: u64, package_id: Address) {
+        self.versions.insert(version, package_id);
+        self.ids.insert(package_id);
+    }
+
+    /// The package id published as `version`, if known.
+    pub fn get(&self, version: u64) -> Option<Address> {
+        self.versions.get(&version).copied()
+    }
+
+    /// The highest known version number.
+    pub fn latest_version(&self) -> Option<u64> {
+        self.versions.last_key_value().map(|(version, _)| *version)
+    }
+
+    /// The package id of the highest known version.
+    pub fn latest_id(&self) -> Option<Address> {
+        self.versions.last_key_value().map(|(_, id)| *id)
+    }
+
+    /// True when `address` is one of the known package ids (any version).
+    pub fn contains(&self, address: &Address) -> bool {
+        self.ids.contains(address)
+    }
+
+    /// The full version history, version number to package id.
+    pub fn versions(&self) -> &BTreeMap<u64, Address> {
+        &self.versions
+    }
+}
+
+/// A Rust mirror of a Move struct, identified by its defining package
+/// version, module, and name.
 pub trait MoveType {
+    /// The hashi package version that first defined this struct. A
+    /// type keeps its defining package's address through upgrades, so
+    /// `matches` resolves this version to the one address the struct
+    /// tag must carry — types added in an upgraded package declare the
+    /// version that introduced them.
     const PACKAGE_VERSION: u64 = 1;
     const MODULE: &'static str;
     const NAME: &'static str;
+    /// The number of type parameters the struct tag must carry.
+    const TYPE_PARAMS: usize = 0;
     const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
+
+    fn matches(packages: &PackageVersions, tag: &StructTag) -> bool {
+        packages.get(Self::PACKAGE_VERSION) == Some(*tag.address())
+            && tag.module() == Self::MODULE
+            && tag.name() == Self::NAME
+            && tag.type_params().len() == Self::TYPE_PARAMS
+    }
 }
 
-/// Validates that the event's StructTag matches the expected module/name for `T`
-/// and extracts the single type parameter.
-fn extract_type_param<T: MoveType>(event_type: &StructTag) -> Result<TypeTag, anyhow::Error> {
-    if event_type.module() == T::MODULE
-        && event_type.name() == T::NAME
+/// Validates that the event's StructTag matches `T` and extracts the
+/// single type parameter.
+fn extract_type_param<T: MoveType>(
+    packages: &PackageVersions,
+    event_type: &StructTag,
+) -> Result<TypeTag, anyhow::Error> {
+    if T::matches(packages, event_type)
         && let [type_param] = event_type.type_params()
     {
         Ok(type_param.to_owned())
     } else {
         Err(anyhow::anyhow!("invalid {}", T::NAME))
     }
+}
+
+/// True when the struct tag is the Sui framework's
+/// `0x2::dynamic_field::Field` (any type parameters).
+pub fn is_dynamic_field(tag: &StructTag) -> bool {
+    tag.address() == &Address::TWO
+        && tag.module() == "dynamic_field"
+        && tag.name() == "Field"
+        && tag.type_params().len() == 2
+}
+
+/// True when the struct tag is a `Field<_, V>` whose value-side `V` is
+/// the struct `<module>::<name>` from any package. The package address
+/// of `V` is ignored so package upgrades don't invalidate the match.
+pub fn is_field_with_value(tag: &StructTag, module: &str, name: &str) -> bool {
+    if !is_dynamic_field(tag) {
+        return false;
+    }
+    let Some(TypeTag::Struct(value)) = tag.type_params().get(1) else {
+        return false;
+    };
+    value.module() == module && value.name() == name
+}
+
+/// True when the struct tag is a dynamic object field wrapper —
+/// `0x2::dynamic_field::Field<0x2::dynamic_object_field::Wrapper<K>, ID>`.
+/// The wrapper is the intermediate object that owns a DOF's value
+/// object; its contents hold the value's object id.
+pub fn is_dof_wrapper(tag: &StructTag) -> bool {
+    if !is_dynamic_field(tag) {
+        return false;
+    }
+    let Some(TypeTag::Struct(name_type)) = tag.type_params().first() else {
+        return false;
+    };
+    name_type.address() == &Address::TWO
+        && name_type.module() == "dynamic_object_field"
+        && name_type.name() == "Wrapper"
 }
 
 /// Rust version of the Move hashi::hashi::Hashi type.
@@ -846,30 +957,35 @@ pub enum HashiEvent {
 }
 
 impl HashiEvent {
-    pub fn try_parse(
-        package_ids: &BTreeSet<Address>,
-        bcs: &Bcs,
-    ) -> Result<Option<Self>, anyhow::Error> {
+    pub fn try_parse(packages: &PackageVersions, bcs: &Bcs) -> Result<Option<Self>, anyhow::Error> {
         let event_type = bcs.name().parse::<StructTag>()?;
 
         // If this isn't from a package we care about we can skip
-        if !package_ids.contains(event_type.address()) {
+        if !packages.contains(event_type.address()) {
             return Ok(None);
         }
 
         let event = match (event_type.module().as_str(), event_type.name().as_str()) {
             ValidatorRegistered::MODULE_NAME => ValidatorRegistered::from_bcs(bcs.value())?.into(),
             ValidatorUpdated::MODULE_NAME => ValidatorUpdated::from_bcs(bcs.value())?.into(),
-            VoteCast::MODULE_NAME => VoteCast::new(&event_type, bcs.value())?.into(),
-            VoteRemoved::MODULE_NAME => VoteRemoved::new(&event_type, bcs.value())?.into(),
-            ProposalCreated::MODULE_NAME => ProposalCreated::new(&event_type, bcs.value())?.into(),
-            ProposalDeleted::MODULE_NAME => ProposalDeleted::new(&event_type, bcs.value())?.into(),
-            ProposalExecuted::MODULE_NAME => {
-                ProposalExecuted::new(&event_type, bcs.value())?.into()
+            VoteCast::MODULE_NAME => VoteCast::new(packages, &event_type, bcs.value())?.into(),
+            VoteRemoved::MODULE_NAME => {
+                VoteRemoved::new(packages, &event_type, bcs.value())?.into()
             }
-            QuorumReached::MODULE_NAME => QuorumReached::new(&event_type, bcs.value())?.into(),
-            Minted::MODULE_NAME => Minted::new(&event_type, bcs.value())?.into(),
-            Burned::MODULE_NAME => Burned::new(&event_type, bcs.value())?.into(),
+            ProposalCreated::MODULE_NAME => {
+                ProposalCreated::new(packages, &event_type, bcs.value())?.into()
+            }
+            ProposalDeleted::MODULE_NAME => {
+                ProposalDeleted::new(packages, &event_type, bcs.value())?.into()
+            }
+            ProposalExecuted::MODULE_NAME => {
+                ProposalExecuted::new(packages, &event_type, bcs.value())?.into()
+            }
+            QuorumReached::MODULE_NAME => {
+                QuorumReached::new(packages, &event_type, bcs.value())?.into()
+            }
+            Minted::MODULE_NAME => Minted::new(packages, &event_type, bcs.value())?.into(),
+            Burned::MODULE_NAME => Burned::new(packages, &event_type, bcs.value())?.into(),
             DepositRequested::MODULE_NAME => DepositRequested::from_bcs(bcs.value())?.into(),
             DepositApproved::MODULE_NAME => DepositApproved::from_bcs(bcs.value())?.into(),
             DepositConfirmed::MODULE_NAME => DepositConfirmed::from_bcs(bcs.value())?.into(),
@@ -942,8 +1058,12 @@ pub struct ProposalCreated {
 }
 
 impl ProposalCreated {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let proposal_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(packages, event_type)?;
         let (proposal_id, timestamp_ms): (Address, u64) = bcs::from_bytes(bcs)?;
         Ok(Self {
             proposal_id,
@@ -956,6 +1076,7 @@ impl ProposalCreated {
 impl MoveType for ProposalCreated {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalCreated";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<ProposalCreated> for HashiEvent {
@@ -972,8 +1093,12 @@ pub struct VoteCast {
 }
 
 impl VoteCast {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let proposal_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(packages, event_type)?;
         let (proposal_id, voter): (Address, Address) = bcs::from_bytes(bcs)?;
         Ok(Self {
             proposal_id,
@@ -986,6 +1111,7 @@ impl VoteCast {
 impl MoveType for VoteCast {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteCast";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<VoteCast> for HashiEvent {
@@ -1002,8 +1128,12 @@ pub struct VoteRemoved {
 }
 
 impl VoteRemoved {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let proposal_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(packages, event_type)?;
         let (proposal_id, voter): (Address, Address) = bcs::from_bytes(bcs)?;
         Ok(Self {
             proposal_id,
@@ -1016,6 +1146,7 @@ impl VoteRemoved {
 impl MoveType for VoteRemoved {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteRemoved";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<VoteRemoved> for HashiEvent {
@@ -1031,8 +1162,12 @@ pub struct ProposalDeleted {
 }
 
 impl ProposalDeleted {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let proposal_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(packages, event_type)?;
         let proposal_id: Address = bcs::from_bytes(bcs)?;
         Ok(Self {
             proposal_id,
@@ -1044,6 +1179,7 @@ impl ProposalDeleted {
 impl MoveType for ProposalDeleted {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalDeleted";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<ProposalDeleted> for HashiEvent {
@@ -1063,8 +1199,12 @@ pub struct ProposalExecuted {
 }
 
 impl ProposalExecuted {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let proposal_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(packages, event_type)?;
         // Layout is `(proposal_id: Address, data: T)`; Address is a fixed
         // 32-byte BCS encoding with no length prefix, so split there.
         if bcs.len() < 32 {
@@ -1083,6 +1223,7 @@ impl ProposalExecuted {
 impl MoveType for ProposalExecuted {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalExecuted";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<ProposalExecuted> for HashiEvent {
@@ -1098,8 +1239,12 @@ pub struct QuorumReached {
 }
 
 impl QuorumReached {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let proposal_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let proposal_type = extract_type_param::<Self>(packages, event_type)?;
         let proposal_id: Address = bcs::from_bytes(bcs)?;
         Ok(Self {
             proposal_id,
@@ -1111,6 +1256,7 @@ impl QuorumReached {
 impl MoveType for QuorumReached {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "QuorumReached";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<QuorumReached> for HashiEvent {
@@ -1145,11 +1291,16 @@ pub struct Minted {
 impl MoveType for Minted {
     const MODULE: &'static str = "treasury";
     const NAME: &'static str = "Minted";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl Minted {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let coin_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let coin_type = extract_type_param::<Self>(packages, event_type)?;
         Ok(Self {
             coin_type,
             amount: bcs::from_bytes(bcs)?,
@@ -1172,11 +1323,16 @@ pub struct Burned {
 impl MoveType for Burned {
     const MODULE: &'static str = "treasury";
     const NAME: &'static str = "Burned";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl Burned {
-    fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
-        let coin_type = extract_type_param::<Self>(event_type)?;
+    fn new(
+        packages: &PackageVersions,
+        event_type: &StructTag,
+        bcs: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        let coin_type = extract_type_param::<Self>(packages, event_type)?;
         Ok(Self {
             coin_type,
             amount: bcs::from_bytes(bcs)?,
@@ -1546,6 +1702,183 @@ impl TryFrom<Committee> for crate::committee::Committee {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use sui_sdk_types::Identifier;
+
+    fn tag(address: Address, module: &str, name: &str, type_params: Vec<TypeTag>) -> StructTag {
+        StructTag::new(
+            address,
+            Identifier::new(module).unwrap(),
+            Identifier::new(name).unwrap(),
+            type_params,
+        )
+    }
+
+    fn hashi_package() -> Address {
+        Address::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+            .unwrap()
+    }
+
+    fn field_tag(name_type: TypeTag, value_type: TypeTag) -> StructTag {
+        tag(
+            Address::TWO,
+            "dynamic_field",
+            "Field",
+            vec![name_type, value_type],
+        )
+    }
+
+    fn member_info_value() -> TypeTag {
+        TypeTag::Struct(Box::new(tag(
+            hashi_package(),
+            "committee_set",
+            "MemberInfo",
+            vec![],
+        )))
+    }
+
+    fn hashi_packages() -> PackageVersions {
+        PackageVersions::new(BTreeMap::from([(1, hashi_package())]))
+    }
+
+    #[test]
+    fn move_type_matches_requires_the_defining_package_address() {
+        let packages = hashi_packages();
+        let t = tag(hashi_package(), "committee_set", "MemberInfo", vec![]);
+        assert!(MemberInfo::matches(&packages, &t));
+
+        // The same module/name from a foreign package is not our type.
+        let foreign = tag(Address::TWO, "committee_set", "MemberInfo", vec![]);
+        assert!(!MemberInfo::matches(&packages, &foreign));
+    }
+
+    #[test]
+    fn move_type_matches_resolves_the_defining_version_after_an_upgrade() {
+        let upgraded =
+            Address::from_hex("0xfeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface")
+                .unwrap();
+        let mut packages = hashi_packages();
+        packages.insert(2, upgraded);
+
+        // A version-1 type keeps its defining address through upgrades;
+        // it never appears under the upgraded package's address.
+        let t = tag(hashi_package(), "committee_set", "MemberInfo", vec![]);
+        assert!(MemberInfo::matches(&packages, &t));
+        let readdressed = tag(upgraded, "committee_set", "MemberInfo", vec![]);
+        assert!(!MemberInfo::matches(&packages, &readdressed));
+
+        assert_eq!(packages.latest_version(), Some(2));
+        assert_eq!(packages.latest_id(), Some(upgraded));
+        assert!(packages.contains(&hashi_package()));
+        assert!(packages.contains(&upgraded));
+    }
+
+    #[test]
+    fn move_type_matches_rejects_wrong_module_name_or_arity() {
+        let packages = hashi_packages();
+        let wrong_module = tag(hashi_package(), "committee", "MemberInfo", vec![]);
+        assert!(!MemberInfo::matches(&packages, &wrong_module));
+
+        let wrong_name = tag(hashi_package(), "committee_set", "Committee", vec![]);
+        assert!(!MemberInfo::matches(&packages, &wrong_name));
+
+        let wrong_arity = tag(
+            hashi_package(),
+            "committee_set",
+            "MemberInfo",
+            vec![TypeTag::U64],
+        );
+        assert!(!MemberInfo::matches(&packages, &wrong_arity));
+    }
+
+    #[test]
+    fn typed_event_matches_requires_one_type_param() {
+        let packages = hashi_packages();
+        let bare = tag(hashi_package(), "proposal", "ProposalCreated", vec![]);
+        assert!(!ProposalCreated::matches(&packages, &bare));
+
+        let typed = tag(
+            hashi_package(),
+            "proposal",
+            "ProposalCreated",
+            vec![TypeTag::U64],
+        );
+        assert!(ProposalCreated::matches(&packages, &typed));
+    }
+
+    #[test]
+    fn is_dynamic_field_requires_framework_field_shape() {
+        assert!(is_dynamic_field(&field_tag(
+            TypeTag::Address,
+            member_info_value()
+        )));
+
+        // Same shape but not in the Sui framework package.
+        let impostor = tag(
+            hashi_package(),
+            "dynamic_field",
+            "Field",
+            vec![TypeTag::Address, member_info_value()],
+        );
+        assert!(!is_dynamic_field(&impostor));
+
+        // The framework Field always has exactly two type parameters.
+        let wrong_arity = tag(Address::TWO, "dynamic_field", "Field", vec![TypeTag::U64]);
+        assert!(!is_dynamic_field(&wrong_arity));
+
+        let not_a_field = tag(hashi_package(), "committee_set", "MemberInfo", vec![]);
+        assert!(!is_dynamic_field(&not_a_field));
+    }
+
+    #[test]
+    fn is_field_with_value_matches_the_value_side_only() {
+        let member_field = field_tag(TypeTag::Address, member_info_value());
+        assert!(is_field_with_value(
+            &member_field,
+            "committee_set",
+            "MemberInfo"
+        ));
+        assert!(!is_field_with_value(
+            &member_field,
+            "committee",
+            "Committee"
+        ));
+
+        // A primitive value side never matches a struct query.
+        let primitive_value = field_tag(TypeTag::Address, TypeTag::U64);
+        assert!(!is_field_with_value(
+            &primitive_value,
+            "committee_set",
+            "MemberInfo"
+        ));
+    }
+
+    #[test]
+    fn is_dof_wrapper_detects_the_wrapper_name_type() {
+        let wrapper_name = TypeTag::Struct(Box::new(tag(
+            Address::TWO,
+            "dynamic_object_field",
+            "Wrapper",
+            vec![TypeTag::Address],
+        )));
+        let wrapper = field_tag(wrapper_name, TypeTag::Address);
+        assert!(is_dof_wrapper(&wrapper));
+        // A DOF wrapper is still a plain dynamic field structurally.
+        assert!(is_dynamic_field(&wrapper));
+
+        // A plain dynamic field is not a DOF wrapper.
+        let plain = field_tag(TypeTag::Address, member_info_value());
+        assert!(!is_dof_wrapper(&plain));
+
+        // A Wrapper name type from outside the framework doesn't count.
+        let impostor_name = TypeTag::Struct(Box::new(tag(
+            hashi_package(),
+            "dynamic_object_field",
+            "Wrapper",
+            vec![TypeTag::Address],
+        )));
+        assert!(!is_dof_wrapper(&field_tag(impostor_name, TypeTag::Address)));
+    }
 
     #[test]
     fn committee_mpc_config_carried_verbatim_through_bcs() {

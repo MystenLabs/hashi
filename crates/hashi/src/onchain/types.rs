@@ -312,6 +312,19 @@ impl CommitteeSet {
         }
     }
 
+    /// Remove a member entirely: its info, TLS reverse mapping, and
+    /// cached client. Members are not removed by any current Move path,
+    /// but the object-driven watcher mirrors deletions faithfully.
+    pub fn remove_validator(&mut self, validator: &Address) {
+        if let Some(info) = self.members.remove(validator)
+            && let Some(tls_public_key) = &info.tls_public_key
+        {
+            self.tls_public_key_to_address
+                .remove(tls_public_key.as_bytes());
+        }
+        self.clients.remove(validator);
+    }
+
     pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {
         self.epoch = epoch;
         self

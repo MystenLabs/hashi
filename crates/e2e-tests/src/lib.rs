@@ -25,6 +25,7 @@ pub mod guardian_harness;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
+pub mod tcp_proxy;
 pub mod test_helpers;
 pub mod upgrade_flow;
 
@@ -204,6 +205,14 @@ impl TestNetworksBuilder {
         self
     }
 
+    /// Route the given node's Sui RPC connection through a severable
+    /// proxy (`hashi_network.sui_rpc_proxy()`), so a test can simulate a
+    /// fullnode outage for that node alone.
+    pub fn with_sui_rpc_proxy_for_node(mut self, node_index: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_sui_rpc_proxy_for_node(node_index);
+        self
+    }
+
     pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
         self.hashi_builder = self
             .hashi_builder
@@ -342,9 +351,9 @@ impl TestNetworksBuilder {
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
         // The launch tx writes guardian_url with no event; nodes booted
-        // pre-launch learn it only via the watcher's config poll. Gate BEFORE
-        // the override proposals — their config refresh would mask a broken
-        // poll (genesis end_reconfig losers rescrape and heal incidentally).
+        // pre-launch learn it from the object mirror applying the root
+        // write. Gate BEFORE the override proposals so a broken mirror
+        // path can't hide behind their config-refreshing writes.
         if nodes_started {
             futures::future::try_join_all(
                 test_networks
@@ -1390,7 +1399,7 @@ mod tests {
         let ids = test_networks.hashi_network().ids();
 
         let (state, _service) =
-            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None, None).await?;
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
@@ -1408,12 +1417,24 @@ mod tests {
             .wait_for_mpc_key(DKG_TIMEOUT)
             .await?;
 
-        // Validate subscribing works by just updating a validator's onchain info
+        // Validate subscribing works by updating a validator's onchain info.
+        // The key must actually differ from the registered one: protocol v76's
+        // minimize_child_object_mutations fingerprints child writes and elides
+        // value-identical ones from effects, so re-submitting the current key
+        // is a no-op the object mirror correctly does not notify about.
         let mut reciever = state.subscribe();
 
         let client = test_networks.sui_network().client.clone();
         let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
-        super::hashi_network::update_tls_public_key(client, v1_config)
+        let mut updated_config = v1_config.clone();
+        use ed25519_dalek::pkcs8::EncodePrivateKey as _;
+        updated_config.tls_private_key = Some(
+            ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+                .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+                .unwrap()
+                .to_string(),
+        );
+        super::hashi_network::update_tls_public_key(client, &updated_config)
             .await
             .unwrap();
 
@@ -1429,15 +1450,16 @@ mod tests {
         Ok(())
     }
 
-    /// Verify that rescraping on-chain state correctly deserializes deposit
+    /// Verify that the bootstrap scrape correctly deserializes deposit
     /// requests from ObjectBag dynamic fields.
     ///
-    /// This catches BCS mismatches between the subscription path (which builds
-    /// objects from events) and the scrape path (which reads from ObjectBag
-    /// child objects). The subscription path may work while the scrape path
-    /// fails if the deserialization code uses the wrong field access method.
+    /// This catches BCS mismatches between the streaming path (which decodes
+    /// objects from transaction object sets) and the scrape path (which reads
+    /// from ObjectBag child objects). The streaming path may work while the
+    /// scrape path fails if the deserialization code uses the wrong field
+    /// access method.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_rescrape_with_existing_requests() -> Result<()> {
+    async fn test_scrape_with_existing_requests() -> Result<()> {
         let test_networks = TestNetworksBuilder::new()
             .with_nodes(4)
             .with_full_voting_power()
@@ -1461,18 +1483,15 @@ mod tests {
             .execute_create_deposit_request(dummy_txid, 0, 50_000, Some(hbtc_recipient))
             .await?;
 
-        // Wait briefly for the subscription path to pick up the event
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        // Now rescrape from chain — this exercises the ObjectBag deserialization
-        // path that reads child objects, not the subscription/event path.
-        hashi.onchain_state().rescrape().await?;
-
-        // Verify the deposit request survived the rescrape.
-        let deposit_requests = hashi.onchain_state().deposit_requests();
+        // Boot a fresh OnchainState now that the request exists on-chain:
+        // its bootstrap scrape must find the request in the ObjectBag.
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+        let (state, _service) =
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
         assert!(
-            !deposit_requests.is_empty(),
-            "Rescrape should find the deposit request in the ObjectBag"
+            !state.deposit_requests().is_empty(),
+            "The bootstrap scrape should find the deposit request in the ObjectBag"
         );
 
         Ok(())

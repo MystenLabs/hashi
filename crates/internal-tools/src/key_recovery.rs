@@ -117,8 +117,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
     // `previous_epoch`'s committee. `MpcManager::new` requires a committee at
     // `reconstruction_epoch`, and reconstruction decrypts AVSS messages with
     // `previous_epoch`'s encryption keys (per #502). Cloning instead of
-    // mutating `onchain_state` keeps the watcher free to rescrape without
-    // racing this tool.
+    // mutating `onchain_state` keeps the watcher free to update state
+    // without racing this tool.
     let recovery_committee_set =
         build_recovery_committee_set(onchain_state, previous_epoch, reconstruction_epoch)?;
     let previous_committee = recovery_committee_set

@@ -228,6 +228,23 @@ impl MpcService {
         }
     }
 
+    /// Wait (bounded) for the object mirror to reflect the epoch change
+    /// another node's `end_reconfig` completed. The lossless watcher
+    /// applies the winning transaction as a root object write within a
+    /// few checkpoints; clock ticks pace the re-checks.
+    async fn wait_for_epoch_change_visibility(&self, epoch: u64) {
+        const VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
+        let _ = tokio::time::timeout(VISIBILITY_TIMEOUT, async {
+            while self.get_pending_epoch_change() == Some(epoch) {
+                if checkpoint_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+
     fn get_pending_epoch_change(&self) -> Option<u64> {
         self.inner
             .onchain_state()
@@ -870,17 +887,47 @@ impl MpcService {
                 "no DB encryption or signing key matches the current committee record; \
                  registering fresh keys for epoch {target} so the node rejoins at that reconfig"
             );
-            if let Err(e) = self.inner.prepare_and_register_keys(target).await {
-                warn!("failed to register replacement keys for epoch {target}: {e}; will retry");
-                return;
+            let landed_at = match self.inner.prepare_and_register_keys(target).await {
+                Ok(landed_at) => landed_at,
+                Err(e) => {
+                    warn!(
+                        "failed to register replacement keys for epoch {target}: {e}; will retry"
+                    );
+                    return;
+                }
+            };
+            // The snapshot check below reads the mirror, so the mirror must
+            // first reflect the registration that just landed: a lagging
+            // view could show the epoch-`target` committee as not yet
+            // snapshotted when it was in fact already frozen without the
+            // replacement keys, ending the bump loop one epoch short.
+            if let Some(landed_at) = landed_at {
+                const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+                if tokio::time::timeout(
+                    VISIBILITY_TIMEOUT,
+                    self.inner.onchain_state().wait_until_checkpoint(landed_at),
+                )
+                .await
+                .is_err()
+                {
+                    warn!(
+                        "mirror did not reach the key-registration checkpoint {landed_at} within \
+                         {VISIBILITY_TIMEOUT:?}; re-verifying next tick"
+                    );
+                    return;
+                }
             }
-            match self
+            let frozen = self
                 .inner
                 .onchain_state()
-                .scrape_committee_for_epoch(target)
-                .await
-            {
-                Ok(Some(frozen)) if self.inner.committee_key_lost(&frozen, me) => {
+                .state()
+                .hashi()
+                .committees
+                .committees()
+                .get(&target)
+                .cloned();
+            match frozen {
+                Some(frozen) if self.inner.committee_key_lost(&frozen, me) => {
                     self.inner.metrics.mpc_key_reregistration_bumps_total.inc();
                     info!(
                         "epoch {target} committee already snapshotted without replacement keys; \
@@ -889,7 +936,7 @@ impl MpcService {
                     );
                     target += 1;
                 }
-                Ok(Some(frozen)) => {
+                Some(frozen) => {
                     if frozen.members().iter().any(|m| m.validator_address() == me) {
                         info!("replacement keys frozen into the epoch {target} committee");
                     } else {
@@ -901,19 +948,12 @@ impl MpcService {
                     *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
                     return;
                 }
-                Ok(None) => {
+                None => {
                     info!(
                         "replacement keys registered; the epoch {target} committee is not yet \
                          snapshotted and will include them"
                     );
                     *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
-                    return;
-                }
-                Err(e) => {
-                    warn!(
-                        "cannot verify the epoch {target} committee after key registration: {e}; \
-                         re-verifying next tick"
-                    );
                     return;
                 }
             }
@@ -1431,15 +1471,15 @@ impl MpcService {
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
                         warn!(
-                            "end_reconfig submission for epoch {epoch} found reconfig already completed; rescraping on-chain state: {e}"
+                            "end_reconfig submission for epoch {epoch} found reconfig already completed; waiting for the watcher to observe it: {e}"
                         );
-                        self.inner.onchain_state().rescrape().await?;
+                        self.wait_for_epoch_change_visibility(epoch).await;
                         if self.get_pending_epoch_change() != Some(epoch) {
                             return Ok(());
                         }
                         Err(e).with_context(|| {
                             format!(
-                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape"
+                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after waiting for the watcher"
                             )
                         })?;
                     }
