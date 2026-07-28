@@ -133,8 +133,11 @@ pub(super) async fn run(
 fn build_client(sui_rpc_url: &str, state: &OnchainState) -> Result<Client> {
     // A fresh client per attempt: re-subscribing on the same channel can
     // reuse a wedged h2 connection — the one whose stream just stalled —
-    // and silently hang again.
-    let mut client = Client::new(sui_rpc_url)?;
+    // and silently hang again. The shared deadline layer bounds the
+    // request/handshake awaits (subscribe, each replay list page, the
+    // re-bootstrap scrape) that the stall timeout does not cover, while
+    // sparing established subscription streams.
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
     if let Some(limit) = state.grpc_max_decoding_message_size() {
         client = client.with_max_decoding_message_size(limit);
     }
