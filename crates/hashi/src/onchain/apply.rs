@@ -132,7 +132,7 @@ impl TxView {
                 .and_then(|s| OutputObjectState::try_from(s).ok())
                 .unwrap_or(OutputObjectState::Unknown);
             match state {
-                OutputObjectState::ObjectWrite | OutputObjectState::PackageWrite => {
+                OutputObjectState::ObjectWrite => {
                     let version = changed
                         .output_version
                         .context("written ChangedObject is missing output_version")?;
@@ -153,9 +153,16 @@ impl TxView {
                     changes.push(TxChange::Written(Box::new(object)));
                 }
                 OutputObjectState::DoesNotExist => changes.push(TxChange::Deleted { id }),
-                // Accumulator writes and unknown future states don't
-                // fit the object-contents shape; ignore them.
-                _ => {}
+                // Package objects are not mirrored (the upgrade effect
+                // derives from the root's `UpgradeCap` change), so don't
+                // demand one from the object set — failing here would
+                // kill the stream on every upgrade if a server ever
+                // omitted the package object.
+                OutputObjectState::PackageWrite => {}
+                // Accumulator writes carry no object contents and no
+                // Hashi state.
+                OutputObjectState::AccumulatorWrite => {}
+                OutputObjectState::Unknown | _ => {}
             }
         }
 
