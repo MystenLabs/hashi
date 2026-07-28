@@ -92,6 +92,15 @@ impl RoutingTable {
         self.packages.insert(package);
     }
 
+    /// Register every published package id. A Move type keeps its
+    /// defining package's address forever, so a type introduced by an
+    /// upgrade carries that version's address and nothing else — the
+    /// tripwire needs the whole history, not just the original and the
+    /// current one.
+    pub(super) fn register_packages(&mut self, packages: &move_types::PackageVersions) {
+        self.packages.extend(packages.versions().values().copied());
+    }
+
     pub(super) fn is_hashi_package(&self, package: &Address) -> bool {
         self.packages.contains(package)
     }
@@ -393,6 +402,27 @@ mod tests {
         let wrapper = addr(0x21);
         routing.register_wrapper(wrapper, addr(0x99));
         assert_eq!(routing.resolve_owner(&wrapper), None);
+    }
+
+    #[test]
+    fn register_packages_covers_every_published_version() {
+        let (mut routing, _) = routing_with_bitcoin_state();
+        let (v1, v2, v3) = (addr(0xa1), addr(0xa2), addr(0xa3));
+        routing.register_package(v1);
+        assert!(!routing.is_hashi_package(&v2));
+
+        // A type introduced by an upgrade carries that version's address
+        // forever, so the tripwire needs the whole history and not just
+        // the first and last entries.
+        routing.register_packages(&move_types::PackageVersions::new(BTreeMap::from([
+            (1, v1),
+            (2, v2),
+            (3, v3),
+        ])));
+        assert!(routing.is_hashi_package(&v1));
+        assert!(routing.is_hashi_package(&v2));
+        assert!(routing.is_hashi_package(&v3));
+        assert!(!routing.is_hashi_package(&addr(0xa4)));
     }
 
     #[test]

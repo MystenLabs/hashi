@@ -238,6 +238,29 @@ impl OnchainState {
             *current = covered;
             true
         });
+        self.record_state_watermark();
+    }
+
+    /// Set the watermark to a re-bootstrap's scrape floor, which may be
+    /// *below* the current value. The scrape replaces the mirrored state
+    /// wholesale, so coverage claimed by the mirror it tore down no
+    /// longer holds; leaving the higher value would report state the new
+    /// mirror does not have until replay catches up. Waiters simply
+    /// block for longer.
+    fn reset_state_watermark(&self, floor: u64) {
+        let previous = self.state_watermark();
+        if floor < previous {
+            tracing::warn!(
+                previous,
+                floor,
+                "mirror re-bootstrapped below its previous coverage; state watermark reset"
+            );
+        }
+        self.0.state_watermark.send_replace(floor);
+        self.record_state_watermark();
+    }
+
+    fn record_state_watermark(&self) {
         if let Some(metrics) = &self.0.metrics {
             metrics
                 .watcher_state_watermark
@@ -322,7 +345,18 @@ impl OnchainState {
         if let Some(metrics) = &self.0.metrics {
             hashi.committees.set_metrics(metrics.clone());
         }
-        self.state_mut().hashi = hashi;
+        let mut guard = self.state_mut();
+        guard.hashi = hashi;
+        // A wholesale replace swallows the removal transition of any
+        // withdrawal that confirmed during the gap, so its signed-at
+        // entry would linger for the life of the process.
+        let State {
+            hashi,
+            withdrawal_signed_at_ms,
+            ..
+        } = &mut *guard;
+        withdrawal_signed_at_ms
+            .retain(|id, _| hashi.withdrawal_queue.withdrawal_txns().contains_key(id));
     }
 
     /// Record an on-chain package upgrade. The root's `UpgradeCap`
@@ -767,14 +801,16 @@ impl State {
         client: Client,
         ids: HashiIds,
     ) -> Result<(Self, CheckpointInfo, route::MirrorSeed)> {
-        let (package_versions, (checkpoint_info, hashi, seed)) = tokio::try_join!(
+        let (package_versions, (checkpoint_info, hashi, mut seed)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id, ids.package_id),
         )?;
+        let package_versions = move_types::PackageVersions::new(package_versions);
+        seed.routing.register_packages(&package_versions);
 
         Ok((
             State {
-                package_versions: move_types::PackageVersions::new(package_versions),
+                package_versions,
                 hashi,
                 withdrawal_signed_at_ms: BTreeMap::new(),
             },

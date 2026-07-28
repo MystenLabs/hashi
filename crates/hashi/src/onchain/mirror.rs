@@ -155,7 +155,7 @@ async fn ensure_bootstrapped(
     if mirror.is_some() {
         return Ok(());
     }
-    let (_, hashi, seed) = super::scrape_hashi(
+    let (_, hashi, mut seed) = super::scrape_hashi(
         client.clone(),
         state.hashi_id(),
         state.package_id_original(),
@@ -178,7 +178,12 @@ async fn ensure_bootstrapped(
     if let Some((version, package)) = latest_package {
         state.add_package_version(version, package);
     }
-    state.advance_state_watermark(seed.floor);
+    // A fresh routing table only knows the original package id; restore
+    // the publish history so the tripwire keeps recognizing types an
+    // intermediate upgrade defined.
+    seed.routing
+        .register_packages(state.state().package_versions());
+    state.reset_state_watermark(seed.floor);
     *mirror = Some(Mirror::from_seed(seed));
     state.request_limiter_reconcile();
     if let Some(metrics) = state.metrics() {

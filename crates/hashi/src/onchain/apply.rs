@@ -50,13 +50,10 @@ pub(super) struct TxView {
     /// advance and the withdrawal duration metrics.
     pub timestamp_ms: u64,
     pub changes: Vec<TxChange>,
-}
-
-impl TxView {
-    /// The transaction's position in the chain's total order.
-    pub(super) fn position(&self) -> (u64, u64) {
-        (self.checkpoint, self.transaction_index)
-    }
+    /// Changed objects whose `output_state` was absent or unrecognized.
+    /// Neither a write nor a removal can be derived from them, so they
+    /// ride the unrouted tripwire rather than being dropped silently.
+    pub unknown_output_states: Vec<Address>,
 }
 
 #[derive(Debug)]
@@ -96,17 +93,24 @@ fn decode_object_pool(set: Option<&proto::ObjectSet>) -> anyhow::Result<ObjectPo
 }
 
 impl TxView {
+    /// The transaction's position in the chain's total order.
+    pub(super) fn position(&self) -> (u64, u64) {
+        (self.checkpoint, self.transaction_index)
+    }
+
     /// Decode a proto `ExecutedTransaction` (as delivered by the
     /// filtered transaction stream) into a `TxView`, sourcing
     /// post-state objects from its per-transaction object set. Returns
     /// `Ok(None)` for transactions that did not execute successfully —
     /// their object changes are gas-only and carry no Hashi state.
     pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
-        let mut pool = decode_object_pool(tx.objects.as_ref())?;
         let effects = tx
             .effects
             .as_ref()
             .context("ExecutedTransaction is missing effects")?;
+        // Before decoding the object set: a failed transaction's objects
+        // are discarded anyway, so neither the work nor a decode failure
+        // on them should reach the stream.
         if !effects
             .status
             .as_ref()
@@ -115,8 +119,10 @@ impl TxView {
         {
             return Ok(None);
         }
+        let mut pool = decode_object_pool(tx.objects.as_ref())?;
 
         let mut changes = Vec::new();
+        let mut unknown_output_states = Vec::new();
         for changed in &effects.changed_objects {
             let id: Address = changed
                 .object_id
@@ -129,7 +135,7 @@ impl TxView {
                 .and_then(|s| OutputObjectState::try_from(s).ok())
                 .unwrap_or(OutputObjectState::Unknown);
             match state {
-                OutputObjectState::ObjectWrite | OutputObjectState::PackageWrite => {
+                OutputObjectState::ObjectWrite => {
                     let version = changed
                         .output_version
                         .context("written ChangedObject is missing output_version")?;
@@ -150,9 +156,19 @@ impl TxView {
                     changes.push(TxChange::Written(Box::new(object)));
                 }
                 OutputObjectState::DoesNotExist => changes.push(TxChange::Deleted { id }),
-                // Accumulator writes and unknown future states don't
-                // fit the object-contents shape; ignore them.
-                _ => {}
+                // The package object carries no mirrored state — the
+                // upgrade is derived from the root's `UpgradeCap` — so
+                // demanding it from the object set would only risk
+                // failing the frame over contents we discard.
+                OutputObjectState::PackageWrite => {}
+                // An accumulator value is not object contents.
+                OutputObjectState::AccumulatorWrite => {}
+                // `Unknown` (an absent or unrecognized discriminant)
+                // today, and whatever a future SDK adds tomorrow —
+                // `OutputObjectState` is `#[non_exhaustive]`, so this
+                // arm cannot be dropped. Either way the object's fate is
+                // undetermined, which is a mirror gap, not a no-op.
+                _ => unknown_output_states.push(id),
             }
         }
 
@@ -174,6 +190,7 @@ impl TxView {
             )
             .context("invalid ExecutedTransaction timestamp")?,
             changes,
+            unknown_output_states,
         }))
     }
 }
@@ -224,7 +241,14 @@ pub(super) fn apply_transaction(
     index: &mut ObjectIndex,
     tx: &TxView,
 ) -> ApplyOutcome {
-    let mut out = ApplyOutcome::default();
+    let mut out = ApplyOutcome {
+        unrouted: tx
+            .unknown_output_states
+            .iter()
+            .map(|id| (*id, "unknown output_state".into()))
+            .collect(),
+        ..Default::default()
+    };
 
     // Pass 1: the Hashi root and the BitcoinState dynamic field.
     for change in &tx.changes {
@@ -234,7 +258,7 @@ pub(super) fn apply_transaction(
         if obj.object_id() == routing.hashi_id() {
             apply_root(hashi, routing, index, obj, &mut out);
         } else if obj.object_id() == routing.bitcoin_state_field_id() {
-            apply_bitcoin_state(routing, index, obj, &mut out);
+            apply_bitcoin_state(routing, index, obj);
         }
     }
 
@@ -385,12 +409,7 @@ fn apply_root(
     index.record(id, obj.version(), TrackedKind::HashiRoot);
 }
 
-fn apply_bitcoin_state(
-    routing: &mut RoutingTable,
-    index: &mut ObjectIndex,
-    obj: &Object,
-    _out: &mut ApplyOutcome,
-) {
+fn apply_bitcoin_state(routing: &mut RoutingTable, index: &mut ObjectIndex, obj: &Object) {
     let id = obj.object_id();
     if index.is_stale_write(&id, obj.version()) {
         return;
@@ -898,6 +917,7 @@ mod tests {
             transaction_index: 0,
             timestamp_ms: 1_000,
             changes,
+            unknown_output_states: Vec::new(),
         }
     }
 
@@ -1574,5 +1594,83 @@ mod tests {
             .expect("successful transaction decodes to a view");
         assert_eq!(view.position(), (7, 0));
         assert_eq!(view.timestamp_ms, 1_234);
+    }
+
+    /// A successful proto transaction carrying `changed`, with the
+    /// position and timestamp fields `from_proto` requires.
+    fn proto_tx(changed: Vec<proto::ChangedObject>) -> proto::ExecutedTransaction {
+        let mut status = proto::ExecutionStatus::default();
+        status.success = Some(true);
+        let mut effects = proto::TransactionEffects::default();
+        effects.status = Some(status);
+        effects.changed_objects = changed;
+        let mut proto_tx = proto::ExecutedTransaction::default();
+        proto_tx.effects = Some(effects);
+        proto_tx.set_checkpoint(7);
+        proto_tx.set_transaction_index(0);
+        proto_tx.timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(1_234));
+        proto_tx
+    }
+
+    fn changed_object(id: Address, state: Option<OutputObjectState>) -> proto::ChangedObject {
+        let mut changed = proto::ChangedObject::default();
+        changed.object_id = Some(id.to_string());
+        changed.output_state = state.map(|state| state as i32);
+        changed.output_version = Some(3);
+        changed
+    }
+
+    #[test]
+    fn package_writes_do_not_need_the_package_object() {
+        // The package object is never mirrored — the upgrade is derived
+        // from the root's UpgradeCap — so an upgrade transaction must
+        // decode even with nothing for it in the object set.
+        let proto_tx = proto_tx(vec![changed_object(
+            addr(0x80),
+            Some(OutputObjectState::PackageWrite),
+        )]);
+        let view = TxView::from_proto(&proto_tx)
+            .unwrap()
+            .expect("successful transaction decodes to a view");
+        assert!(view.changes.is_empty());
+        assert!(view.unknown_output_states.is_empty());
+    }
+
+    #[test]
+    fn unknown_output_state_trips_the_unrouted_counter() {
+        let id = addr(0x81);
+        let view = TxView::from_proto(&proto_tx(vec![changed_object(id, None)]))
+            .unwrap()
+            .expect("successful transaction decodes to a view");
+        assert_eq!(view.unknown_output_states, vec![id]);
+        assert!(view.changes.is_empty());
+
+        // An uninterpretable state is a potential mirror gap, so it has
+        // to reach the tripwire rather than be skipped.
+        let out = Fixture::new().apply(&view);
+        assert_eq!(out.unrouted.len(), 1);
+        assert_eq!(out.unrouted[0].0, id);
+    }
+
+    #[test]
+    fn failed_transactions_drop_before_the_object_set_is_decoded() {
+        let mut bcs = proto::Bcs::default();
+        bcs.value = Some(vec![0xff; 4].into());
+        let mut object = proto::Object::default();
+        object.bcs = Some(bcs);
+        let mut objects = proto::ObjectSet::default();
+        objects.objects = vec![object];
+
+        let mut status = proto::ExecutionStatus::default();
+        status.success = Some(false);
+        let mut effects = proto::TransactionEffects::default();
+        effects.status = Some(status);
+        let mut proto_tx = proto::ExecutedTransaction::default();
+        proto_tx.effects = Some(effects);
+        proto_tx.objects = Some(objects);
+
+        // Undecodable contents on a failed transaction must not fail the
+        // frame; nothing from it reaches the mirror anyway.
+        assert!(TxView::from_proto(&proto_tx).unwrap().is_none());
     }
 }
