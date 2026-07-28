@@ -561,7 +561,14 @@ fn apply_write(
                         hashi
                             .committees
                             .committees_mut()
-                            .insert(epoch, super::convert_move_committee(field.value));
+                            .insert(epoch, super::convert_move_committee(field.value.clone()));
+                        // Keep the verbatim on-chain committee too: it is
+                        // the only form a `CommitteeTransitionRequest`
+                        // may embed (see `CommitteeSet::raw_committees`).
+                        hashi
+                            .committees
+                            .raw_committees_mut()
+                            .insert(epoch, field.value);
                         TrackedKind::Committee(epoch)
                     },
                 )
@@ -689,12 +696,18 @@ fn apply_write(
 /// Insert a committee handoff, converting through the raw Move
 /// committee its certificate signs. Returns false when the referenced
 /// committee is unknown (the mirror can't validate the cert shape).
+///
+/// The committee embedded in the stored transition is the verbatim
+/// on-chain one: Move's `submit_committee_handoff` verified this cert
+/// over a `CommitteeTransitionRequest` rebuilt from the stored
+/// committee, so those are the only bytes the cert matches (see
+/// `CommitteeSet::raw_committees`).
 fn apply_committee_handoff(
     hashi: &mut types::Hashi,
     from_epoch: u64,
     handoff: move_types::CommitteeHandoff,
 ) -> bool {
-    let Some(next_committee) = hashi.committees.committees().get(&handoff.next_epoch) else {
+    let Some(raw) = hashi.committees.raw_committee(handoff.next_epoch).cloned() else {
         tracing::error!(
             from_epoch,
             next_epoch = handoff.next_epoch,
@@ -702,7 +715,6 @@ fn apply_committee_handoff(
         );
         return false;
     };
-    let raw = move_types::Committee::from(next_committee);
     match super::convert_move_committee_handoff(handoff, raw) {
         Ok(signed) => {
             hashi
@@ -739,6 +751,7 @@ fn retire(
         }
         TrackedKind::Committee(epoch) => {
             hashi.committees.committees_mut().remove(epoch);
+            hashi.committees.raw_committees_mut().remove(epoch);
         }
         TrackedKind::CommitteeHandoff(epoch) => {
             hashi.committees.committee_handoffs_mut().remove(epoch);
@@ -1670,5 +1683,94 @@ mod tests {
         assert_eq!(out.unrouted.len(), 1);
         assert_eq!(out.unrouted[0].0, addr(0x51));
         assert!(out.unrouted[0].1.contains("output_state"));
+    }
+
+    /// Move's `submit_committee_handoff` verifies the handoff cert over
+    /// a `CommitteeTransitionRequest` rebuilt from the stored on-chain
+    /// committee, so the mirror must store the verbatim on-chain
+    /// committee in the transition — even when a member's encryption
+    /// key bytes do not parse and the enriched view substitutes the
+    /// fallback key.
+    #[test]
+    fn handoff_stores_the_raw_onchain_committee() {
+        use fastcrypto::traits::KeyPair as _;
+        use fastcrypto::traits::Signer as _;
+
+        let mut fixture = Fixture::new();
+        let mut rng = rand::thread_rng();
+        let keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+
+        // 32 bytes that are not a valid ristretto point; Move only
+        // asserts the length.
+        let junk_key = vec![0xFF; 32];
+        let raw_committee = move_types::Committee {
+            epoch: 9,
+            members: vec![move_types::CommitteeMember {
+                validator_address: addr(0x21),
+                public_key: fastcrypto::traits::ToFromBytes::as_bytes(keypair.public()).to_vec(),
+                encryption_public_key: junk_key.clone(),
+                weight: 1,
+            }],
+            total_weight: 1,
+            config: move_types::Config::from_entries(vec![]),
+        };
+        let committee_field = obj(
+            field_tag(TypeTag::U64, hashi_struct("committee", "Committee", vec![])),
+            1,
+            Owner::Object(committees_id()),
+            bcs::to_bytes(&FieldEnc {
+                id: addr(0x22),
+                name: 9u64,
+                value: raw_committee.clone(),
+            })
+            .unwrap(),
+        );
+
+        let signature: fastcrypto::bls12381::min_pk::BLS12381Signature = keypair.sign(b"handoff");
+        let handoff_field = obj(
+            field_tag(
+                hashi_struct("committee_set", "CommitteeHandoffKey", vec![]),
+                hashi_struct("committee_set", "CommitteeHandoff", vec![]),
+            ),
+            1,
+            Owner::Object(committees_id()),
+            bcs::to_bytes(&FieldEnc {
+                id: addr(0x23),
+                name: move_types::CommitteeHandoffKey { epoch: 7 },
+                value: move_types::CommitteeHandoff {
+                    next_epoch: 9,
+                    cert: move_types::CommitteeSignature {
+                        epoch: 7,
+                        signature: fastcrypto::traits::ToFromBytes::as_bytes(&signature).to_vec(),
+                        signers_bitmap: vec![1],
+                    },
+                },
+            })
+            .unwrap(),
+        );
+
+        let out = fixture.apply(&tx(vec![written(committee_field), written(handoff_field)]));
+        assert!(out.unrouted.is_empty(), "unrouted: {:?}", out.unrouted);
+
+        // The enriched view substitutes the fallback key for local use.
+        let enriched = fixture.hashi.committees.committees().get(&9).unwrap();
+        assert_eq!(
+            *enriched.members()[0].encryption_public_key(),
+            crate::mpc::fallback_encryption_public_key(),
+        );
+
+        // The stored transition embeds the verbatim on-chain committee,
+        // junk key bytes included — the only payload the cert matches.
+        let stored = fixture
+            .hashi
+            .committees
+            .committee_handoffs()
+            .get(&7)
+            .unwrap();
+        assert_eq!(stored.message().new_committee, raw_committee);
+        assert_eq!(
+            stored.message().new_committee.members[0].encryption_public_key,
+            junk_key
+        );
     }
 }

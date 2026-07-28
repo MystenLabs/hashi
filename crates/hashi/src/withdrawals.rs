@@ -859,9 +859,11 @@ impl Hashi {
             anyhow::bail!("not a member of the committee at epoch {from_epoch}");
         }
 
-        let transition = hashi_types::guardian::CommitteeTransitionRequest {
-            new_committee: hashi_types::move_types::Committee::from(&new_committee),
-        };
+        // The verbatim on-chain committee: Move's
+        // `submit_committee_handoff` verifies the aggregated cert over a
+        // `CommitteeTransitionRequest` it rebuilds from the stored
+        // committee, so these are the only bytes worth signing.
+        let transition = hashi_types::guardian::CommitteeTransitionRequest { new_committee };
 
         let signature = self.sign_message_proto_at_epoch(&transition, from_epoch)?;
         self.store_committee_handoff_signature(from_epoch, signature.clone());

@@ -350,11 +350,13 @@ impl LeaderService {
             .ok_or_else(|| {
                 anyhow::anyhow!("no on-chain committee transition from epoch {from_epoch}")
             })?;
-        let to_epoch = new_committee.epoch();
+        let to_epoch = new_committee.epoch;
 
-        let transition = CommitteeTransitionRequest {
-            new_committee: hashi_types::move_types::Committee::from(&new_committee),
-        };
+        // The verbatim on-chain committee: Move's
+        // `submit_committee_handoff` verifies the aggregated cert over a
+        // `CommitteeTransitionRequest` it rebuilds from the stored
+        // committee, and every member signed exactly these bytes.
+        let transition = CommitteeTransitionRequest { new_committee };
         let required_weight = certificate_threshold(from_committee.total_weight());
 
         let proto_request = SignCommitteeTransitionRequest { from_epoch };
