@@ -102,11 +102,13 @@ impl TxView {
     /// `Ok(None)` for transactions that did not execute successfully —
     /// their object changes are gas-only and carry no Hashi state.
     pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
-        let mut pool = decode_object_pool(tx.objects.as_ref())?;
         let effects = tx
             .effects
             .as_ref()
             .context("ExecutedTransaction is missing effects")?;
+        // Check success before decoding the object set: a failed
+        // transaction's changes are gas-only and discarded, so its
+        // objects are neither worth decoding nor worth failing on.
         if !effects
             .status
             .as_ref()
@@ -115,6 +117,7 @@ impl TxView {
         {
             return Ok(None);
         }
+        let mut pool = decode_object_pool(tx.objects.as_ref())?;
 
         let mut changes = Vec::new();
         for changed in &effects.changed_objects {
