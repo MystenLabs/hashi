@@ -372,8 +372,8 @@ pub struct HashiNetworkBuilder {
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
     /// Node index whose Sui RPC connection is routed through a severable
-    /// [`TcpProxy`], so tests can simulate a fullnode outage for that
-    /// node alone.
+    /// [`TcpProxy`](crate::tcp_proxy::TcpProxy), so tests can simulate a
+    /// fullnode outage for that node alone.
     pub sui_rpc_proxy_node: Option<usize>,
 }
 
