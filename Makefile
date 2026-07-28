@@ -20,8 +20,8 @@ fmt-buf: ## Format protobuf files
 
 .PHONY: fmt-move
 fmt-move: ## Format Move code
-	cd packages && prettier-move -w "*/sources/**/*.move"
-	cd packages && prettier-move -w "*/tests/**/*.move"
+	cd packages && prettier-move -w "**/sources/**/*.move"
+	cd packages && prettier-move -w "**/tests/**/*.move"
 
 .PHONY: buf-lint
 buf-lint: ## Run buf lint
@@ -34,7 +34,8 @@ test: ## Run all tests
 
 .PHONY: test-move
 test-move: ## Run all move tests
-	ls -d packages/*/ | xargs -I {} bash -c "sui move test --path '{}'"
+	find packages -name Move.toml -not -path "*/build/*" -exec dirname {} \; \
+	  | xargs -I {} bash -c "sui move test --path '{}'"
 
 .PHONY: proto
 proto: ## Build proto files

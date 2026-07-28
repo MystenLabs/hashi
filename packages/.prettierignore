@@ -1,1 +1,4 @@
-hashi-v*/
+hashi/v1/
+
+# Generated + vendored dependency sources; the widened glob reaches them.
+**/build/

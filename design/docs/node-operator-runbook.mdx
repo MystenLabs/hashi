@@ -867,7 +867,7 @@ hashi config on-chain
 
 ```bash
 # Build and propose (CLI verifies PACKAGE_VERSION is incremented)
-hashi proposal create upgrade --package-path /path/to/packages/hashi
+hashi proposal create upgrade --package-path /path/to/packages/hashi/<new-version>
 
 # Vote (--execute is NOT supported for Upgrade proposals)
 hashi proposal vote 0x<proposal-id>

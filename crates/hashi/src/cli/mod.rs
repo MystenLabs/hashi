@@ -631,7 +631,7 @@ pub struct PublishOpts {
     pub sui_rpc_url: String,
 
     /// Path to the Move package directory
-    #[clap(long, short = 'p', default_value = "packages/hashi")]
+    #[clap(long, short = 'p', default_value = "packages/hashi/v2")]
     pub package_path: std::path::PathBuf,
 
     /// Path to the `sui` CLI binary

@@ -2,6 +2,11 @@ name: Move CI
 
 on:
   pull_request:
+  workflow_dispatch:
+  # The freeze invariant spans the directory set and the pin set, which different PRs touch, so
+  # two individually-green PRs can merge into an inconsistent main. Re-check the default branch.
+  schedule:
+    - cron: "0 2 * * *"
 
 permissions:
   contents: read
@@ -17,28 +22,68 @@ jobs:
       - uses: actions/checkout@v7
       - run: |
           shopt -s nullglob
-          for dir in "${MOVE_PACKAGES_PATH}"/hashi-v*/; do
-            dir="${dir%/}"
-            pin="${dir}.frozen"
-            if [ ! -f "$pin" ]; then
-              echo "::error::$dir has no $pin. Add: git rev-parse HEAD:$dir"
-              exit 1
-            fi
+          # Every pin must have a snapshot whose tree still matches it. Found by name at any
+          # depth: a pin left behind by a move would be invisible to a fixed-depth glob.
+          while IFS= read -r pin; do
+            dir="${pin%.frozen}"
             expected=$(grep -v '^#' "$pin" | tr -d '[:space:]')
-            # Without this an empty or malformed pin compares as "" and blames the snapshot.
             if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{40}$'; then
               echo "::error::$pin is not a 40-character tree hash."
               exit 1
             fi
-            # Tolerated so the message below prints instead of a bare git fatal.
             if ! actual=$(git rev-parse "HEAD:$dir" 2>/dev/null); then
-              echo "::error::$dir is gone but $pin remains; retiring drops both."
+              echo "::error::$pin has no $dir. Retiring a snapshot drops both together."
               exit 1
             fi
             if [ "$expected" != "$actual" ]; then
               echo "::error::$dir changed (tree $actual, pinned $expected)."
-              echo "It is a published package's source — change ${MOVE_PACKAGES_PATH}/hashi instead."
-              echo "Re-pin only when deliberately replacing the snapshot: set $pin to $actual"
+              echo "It is the source of a published package — change the live package instead."
+              echo "Re-pinning redefines what 'deployed' means: only when deliberately replacing"
+              echo "the snapshot, noted in the PR description, set $pin to $actual"
+              exit 1
+            fi
+            # A pinned dir the formatter can still reach is a trap: a plugin release rewrites it,
+            # which trips the check above, and the fix is blocked until the ignore is updated.
+            grep -qxF "$dir/" .prettierignore \
+              || { echo "::error::$dir is pinned but not ignored in .prettierignore (add '$dir/')."; exit 1; }
+            grep -qxF "${dir#${MOVE_PACKAGES_PATH}/}/" "${MOVE_PACKAGES_PATH}/.prettierignore" \
+              || { echo "::error::$dir is pinned but not ignored in ${MOVE_PACKAGES_PATH}/.prettierignore (add '${dir#${MOVE_PACKAGES_PATH}/}/')."; exit 1; }
+          done < <(find "${MOVE_PACKAGES_PATH}" -name '*.frozen' | sort)
+          # Within each family, the highest vN is live; every lower one must be pinned, the live
+          # one must not be, and the paths that publish it must name it.
+          for family in "${MOVE_PACKAGES_PATH}"/*/; do
+            versions=()
+            for dir in "$family"v*/; do
+              dir="${dir%/}"
+              # vN only — a sibling like v2-upgrade or vendor/ is not a version.
+              [[ "$(basename "$dir")" =~ ^v[0-9]+$ ]] && versions+=("$dir")
+            done
+            [ ${#versions[@]} -eq 0 ] && continue
+            live=$(printf '%s\n' "${versions[@]}" | sort -V | tail -1)
+            for dir in "${versions[@]}"; do
+              if [ "$dir" != "$live" ] && [ ! -f "${dir}.frozen" ]; then
+                echo "::error::$dir is not the live package but has no ${dir}.frozen pinning it."
+                echo "Add one with: git rev-parse HEAD:$dir"
+                exit 1
+              fi
+            done
+            if [ -f "${live}.frozen" ]; then
+              echo "::error::$live is the live package but is pinned by ${live}.frozen."
+              echo "A pinned package cannot be edited; either cut a newer version or drop the pin."
+              exit 1
+            fi
+            # The publish paths are hardcoded and must move when a version is cut. A stale one
+            # fresh-publishes the frozen package with no error, so check the in-repo ones here.
+            rel="${live#${MOVE_PACKAGES_PATH}/}"
+            stale=""
+            grep -q "DEFAULT_MOVE_PACKAGE_DIR: &str = \"$rel\"" crates/e2e-tests/src/publish.rs \
+              || stale="$stale crates/e2e-tests/src/publish.rs"
+            grep -q "default_value = \"${MOVE_PACKAGES_PATH}/$rel\"" crates/hashi/src/cli/mod.rs \
+              || stale="$stale crates/hashi/src/cli/mod.rs"
+            if [ -n "$stale" ]; then
+              echo "::error::live package is $live but these still name an older version:$stale"
+              echo "Also update --package-path in the infra deploy workflow — CI cannot see it,"
+              echo "and a stale path there fresh-publishes the wrong version silently."
               exit 1
             fi
           done
@@ -65,5 +110,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: sui --version; mvr --version
-      - run: ls -d ./*/ | xargs -I {} bash -c "sui move build --path '{}'"
-      - run: ls -d ./*/ | xargs -I {} bash -c "sui move test --path '{}'"
+      - run: find . -name Move.toml -not -path "*/build/*" -exec dirname {} \; | xargs -I {} bash -c "sui move build --path '{}'"
+      - run: find . -name Move.toml -not -path "*/build/*" -exec dirname {} \; | xargs -I {} bash -c "sui move test --path '{}'"

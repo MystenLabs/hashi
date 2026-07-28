@@ -9,9 +9,9 @@ use sui_rpc::Client;
 
 use crate::sui_network::sui_binary;
 
-pub const DEFAULT_MOVE_PACKAGE_DIR: &str = "hashi";
+pub const DEFAULT_MOVE_PACKAGE_DIR: &str = "hashi/v2";
 
-pub const FROZEN_V1_MOVE_PACKAGE_DIR: &str = "hashi-v1";
+pub const FROZEN_V1_MOVE_PACKAGE_DIR: &str = "hashi/v1";
 
 pub async fn publish(
     dir: &Path,

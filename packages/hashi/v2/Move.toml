@@ -1,0 +1,6 @@
+[package]
+name = "hashi"
+edition = "2024.beta"
+
+[dependencies]
+sui_system = { system = "sui_system" }

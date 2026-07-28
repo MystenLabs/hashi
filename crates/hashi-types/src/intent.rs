@@ -15,7 +15,7 @@
 //! The wire value is the discriminant, taken via `as u16` — never serde's enum
 //! encoding (which is the variant index, not the discriminant).
 //!
-//! This registry mirrors `packages/hashi/sources/core/intent.move`; the two
+//! This registry mirrors `packages/hashi/v2/sources/core/intent.move`; the two
 //! MUST stay in sync — `intent_values_are_stable` below pins the on-wire
 //! values so the Rust side cannot drift silently, and the e2e suite is the
 //! true cross-language check. Allocation blocks, one per domain, with room to
@@ -84,7 +84,7 @@ mod tests {
     use super::Intent;
 
     /// The intent discriminants are the on-wire signing domain and MUST match
-    /// `packages/hashi/sources/core/intent.move` exactly. Renumbering here (or
+    /// `packages/hashi/v2/sources/core/intent.move` exactly. Renumbering here (or
     /// there) breaks every committee signature across the language boundary.
     #[test]
     fn intent_values_are_stable() {
