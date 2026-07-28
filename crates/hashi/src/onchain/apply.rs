@@ -156,13 +156,23 @@ impl TxView {
             }
         }
 
+        // The bare prost accessors default missing fields to zero; a
+        // zeroed position would fall below the delivery ratchet and the
+        // transaction would be dropped silently, and a zeroed timestamp
+        // would corrupt the limiter window. Fail the frame instead —
+        // the watcher reconnects and replays.
         Ok(Some(Self {
-            checkpoint: tx.checkpoint(),
-            transaction_index: tx.transaction_index(),
-            timestamp_ms: tx
-                .timestamp
-                .and_then(|t| proto_to_timestamp_ms(t).ok())
-                .unwrap_or(0),
+            checkpoint: tx
+                .checkpoint_opt()
+                .context("ExecutedTransaction is missing checkpoint")?,
+            transaction_index: tx
+                .transaction_index_opt()
+                .context("ExecutedTransaction is missing transaction_index")?,
+            timestamp_ms: proto_to_timestamp_ms(
+                tx.timestamp
+                    .context("ExecutedTransaction is missing timestamp")?,
+            )
+            .context("invalid ExecutedTransaction timestamp")?,
             changes,
         }))
     }
@@ -1539,5 +1549,30 @@ mod tests {
         assert!(out.unrouted.is_empty());
         assert!(out.effects.is_empty());
         assert_eq!(fixture.index.len(), 0);
+    }
+
+    #[test]
+    fn from_proto_rejects_missing_position_or_timestamp() {
+        let mut proto_tx = proto::ExecutedTransaction::default();
+        let mut effects = proto::TransactionEffects::default();
+        let mut status = proto::ExecutionStatus::default();
+        status.success = Some(true);
+        effects.status = Some(status);
+        proto_tx.effects = Some(effects);
+
+        // The bare prost accessors default to zero, and position (0, 0)
+        // sits below any delivery ratchet — each missing field must fail
+        // the frame instead of silently dropping the transaction.
+        assert!(TxView::from_proto(&proto_tx).is_err());
+        proto_tx.set_checkpoint(7);
+        assert!(TxView::from_proto(&proto_tx).is_err());
+        proto_tx.set_transaction_index(0);
+        assert!(TxView::from_proto(&proto_tx).is_err());
+        proto_tx.timestamp = Some(sui_rpc::proto::timestamp_ms_to_proto(1_234));
+        let view = TxView::from_proto(&proto_tx)
+            .unwrap()
+            .expect("successful transaction decodes to a view");
+        assert_eq!(view.position(), (7, 0));
+        assert_eq!(view.timestamp_ms, 1_234);
     }
 }
