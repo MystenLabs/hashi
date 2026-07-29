@@ -32,11 +32,22 @@ pub struct GuardianGrpc {
 fn to_status(e: GuardianError) -> Status {
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
+        Unauthenticated(msg) => Status::unauthenticated(msg),
+        BuildNotAllowlisted(msg) | BuildNotCurrent(msg) => Status::failed_precondition(msg),
+        LifecycleMismatch { expected, actual } => Status::failed_precondition(format!(
+            "expected enclave lifecycle {expected:?}, but enclave is {actual:?}"
+        )),
+        // Guardian reserves `Aborted` and `ResourceExhausted` exclusively for
+        // limiter sequence mismatches and rate limiting, respectively, so
+        // Hashi can classify them without parsing error messages.
+        LimiterSequenceMismatch { expected, actual } => Status::aborted(format!(
+            "limiter sequence mismatch: expected {expected}, got {actual}"
+        )),
+        RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
+        S3Error(msg) => Status::internal(msg),
+        InvalidS3Log(msg) => Status::internal(msg),
         InternalError(msg) => Status::internal(msg),
         Unavailable(msg) => Status::unavailable(msg),
-        S3Error(msg) => Status::internal(msg),
-        EnclaveUninitialized => Status::failed_precondition("Enclave is not fully initialized"),
-        RateLimitExceeded => Status::internal("Rate limit exceeded"),
     }
 }
 

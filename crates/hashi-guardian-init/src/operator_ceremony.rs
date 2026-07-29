@@ -180,7 +180,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    and sanity-check the shape; keep the now-verified BTC master pubkey.
     let response = signed_resp
         .verify(&signing_pub_key)
-        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))?;
+        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e}"))?;
     let live = CeremonyState::from(response);
     live.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(

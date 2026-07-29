@@ -454,7 +454,11 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
     activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
         .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
-    assert!(enclave.is_fully_initialized());
+    assert_eq!(
+        enclave.lifecycle(),
+        WithdrawStage::Activated.into(),
+        "test activation should reach the activated lifecycle"
+    );
     assert!(enclave.temporary_init_state().is_err());
     enclave
 }
