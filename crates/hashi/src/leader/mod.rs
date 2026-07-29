@@ -110,6 +110,12 @@ pub(crate) struct LeaderService {
     // Arms the cleanup scan: set at boot (crash recovery), when a withdrawal
     // confirms on Sui, and after a cleanup task that did work or failed.
     utxo_cleanup_scan_needed: bool,
+    // Checkpoint the scan's mirror read must cover before deciding: the
+    // highest checkpoint a confirm tx landed in (monotonic). A scan from a
+    // mirror that has not applied the confirm's spent markings yet would
+    // find nothing and disarm, stranding the records until the next
+    // confirm. Zero at boot: the bootstrap mirror is fresh by construction.
+    utxo_cleanup_scan_target: u64,
 
     // Singleton task that reconciles the guardian committee with the on-chain committee.
     guardian_committee_reconcile_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -149,6 +155,7 @@ impl LeaderService {
             utxo_cleanup_gc_task: None,
             utxo_cleanup_retry: GlobalRetryTracker::new(),
             utxo_cleanup_scan_needed: true,
+            utxo_cleanup_scan_target: 0,
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
         }
@@ -213,6 +220,7 @@ impl LeaderService {
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
+        let mut was_leader = false;
 
         loop {
             trace!("Waiting for next checkpoint or task completion...");
@@ -230,8 +238,13 @@ impl LeaderService {
                     let is_leader = self.is_current_leader(checkpoint_height);
                     self.inner.metrics.is_leader.set(i64::from(is_leader));
                     if is_leader {
+                        was_leader = true;
                         debug!("Checkpoint {checkpoint_height}: We are the leader node");
                     } else {
+                        if was_leader {
+                            self.reset_approved_deposit_metrics();
+                            was_leader = false;
+                        }
                         trace!("We are not the leader node");
                         continue;
                     }

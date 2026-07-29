@@ -25,6 +25,7 @@ pub mod guardian_harness;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
+pub mod tcp_proxy;
 pub mod test_helpers;
 pub mod upgrade_flow;
 
@@ -210,17 +211,18 @@ impl TestNetworksBuilder {
         self
     }
 
+    /// Route the given node's Sui RPC connection through a severable
+    /// proxy (`hashi_network.sui_rpc_proxy()`), so a test can simulate a
+    /// fullnode outage for that node alone.
+    pub fn with_sui_rpc_proxy_for_node(mut self, node_index: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_sui_rpc_proxy_for_node(node_index);
+        self
+    }
+
     pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
         self.hashi_builder = self
             .hashi_builder
             .with_corrupt_shares_target(target_node_index);
-        self
-    }
-
-    pub fn with_presignature_derivation_activation_epoch(mut self, epoch: u64) -> Self {
-        self.hashi_builder = self
-            .hashi_builder
-            .with_presignature_derivation_activation_epoch(epoch);
         self
     }
 
@@ -355,9 +357,9 @@ impl TestNetworksBuilder {
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
         // The launch tx writes guardian_url with no event; nodes booted
-        // pre-launch learn it only via the watcher's config poll. Gate BEFORE
-        // the override proposals — their config refresh would mask a broken
-        // poll (genesis end_reconfig losers rescrape and heal incidentally).
+        // pre-launch learn it from the object mirror applying the root
+        // write. Gate BEFORE the override proposals so a broken mirror
+        // path can't hide behind their config-refreshing writes.
         if nodes_started {
             futures::future::try_join_all(
                 test_networks
@@ -1403,7 +1405,7 @@ mod tests {
         let ids = test_networks.hashi_network().ids();
 
         let (state, _service) =
-            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None, None).await?;
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
@@ -1421,12 +1423,24 @@ mod tests {
             .wait_for_mpc_key(DKG_TIMEOUT)
             .await?;
 
-        // Validate subscribing works by just updating a validator's onchain info
+        // Validate subscribing works by updating a validator's onchain info.
+        // The key must actually differ from the registered one: protocol v76's
+        // minimize_child_object_mutations fingerprints child writes and elides
+        // value-identical ones from effects, so re-submitting the current key
+        // is a no-op the object mirror correctly does not notify about.
         let mut reciever = state.subscribe();
 
         let client = test_networks.sui_network().client.clone();
         let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
-        super::hashi_network::update_tls_public_key(client, v1_config)
+        let mut updated_config = v1_config.clone();
+        use ed25519_dalek::pkcs8::EncodePrivateKey as _;
+        updated_config.tls_private_key = Some(
+            ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+                .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+                .unwrap()
+                .to_string(),
+        );
+        super::hashi_network::update_tls_public_key(client, &updated_config)
             .await
             .unwrap();
 
@@ -1442,15 +1456,16 @@ mod tests {
         Ok(())
     }
 
-    /// Verify that rescraping on-chain state correctly deserializes deposit
+    /// Verify that the bootstrap scrape correctly deserializes deposit
     /// requests from ObjectBag dynamic fields.
     ///
-    /// This catches BCS mismatches between the subscription path (which builds
-    /// objects from events) and the scrape path (which reads from ObjectBag
-    /// child objects). The subscription path may work while the scrape path
-    /// fails if the deserialization code uses the wrong field access method.
+    /// This catches BCS mismatches between the streaming path (which decodes
+    /// objects from transaction object sets) and the scrape path (which reads
+    /// from ObjectBag child objects). The streaming path may work while the
+    /// scrape path fails if the deserialization code uses the wrong field
+    /// access method.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_rescrape_with_existing_requests() -> Result<()> {
+    async fn test_scrape_with_existing_requests() -> Result<()> {
         let test_networks = TestNetworksBuilder::new()
             .with_nodes(4)
             .with_full_voting_power()
@@ -1474,18 +1489,15 @@ mod tests {
             .execute_create_deposit_request(dummy_txid, 0, 50_000, Some(hbtc_recipient))
             .await?;
 
-        // Wait briefly for the subscription path to pick up the event
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        // Now rescrape from chain — this exercises the ObjectBag deserialization
-        // path that reads child objects, not the subscription/event path.
-        hashi.onchain_state().rescrape().await?;
-
-        // Verify the deposit request survived the rescrape.
-        let deposit_requests = hashi.onchain_state().deposit_requests();
+        // Boot a fresh OnchainState now that the request exists on-chain:
+        // its bootstrap scrape must find the request in the ObjectBag.
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+        let (state, _service) =
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
         assert!(
-            !deposit_requests.is_empty(),
-            "Rescrape should find the deposit request in the ObjectBag"
+            !state.deposit_requests().is_empty(),
+            "The bootstrap scrape should find the deposit request in the ObjectBag"
         );
 
         Ok(())
@@ -2429,6 +2441,7 @@ mod tests {
             .signing_manager_for(epoch)
             .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
         let pool_size = signing_manager.initial_presig_count();
+        assert_pool_derivation(pool_size, &nodes[0]);
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
         let num_signings = pool_size + 1;
@@ -2461,7 +2474,7 @@ mod tests {
         Ok(())
     }
 
-    fn assert_pool_derivation(pool_size: usize, node: &HashiNodeHandle, expect_legacy: bool) {
+    fn assert_pool_derivation(pool_size: usize, node: &HashiNodeHandle) {
         let (w_total, w_node, t, f, bspw) = {
             let mpc_manager = node.hashi().mpc_manager().unwrap();
             let mgr = mpc_manager.read().unwrap();
@@ -2476,119 +2489,26 @@ mod tests {
                 mgr.batch_size_per_weight as usize,
             )
         };
-        let (c_expected, c_other) = if expect_legacy {
-            (f, t - 1)
-        } else {
-            (t - 1, f)
-        };
+        let consumed = t - 1;
         assert_ne!(
-            c_expected % w_node,
-            c_other % w_node,
-            "params cannot distinguish the two formulas"
+            consumed, f,
+            "params make t-1 and f coincide, so this cannot pin the derivation"
         );
         assert_eq!(pool_size % bspw, 0, "pool must be whole positions");
         let height = pool_size / bspw;
-        let w_out = height + c_expected;
+        let w_out = height + consumed;
         assert!(
             w_out.is_multiple_of(w_node) && t <= w_out && w_out <= w_total,
-            "pool of {pool_size} (height {height}) does not match the expected \
-             derivation (c = {c_expected}); it implies output weight {w_out}"
+            "pool of {pool_size} (height {height}) does not match privacy-threshold \
+             derivation (c = {consumed}); it implies output weight {w_out}"
         );
-        let gate = if expect_legacy {
-            2 * f + 1
-        } else {
-            w_total - f
-        };
+        let gate = w_total - f;
         let expected_w_out = w_node * gate.div_ceil(w_node);
         assert_eq!(
-            w_out,
-            expected_w_out,
-            "pool of {pool_size} implies output weight {w_out}, but the \
-             {} gate ({gate}) should collect {expected_w_out}",
-            if expect_legacy {
-                "legacy 2f+1"
-            } else {
-                "privacy-threshold W-f"
-            }
+            w_out, expected_w_out,
+            "pool of {pool_size} implies output weight {w_out}, but collecting to \
+             the W-f gate ({gate}) rounds to {expected_w_out}"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_presignature_derivation_version_flips_at_epoch_boundary() -> Result<()> {
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
-
-        let mut test_networks = TestNetworksBuilder::new()
-            .with_nodes(4)
-            .with_presignature_derivation_activation_epoch(1)
-            .build()
-            .await?;
-
-        let initial_epoch = {
-            let nodes = test_networks.hashi_network().nodes();
-            let mpc_key_futures: Vec<_> = nodes
-                .iter()
-                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
-                .collect();
-            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
-            for (i, result) in results.into_iter().enumerate() {
-                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
-            }
-            nodes[0].current_epoch().unwrap()
-        };
-        assert_eq!(
-            initial_epoch, 0,
-            "activation at epoch 1 assumes genesis at 0"
-        );
-
-        {
-            let nodes = test_networks.hashi_network().nodes();
-            let signing_manager = nodes[0]
-                .hashi()
-                .signing_manager_for(initial_epoch)
-                .expect("SigningManager for the initial epoch");
-            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], true);
-            let results = sign_on_all_nodes(
-                nodes,
-                b"derivation flip: legacy epoch",
-                initial_epoch,
-                sui_sdk_types::Address::new([0xD1; 32]),
-                0,
-                None,
-            )
-            .await;
-            assert_all_signatures_match(results);
-        }
-
-        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
-
-        {
-            let nodes = test_networks.hashi_network().nodes();
-            let epoch = initial_epoch + 1;
-            wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
-            let signing_manager = nodes[0]
-                .hashi()
-                .signing_manager_for(epoch)
-                .expect("SigningManager for the post-activation epoch");
-            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], false);
-            let results = sign_on_all_nodes(
-                nodes,
-                b"derivation flip: privacy-threshold epoch",
-                epoch,
-                sui_sdk_types::Address::new([0xD2; 32]),
-                0,
-                None,
-            )
-            .await;
-            assert_all_signatures_match(results);
-        }
-        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2761,6 +2681,7 @@ mod tests {
             .signing_manager_for(epoch)
             .expect("just waited for it");
         let pool_size = signing_manager.initial_presig_count();
+        assert_pool_derivation(pool_size, &nodes[0]);
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         let num_signings = pool_size + 1;
         let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;

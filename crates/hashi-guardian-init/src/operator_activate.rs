@@ -6,10 +6,15 @@
 
 use anyhow::Context;
 use anyhow::ensure;
+use hashi_guardian::HEARTBEAT_INTERVAL;
+use hashi_guardian::MAX_S3_WRITE_FAILURE_INTERVAL;
+use hashi_guardian::OTHER_SESSION_QUIET_PERIOD;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
+use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorActivateRequest;
@@ -18,10 +23,28 @@ use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
+use std::time::Duration;
+use tokio::time::Instant;
+use tokio::time::sleep_until;
 use tracing::info;
+use tracing::warn;
 
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
+
+// The live-session freshness threshold is intentionally shorter than the
+// writer's normal upper bound: one heartbeat interval plus the S3 write-failure
+// interval (six minutes). A not-live session may therefore still recover, and
+// ten minutes leaves an explicit operational buffer for that recovery.
+const CURRENT_SESSION_HEARTBEAT_RETRY_WINDOW: Duration = Duration::from_mins(10);
+const _: () = assert!(
+    HEARTBEAT_INTERVAL.as_secs() + MAX_S3_WRITE_FAILURE_INTERVAL.as_secs()
+        < CURRENT_SESSION_HEARTBEAT_RETRY_WINDOW.as_secs()
+);
+
+// Allow a prior guardian time to stop while retaining enough time to observe
+// the complete quiet period afterward.
+const ACTIVATION_HEARTBEAT_WAIT_BUFFER: Duration = Duration::from_mins(5);
 
 /// Activate a provisioner-initialized standby guardian.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -120,8 +143,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         session_id = %session_id,
         "checking that the standby session is live and all other sessions are quiet",
     );
-    reader
-        .ensure_session_live_and_others_quiet(&session_id)
+    wait_for_activation_heartbeat_conditions(&mut reader, &session_id)
         .await
         .context("heartbeat activation check failed")?;
 
@@ -218,6 +240,52 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     println!("  region:           {}", guardian_s3.region());
 
     Ok(())
+}
+
+async fn wait_for_activation_heartbeat_conditions(
+    reader: &mut GuardianReader,
+    session_id: &str,
+) -> GuardianResult<()> {
+    let now = Instant::now();
+    let current_session_deadline = now + CURRENT_SESSION_HEARTBEAT_RETRY_WINDOW;
+    let prior_session_deadline =
+        now + OTHER_SESSION_QUIET_PERIOD + ACTIVATION_HEARTBEAT_WAIT_BUFFER;
+    loop {
+        match reader
+            .ensure_session_live_and_others_quiet(session_id)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let deadline = match &error {
+                    GuardianError::CurrentSessionHeartbeatNotLive { .. } => {
+                        current_session_deadline
+                    }
+                    GuardianError::PriorSessionHeartbeatStillRecent { .. } => {
+                        prior_session_deadline
+                    }
+                    _ => return Err(error),
+                };
+                let Some(retry_after_secs) = error.retry_after_secs() else {
+                    return Err(error);
+                };
+                let retry_delay = Duration::from_secs(retry_after_secs);
+
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(error);
+                }
+
+                let retry_at = (now + retry_delay).min(deadline);
+                warn!(
+                    error = %error,
+                    retry_in_secs = retry_at.duration_since(now).as_secs(),
+                    "activation heartbeat conditions are not ready; retrying"
+                );
+                sleep_until(retry_at).await;
+            }
+        }
+    }
 }
 
 struct StandbyChecks {

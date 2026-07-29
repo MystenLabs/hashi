@@ -114,7 +114,10 @@ impl Hashi {
                 // already approved by the current committee. The on-chain
                 // `approve_deposit` would reject it anyway, so we don't
                 // want to waste a signature exchange or a transaction.
-                let current_epoch = self.onchain_state().epoch();
+                //
+                // Read from the held snapshot; `OnchainState::epoch()` would
+                // reacquire the same state lock.
+                let current_epoch = state.hashi().committees.epoch();
                 if let Some(cert) = &onchain_request.approval_cert
                     && cert.epoch == current_epoch
                 {
@@ -124,13 +127,7 @@ impl Hashi {
         }
 
         let utxo_pool = &state.hashi().utxo_pool;
-        if utxo_pool
-            .utxo_records()
-            .contains_key(&deposit_request.utxo.id)
-            || utxo_pool
-                .spent_utxos()
-                .contains_key(&deposit_request.utxo.id)
-        {
+        if utxo_pool.is_active_or_spent(&deposit_request.utxo.id) {
             return Err(UnapprovedDepositError::DuplicateOrSpentOnSui(anyhow!(
                 "UTXO {:?} is already active or spent",
                 deposit_request.utxo.id

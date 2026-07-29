@@ -231,7 +231,7 @@ fn validate_epoch_current_or_previous(
     Ok(())
 }
 
-fn signing_error_to_status(err: SigningError) -> Status {
+pub(crate) fn signing_error_to_status(err: SigningError) -> Status {
     match &err {
         SigningError::InvalidMessage { .. } => Status::invalid_argument(err.to_string()),
         SigningError::NotFound(_) => Status::not_found(err.to_string()),

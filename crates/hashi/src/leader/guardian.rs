@@ -76,23 +76,25 @@ impl LeaderService {
         let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
 
         let response_pb = rpc_result.map_err(|status| {
-            let (rpc_outcome, retry_label) = if status.message().contains("seq mismatch") {
-                (
+            let (rpc_outcome, retry_label) = match status.code() {
+                tonic::Code::Aborted => (
                     crate::metrics::GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH,
                     "GuardianSeqMismatch",
-                )
-            } else if status.message().contains("Rate limit exceeded") {
-                warn!("Guardian rate-limited withdrawal, will retry later");
-                (
-                    crate::metrics::GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
-                    "GuardianRateLimited",
-                )
-            } else {
-                error!("Guardian call failed: {}", status.message());
-                (
-                    crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
-                    "GuardianUnavailable",
-                )
+                ),
+                tonic::Code::ResourceExhausted => {
+                    warn!("Guardian rate-limited withdrawal, will retry later");
+                    (
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
+                        "GuardianRateLimited",
+                    )
+                }
+                _ => {
+                    error!("Guardian call failed: {}", status.message());
+                    (
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                        "GuardianUnavailable",
+                    )
+                }
             };
             Self::record_guardian_rpc_outcome(inner, rpc_outcome, rpc_elapsed);
             inner
@@ -344,30 +346,19 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         from_epoch: u64,
     ) -> anyhow::Result<SignedMessage<CommitteeTransitionRequest>> {
-        let (to_epoch, from_committee, new_committee) = {
-            let onchain = inner.onchain_state();
-            let state = onchain.state();
-            let committees_map = state.hashi().committees.committees();
-            let from = committees_map
-                .get(&from_epoch)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no on-chain committee for epoch {from_epoch}"))?;
-            // Hashi committee epochs are sparse: each reconfig only adds a
-            // new entry when Sui's epoch advances past hashi's AND the MPC
-            // reconfig completes, so the next entry is generally not
-            // `from_epoch + 1`. Both leader and followers derive the same
-            // `to_epoch` from on-chain state, so they sign the same transition.
-            let (to_epoch, to) = committees_map
-                .range((from_epoch + 1)..)
-                .next()
-                .map(|(&k, c)| (k, c.clone()))
-                .ok_or_else(|| anyhow::anyhow!("no on-chain committee epoch after {from_epoch}"))?;
-            (to_epoch, from, to)
-        };
+        let (from_committee, new_committee) = inner
+            .onchain_state()
+            .committee_transition(from_epoch)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no on-chain committee transition from epoch {from_epoch}")
+            })?;
+        let to_epoch = new_committee.epoch;
 
-        let transition = CommitteeTransitionRequest {
-            new_committee: hashi_types::move_types::Committee::from(&new_committee),
-        };
+        // The verbatim on-chain committee: Move's
+        // `submit_committee_handoff` verifies the aggregated cert over a
+        // `CommitteeTransitionRequest` it rebuilds from the stored
+        // committee, and every member signed exactly these bytes.
+        let transition = CommitteeTransitionRequest { new_committee };
         let required_weight = certificate_threshold(from_committee.total_weight());
 
         let proto_request = SignCommitteeTransitionRequest { from_epoch };

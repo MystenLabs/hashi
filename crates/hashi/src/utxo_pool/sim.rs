@@ -493,6 +493,17 @@ impl Simulator {
         }
     }
 
+    /// Distinct identity for a simulated ancestor. Ancestors are
+    /// deduplicated by id, so each must be unique.
+    fn fresh_ancestor_id(&mut self) -> sui_sdk_types::Address {
+        let n = self.next_id;
+        self.next_id += 1;
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&n.to_be_bytes());
+        bytes[31] = 0xa1;
+        sui_sdk_types::Address::new(bytes)
+    }
+
     fn fresh_utxo_id(&mut self) -> UtxoId {
         let n = self.next_id;
         self.next_id += 1;
@@ -555,12 +566,14 @@ impl Simulator {
                 continue;
             }
             let id = self.fresh_utxo_id();
+            let anc = self.fresh_ancestor_id();
             let candidate = UtxoCandidate {
                 id,
                 amount,
                 spend_path: SpendPath::TaprootScriptPath2of2,
                 status: UtxoStatus::Pending {
                     chain: vec![AncestorTx {
+                        id: anc,
                         confirmations: 0,
                         tx_weight: Weight::from_wu(800),
                         tx_fee: 500,
@@ -756,12 +769,14 @@ impl Simulator {
             }
 
             let id = self.fresh_utxo_id();
+            let anc = self.fresh_ancestor_id();
             let candidate = UtxoCandidate {
                 id,
                 amount: change,
                 spend_path: SpendPath::TaprootScriptPath2of2,
                 status: UtxoStatus::Pending {
                     chain: vec![AncestorTx {
+                        id: anc,
                         confirmations: 0,
                         tx_weight: Weight::from_wu(result.inputs.len() as u64 * 300 + 500),
                         tx_fee: result.fee,

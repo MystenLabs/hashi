@@ -1135,13 +1135,18 @@ impl SuiTxExecutor {
     /// move calls are needed, then signs and executes the resulting transaction.
     /// Returns `Ok(false)` if nothing needed to be updated.
     #[tracing::instrument(level = "info", skip_all)]
+    /// Returns the checkpoint the registration transaction landed in, or
+    /// `None` if the on-chain record was already up to date and no
+    /// transaction was needed. Callers that follow up with a mirror read
+    /// (the rejoin path) wait for the watermark to pass the returned
+    /// checkpoint first.
     pub async fn execute_register_or_update_validator(
         &mut self,
         config: &Config,
         operator_address: Option<Address>,
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<u64>> {
         let sender = self.signer.verifying_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
@@ -1155,7 +1160,7 @@ impl SuiTxExecutor {
         .await?;
 
         let Some(transaction) = transaction else {
-            return Ok(false);
+            return Ok(None);
         };
 
         let signature = self.signer.sign_transaction(&transaction)?;
@@ -1176,7 +1181,11 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(true)
+        let checkpoint = response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("register_validator response missing checkpoint"))?;
+        Ok(Some(checkpoint))
     }
 
     /// Execute a certificate submission transaction.
@@ -1575,11 +1584,14 @@ impl SuiTxExecutor {
         skip_all,
         fields(withdrawal_txn_id = %withdrawal_id),
     )]
+    /// Returns the checkpoint the confirm transaction landed in, so the
+    /// caller can wait for the object mirror to reflect the spent-UTXO
+    /// markings before deciding on a cleanup.
     pub async fn execute_confirm_withdrawal(
         &mut self,
         withdrawal_id: &Address,
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -1611,7 +1623,11 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        let checkpoint = response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("confirm_withdrawal response missing checkpoint"))?;
+        Ok(checkpoint)
     }
 
     /// Execute `withdraw::cleanup_spent_utxos` to finalize spent-UTXO

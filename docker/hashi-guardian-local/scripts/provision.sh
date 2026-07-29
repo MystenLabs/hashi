@@ -36,30 +36,10 @@ for i in $(seq 1 "${THRESHOLD}"); do
   hashi-guardian-init key-provisioner provision --config "${CONFIG}" --do-genesis
 done
 
-operator_activate() {
-  local deadline=$(( SECONDS + 180 )) out
-  render_config "${WITHDRAW_GUARDIAN_ENDPOINT:-http://host:3000}" ""
-  while :; do
-    if out="$(hashi-guardian-init operator activate --config "${CONFIG}" 2>&1)"; then
-      printf '%s\n' "${out}"
-      return 0
-    fi
-    printf '%s\n' "${out}" >&2
-    if ! grep -q "no heartbeat logs found for session" <<<"${out}"; then
-      return 1
-    fi
-    if [ "${SECONDS}" -ge "${deadline}" ]; then
-      echo "guardian still has no heartbeat after 180s — aborting activation." >&2
-      return 1
-    fi
-    echo "guardian has not heartbeated yet; waiting 10s before activation..." >&2
-    sleep 10
-  done
-}
-
 echo
 echo "== operator activate =="
-operator_activate
+render_config "${WITHDRAW_GUARDIAN_ENDPOINT:-http://host:3000}" ""
+hashi-guardian-init operator activate --config "${CONFIG}"
 
 echo
 echo "Provisioning and activation complete — the guardian should now be serving withdrawals."

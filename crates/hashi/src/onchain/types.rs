@@ -20,6 +20,7 @@ use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
 use hashi_types::guardian::CommitteeTransitionRequest;
+use hashi_types::move_types;
 use hashi_types::utils::Base64;
 
 // Re-export types from hashi-types that are used as-is (identical to the
@@ -64,6 +65,15 @@ pub struct CommitteeSet {
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
     committees: BTreeMap<u64, Committee>,
+    /// The verbatim on-chain committees, kept alongside the enriched
+    /// view. Move's `submit_committee_handoff` verifies the handoff
+    /// cert over a `CommitteeTransitionRequest` built from the stored
+    /// on-chain committee, so every transition the nodes sign or
+    /// mirror must embed exactly these bytes. The enriched view is for
+    /// local use only: it substitutes the fallback encryption key for
+    /// a member whose on-chain key bytes do not parse, and such a
+    /// substitution must never reach a signed payload.
+    raw_committees: BTreeMap<u64, move_types::Committee>,
     committee_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
@@ -125,6 +135,7 @@ impl CommitteeSet {
             mpc_public_key: Vec::new(),
             committees_id,
             committees: BTreeMap::new(),
+            raw_committees: BTreeMap::new(),
             committee_handoffs: BTreeMap::new(),
             tls_private_key: None,
             grpc_max_decoding_message_size: None,
@@ -161,6 +172,16 @@ impl CommitteeSet {
 
     pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, Committee> {
         &mut self.committees
+    }
+
+    /// The verbatim on-chain committee for `epoch`, the only form a
+    /// `CommitteeTransitionRequest` may embed (see `raw_committees`).
+    pub fn raw_committee(&self, epoch: u64) -> Option<&move_types::Committee> {
+        self.raw_committees.get(&epoch)
+    }
+
+    pub fn raw_committees_mut(&mut self) -> &mut BTreeMap<u64, move_types::Committee> {
+        &mut self.raw_committees
     }
 
     pub fn current_committee(&self) -> Option<&Committee> {
@@ -312,6 +333,19 @@ impl CommitteeSet {
         }
     }
 
+    /// Remove a member entirely: its info, TLS reverse mapping, and
+    /// cached client. Members are not removed by any current Move path,
+    /// but the object-driven watcher mirrors deletions faithfully.
+    pub fn remove_validator(&mut self, validator: &Address) {
+        if let Some(info) = self.members.remove(validator)
+            && let Some(tls_public_key) = &info.tls_public_key
+        {
+            self.tls_public_key_to_address
+                .remove(tls_public_key.as_bytes());
+        }
+        self.clients.remove(validator);
+    }
+
     pub fn set_epoch(&mut self, epoch: u64) -> &mut Self {
         self.epoch = epoch;
         self
@@ -328,8 +362,26 @@ impl CommitteeSet {
         self
     }
 
+    /// Install committees, deriving the raw view by round-tripping the
+    /// enriched one — exact when every member's encryption key is a
+    /// valid group element, which holds for the synthetic committees
+    /// tests build. The chain-fed paths (scrape and apply) install the
+    /// decoded on-chain committees via [`Self::set_raw_committees`] or
+    /// [`Self::raw_committees_mut`] instead of relying on this.
     pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
+        self.raw_committees = committees
+            .iter()
+            .map(|(epoch, committee)| (*epoch, move_types::Committee::from(committee)))
+            .collect();
         self.committees = committees;
+        self
+    }
+
+    pub fn set_raw_committees(
+        &mut self,
+        raw_committees: BTreeMap<u64, move_types::Committee>,
+    ) -> &mut Self {
+        self.raw_committees = raw_committees;
         self
     }
 
@@ -743,6 +795,10 @@ impl UtxoPool {
             .iter()
             .filter(|(_, r)| r.spent_by.is_none())
             .map(|(id, r)| (id, &r.utxo))
+    }
+
+    pub fn is_active_or_spent(&self, id: &UtxoId) -> bool {
+        self.utxo_records.contains_key(id) || self.spent_utxos.contains_key(id)
     }
 
     pub fn spent_utxos_id(&self) -> &Address {

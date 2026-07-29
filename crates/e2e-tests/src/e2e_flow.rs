@@ -34,6 +34,7 @@ mod tests {
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
+    use crate::test_helpers::wait_for_spent_utxo_cleanup;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -568,7 +569,7 @@ mod tests {
             .guardian_harness
             .as_ref()
             .expect("harness present after 2-of-2 cutover");
-        assert!(harness.enclave().is_fully_initialized());
+        assert!(harness.enclave().require_fully_initialized().is_ok());
 
         let deposit_amount_sats = 100_000u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -644,6 +645,11 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
+
+        // The confirm marked the withdrawal's inputs spent; the leader's GC
+        // must now clean them from its mirror, and the eventless cleanup
+        // deletions must reach every node's mirror via the object stream.
+        wait_for_spent_utxo_cleanup(&networks, Duration::from_secs(60)).await?;
 
         let guardian_state = networks
             .guardian_harness
@@ -1308,8 +1314,9 @@ mod tests {
             let checkpoint = match item {
                 Ok(checkpoint) => checkpoint,
                 Err(e) => {
-                    debug!("Error in checkpoint stream: {}", e);
-                    continue;
+                    return Err(anyhow!(
+                        "Checkpoint stream failed while waiting for {event_name}: {e}"
+                    ));
                 }
             };
             for txn in checkpoint.checkpoint().transactions() {
@@ -1334,7 +1341,6 @@ mod tests {
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Err(anyhow!("Checkpoint subscription ended unexpectedly"))
     }
@@ -1654,6 +1660,135 @@ mod tests {
         );
 
         info!("=== OnchainConfig Builder Override Test Passed ===");
+        Ok(())
+    }
+
+    /// Kill-and-reconnect: sever one node's Sui RPC connection, land
+    /// Hashi transactions during the outage, and verify the watcher's
+    /// replay path — not a re-bootstrap from a fresh scrape — recovers
+    /// them once the connection returns.
+    ///
+    /// The outage transactions are inert update-config proposals:
+    /// created but never voted on, each touches the Hashi root (so the
+    /// filtered stream must deliver it) and lands in the active
+    /// proposals bag where the recovered mirror must show it.
+    #[tokio::test]
+    async fn test_watcher_replay_recovers_outage_transactions() -> Result<()> {
+        use hashi::cli::client::CreateProposalParams;
+        use hashi::cli::client::build_create_proposal_transaction;
+        use hashi::cli::upgrade::extract_proposal_id_from_response;
+
+        init_test_logging();
+        info!("=== Starting Watcher Kill-and-Reconnect Replay Test ===");
+
+        const PROXIED_NODE: usize = 3;
+        let networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_sui_rpc_proxy_for_node(PROXIED_NODE)
+            .build()
+            .await?;
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+
+        let proxied = networks.hashi_network.nodes()[PROXIED_NODE].hashi().clone();
+        let proxy = networks
+            .hashi_network
+            .sui_rpc_proxy()
+            .expect("proxy configured via the builder");
+        assert_eq!(proxied.metrics.watcher_rebootstrap_total.get(), 0);
+
+        info!("Severing node {PROXIED_NODE}'s Sui RPC connection...");
+        proxy.sever();
+
+        // Land the proposals through a healthy node's connection.
+        let healthy = networks.hashi_network.nodes()[0].hashi().clone();
+        let hashi_ids = networks.hashi_network.ids();
+        let mut executor = SuiTxExecutor::from_config(&healthy.config, healthy.onchain_state())?;
+        let creator = executor.sender();
+        let mut proposal_ids = Vec::new();
+        let mut last_checkpoint = 0u64;
+        for i in 0..3u64 {
+            let builder = build_create_proposal_transaction(
+                hashi_ids,
+                creator,
+                CreateProposalParams::UpdateConfig {
+                    // Never voted on or executed, so the values are inert.
+                    key: "bitcoin_deposit_time_delay_ms".to_string(),
+                    value: hashi_types::move_types::ConfigValue::U64(i),
+                    metadata: vec![],
+                },
+            );
+            let response = executor.execute(builder).await?;
+            assert!(
+                response.transaction().effects().status().success(),
+                "update_config::propose transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+            proposal_ids.push(extract_proposal_id_from_response(&response)?);
+            last_checkpoint = response
+                .transaction()
+                .checkpoint_opt()
+                .ok_or_else(|| anyhow!("propose response missing checkpoint"))?;
+        }
+        info!(
+            "Landed {} proposals during the outage; last at checkpoint {last_checkpoint}",
+            proposal_ids.len()
+        );
+
+        // Positive control: the outage must have been real.
+        let severed_watermark = proxied.onchain_state().state_watermark();
+        assert!(
+            severed_watermark < last_checkpoint,
+            "the severed node's watermark ({severed_watermark}) covers the outage \
+             transactions (checkpoint {last_checkpoint}); the outage was not effective"
+        );
+        {
+            let state = proxied.onchain_state().state();
+            let active = state.hashi().proposals.active();
+            for id in &proposal_ids {
+                assert!(
+                    !active.contains_key(id),
+                    "the severed node saw proposal {id} during the outage"
+                );
+            }
+        }
+
+        info!("Restoring the connection...");
+        proxy.restore();
+
+        // The watcher reconnects and replays the gap; the state watermark
+        // passing the last landed checkpoint proves coverage, and the
+        // replay applies transactions before claiming it.
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            proxied
+                .onchain_state()
+                .wait_until_checkpoint(last_checkpoint),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out waiting for the severed node to catch up via replay"))?;
+
+        {
+            let state = proxied.onchain_state().state();
+            let active = state.hashi().proposals.active();
+            for id in &proposal_ids {
+                assert!(
+                    active.contains_key(id),
+                    "proposal {id} landed during the outage was not recovered by replay"
+                );
+            }
+        }
+
+        // The recovery must have come from the replay path, not the
+        // fresh-scrape fallback.
+        assert_eq!(
+            proxied.metrics.watcher_rebootstrap_total.get(),
+            0,
+            "the mirror re-bootstrapped from a scrape instead of replaying the gap"
+        );
+
+        info!("=== Watcher Kill-and-Reconnect Replay Test Passed ===");
         Ok(())
     }
 
@@ -2154,19 +2289,17 @@ mod tests {
         Ok(())
     }
 
-    /// Stress-test withdrawal at the production default batch size (50
-    /// requests / 500 inputs). Verifies that commit, sign, confirm, and
+    /// Stress-test withdrawal at the production default batch size (40
+    /// requests / 400 inputs). Verifies that commit, sign, confirm, and
     /// cleanup all stay within Sui's runtime-object and effects-size limits.
     ///
-    /// Before the two-phase spent optimization, confirm at 50 req / 500 inputs
-    /// would exceed Sui's 1000-object limit (~1053 objects). After the
-    /// optimization, confirm emits events only (0 objects per input) and a
-    /// separate `cleanup_spent_utxos` transaction does the bookkeeping.
+    /// The 400 input signatures exceed Sui's 16 KiB pure-argument limit, so
+    /// this also exercises chunked signature commits at the production cap.
     ///
     /// Test outline:
-    /// 1. Create 500 deposits (one UTXO each).
-    /// 2. Submit 50 withdrawal requests; low-fee consolidation fills the
-    ///    500-input cap.
+    /// 1. Create 400 deposits (one UTXO each).
+    /// 2. Submit 40 withdrawal requests; consolidation fills the
+    ///    400-input cap.
     /// 3. Assert commit, sign, and confirm transactions are under all Sui
     ///    limits (tx size, effects size, runtime objects).
     /// 4. Mine blocks and wait for confirmation.
@@ -2176,14 +2309,14 @@ mod tests {
         init_test_logging();
         info!("=== Starting Large Withdrawal Stress Test ===");
 
-        let num_withdrawals: usize = 50;
-        let num_deposits: usize = 500;
+        let num_withdrawals: usize = 40;
+        let num_deposits: usize = 400;
 
-        // 24-hour batching delay: the batch fires only at capacity (50), not
-        // on a timer. This ensures all 50 requests end up in one Bitcoin tx.
+        // 24-hour batching delay: the batch fires only at capacity (40), not
+        // on a timer. This ensures all 40 requests end up in one Bitcoin tx.
         // With 4 nodes at weight 25 each (total_weight=100), the presig pool
         // is batch_size_per_weight * total_weight. We need enough
-        // presignatures for 500 inputs.
+        // presignatures for 400 inputs.
         let mut networks = avid_override(
             TestNetworksBuilder::new()
                 .with_nodes(4)
@@ -2201,15 +2334,15 @@ mod tests {
 
         let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
 
-        // --- Create 500 Bitcoin deposits ---
+        // --- Create 400 Bitcoin deposits ---
         // Each deposit is 40,000 sats (above the 30,000 on-chain minimum),
-        // totalling 20,000,000 sats. The withdrawals request
-        // 50 x 30,000 = 1,500,000 sats. Coin selection picks enough UTXOs
-        // for value and consolidation at low fee rates pulls in the rest up
-        // to the 500-input cap.
+        // totalling 16,000,000 sats. The withdrawals request
+        // 40 x 200,001 = 8,000,040 sats, requiring 201 UTXOs for value.
+        // Moderate-fee consolidation can add up to 200 more inputs, so it
+        // pulls in the remaining 199 UTXOs and reaches the 400-input cap.
         let deposit_amount_sats = 40_000u64;
-        // With 500 inputs and 64-byte Schnorr signatures, the BCS-encoded
-        // signatures vector is ~32.5 KiB -- well above the 16 KiB per-pure-arg
+        // With 400 inputs and 64-byte Schnorr signatures, the BCS-encoded
+        // signatures vector is ~26 KiB -- well above the 16 KiB per-pure-arg
         // limit that the chunking fix addresses.
         info!(
             "Creating {} Bitcoin deposits of {} sats each...",
@@ -2292,7 +2425,7 @@ mod tests {
                 break;
             }
             let confirmed = num_deposits - remaining;
-            if confirmed / 50 > last_logged / 50 {
+            if confirmed / 40 > last_logged / 40 {
                 info!(
                     active_utxos,
                     "Deposit confirmations: {}/{}", confirmed, num_deposits
@@ -2304,8 +2437,8 @@ mod tests {
         info!("All deposits confirmed");
         drop(_deposit_miner);
 
-        // --- Submit 50 withdrawal requests ---
-        let withdrawal_amount_sats = 30_000u64;
+        // --- Submit 40 withdrawal requests ---
+        let withdrawal_amount_sats = 200_001u64;
         info!(
             "Submitting {} withdrawal requests of {} sats each...",
             num_withdrawals, withdrawal_amount_sats
@@ -2386,7 +2519,7 @@ mod tests {
             num_withdrawals,
         );
 
-        // With 500 UTXOs at 40,000 sats and 1,500,000 sats of withdrawals,
+        // With 400 UTXOs at 40,000 sats and 8,000,040 sats of withdrawals,
         // coin selection should pick most UTXOs for value and consolidate the
         // rest. Verify that enough inputs were selected to exceed the old
         // 16 KiB per-pure-arg limit (~252 signatures at 65 BCS bytes each).

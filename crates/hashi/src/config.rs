@@ -14,7 +14,6 @@ use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
 const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
-pub(crate) const DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS: u64 = 300_000;
 /// Tonic's 4 MiB default is too small to scrape a large on-chain state or
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
@@ -127,12 +126,6 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_batch_size_per_weight: Option<u16>,
 
-    /// Override the presignature-derivation activation epoch for testing the
-    /// epoch-boundary flip. Can only be set if `sui_chain_id` is not mainnet or
-    /// testnet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub test_presignature_derivation_activation_epoch: Option<u64>,
-
     /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
     /// When not set, AML screening is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +160,7 @@ pub struct Config {
     /// transaction. The batch commits immediately once this many requests are
     /// ready, without waiting for `withdrawal_batching_delay_ms` to elapse.
     ///
-    /// Defaults to 70 (the algorithm's hard upper bound).
+    /// Defaults to 40 (the algorithm's hard upper bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
 
@@ -207,14 +200,14 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_fee_conf_target: Option<u16>,
 
-    /// Interval (ms) between watcher polls of the on-chain Hashi config while
-    /// the launch is pending — the safety net for `finish_publish`, which sets
-    /// `guardian_url` and the guardian BTC key with no event. Polling stops
-    /// once both are on-chain.
+    /// Floor (sat/vB) for the withdrawal settlement fee rate, applied
+    /// after `estimatesmartfee`. Raising this is the lever for rescuing a
+    /// stalled settlement: the CPFP boost only covers the amount by which
+    /// this floor exceeds what the stalled ancestor already paid.
     ///
-    /// Defaults to 300,000 ms (5 minutes).
+    /// Defaults to `CoinSelectionParams::DEFAULT_MIN_FEE_RATE`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub onchain_config_poll_interval_ms: Option<u64>,
+    pub withdrawal_min_fee_rate_sat_vb: Option<u64>,
 
     /// Test-only: corrupt AVSS shares sent to this address, triggering the
     /// complaint recovery flow. Must not be set on mainnet or testnet.
@@ -419,13 +412,6 @@ impl Config {
         self.withdrawal_batching_delay_ms.unwrap_or(300_000)
     }
 
-    pub fn onchain_config_poll_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(
-            self.onchain_config_poll_interval_ms
-                .unwrap_or(DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS),
-        )
-    }
-
     pub fn withdrawal_max_batch_size(&self) -> usize {
         self.withdrawal_max_batch_size
             .unwrap_or(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
@@ -451,6 +437,12 @@ impl Config {
 
     pub fn withdrawal_fee_conf_target(&self) -> u16 {
         self.withdrawal_fee_conf_target.unwrap_or(3)
+    }
+
+    pub fn withdrawal_min_fee_rate(&self) -> bitcoin::FeeRate {
+        self.withdrawal_min_fee_rate_sat_vb
+            .and_then(bitcoin::FeeRate::from_sat_per_vb)
+            .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MIN_FEE_RATE)
     }
 
     // Creates a new config suitable for testing. In particular this config will:
@@ -617,21 +609,15 @@ mod tests {
     #[test]
     fn test_withdrawal_max_batch_size_defaults_to_absolute_cap() {
         let config = Config::default();
-        assert_eq!(
-            config.withdrawal_max_batch_size(),
-            crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
-        );
+        assert_eq!(config.withdrawal_max_batch_size(), 40);
     }
 
     #[test]
     fn test_withdrawal_max_batch_size_clamps_to_absolute_cap() {
         let config = Config {
-            withdrawal_max_batch_size: Some(200),
+            withdrawal_max_batch_size: Some(70),
             ..Config::default()
         };
-        assert_eq!(
-            config.withdrawal_max_batch_size(),
-            crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
-        );
+        assert_eq!(config.withdrawal_max_batch_size(), 40);
     }
 }

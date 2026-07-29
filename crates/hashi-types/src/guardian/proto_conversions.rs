@@ -1339,7 +1339,7 @@ impl TryFrom<pb::Committee> for HashiCommittee {
     }
 }
 
-impl TryFrom<pb::CommitteeMember> for HashiCommitteeMember {
+impl TryFrom<pb::CommitteeMember> for crate::move_types::CommitteeMember {
     type Error = GuardianError;
 
     fn try_from(m: pb::CommitteeMember) -> Result<Self, Self::Error> {
@@ -1354,13 +1354,20 @@ impl TryFrom<pb::CommitteeMember> for HashiCommitteeMember {
 
         let weight = m.weight.ok_or_else(|| missing("weight"))?;
 
-        let member = crate::move_types::CommitteeMember {
+        Ok(Self {
             validator_address,
             public_key: public_key.to_vec(),
             encryption_public_key: encryption_public_key.to_vec(),
             weight,
-        };
+        })
+    }
+}
 
+impl TryFrom<pb::CommitteeMember> for HashiCommitteeMember {
+    type Error = GuardianError;
+
+    fn try_from(m: pb::CommitteeMember) -> Result<Self, Self::Error> {
+        let member = crate::move_types::CommitteeMember::try_from(m)?;
         Self::try_from(member).map_err(|e| InvalidInputs(format!("invalid committee member: {e}")))
     }
 }
@@ -1518,9 +1525,28 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
 impl TryFrom<pb::Committee> for crate::move_types::Committee {
     type Error = GuardianError;
 
+    /// Decodes verbatim, never through the enriched `HashiCommittee`:
+    /// committee-transition certs are verified over these bytes (Move's
+    /// `submit_committee_handoff` rebuilds the message from the stored
+    /// on-chain committee), so re-deriving any field here would change
+    /// the payload under the signature.
     fn try_from(c: pb::Committee) -> Result<Self, Self::Error> {
-        let hashi_committee = HashiCommittee::try_from(c)?;
-        Ok(Self::from(&hashi_committee))
+        let epoch = c.epoch.ok_or_else(|| missing("epoch"))?;
+        let members = c
+            .members
+            .into_iter()
+            .map(crate::move_types::CommitteeMember::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
+        let total_weight = c.total_weight.ok_or_else(|| missing("total_weight"))?;
+        let config_bytes = c.config.ok_or_else(|| missing("config"))?;
+        let config: Config = bcs::from_bytes(&config_bytes)
+            .map_err(|e| InvalidInputs(format!("invalid config: {e}")))?;
+        Ok(Self {
+            epoch,
+            members,
+            total_weight,
+            config,
+        })
     }
 }
 
@@ -1824,5 +1850,41 @@ mod tests {
         assert_eq!(signed.signature_bytes(), back.signature_bytes());
         assert_eq!(signed.signers_bitmap_bytes(), back.signers_bitmap_bytes());
         assert_eq!(signed.message().new_committee, back.message().new_committee);
+    }
+
+    /// The wire decode must be verbatim: committee-transition certs are
+    /// verified over the decoded bytes (Move rebuilds the message from
+    /// the stored on-chain committee), so a member whose encryption key
+    /// bytes do not parse must round-trip unchanged rather than error
+    /// or be substituted.
+    #[test]
+    fn committee_transition_round_trips_unparseable_member_keys() {
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0xFACADE);
+        let sk = crate::committee::Bls12381PrivateKey::generate(&mut rng);
+        let junk_key = vec![0xFFu8; 32];
+        let raw_committee = crate::move_types::Committee {
+            epoch: 6,
+            members: vec![crate::move_types::CommitteeMember {
+                validator_address: sui_sdk_types::Address::new([7u8; 32]),
+                public_key: sk.public_key().as_ref().to_vec(),
+                encryption_public_key: junk_key.clone(),
+                weight: 10,
+            }],
+            total_weight: 10,
+            config: crate::move_types::Config::from_entries(vec![]),
+        };
+        let transition = CommitteeTransitionRequest {
+            new_committee: raw_committee.clone(),
+        };
+
+        let pb = committee_transition_to_pb(&transition);
+        let back = CommitteeTransitionRequest::try_from(pb).expect("verbatim decode");
+        assert_eq!(back.new_committee, raw_committee);
+        assert_eq!(
+            back.new_committee.members[0].encryption_public_key,
+            junk_key
+        );
     }
 }

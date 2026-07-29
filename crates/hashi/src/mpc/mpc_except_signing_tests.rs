@@ -290,7 +290,6 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -908,7 +907,6 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
@@ -974,7 +972,6 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     );
 
@@ -1007,7 +1004,6 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     );
 
@@ -1096,7 +1092,6 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1183,7 +1178,6 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .expect(
@@ -7146,7 +7140,6 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8447,7 +8440,6 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8626,7 +8618,6 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8761,7 +8752,6 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8790,7 +8780,6 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8894,7 +8883,6 @@ fn test_recover_current_dkg() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -9046,7 +9034,6 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9143,7 +9130,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9179,7 +9165,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9292,7 +9277,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9379,7 +9363,6 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9455,7 +9438,6 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -9577,7 +9559,6 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
-            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9658,7 +9639,6 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
-        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -10622,7 +10602,7 @@ fn test_handle_complain_request_nonce_caches_response() {
 }
 
 #[test]
-fn test_required_nonce_weight_follows_derivation_version() {
+fn test_required_nonce_weight_is_the_privacy_threshold_floor() {
     const THRESHOLD: u16 = 52;
     const MAX_FAULTY: u16 = 20;
 
@@ -10632,22 +10612,12 @@ fn test_required_nonce_weight_follows_derivation_version() {
     mgr.mpc_config.max_faulty = MAX_FAULTY;
     let total_weight = mgr.mpc_config.nodes.total_weight() as u32;
 
-    let legacy_gate = 2 * MAX_FAULTY as u32 + 1;
-    let privacy_gate = total_weight - MAX_FAULTY as u32;
-    assert_ne!(
-        legacy_gate, privacy_gate,
-        "params must distinguish the two gates or this test proves nothing"
+    assert_eq!(
+        mgr.required_nonce_weight(),
+        total_weight - MAX_FAULTY as u32
     );
-
-    mgr.mpc_config.presignature_derivation_version = PresignatureDerivationVersion::Legacy;
-    assert_eq!(mgr.required_nonce_weight(), legacy_gate);
-
-    mgr.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
-    assert_eq!(mgr.required_nonce_weight(), privacy_gate);
-
-    assert!(legacy_gate < mgr.mpc_config.threshold as u32);
-    assert!(privacy_gate >= mgr.mpc_config.threshold as u32);
+    assert!(mgr.required_nonce_weight() >= mgr.mpc_config.threshold as u32);
+    assert!(2 * MAX_FAULTY as u32 + 1 < mgr.mpc_config.threshold as u32);
 }
 
 fn valid_dealer_submission(
@@ -10693,8 +10663,6 @@ fn valid_dealer_submission(
 fn test_certified_nonce_dealers_window_extends_past_floor() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
-    mgr.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
     mgr.mpc_config.max_faulty = 25;
 
     let cert = |i: usize, timestamp_ms: u64| valid_dealer_submission(&setup, i, timestamp_ms);
@@ -10723,12 +10691,11 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
 }
 
 #[test]
-fn test_legacy_derivation_ignores_accumulation_window() {
+fn test_zero_accumulation_window_is_floor_only() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
-    mgr.mpc_config.presignature_derivation_version = PresignatureDerivationVersion::Legacy;
     mgr.mpc_config.max_faulty = 25;
-    mgr.mpc_config.nonce_accumulation_window_ms = 700;
+    mgr.mpc_config.nonce_accumulation_window_ms = 0;
 
     let cert = |i: usize, timestamp_ms: u64| valid_dealer_submission(&setup, i, timestamp_ms);
     let certs = vec![
@@ -10745,8 +10712,6 @@ fn test_legacy_derivation_ignores_accumulation_window() {
 fn test_bare_zero_stamp_certs_force_floor_only_window() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
-    mgr.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
     mgr.mpc_config.max_faulty = 25;
     mgr.mpc_config.nonce_accumulation_window_ms = 700;
 
@@ -10761,8 +10726,6 @@ fn test_bare_zero_stamp_certs_force_floor_only_window() {
 async fn test_verified_nonce_certs_drops_unverified() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
-    mgr.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
     mgr.mpc_config.max_faulty = 25;
     let epoch = mgr.mpc_config.epoch;
 
@@ -10793,8 +10756,6 @@ async fn test_verified_nonce_certs_drops_unverified() {
 fn test_reconstruct_presignatures_rejects_below_floor_certs() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
-    mgr.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
     mgr.mpc_config.max_faulty = 25;
 
     let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
@@ -10845,8 +10806,6 @@ async fn test_nonce_window_live_collection_past_floor() {
     }
 
     let mut test_manager = managers.remove(0);
-    test_manager.mpc_config.presignature_derivation_version =
-        PresignatureDerivationVersion::PrivacyThreshold;
     test_manager.mpc_config.max_faulty = 1;
     for (j, nonce_msg) in dealer_messages.iter().enumerate() {
         send_and_assert_ok(
@@ -12518,26 +12477,27 @@ fn test_serve_avid_nonce_retrieval() {
     assert!(matches!(result, Err(MpcError::NotFound(_))));
 }
 
-#[tokio::test]
-async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
-    let mut rng = rand::thread_rng();
-    // Weighted so a single dealer (weight 5) meets the party's required dealer weight
-    // (2f+1 = 5 at W=10, f=2).
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
+/// Deals `dealer_index`'s optimistic AVID messages to every other member,
+/// returning the confirm signatures (the dealer's own first, then members in
+/// index order) with the target they sign.
+fn avid_confirm_signatures(
+    setup: &TestSetup,
+    managers: &mut HashMap<Address, MpcManager>,
+    dealer_index: usize,
+    batch_index: u32,
+    rng: &mut impl fastcrypto::traits::AllowedRng,
+) -> (Vec<MemberSignature>, DealerMessagesHash) {
+    let dealer_addr = setup.address(dealer_index);
+    let mut dealer = managers.remove(&dealer_addr).expect("dealer manager");
     let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .prepare_avid_nonce_dealer_flow(batch_index, rng)
         .unwrap();
-
-    // Hand-deliver the optimistic messages and aggregate two Confirm certs over H(v): a thin
-    // one (dealer + nodes 1, 2 = weight 7 < 10) and the full one (all members).
-    let mut managers: HashMap<Address, MpcManager> = (1..6)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
+    let epoch = dealer.mpc_config.epoch;
     let mut sigs = vec![flow.my_signature.clone()];
-    for i in 1..6 {
+    for i in 0..setup.committee().members().len() {
+        if i == dealer_index {
+            continue;
+        }
         let addr = setup.address(i);
         let (_, msg) = flow
             .recipient_messages
@@ -12547,17 +12507,34 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
             .clone();
         let response = managers
             .get_mut(&addr)
-            .unwrap()
+            .expect("recipient manager")
             .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
             .unwrap();
-        sigs.push(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ));
+        sigs.push(MemberSignature::new(epoch, addr, response.signature));
     }
-    let make_cert = |take: usize| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    managers.insert(dealer_addr, dealer);
+    (sigs, flow.confirm_target)
+}
+
+#[tokio::test]
+async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
+    let mut rng = rand::thread_rng();
+    // W=16, t=6, f=4: the W-f floor (12) takes both dealers (6+6), and each
+    // dealer's weight (6) is under the t+f quorum (10), so certs need peers.
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let second_dealer_addr = setup.address(2);
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+
+    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature], take: usize| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs.iter().take(take) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -12567,14 +12544,16 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
             timestamp_ms: 0,
         }
     };
-    let thin_cert = make_cert(3); // weight 5 + 1 + 1 = 7 < 10
-    let full_cert = make_cert(6); // weight 10
+    let thin_cert = make_cert(&confirm_target, &sigs, 3); // weight 6 + 1 + 6 = 13 < 16
+    let full_cert = make_cert(&confirm_target, &sigs, 6); // weight 16
+    let second_full_cert = make_cert(&second_target, &second_sigs, 6);
 
     // The party (node 1, holding its output) must ignore the thin Confirm cert and consume the
     // full one — the fast path is only consume-safe at full weight.
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert]);
+    let mut mock_tob =
+        MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert, second_full_cert]);
     let metrics = test_metrics();
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
@@ -12587,7 +12566,11 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     .await
     .unwrap();
 
-    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert_eq!(
+        certified,
+        HashSet::from([dealer_addr, second_dealer_addr]),
+        "the floor takes both dealers, so neither alone can satisfy it"
+    );
     assert_eq!(
         mock_tob.pending_messages(),
         Some(0),
@@ -12606,51 +12589,38 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
+    let second_dealer_addr = setup.address(2);
 
     let store = SharedMemoryStore::new();
-    let mut managers: HashMap<Address, MpcManager> = (2..6)
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .filter(|i| *i != 1)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
     managers.insert(
         setup.address(1),
         setup.create_manager_with_store(1, Box::new(store.clone())),
     );
-    let mut sigs = vec![flow.my_signature.clone()];
-    for i in 1..6 {
-        let addr = setup.address(i);
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == addr)
-            .unwrap()
-            .clone();
-        let response = managers
-            .get_mut(&addr)
-            .unwrap()
-            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
-            .unwrap();
-        sigs.push(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ));
-    }
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
-    for sig in sigs {
-        agg.add_signature(sig).unwrap();
-    }
-    let full_cert = CertificateV1::NonceGeneration {
-        batch_index,
-        cert: agg.finish().unwrap(),
-        timestamp_ms: 0,
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs {
+            agg.add_signature(sig).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+            timestamp_ms: 0,
+        }
     };
+    let full_cert = make_full_cert(&confirm_target, sigs);
+    let second_full_cert = make_full_cert(&second_target, second_sigs);
 
     managers.remove(&setup.address(1));
     let restarted = setup.create_manager_with_store(1, Box::new(store.clone()));
@@ -12658,7 +12628,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
 
     let party = Arc::new(RwLock::new(restarted));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert]);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert, second_full_cert]);
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
@@ -12670,7 +12640,11 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     .await
     .unwrap();
 
-    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert_eq!(
+        certified,
+        HashSet::from([dealer_addr, second_dealer_addr]),
+        "the floor takes both dealers, so neither alone can satisfy it"
+    );
     assert!(
         party
             .read()
@@ -12678,6 +12652,102 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
             .dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr)),
         "the restarted confirmer re-derived its output at the consume seam"
+    );
+}
+
+#[test]
+fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
+    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let mgr = setup.create_manager(0);
+    let batch_index = 3u32;
+    let total = mgr.mpc_config.nodes.total_weight() as u32;
+    let vote_quorum = total - mgr.mpc_config.max_faulty as u32;
+
+    let weight_of = |signers: &[usize]| -> u32 {
+        signers
+            .iter()
+            .map(|&s| mgr.mpc_config.nodes.weight_of(s as u16).unwrap() as u32)
+            .sum()
+    };
+    let make_cert = |dealer_idx: usize, signers: &[usize]| -> (Address, CertificateV1) {
+        let dealer_address = setup.address(dealer_idx);
+        let message = DealerMessagesHash {
+            dealer_address,
+            messages_hash: MessageHash::from([dealer_idx as u8 + 1; 32]),
+        };
+        let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+        for &s in signers {
+            let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+            aggregator.add_signature(sig).unwrap();
+        }
+        (
+            dealer_address,
+            CertificateV1::NonceGeneration {
+                batch_index,
+                cert: aggregator.finish().unwrap(),
+                timestamp_ms: 0,
+            },
+        )
+    };
+
+    let just_below_quorum = [0usize, 1];
+    let in_band = [0usize, 1, 3];
+    let all = [0usize, 1, 2, 3];
+    assert_eq!(
+        weight_of(&just_below_quorum),
+        vote_quorum - 1,
+        "params must put the excluded cert one weight below the vote quorum"
+    );
+    assert!(
+        weight_of(&in_band) >= vote_quorum && weight_of(&in_band) < total,
+        "params must give a between-quorums band or this test proves nothing"
+    );
+
+    let certs = vec![
+        make_cert(3, &just_below_quorum),
+        make_cert(0, &all),
+        make_cert(1, &in_band),
+        make_cert(2, &all),
+    ];
+
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs);
+    assert!(
+        !certified.contains(&setup.address(3)),
+        "cert one weight below the vote quorum must not be counted by sizing"
+    );
+    assert!(certified.contains(&setup.address(0)));
+    assert!(
+        certified.contains(&setup.address(1)),
+        "KNOWN GAP: this cert sits exactly at the vote quorum, so sizing admits it, \
+         but the replay gates AvssVote at full W — a Byzantine dealer aggregating to \
+         exactly W-f still diverges. Pinning current behaviour, not asserting it is correct."
+    );
+    assert!(
+        weight >= mgr.required_nonce_weight(),
+        "sizing must reach the floor from admissible certs despite the skipped one"
+    );
+
+    let (blind, _) = mgr.window_certified_nonce_dealers(&certs);
+    assert!(blind.contains(&setup.address(3)));
+
+    let (_, foreign_keyed) = make_cert(0, &all);
+    let rekeyed = vec![(setup.address(3), foreign_keyed)];
+    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed);
+    assert_eq!(
+        certified,
+        HashSet::from([setup.address(0)]),
+        "sizing must key on the signed dealer"
+    );
+
+    let (_, dup_a) = make_cert(0, &all);
+    let (_, dup_b) = make_cert(0, &all);
+    let duplicated = vec![(setup.address(0), dup_a), (setup.address(3), dup_b)];
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated);
+    assert_eq!(certified, HashSet::from([setup.address(0)]));
+    assert_eq!(
+        weight,
+        weight_of(&[0]),
+        "a dealer served twice must not be double-counted"
     );
 }
 
@@ -12744,16 +12814,19 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
-    // Weighted pessimistic round: dealer 0 (weight 5) deals with node 5 unreachable, so a Vote
-    // cert posts; voter node 1 resolves its kind from the vote it holds (no pull) and consumes.
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    // W=16, t=6, f=4: each dealer (6) is under the t+f confirm quorum (10) so it
+    // must collect peers, and the W-f floor (12) takes both dealers' certs.
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
+    let second_dealer_addr = setup.address(2);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
+
+    // Weighted pessimistic round: node 5 is unreachable, so a Vote cert posts.
     let others: HashMap<_, _> = (1..5)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
     let dealer_p2p = MockP2PChannel::new(others, dealer_addr);
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
     let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
@@ -12766,7 +12839,27 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
     .unwrap();
     assert_eq!(mock_tob.pending_messages(), Some(1), "Vote cert published");
 
+    // The second dealer's round needs node 0's weight to reach the vote quorum.
     let mut voters = std::mem::take(&mut *dealer_p2p.managers.lock().unwrap());
+    let second_dealer = Arc::new(RwLock::new(voters.remove(&second_dealer_addr).unwrap()));
+    voters.insert(setup.address(0), setup.create_manager(0));
+    let second_p2p = MockP2PChannel::new(voters, second_dealer_addr);
+    MpcManager::run_as_avid_nonce_dealer(
+        &second_dealer,
+        batch_index,
+        &second_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock_tob.pending_messages(),
+        Some(2),
+        "both dealers' Vote certs published"
+    );
+
+    let mut voters = std::mem::take(&mut *second_p2p.managers.lock().unwrap());
     let party = Arc::new(RwLock::new(voters.remove(&setup.address(1)).unwrap()));
     {
         let mgr = party.read().unwrap();
@@ -12787,56 +12880,45 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
     )
     .await
     .unwrap();
-    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert_eq!(
+        certified,
+        HashSet::from([dealer_addr, second_dealer_addr]),
+        "the floor takes both dealers, so neither alone can satisfy it"
+    );
 }
 
 #[tokio::test]
 async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
-
-    let mut managers: HashMap<Address, MpcManager> = (1..6)
+    let second_dealer_addr = setup.address(2);
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
-    agg.add_signature(flow.my_signature.clone()).unwrap();
-    for i in 1..6 {
-        let addr = setup.address(i);
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == addr)
-            .unwrap()
-            .clone();
-        let response = managers
-            .get_mut(&addr)
-            .unwrap()
-            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
-            .unwrap();
-        agg.add_signature(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ))
-        .unwrap();
-    }
-    let cert = CertificateV1::NonceGeneration {
-        batch_index,
-        cert: agg.finish().unwrap(),
-        timestamp_ms: 0,
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs {
+            agg.add_signature(sig).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+            timestamp_ms: 0,
+        }
     };
+    let cert = make_full_cert(&confirm_target, sigs);
+    let second_cert = make_full_cert(&second_target, second_sigs);
 
-    // The coordinator's certified-weight precheck sees dealer 0 (weight 5 >= required 5), skips
-    // its own dealer phase, consumes via the AVID party, and returns legacy-typed outputs.
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert]);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert, second_cert]);
     let outputs = MpcManager::run_nonce_generation(
         &party,
         batch_index,
@@ -12848,11 +12930,15 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     .await
     .unwrap();
 
-    assert_eq!(outputs.len(), 1, "one certified dealer consumed");
+    assert_eq!(outputs.len(), 2, "both certified dealers consumed");
     let mgr = party.read().unwrap();
     assert!(
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
+    );
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, second_dealer_addr))
     );
 }
 
@@ -12991,48 +13077,38 @@ fn test_decoded_shares_match_optimistic_shares() {
 #[tokio::test]
 async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
-
-    let mut managers: HashMap<Address, MpcManager> = (1..6)
+    let second_dealer_addr = setup.address(2);
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
-    agg.add_signature(flow.my_signature.clone()).unwrap();
-    for i in 1..6 {
-        let addr = setup.address(i);
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == addr)
-            .unwrap()
-            .clone();
-        let response = managers
-            .get_mut(&addr)
-            .unwrap()
-            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
-            .unwrap();
-        agg.add_signature(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ))
-        .unwrap();
-    }
-    let cert = CertificateV1::NonceGeneration {
-        batch_index,
-        cert: agg.finish().unwrap(),
-        timestamp_ms: 0,
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs {
+            agg.add_signature(sig).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+            timestamp_ms: 0,
+        }
     };
+    let cert = make_full_cert(&confirm_target, sigs);
+    let second_cert = make_full_cert(&second_target, second_sigs);
 
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![(dealer_addr, cert)]);
+    let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![
+        (dealer_addr, cert),
+        (second_dealer_addr, second_cert),
+    ]);
     let outputs = MpcManager::run_nonce_generation(
         &party,
         batch_index,
@@ -13044,11 +13120,15 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     .await
     .unwrap();
 
-    assert_eq!(outputs.len(), 1, "one certified dealer recovered");
+    assert_eq!(outputs.len(), 2, "both certified dealers recovered");
     let mgr = party.read().unwrap();
     assert!(
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
+    );
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, second_dealer_addr))
     );
     assert!(
         mgr.public_messages_store

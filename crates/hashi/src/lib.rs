@@ -316,7 +316,6 @@ impl Hashi {
             self.config.tls_private_key().ok(),
             Some(self.config.grpc_max_decoding_message_size()),
             Some(self.metrics.clone()),
-            Some(self.config.onchain_config_poll_interval()),
         )
         .await?;
         self.onchain_state
@@ -346,7 +345,13 @@ impl Hashi {
         })
     }
 
-    pub async fn prepare_and_register_keys(self: &Arc<Self>, epoch: u64) -> anyhow::Result<()> {
+    /// Returns the checkpoint the registration transaction landed in, or
+    /// `None` if the on-chain record already matched and no transaction
+    /// was needed.
+    pub async fn prepare_and_register_keys(
+        self: &Arc<Self>,
+        epoch: u64,
+    ) -> anyhow::Result<Option<u64>> {
         let keys = self.prepare_next_epoch_keys(epoch)?;
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
         executor
@@ -357,7 +362,6 @@ impl Hashi {
                 Some(&keys.signing_private_key),
             )
             .await
-            .map(|_| ())
     }
 
     pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
@@ -610,17 +614,6 @@ impl Hashi {
                 "test_corrupt_shares_for",
             );
         }
-        let presignature_derivation_activation_epoch =
-            if let Some(epoch) = self.config.test_presignature_derivation_activation_epoch {
-                assert_test_only_config(
-                    chain_id,
-                    self.config.bitcoin_chain_id(),
-                    "test_presignature_derivation_activation_epoch",
-                );
-                epoch
-            } else {
-                constants::presignature_derivation_activation_epoch(chain_id)
-            };
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
@@ -634,7 +627,6 @@ impl Hashi {
             self.config.test_weight_divisor,
             batch_size_per_weight,
             self.config.test_corrupt_shares_for,
-            presignature_derivation_activation_epoch,
             &self.metrics,
         )?)
     }
@@ -859,8 +851,8 @@ impl Hashi {
             )
             .await
         {
-            Ok(true) => tracing::info!("Validator registered/updated on-chain"),
-            Ok(false) => tracing::debug!("Validator metadata is already up-to-date"),
+            Ok(Some(_)) => tracing::info!("Validator registered/updated on-chain"),
+            Ok(None) => tracing::debug!("Validator metadata is already up-to-date"),
             Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
         }
 
@@ -1077,12 +1069,14 @@ impl Hashi {
         }
     }
 
-    /// Reconcile on a watcher rescrape. A rescrape can't tell a dropped signed event
-    /// (real drift) from an in-flight withdrawal (consumed by the guardian, event
-    /// pending), so forward-snapping `next_seq` would double-count the in-flight ones
-    /// (the snap counts them, then their `WithdrawalSigned` counts them again).
-    /// So only re-align the bucket at a matching seq; seq drift is left to the stall tick.
-    async fn reconcile_guardian_limiter_on_rescrape(&self) {
+    /// Reconcile after a mirror re-bootstrap. A re-bootstrap can't tell a
+    /// dropped fully-signed transition (real drift) from an in-flight
+    /// withdrawal (consumed by the guardian, transition pending), so
+    /// forward-snapping `next_seq` would double-count the in-flight ones
+    /// (the snap counts them, then their fully-signed transition counts them
+    /// again). So only re-align the bucket at a matching seq; seq drift is
+    /// left to the stall tick.
+    async fn reconcile_guardian_limiter_on_rebootstrap(&self) {
         let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
             return;
         };
@@ -1090,7 +1084,7 @@ impl Hashi {
             self.record_limiter_reconcile(&limiter, state);
             tracing::debug!(
                 seq = state.next_seq,
-                "Local guardian limiter bucket reconciled after watcher rescrape",
+                "Local guardian limiter bucket reconciled after a mirror re-bootstrap",
             );
         }
     }
@@ -1166,12 +1160,13 @@ impl Hashi {
             .await;
             tracing::info!("Guardian bootstrap complete");
 
-            // Safety net for the event path: the periodic tick catches slow seq drift
-            // (stall-gated) + bucket drift; a rescrape notify re-aligns the bucket.
+            // Safety net for the transition path: the periodic tick catches slow
+            // seq drift (stall-gated) + bucket drift; a re-bootstrap notify
+            // re-aligns the bucket.
             let reconcile_notify = self.onchain_state().limiter_reconcile_notify();
             // Pinned + re-armed so a notify can't be lost to `select!` cancellation.
-            let rescraped = reconcile_notify.notified();
-            tokio::pin!(rescraped);
+            let rebootstrapped = reconcile_notify.notified();
+            tokio::pin!(rebootstrapped);
             let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut tracker = guardian_limiter::LimiterStallTracker::default();
@@ -1180,10 +1175,10 @@ impl Hashi {
                     _ = interval.tick() => {
                         self.reconcile_guardian_limiter(&mut tracker).await;
                     }
-                    _ = &mut rescraped => {
-                        // Re-arm first so a rescrape during the reconcile isn't lost.
-                        rescraped.set(reconcile_notify.notified());
-                        self.reconcile_guardian_limiter_on_rescrape().await;
+                    _ = &mut rebootstrapped => {
+                        // Re-arm first so a re-bootstrap during the reconcile isn't lost.
+                        rebootstrapped.set(reconcile_notify.notified());
+                        self.reconcile_guardian_limiter_on_rebootstrap().await;
                     }
                 }
             }

@@ -126,7 +126,6 @@ impl HashiClient {
             None,
             Some(crate::config::DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE),
             None,
-            None,
         )
         .await
         .context("Failed to initialize on-chain state")?;
@@ -201,9 +200,7 @@ impl HashiClient {
         self.onchain_state
             .state()
             .package_versions()
-            .keys()
-            .copied()
-            .max()
+            .latest_version()
     }
 
     /// Fetch current epoch from on-chain state

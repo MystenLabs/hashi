@@ -240,6 +240,9 @@ pub struct HashiNetwork {
     /// Guardian parameters, published on-chain by the launch tx.
     guardian: hashi::publish::GuardianConfig,
     nodes: Vec<HashiNodeHandle>,
+    /// The severable Sui RPC proxy in front of the node selected via
+    /// `with_sui_rpc_proxy_for_node`, if any.
+    sui_rpc_proxy: Option<crate::tcp_proxy::TcpProxy>,
     /// Keeps the mock screener gRPC server alive for the lifetime of the test network.
     _screener_service: Service,
 }
@@ -247,6 +250,11 @@ pub struct HashiNetwork {
 impl HashiNetwork {
     pub fn nodes(&self) -> &[HashiNodeHandle] {
         &self.nodes
+    }
+
+    /// The severable Sui RPC proxy set up by `with_sui_rpc_proxy_for_node`.
+    pub fn sui_rpc_proxy(&self) -> Option<&crate::tcp_proxy::TcpProxy> {
+        self.sui_rpc_proxy.as_ref()
     }
 
     pub fn upgrade_cap_id(&self) -> Address {
@@ -349,14 +357,13 @@ pub struct HashiNetworkBuilder {
     /// `None` means all `num_nodes` are active (default).
     pub num_initially_active_nodes: Option<usize>,
     pub test_batch_size_per_weight: Option<u16>,
-    pub test_presignature_derivation_activation_epoch: Option<u64>,
     /// `None` means full Sui voting power weights (no reduction).
     pub test_weight_divisor: Option<u16>,
     /// Overrides `withdrawal_batching_delay_ms` in each node's config.
     /// Defaults to `Some(0)` (no delay) for tests.
     pub withdrawal_batching_delay_ms: Option<u64>,
     /// Overrides `withdrawal_max_batch_size` in each node's config.
-    /// `None` uses the production default (70).
+    /// `None` uses the production default (40).
     pub withdrawal_max_batch_size: Option<usize>,
     /// Overrides `max_mempool_chain_depth` in each node's config.
     /// `None` uses the production default (5).
@@ -364,6 +371,10 @@ pub struct HashiNetworkBuilder {
     /// Node index whose shares should be corrupted by all other nodes,
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
+    /// Node index whose Sui RPC connection is routed through a severable
+    /// [`TcpProxy`](crate::tcp_proxy::TcpProxy), so tests can simulate a
+    /// fullnode outage for that node alone.
+    pub sui_rpc_proxy_node: Option<usize>,
 }
 
 impl HashiNetworkBuilder {
@@ -372,12 +383,12 @@ impl HashiNetworkBuilder {
             num_nodes: 1,
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
-            test_presignature_derivation_activation_epoch: None,
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
             withdrawal_batching_delay_ms: Some(0),
             withdrawal_max_batch_size: None,
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
+            sui_rpc_proxy_node: None,
         }
     }
 
@@ -401,8 +412,8 @@ impl HashiNetworkBuilder {
         self
     }
 
-    pub fn with_presignature_derivation_activation_epoch(mut self, epoch: u64) -> Self {
-        self.test_presignature_derivation_activation_epoch = Some(epoch);
+    pub fn with_sui_rpc_proxy_for_node(mut self, node_index: usize) -> Self {
+        self.sui_rpc_proxy_node = Some(node_index);
         self
     }
 
@@ -442,6 +453,19 @@ impl HashiNetworkBuilder {
 
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();
+        // Interpose the severable proxy for the selected node before the
+        // configs are built, so that node dials the proxy from boot.
+        let sui_rpc_proxy = match self.sui_rpc_proxy_node {
+            Some(index) => {
+                assert!(index < self.num_nodes, "proxied node index out of range");
+                let target: std::net::SocketAddr = sui_rpc
+                    .strip_prefix("http://")
+                    .ok_or_else(|| anyhow::anyhow!("unexpected sui rpc url format: {sui_rpc}"))?
+                    .parse()?;
+                Some(crate::tcp_proxy::TcpProxy::start(target).await?)
+            }
+            None => None,
+        };
         let service_info = sui
             .client
             .clone()
@@ -465,8 +489,6 @@ impl HashiNetworkBuilder {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = self.test_weight_divisor;
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
-            config.test_presignature_derivation_activation_epoch =
-                self.test_presignature_derivation_activation_epoch;
             config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
             config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
             config.max_mempool_chain_depth = self.max_mempool_chain_depth;
@@ -480,13 +502,13 @@ impl HashiNetworkBuilder {
             // the guardian client lazily from the on-chain guardian_url set
             // by the launch tx, so every e2e run exercises the
             // guardian-set-up-last path.
-            // Fast config poll so the guardian gate in `build()` isn't
-            // waiting out the 5-minute default.
-            config.onchain_config_poll_interval_ms = Some(5_000);
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);
-            config.sui_rpc = Some(sui_rpc.clone());
+            config.sui_rpc = match (&sui_rpc_proxy, self.sui_rpc_proxy_node) {
+                (Some(proxy), Some(index)) if index == i => Some(proxy.url()),
+                _ => Some(sui_rpc.clone()),
+            };
             config.bitcoin_rpc = Some(bitcoin_rpc.clone());
             config.bitcoin_rpc_auth = Some(hashi::btc_monitor::config::BtcRpcAuth::UserPass(
                 crate::bitcoin_node::RPC_USER.into(),
@@ -540,6 +562,7 @@ impl HashiNetworkBuilder {
             upgrade_cap_id,
             guardian,
             nodes,
+            sui_rpc_proxy,
             _screener_service: screener_service,
         };
 

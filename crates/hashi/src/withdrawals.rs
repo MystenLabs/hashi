@@ -401,15 +401,10 @@ impl Hashi {
             }
         }
 
-        // 6. Validate fee is reasonable.
-        //
-        // TODO: When spending unconfirmed change UTXOs the effective fee
-        // rate that matters for mining is the *package* fee rate across
-        // the entire ancestor chain (CPFP). This check currently
-        // evaluates the transaction in isolation, which may over- or
-        // under-estimate the true cost to get the package mined. A
-        // future revision should compute the aggregate ancestor weight
-        // and fees and validate the package fee rate instead.
+        // 6. Validate fee is reasonable. The ceiling covers the whole CPFP
+        //    package: a leader spending unconfirmed change must also cover
+        //    what its ancestors owe, so judging the transaction alone
+        //    would reject every legitimate rescue of a stalled settlement.
         {
             // Estimate transaction weight.
             let num_inputs = selected_utxos.len() as u64;
@@ -424,35 +419,49 @@ impl Hashi {
             let tx_weight =
                 Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight);
 
-            let min_fee_rate = FeeRate::from_sat_per_vb_unchecked(1);
-
             // Fee must be at least the minimum relay fee (1 sat/vB).
-            let min_fee = min_fee_rate
+            let relay_min_fee = FeeRate::from_sat_per_vb_unchecked(1)
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
                 .unwrap_or(0);
             anyhow::ensure!(
-                fee >= min_fee,
-                "Fee {fee} sats is below minimum relay fee {min_fee} sats"
+                fee >= relay_min_fee,
+                "Fee {fee} sats is below minimum relay fee {relay_min_fee} sats"
             );
 
-            // Fee ceiling: clamp the fee rate from our Bitcoin node to
-            // a floor of 1 sat/vB, then cap at the tolerance multiplier.
+            // Allow the tolerance multiplier over what a correct leader
+            // would pay: its own fee plus any ancestor CPFP deficit.
             let kyoto_fee_rate = self
                 .btc_monitor()
                 .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
                 .await?;
-            let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, min_fee_rate);
+            let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, self.effective_min_fee_rate());
+
+            let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
+                self,
+                &selected_records,
+                &withdrawal_txns,
+                &utxo_records,
+            );
+            let cpfp_deficit = clamped_fee_rate
+                .fee_wu(ancestor_weight)
+                .map(|a| a.to_sat())
+                .unwrap_or(0)
+                .saturating_sub(ancestor_fee);
+
             let estimated_fee = clamped_fee_rate
                 .fee_wu(tx_weight)
                 .map(|a| a.to_sat())
-                .unwrap_or(0);
+                .unwrap_or(0)
+                .saturating_add(cpfp_deficit);
             let max_fee = estimated_fee.saturating_mul(FEE_RATE_TOLERANCE_MULTIPLIER);
             anyhow::ensure!(
                 fee <= max_fee,
                 "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
                  ({FEE_RATE_TOLERANCE_MULTIPLIER}x the clamped estimate of \
-                 {estimated_fee} sats at {clamped_fee_rate})"
+                 {estimated_fee} sats at {clamped_fee_rate}, including a \
+                 {cpfp_deficit} sat CPFP deficit for {ancestor_weight} of \
+                 unconfirmed ancestors)"
             );
         }
 
@@ -838,12 +847,10 @@ impl Hashi {
             .validator_address()
             .map_err(|e| anyhow!("No validator address configured: {e}"))?;
 
-        let onchain = self.onchain_state();
-        let state = onchain.state();
-        let committees_map = state.hashi().committees.committees();
-        let from_committee = committees_map
-            .get(&from_epoch)
-            .ok_or_else(|| anyhow!("no on-chain committee for epoch {from_epoch}"))?;
+        let (from_committee, new_committee) = self
+            .onchain_state()
+            .committee_transition(from_epoch)
+            .ok_or_else(|| anyhow!("no on-chain committee transition from epoch {from_epoch}"))?;
         if !from_committee
             .members()
             .iter()
@@ -852,19 +859,11 @@ impl Hashi {
             anyhow::bail!("not a member of the committee at epoch {from_epoch}");
         }
 
-        // Hashi committee epochs are sparse: the next entry after `from_epoch`
-        // is generally not `from_epoch + 1`. Both leader and followers derive
-        // the same `to_epoch` from on-chain state, so they sign the same
-        // transition.
-        let new_committee = committees_map
-            .range((from_epoch + 1)..)
-            .next()
-            .map(|(_, c)| c)
-            .ok_or_else(|| anyhow!("no on-chain committee epoch after {from_epoch}"))?;
-
-        let transition = hashi_types::guardian::CommitteeTransitionRequest {
-            new_committee: hashi_types::move_types::Committee::from(new_committee),
-        };
+        // The verbatim on-chain committee: Move's
+        // `submit_committee_handoff` verifies the aggregated cert over a
+        // `CommitteeTransitionRequest` it rebuilds from the stored
+        // committee, so these are the only bytes worth signing.
+        let transition = hashi_types::guardian::CommitteeTransitionRequest { new_committee };
 
         let signature = self.sign_message_proto_at_epoch(&transition, from_epoch)?;
         self.store_committee_handoff_signature(from_epoch, signature.clone());
@@ -1004,53 +1003,14 @@ impl Hashi {
             metrics_ref,
             result_tx,
         );
-        let forward = async {
-            while let Some((signing_id, sign_result)) = result_rx.recv().await {
-                let input_index = index_by_id[&signing_id];
-                let sign_duration = batch_start.elapsed().as_secs_f64();
-                match &sign_result {
-                    Ok(_) => {
-                        metrics_ref
-                            .mpc_sign_duration_seconds
-                            .with_label_values(&["success"])
-                            .observe(sign_duration);
-                        metrics_ref
-                            .presig_pool_remaining
-                            .set(signing_manager_ref.presignatures_remaining() as i64);
-                    }
-                    Err(e) => {
-                        metrics_ref
-                            .mpc_sign_duration_seconds
-                            .with_label_values(&["failure"])
-                            .observe(sign_duration);
-                        let reason = match e {
-                            crate::mpc::types::SigningError::Timeout { .. } => "timeout",
-                            crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
-                            crate::mpc::types::SigningError::TooManyInvalidSignatures {
-                                ..
-                            } => "too_many_invalid",
-                            crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
-                            _ => "other",
-                        };
-                        metrics_ref
-                            .mpc_sign_failures_total
-                            .with_label_values(&[reason])
-                            .inc();
-                    }
-                }
-                let partial = sign_result
-                    .map(|sig| hashi_types::proto::SignWithdrawalTransactionPartial {
-                        input_index: input_index as u32,
-                        signature: sig.to_byte_array().to_vec().into(),
-                    })
-                    .map_err(|e| {
-                        tonic::Status::internal(format!(
-                            "Failed to sign withdrawal transaction input {input_index}: {e}"
-                        ))
-                    });
-                let _ = sink_ref.send(partial).await;
-            }
-        };
+        let forward = forward_signing_results(
+            &mut result_rx,
+            &index_by_id,
+            sink_ref,
+            metrics_ref,
+            batch_start,
+            || signing_manager_ref.presignatures_remaining() as i64,
+        );
         tokio::join!(collect, forward);
         Ok(())
     }
@@ -1092,6 +1052,16 @@ impl Hashi {
     }
 
     // --- UTXO selection and tx crafting ---
+
+    /// The configured fee-rate floor, capped at the high-fee threshold.
+    ///
+    /// Leader and validator must derive this identically or they price
+    /// fees differently. The cap also keeps `clamp` from inverting.
+    fn effective_min_fee_rate(&self) -> FeeRate {
+        self.config
+            .withdrawal_min_fee_rate()
+            .min(CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD)
+    }
 
     /// Build an unsigned Bitcoin transaction for a withdrawal. This is used both
     /// by the leader when initially crafting the tx, and by validators when
@@ -1138,8 +1108,8 @@ impl Hashi {
             .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
-        let min_fee_rate = CoinSelectionParams::DEFAULT_MIN_FEE_RATE;
         let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
+        let min_fee_rate = self.effective_min_fee_rate();
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
         let change_address = self
@@ -1204,6 +1174,7 @@ impl Hashi {
 
             let params = CoinSelectionParams {
                 max_inputs,
+                min_fee_rate,
                 long_term_fee_rate: configured_long_term_fee_rate,
                 max_fee_per_request: self.onchain_state().worst_case_network_fee(),
                 max_withdrawal_requests: request_count,
@@ -1596,6 +1567,148 @@ fn unconfirmed_ancestor_depth(
 /// one [`AncestorTx`] entry with its confirmation count, weight, and fee.
 /// The walk is a BFS over the ancestor DAG, capped at
 /// [`MAX_ANCESTOR_DEPTH`] levels.
+/// Aggregate weight and fee of the unconfirmed ancestors of `records`,
+/// counted once each.
+///
+/// Mirrors `unconfirmed_ancestor_depth`: anything still in
+/// `withdrawal_txns` counts as unconfirmed, keeping validation
+/// deterministic without a Bitcoin round-trip. Entries linger until
+/// finality, so this is an upper bound on the leader's figure — it
+/// widens only the ceiling, which the on-chain per-request cap bounds.
+fn unconfirmed_ancestor_package(
+    hashi: &Hashi,
+    records: &[&UtxoRecord],
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
+    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
+) -> (Weight, u64) {
+    let mut seen: std::collections::HashSet<Address> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<Address> = records
+        .iter()
+        .filter_map(|r| r.produced_by)
+        .collect::<std::collections::VecDeque<_>>();
+
+    let mut weight = Weight::ZERO;
+    let mut fee = 0u64;
+
+    while let Some(wid) = queue.pop_front() {
+        if !seen.insert(wid) {
+            continue;
+        }
+        let Some(txn) = withdrawal_txns.get(&wid) else {
+            continue;
+        };
+        let Ok(tx) = hashi.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs()) else {
+            continue;
+        };
+
+        weight += signed_weight_of(&tx, txn.inputs.len());
+        let input_total: u64 = txn.inputs.iter().map(|u| u.amount).sum();
+        let output_total: u64 = txn.all_outputs().iter().map(|o| o.amount).sum();
+        fee = fee.saturating_add(input_total.saturating_sub(output_total));
+
+        for input_utxo in &txn.inputs {
+            if let Some(parent) = utxo_records.get(&input_utxo.id).and_then(|r| r.produced_by) {
+                queue.push_back(parent);
+            }
+        }
+    }
+
+    (weight, fee)
+}
+
+/// Weight of a withdrawal transaction once signed.
+///
+/// [`Hashi::build_unsigned_withdrawal_tx`] leaves witnesses empty, so its
+/// `weight()` is base-only — 127,060 wu for a 700-input settlement that
+/// weighs 314,662 wu on-chain. Sizing a CPFP deficit against that would
+/// badly underpay. Adds each input's satisfaction weight plus the 2 wu
+/// segwit marker and flag that an empty-witness transaction omits.
+fn signed_weight_of(unsigned: &bitcoin::Transaction, input_count: usize) -> Weight {
+    let satisfaction = SpendPath::TaprootScriptPath2of2
+        .satisfaction_weight()
+        .checked_mul(input_count as u64)
+        .expect("ancestor satisfaction weight overflow");
+    unsigned.weight() + satisfaction + Weight::from_wu(2)
+}
+
+async fn forward_signing_results(
+    results: &mut tokio::sync::mpsc::UnboundedReceiver<(
+        Address,
+        crate::mpc::types::SigningResult<SchnorrSignature>,
+    )>,
+    index_by_id: &HashMap<Address, usize>,
+    sink: &tokio::sync::mpsc::Sender<
+        Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+    >,
+    metrics: &crate::metrics::Metrics,
+    batch_start: std::time::Instant,
+    presigs_remaining: impl Fn() -> i64,
+) {
+    let mut deferred_failure: Option<tonic::Status> = None;
+    while let Some((signing_id, sign_result)) = results.recv().await {
+        let input_index = index_by_id[&signing_id];
+        let sign_duration = batch_start.elapsed().as_secs_f64();
+        match &sign_result {
+            Ok(_) => {
+                metrics
+                    .mpc_sign_duration_seconds
+                    .with_label_values(&["success"])
+                    .observe(sign_duration);
+                metrics.presig_pool_remaining.set(presigs_remaining());
+            }
+            Err(e) => {
+                metrics
+                    .mpc_sign_duration_seconds
+                    .with_label_values(&["failure"])
+                    .observe(sign_duration);
+                let reason = match e {
+                    crate::mpc::types::SigningError::Timeout { .. } => "timeout",
+                    crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                    crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
+                        "too_many_invalid"
+                    }
+                    crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                    _ => "other",
+                };
+                metrics
+                    .mpc_sign_failures_total
+                    .with_label_values(&[reason])
+                    .inc();
+            }
+        }
+        match sign_result {
+            Ok(sig) => {
+                let partial = hashi_types::proto::SignWithdrawalTransactionPartial {
+                    input_index: input_index as u32,
+                    signature: sig.to_byte_array().to_vec().into(),
+                };
+                let _ = sink.send(Ok(partial)).await;
+            }
+            Err(e) => {
+                deferred_failure
+                    .get_or_insert_with(|| withdrawal_input_signing_status(input_index, e));
+            }
+        }
+    }
+    if let Some(status) = deferred_failure {
+        let _ = sink.send(Err(status)).await;
+    }
+}
+
+fn withdrawal_input_signing_status(
+    input_index: usize,
+    err: crate::mpc::types::SigningError,
+) -> tonic::Status {
+    let status = crate::mpc::rpc::signing_error_to_status(err);
+    tonic::Status::new(
+        status.code(),
+        format!(
+            "Failed to sign withdrawal transaction input {input_index}: {}",
+            status.message()
+        ),
+    )
+}
+
 fn build_ancestor_chain(
     hashi: &Hashi,
     producing_id: Address,
@@ -1604,11 +1717,18 @@ fn build_ancestor_chain(
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
 ) -> Vec<AncestorTx> {
     let mut chain = Vec::new();
+    let mut seen: std::collections::HashSet<Address> = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::new();
     queue.push_back((producing_id, 0usize));
 
     while let Some((wid, depth)) = queue.pop_front() {
         if depth >= MAX_ANCESTOR_DEPTH {
+            continue;
+        }
+
+        // A DAG, not a tree: spending two change outputs of one parent
+        // would otherwise record it twice.
+        if !seen.insert(wid) {
             continue;
         }
 
@@ -1625,8 +1745,9 @@ fn build_ancestor_chain(
         let output_total: u64 = txn.all_outputs().iter().map(|o| o.amount).sum();
 
         chain.push(AncestorTx {
+            id: wid,
             confirmations,
-            tx_weight: tx.weight(),
+            tx_weight: signed_weight_of(&tx, txn.inputs.len()),
             tx_fee: input_total.saturating_sub(output_total),
         });
 
@@ -1701,11 +1822,80 @@ pub fn build_guardian_withdrawal_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mpc::types::SigningError;
     use crate::onchain::types::OutputUtxo;
     use crate::onchain::types::Utxo;
     use crate::onchain::types::UtxoId;
     use crate::utxo_pool::CoinSelectionParams;
     use hashi_types::bitcoin_txid::BitcoinTxid;
+
+    fn a_signature() -> SchnorrSignature {
+        let bytes = hex::decode(
+            "403B12B0D8555A344175EA7EC746566303321E5DBFA8BE6F091635163ECA79A8\
+             585ED3E3170807E7C03B720FC54C7B23897FCBA0E9D0B4A06894CFD249F22367",
+        )
+        .unwrap();
+        SchnorrSignature::from_byte_array(&bytes.try_into().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn forward_signing_results_sends_the_failure_last() {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sink, mut sink_rx) = tokio::sync::mpsc::channel(8);
+
+        let exhausted = Address::new([1u8; 32]);
+        let signed_a = Address::new([2u8; 32]);
+        let signed_b = Address::new([3u8; 32]);
+        let index_by_id: HashMap<Address, usize> = [(exhausted, 0), (signed_a, 1), (signed_b, 2)]
+            .into_iter()
+            .collect();
+
+        result_tx
+            .send((exhausted, Err(SigningError::PoolExhausted)))
+            .unwrap();
+        result_tx.send((signed_a, Ok(a_signature()))).unwrap();
+        result_tx.send((signed_b, Ok(a_signature()))).unwrap();
+        drop(result_tx);
+
+        forward_signing_results(
+            &mut result_rx,
+            &index_by_id,
+            &sink,
+            &crate::metrics::Metrics::new(&prometheus::Registry::new()),
+            std::time::Instant::now(),
+            || 0,
+        )
+        .await;
+        drop(sink);
+
+        let mut sent = Vec::new();
+        while let Some(item) = sink_rx.recv().await {
+            sent.push(item);
+        }
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0].as_ref().unwrap().input_index, 1);
+        assert_eq!(sent[1].as_ref().unwrap().input_index, 2);
+        assert_eq!(
+            sent[2].as_ref().unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn withdrawal_input_signing_status_keeps_the_error_code() {
+        let status = withdrawal_input_signing_status(7, SigningError::PoolExhausted);
+        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+        assert!(
+            status.message().contains("input 7")
+                && status.message().contains("Presignature pool exhausted"),
+            "lost message detail: {}",
+            status.message()
+        );
+
+        let status =
+            withdrawal_input_signing_status(7, SigningError::CryptoError("boom".to_string()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+    }
 
     fn input(amount: u64) -> Utxo {
         Utxo {
@@ -1862,16 +2052,23 @@ mod tests {
 
     #[test]
     fn withdrawal_flow_budget_at_absolute_cap() {
-        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 70);
+        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 40);
+        assert_eq!(CoinSelectionParams::DEFAULT_MAX_INPUTS, 400);
         assert_eq!(
-            safe_withdrawal_commit_max_inputs(70, 700),
-            700,
-            "70 requests × 10 inputs = 700, exactly fits the 922 commit budget",
+            safe_withdrawal_commit_max_inputs(
+                CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+                CoinSelectionParams::DEFAULT_MAX_INPUTS,
+            ),
+            400,
+            "the default input cap limits the commit to 400 inputs",
         );
         assert_eq!(
-            safe_withdrawal_flow_max_inputs(70, 700),
-            700,
-            "commit and per-request budgets align at 70 requests / 700 inputs",
+            safe_withdrawal_flow_max_inputs(
+                CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+                CoinSelectionParams::DEFAULT_MAX_INPUTS,
+            ),
+            400,
+            "40 requests × 10 inputs/request limits the flow to 400 inputs",
         );
     }
 
@@ -1884,12 +2081,53 @@ mod tests {
         );
     }
 
+    /// The settlement that stalled on signet: 314,662 wu on-chain
+    /// against 127,060 wu unsigned.
     #[test]
-    fn withdrawal_flow_budget_at_default_batch_size() {
+    fn test_signed_weight_matches_onchain_weight() {
+        use bitcoin::Amount;
+        use bitcoin::OutPoint;
+        use bitcoin::ScriptBuf;
+        use bitcoin::Sequence;
+        use bitcoin::TxIn;
+        use bitcoin::TxOut;
+        use bitcoin::Witness;
+
+        const INPUTS: usize = 700;
+        const OUTPUTS: usize = 71;
+        const ONCHAIN_WEIGHT_WU: u64 = 314_662;
+
+        let unsigned = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: (0..INPUTS)
+                .map(|_| TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                })
+                .collect(),
+            output: (0..OUTPUTS)
+                .map(|_| TxOut {
+                    value: Amount::from_sat(28_876),
+                    // P2TR: OP_1 <32-byte x-only key> = 34 bytes.
+                    script_pubkey: ScriptBuf::from_bytes(
+                        [vec![0x51, 0x20], vec![0u8; 32]].concat(),
+                    ),
+                })
+                .collect(),
+        };
+
         assert_eq!(
-            safe_withdrawal_flow_max_inputs(50, CoinSelectionParams::DEFAULT_MAX_INPUTS),
-            500,
-            "50 requests × 10 inputs/request = 500, per-request budget is binding",
+            unsigned.weight().to_wu(),
+            127_060,
+            "unsigned weight is base-only, as expected"
+        );
+        assert_eq!(
+            signed_weight_of(&unsigned, INPUTS).to_wu(),
+            ONCHAIN_WEIGHT_WU,
+            "signed weight must match the transaction actually broadcast"
         );
     }
 }

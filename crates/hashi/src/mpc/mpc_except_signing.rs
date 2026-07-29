@@ -48,7 +48,6 @@ use crate::mpc::types::NonceCollectionWindow;
 use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
-use crate::mpc::types::PresignatureDerivationVersion;
 pub use crate::mpc::types::ProtocolComplaint;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
@@ -200,7 +199,6 @@ impl MpcManager {
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
-        presignature_derivation_activation_epoch: u64,
         metrics: &Metrics,
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
@@ -226,17 +224,12 @@ impl MpcManager {
         let total_weight = nodes.total_weight();
         let nonce_generation_protocol =
             NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
-        let presignature_derivation_version = PresignatureDerivationVersion::from_activation_epoch(
-            epoch,
-            presignature_derivation_activation_epoch,
-        );
         let mpc_config = MpcConfig::new(
             epoch,
             nodes,
             threshold,
             max_faulty,
             nonce_generation_protocol,
-            presignature_derivation_version,
             committee.mpc_nonce_accumulation_window_ms(),
         );
         let party_id = committee
@@ -1129,6 +1122,61 @@ impl MpcManager {
             }
         }
         (certified, window)
+    }
+
+    pub(crate) fn avid_certified_nonce_dealers_from_certs(
+        &self,
+        certs: &[(Address, CertificateV1)],
+    ) -> (HashSet<Address>, u32) {
+        let required_weight = self.required_nonce_weight();
+        let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
+        let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
+        let mut weight_sum = 0u32;
+        let mut certified = HashSet::new();
+        for (table_dealer, cert) in certs {
+            let CertificateV1::NonceGeneration { cert, .. } = cert else {
+                continue;
+            };
+            let dealer = &cert.message().dealer_address;
+            if dealer != table_dealer {
+                tracing::warn!(
+                    "Nonce cert served under table key {:?} but signed for dealer {:?}; \
+                     sizing under the signed dealer",
+                    table_dealer,
+                    dealer
+                );
+            }
+            if certified.contains(dealer) {
+                continue;
+            }
+            let signer_weight = match self.reduced_weight_of_cert(cert) {
+                Ok(weight) => weight,
+                Err(e) => {
+                    tracing::info!("Unreadable nonce cert signers for {:?}: {}", dealer, e);
+                    continue;
+                }
+            };
+            if signer_weight < vote_quorum_weight {
+                tracing::warn!(
+                    "Excluding AVID nonce cert for dealer {:?} from recovery sizing: \
+                     signer weight {} below the vote quorum {}",
+                    dealer,
+                    signer_weight,
+                    vote_quorum_weight,
+                );
+                continue;
+            }
+            if let Some(party_id) = self.committee.index_of(dealer)
+                && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
+            {
+                weight_sum += w as u32;
+                certified.insert(*dealer);
+                if weight_sum >= required_weight {
+                    break;
+                }
+            }
+        }
+        (certified, weight_sum)
     }
 
     pub(crate) async fn verified_nonce_certs<T>(
@@ -5890,22 +5938,14 @@ impl MpcManager {
 
     pub(crate) fn required_nonce_weight(&self) -> u32 {
         let max_faulty = self.mpc_config.max_faulty as u32;
-        match self.mpc_config.presignature_derivation_version {
-            PresignatureDerivationVersion::Legacy => 2 * max_faulty + 1,
-            PresignatureDerivationVersion::PrivacyThreshold => {
-                self.mpc_config.nodes.total_weight() as u32 - max_faulty
-            }
-        }
+        self.mpc_config.nodes.total_weight() as u32 - max_faulty
     }
 
     fn nonce_collection_window(&self) -> NonceCollectionWindow {
-        let window_ms = match self.mpc_config.presignature_derivation_version {
-            PresignatureDerivationVersion::PrivacyThreshold => {
-                self.mpc_config.nonce_accumulation_window_ms
-            }
-            PresignatureDerivationVersion::Legacy => 0,
-        };
-        NonceCollectionWindow::new(self.required_nonce_weight(), window_ms)
+        NonceCollectionWindow::new(
+            self.required_nonce_weight(),
+            self.mpc_config.nonce_accumulation_window_ms,
+        )
     }
 
     pub(crate) fn nonce_collection_cutoff_ms(

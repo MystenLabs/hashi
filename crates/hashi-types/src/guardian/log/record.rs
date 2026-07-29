@@ -1,17 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LogRecord` envelope written to S3: it wraps a `super::message::LogMessage`
+//! The `LogRecord` envelope written to S3: it wraps a `super::schema::LogMessage`
 //! with the session id, timestamp, and (for signed logs) the guardian signature.
 //! The object key and lock duration are derived from the wrapped message.
 
-use super::S3ObjectLockPolicy;
-use super::message::LogMessage;
-use super::message::LogMessageV1;
-use super::message::ObjectKeyPattern;
-use super::message::VersionedLogMessage;
+use super::ObjectKeyPattern;
+use super::retention::S3ObjectLockPolicy;
+use super::schema::LogMessage;
+use super::schema::LogMessageV1;
+use super::schema::VersionedLogMessage;
 use crate::guardian::BuildPcrs;
-use crate::guardian::GuardianError::InvalidInputs;
+use crate::guardian::GuardianError::InvalidS3Log;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
@@ -250,7 +250,7 @@ impl LogRecord {
         pub_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         if self.message.is_allowed_unsigned() {
-            return Err(InvalidInputs(
+            return Err(InvalidS3Log(
                 "expected signed log record but message is unsigned".into(),
             ));
         }
@@ -260,22 +260,27 @@ impl LogRecord {
         let signature = self
             .signature
             .as_ref()
-            .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-        verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)?;
+            .ok_or_else(|| InvalidS3Log("missing log signature".into()))?;
+        verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)
+            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
 
-        Ok((self.session_id, timestamp_ms, self.message.into_current()?))
+        let message = self
+            .message
+            .into_current()
+            .map_err(|e| InvalidS3Log(format!("log schema conversion failed: {e}")))?;
+        Ok((self.session_id, timestamp_ms, message))
     }
 
     /// Validates the unsigned OI-attestation record's envelope and canonical
     /// session. The Nitro attestation itself must be authenticated separately.
     pub fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         if !self.message.is_allowed_unsigned() {
-            return Err(InvalidInputs(
+            return Err(InvalidS3Log(
                 "expected unsigned log record but message requires a signature".into(),
             ));
         }
         if self.signature.is_some() {
-            return Err(InvalidInputs(
+            return Err(InvalidS3Log(
                 "unsigned log record must not contain a signature".into(),
             ));
         }
@@ -285,25 +290,25 @@ impl LogRecord {
             VersionedLogMessage::V2(LogMessage::Init(init)) => init,
             _ => unreachable!("is_allowed_unsigned only permits an init message"),
         };
-        let super::message::InitLogMessage::OIAttestationUnsigned {
+        let super::messages::InitLogMessage::OIAttestationUnsigned {
             signing_public_key, ..
         } = init.as_ref()
         else {
             unreachable!("is_allowed_unsigned only permits OIAttestationUnsigned");
         };
         self.validate_session_id(signing_public_key)?;
-        Ok((
-            self.session_id,
-            self.timestamp_ms,
-            self.message.into_current()?,
-        ))
+        let message = self
+            .message
+            .into_current()
+            .map_err(|e| InvalidS3Log(format!("log schema conversion failed: {e}")))?;
+        Ok((self.session_id, self.timestamp_ms, message))
     }
 
     /// Rejects a record whose signed intended key differs from the key at which
     /// the S3 reader found it.
     pub fn validate_actual_object_key(&self, actual_object_key: &str) -> GuardianResult<()> {
         if self.object_key != actual_object_key {
-            return Err(InvalidInputs(format!(
+            return Err(InvalidS3Log(format!(
                 "S3 object key mismatch: record contains {}, actual key is {actual_object_key}",
                 self.object_key
             )));
@@ -317,13 +322,13 @@ impl LogRecord {
             .object_key_pattern(&self.session_id, self.timestamp_ms)
         {
             ObjectKeyPattern::Fixed(expected) if self.object_key != expected => {
-                return Err(InvalidInputs(format!(
+                return Err(InvalidS3Log(format!(
                     "non-canonical S3 object key: got {}, expected {expected}",
                     self.object_key
                 )));
             }
             ObjectKeyPattern::RandomSuffix(prefix) if !self.object_key.starts_with(&prefix) => {
-                return Err(InvalidInputs(format!(
+                return Err(InvalidS3Log(format!(
                     "non-canonical S3 object key: got {}, expected prefix {prefix}",
                     self.object_key
                 )));
@@ -336,7 +341,7 @@ impl LogRecord {
     fn validate_session_id(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
         let canonical_session_id = SessionID::from_signing_pubkey(signing_public_key);
         if self.session_id != canonical_session_id {
-            return Err(InvalidInputs(format!(
+            return Err(InvalidS3Log(format!(
                 "session ID mismatch: record contains {}, signing public key derives {canonical_session_id}",
                 self.session_id
             )));
@@ -525,7 +530,7 @@ mod tests {
                 LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                     request_data,
                     request_sign: request_sign.clone(),
-                    error: GuardianError::RateLimitExceeded,
+                    error: GuardianError::RateLimitExceeded.to_string(),
                 })),
             ),
             (
@@ -565,7 +570,7 @@ mod tests {
                     from_epoch: 0,
                     new_committee: committee_1,
                     request_sign,
-                    error: GuardianError::InvalidInputs("test failure".into()),
+                    error: GuardianError::InvalidInputs("test failure".into()).to_string(),
                 })),
             ),
             (
@@ -657,9 +662,14 @@ mod tests {
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
-                error: GuardianError::RateLimitExceeded,
+                error: GuardianError::RateLimitExceeded.to_string(),
             })),
             &signing_key,
+        );
+        let json = serde_json::to_value(&log).unwrap();
+        assert_eq!(
+            json["message"]["Withdrawal"]["Failure"]["error"],
+            GuardianError::RateLimitExceeded.to_string()
         );
 
         assert_writer_key_is_stable_and_verifies(log, &signing_key);
@@ -682,9 +692,14 @@ mod tests {
                     config: crate::move_types::Config::default(),
                 },
                 request_sign,
-                error: GuardianError::InvalidInputs("test failure".to_string()),
+                error: GuardianError::InvalidInputs("test failure".to_string()).to_string(),
             })),
             &signing_key,
+        );
+        let json = serde_json::to_value(&log).unwrap();
+        assert_eq!(
+            json["message"]["CommitteeUpdate"]["Failure"]["error"],
+            GuardianError::InvalidInputs("test failure".to_string()).to_string()
         );
 
         assert_writer_key_is_stable_and_verifies(log, &signing_key);
@@ -804,7 +819,7 @@ mod tests {
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
-                error: GuardianError::RateLimitExceeded,
+                error: GuardianError::RateLimitExceeded.to_string(),
             })),
             &signing_key,
         );

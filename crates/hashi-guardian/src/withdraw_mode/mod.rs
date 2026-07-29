@@ -15,7 +15,7 @@ pub mod provisioner_rotate_cert;
 pub mod standard_withdrawal;
 
 use hashi_types::committee::certificate_threshold;
-use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::Unauthenticated;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
@@ -31,5 +31,5 @@ pub fn verify_hashi_cert<T: hashi_types::intent::IntentMessage>(
     let threshold = certificate_threshold(committee.total_weight());
     committee
         .verify_signature_and_weight(signed_request, threshold)
-        .map_err(|e| InvalidInputs(format!("signature verification failed {:?}", e)))
+        .map_err(|e| Unauthenticated(format!("signature verification failed: {e:?}")))
 }

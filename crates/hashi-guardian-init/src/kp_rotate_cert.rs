@@ -171,7 +171,7 @@ pub async fn run(
         .map_err(|e| anyhow!("decode SignedProvisionerRotateCertResponse: {e:?}"))?;
     let response = signed_response
         .verify(&signing_pub_key)
-        .map_err(|e| anyhow!("verify ProvisionerRotateCertResponse signature: {e:?}"))?;
+        .map_err(|e| anyhow!("verify ProvisionerRotateCertResponse signature: {e}"))?;
     let expected_cert_seq = old_cert_seq.checked_add(1).context("cert_seq overflow")?;
     anyhow::ensure!(
         response.cert_seq == expected_cert_seq,

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::GuardianError::InvalidInputs;
+use super::GuardianError::LimiterSequenceMismatch;
 use super::GuardianError::RateLimitExceeded;
 use super::GuardianResult;
 use serde::Deserialize;
@@ -75,10 +76,10 @@ impl RateLimiter {
     /// refills based on elapsed time, then debits the requested amount.
     pub fn consume(&mut self, seq: u64, timestamp: u64, amount_sats: u64) -> GuardianResult<()> {
         if seq != self.state.next_seq {
-            return Err(InvalidInputs(format!(
-                "seq mismatch: expected {}, got {}",
-                self.state.next_seq, seq
-            )));
+            return Err(LimiterSequenceMismatch {
+                expected: self.state.next_seq,
+                actual: seq,
+            });
         }
         if timestamp < self.state.last_updated_at {
             return Err(InvalidInputs(format!(

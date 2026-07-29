@@ -127,9 +127,7 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         .onchain_state()
         .state()
         .package_versions()
-        .keys()
-        .copied()
-        .max()
+        .latest_version()
         .ok_or_else(|| anyhow::anyhow!("onchain state has no package versions yet"))?;
     let (compiled, digest) = build_upgrade_package(
         sui_binary(),

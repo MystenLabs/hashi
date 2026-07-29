@@ -117,8 +117,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
     // `previous_epoch`'s committee. `MpcManager::new` requires a committee at
     // `reconstruction_epoch`, and reconstruction decrypts AVSS messages with
     // `previous_epoch`'s encryption keys (per #502). Cloning instead of
-    // mutating `onchain_state` keeps the watcher free to rescrape without
-    // racing this tool.
+    // mutating `onchain_state` keeps the watcher free to update state
+    // without racing this tool.
     let recovery_committee_set =
         build_recovery_committee_set(onchain_state, previous_epoch, reconstruction_epoch)?;
     let previous_committee = recovery_committee_set
@@ -191,10 +191,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             dummy_signing_key.clone(),
             Box::new(store),
             chain_id,
-            None,     // weight_divisor
-            0,        // batch_size_per_weight (unused for reconstruction)
-            None,     // test_corrupt_shares_for
-            u64::MAX, // presig derivation is unused for reconstruction
+            None, // weight_divisor
+            0,    // batch_size_per_weight (unused for reconstruction)
+            None, // test_corrupt_shares_for
             &metrics,
         )
         .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?;

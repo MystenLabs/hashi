@@ -101,6 +101,7 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
             .onchain_state()
             .state()
             .package_versions()
+            .versions()
             .clone();
         assert!(
             versions.len() >= 2,

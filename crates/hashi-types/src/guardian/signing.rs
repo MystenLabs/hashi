@@ -7,8 +7,9 @@
 //! value, and `GuardianSigned::{new,verify}` mix that value into the signed
 //! bytes so a signature over one type can never be replayed as another.
 
+use super::CryptoVerificationError;
+use super::CryptoVerificationResult;
 use super::GuardianError::InternalError;
-use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianResult;
 use super::ProvisionerRotateCertRequest;
@@ -76,10 +77,10 @@ pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
     timestamp_ms: UnixMillis,
     signature: &GuardianSignature,
     pub_key: &VerificationKey,
-) -> GuardianResult<()> {
+) -> CryptoVerificationResult<()> {
     pub_key
         .verify(signature, &data.signing_bytes(timestamp_ms))
-        .map_err(|_| InvalidInputs("signature invalid".into()))
+        .map_err(|_| CryptoVerificationError::new("signature invalid"))
 }
 
 /// All possible KP signing intent types.
@@ -163,7 +164,7 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
 
     /// Verify signature and extract payload
     /// Checks intent byte to ensure signature is for the correct type
-    pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
+    pub fn verify(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T> {
         verify_intent(&self.data, self.timestamp_ms, &self.signature, pub_key)?;
         Ok(self.data)
     }
@@ -198,15 +199,16 @@ impl<T: Serialize + KpSigningIntent> KpSigned<T> {
 
     /// Verify the signature without consuming the signed request.
     /// Checks the intent byte to ensure the signature is for this request type.
-    pub fn verify_signature(&self) -> GuardianResult<()> {
+    pub fn verify_signature(&self) -> CryptoVerificationResult<()> {
         let msg_bytes = Self::signed_bytes(&self.data);
-        verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert)
-            .map_err(|e| InvalidInputs(format!("KP signature verification failed: {e}")))?;
+        verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert).map_err(|e| {
+            CryptoVerificationError::new(format!("KP signature verification failed: {e}"))
+        })?;
         Ok(())
     }
 
     /// Verify the signature and extract the payload.
-    pub fn verify(self) -> GuardianResult<T> {
+    pub fn verify(self) -> CryptoVerificationResult<T> {
         self.verify_signature()?;
         Ok(self.data)
     }
