@@ -654,7 +654,7 @@ impl GuardianS3Client {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = self.get_log_record(&info_key).await?;
-        let (_, _, info_message) = info_record.verify(&signing_pubkey)?;
+        let (_, _, info_message) = info_record.validate_signed(&signing_pubkey)?;
         let info = info_message
             .into_init_log()
             .and_then(|x| match x {
@@ -704,6 +704,8 @@ mod tests {
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::NitroAttestation;
+    use hashi_types::guardian::SessionID;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -981,6 +983,51 @@ mod tests {
             matches!(error, S3Error(message) if message.contains("expired object lock metadata"))
         );
         assert_eq!(get_expired.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsigned_log_replay_reaches_canonical_key_validation() {
+        let signing_key = GuardianSignKeyPair::from([14u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let mut record = LogRecord::new_at_timestamp(
+            session_id,
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                attestation: NitroAttestation::new(vec![1, 2, 3]),
+                signing_public_key: signing_key.verification_key(),
+            })),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        record.object_key = "init/copied-attestation.json".to_string();
+        let body = serde_json::to_vec(&record).unwrap();
+        let get_copied = mock!(Client::get_object)
+            .match_requests(|req| {
+                req.bucket() == Some("bucket") && req.key() == Some("init/copied-attestation.json")
+            })
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(body.clone()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_copied]);
+        let logger = mk_logger_with_client(client);
+
+        let record = logger
+            .get_log_record_inner(
+                "init/copied-attestation.json",
+                LockCheck::Skipped,
+                HistoryCheck::AlreadyChecked,
+            )
+            .await
+            .expect("the embedded key matches the actual S3 key");
+        let error = record
+            .validate_unsigned()
+            .expect_err("the copied key must still fail canonical validation");
+
+        assert!(
+            matches!(error, InvalidS3Log(message) if message.contains("non-canonical S3 object key"))
+        );
+        assert_eq!(get_copied.num_calls(), 1);
     }
 
     async fn assert_log_read_rejects_relocation(relocated_key: &str) {

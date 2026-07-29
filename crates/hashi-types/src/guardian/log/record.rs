@@ -245,7 +245,9 @@ impl LogRecord {
         }
     }
 
-    pub fn verify(
+    /// Validates the signed record's envelope, canonical session, and Guardian
+    /// signature. The caller must establish trust in `pub_key` separately.
+    pub fn validate_signed(
         self,
         pub_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
@@ -409,7 +411,7 @@ mod tests {
         let record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
         assert_eq!(record_read_from_s3.object_key(), writer_key);
         record_read_from_s3
-            .verify(&signing_key.verification_key())
+            .validate_signed(&signing_key.verification_key())
             .expect("the serialized record must verify at the key used by the writer");
     }
 
@@ -586,7 +588,7 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
             } else {
                 decoded
-                    .verify(&signing_key.verification_key())
+                    .validate_signed(&signing_key.verification_key())
                     .unwrap_or_else(|error| panic!("{name} failed verification: {error}"));
             }
         }
@@ -606,7 +608,7 @@ mod tests {
                 .unwrap();
         let signing_pubkey = GuardianPubKey::try_from(signing_pubkey.as_slice()).unwrap();
         let (session_id, timestamp_ms, LogMessageV2::KpShareState(message)) = record
-            .verify(&signing_pubkey)
+            .validate_signed(&signing_pubkey)
             .expect("the deployed V1 signature must verify before normalization")
         else {
             panic!("expected normalized KP share state");
@@ -683,7 +685,7 @@ mod tests {
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
 
         let (_, timestamp_ms, message) = log
-            .verify(&signing_key.verification_key())
+            .validate_signed(&signing_key.verification_key())
             .expect("record should verify at its intended S3 key");
 
         assert_eq!(timestamp_ms, 1_700_000_000_000);
@@ -712,7 +714,7 @@ mod tests {
 
         let from_s3: LogRecord = serde_json::from_value(json).unwrap();
         from_s3
-            .verify(&signing_key.verification_key())
+            .validate_signed(&signing_key.verification_key())
             .expect("serialized object key should be covered by the signature");
     }
 
@@ -741,7 +743,7 @@ mod tests {
         );
 
         let err = tampered
-            .verify(&signing_key.verification_key())
+            .validate_signed(&signing_key.verification_key())
             .expect_err("signature must cover the canonical object key and message");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -772,7 +774,7 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         record_read_from_s3.object_key = relocated_key;
         let err = record_read_from_s3
-            .verify(&signing_key.verification_key())
+            .validate_signed(&signing_key.verification_key())
             .expect_err("the signature must authenticate the random failure suffix");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -801,7 +803,7 @@ mod tests {
         aliased.object_key = GenesisLogMessage::object_key();
 
         let err = aliased
-            .verify(&signing_key.verification_key())
+            .validate_signed(&signing_key.verification_key())
             .expect_err("session ID must be part of the signed routing context");
 
         assert!(format!("{err:?}").contains("session ID mismatch"));
@@ -905,7 +907,9 @@ mod tests {
         assert_eq!(message["config_hash"], hex::encode([0xcd; 32]));
 
         let from_json: LogRecord = serde_json::from_value(json).unwrap();
-        from_json.verify(&signing_key.verification_key()).unwrap();
+        from_json
+            .validate_signed(&signing_key.verification_key())
+            .unwrap();
     }
 
     #[test]

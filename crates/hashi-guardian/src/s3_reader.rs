@@ -415,7 +415,8 @@ impl GuardianSessionCache {
         let object_key = record.object_key.clone();
         let session_id = record.session_id.clone();
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
-        let (session_id, timestamp_ms, message) = record.verify(&session_info.signing_pubkey)?;
+        let (session_id, timestamp_ms, message) =
+            record.validate_signed(&session_info.signing_pubkey)?;
         Ok(VerifiedLogRecord::new(
             object_key,
             session_id,
