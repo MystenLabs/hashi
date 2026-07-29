@@ -21,8 +21,6 @@ use crate::guardian::SessionID;
 use crate::guardian::SigningIntent;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
-use crate::guardian::signing::sign_intent;
-use crate::guardian::signing::verify_intent;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Error as _;
@@ -218,11 +216,7 @@ impl LogRecord {
             message,
             signature: None,
         };
-        record.signature = Some(sign_intent(
-            &record.signing_payload(),
-            timestamp_ms,
-            signing_key,
-        ));
+        record.signature = Some(record.signing_payload().sign(timestamp_ms, signing_key));
         record
     }
 
@@ -263,7 +257,8 @@ impl LogRecord {
             .signature
             .as_ref()
             .ok_or_else(|| InvalidS3Log("missing log signature".into()))?;
-        verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)
+        self.signing_payload()
+            .verify_signature(timestamp_ms, signature, pub_key)
             .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
 
         let message = self

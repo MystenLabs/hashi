@@ -49,38 +49,34 @@ pub enum IntentType {
     ProvisionerRotateCertResponse = 5,
 }
 
-/// Trait for types that can be signed, providing domain separation via an intent.
-pub trait SigningIntent {
+/// Trait for serializable types that can be signed with intent-based domain
+/// separation.
+pub trait SigningIntent: Serialize {
     const INTENT: IntentType;
 
     /// Canonical bytes covered by this guardian signature. Most payloads use
     /// the standard `(intent, data, timestamp)` layout; routing-sensitive
     /// payloads may override this while retaining the central intent registry.
-    fn signing_bytes(&self, timestamp_ms: UnixMillis) -> Vec<u8>
-    where
-        Self: Serialize,
-    {
+    fn signing_bytes(&self, timestamp_ms: UnixMillis) -> Vec<u8> {
         bcs::to_bytes(&(Self::INTENT, self, timestamp_ms)).expect("serialization should not fail")
     }
-}
 
-pub(crate) fn sign_intent<T: Serialize + SigningIntent>(
-    data: &T,
-    timestamp_ms: UnixMillis,
-    signing_key: &SigningKey,
-) -> GuardianSignature {
-    signing_key.sign(&data.signing_bytes(timestamp_ms))
-}
+    /// Signs this payload's canonical intent-bound bytes.
+    fn sign(&self, timestamp_ms: UnixMillis, signing_key: &SigningKey) -> GuardianSignature {
+        signing_key.sign(&self.signing_bytes(timestamp_ms))
+    }
 
-pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
-    data: &T,
-    timestamp_ms: UnixMillis,
-    signature: &GuardianSignature,
-    pub_key: &VerificationKey,
-) -> CryptoVerificationResult<()> {
-    pub_key
-        .verify(signature, &data.signing_bytes(timestamp_ms))
-        .map_err(|_| CryptoVerificationError::new("signature invalid"))
+    /// Verifies a signature over this payload's canonical intent-bound bytes.
+    fn verify_signature(
+        &self,
+        timestamp_ms: UnixMillis,
+        signature: &GuardianSignature,
+        pub_key: &VerificationKey,
+    ) -> CryptoVerificationResult<()> {
+        pub_key
+            .verify(signature, &self.signing_bytes(timestamp_ms))
+            .map_err(|_| CryptoVerificationError::new("signature invalid"))
+    }
 }
 
 /// All possible KP signing intent types.
@@ -150,11 +146,11 @@ pub struct GuardianSigned<T> {
 }
 
 /// Methods for `Signed<T>` wrapper - signing and verification
-impl<T: Serialize + SigningIntent> GuardianSigned<T> {
+impl<T: SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
     pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let signature = sign_intent(&data, timestamp_ms, signing_key);
+        let signature = data.sign(timestamp_ms, signing_key);
         Self {
             data,
             timestamp_ms,
@@ -165,7 +161,8 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Verify signature and extract payload
     /// Checks intent byte to ensure signature is for the correct type
     pub fn verify(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T> {
-        verify_intent(&self.data, self.timestamp_ms, &self.signature, pub_key)?;
+        self.data
+            .verify_signature(self.timestamp_ms, &self.signature, pub_key)?;
         Ok(self.data)
     }
 }

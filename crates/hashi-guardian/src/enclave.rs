@@ -21,7 +21,6 @@ use hashi_types::guardian::GuardianError::LifecycleMismatch;
 use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
-use serde::Serialize;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -493,7 +492,7 @@ impl Enclave {
         self.config.signing_keys.verification_key()
     }
 
-    pub fn sign<T: Serialize + SigningIntent>(&self, data: T) -> GuardianSigned<T> {
+    pub fn sign<T: SigningIntent>(&self, data: T) -> GuardianSigned<T> {
         let kp = &self.config.signing_keys;
         let timestamp = now_timestamp_ms();
         GuardianSigned::new(data, kp, timestamp)
