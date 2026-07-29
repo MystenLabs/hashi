@@ -105,7 +105,7 @@ async fn log_failure(
         from_epoch,
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
-        error: err.clone(),
+        error: err.to_string(),
     };
     if let Err(log_err) = enclave.log_committee_update(msg).await {
         error!(

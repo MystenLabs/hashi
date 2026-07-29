@@ -442,7 +442,7 @@ pub enum WithdrawalLogMessage {
     Failure {
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
-        error: GuardianError,
+        error: String,
     },
 }
 
@@ -463,7 +463,7 @@ pub enum CommitteeUpdateLogMessage {
         from_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
-        error: GuardianError,
+        error: String,
     },
 }
 

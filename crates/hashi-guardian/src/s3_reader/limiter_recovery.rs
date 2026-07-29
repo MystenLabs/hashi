@@ -203,7 +203,7 @@ mod tests {
         let msg = WithdrawalLogMessage::Failure {
             request_data: StandardWithdrawalRequestWire::from(request_data),
             request_sign,
-            error: GuardianError::RateLimitExceeded,
+            error: GuardianError::RateLimitExceeded.to_string(),
         };
         VerifiedLogRecord {
             object_key: "withdraw/failure.json".to_string(),
