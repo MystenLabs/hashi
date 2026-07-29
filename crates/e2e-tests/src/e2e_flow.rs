@@ -2600,20 +2600,20 @@ mod tests {
     /// UTXO pool — where the flow should spend the Sui commit object
     /// budget on requests instead of consolidation inputs.
     ///
-    /// The commit transaction at this shape is the closest the flow gets
-    /// to Sui's 1000-object runtime cache limit (12 fixed + 3 × 298
-    /// requests + inputs ≈ 914 modeled objects), so this test empirically
-    /// validates the runtime-object cost model at its ceiling. The
-    /// 298-address `request_ids` pure argument (~9.5 KiB) also probes the
-    /// 16 KiB pure-argument limit, and the 298 approvals exercise the
-    /// 200-per-PTB approval chunking.
+    /// The commit transaction at this shape fills the modeled
+    /// runtime-object budget exactly (12 fixed + 3 × 298 requests + 16
+    /// inputs = 922 modeled objects), so this test empirically validates
+    /// the cost model at its ceiling. The 298-address `request_ids` pure
+    /// argument (~9.5 KiB) also probes the 16 KiB pure-argument limit, and
+    /// the 298 approvals exercise the 200-per-PTB approval chunking.
     ///
     /// Test outline:
-    /// 1. Create 8 large deposits (the entire UTXO pool).
+    /// 1. Create 16 large deposits (the entire UTXO pool, matching the
+    ///    funding reserve the commit object budget leaves at the cap).
     /// 2. Submit 298 withdrawal requests (two batched PTBs, then one
     ///    single request to fill the batch).
-    /// 3. Assert the batch is picked with all 298 requests and only the
-    ///    handful of available inputs.
+    /// 3. Assert the batch is picked with all 298 requests and the full
+    ///    16-input funding reserve.
     /// 4. Assert commit, sign, and confirm stay under all Sui limits.
     /// 5. Mine blocks, wait for confirmation, and run cleanup.
     #[tokio::test]
@@ -2622,7 +2622,7 @@ mod tests {
         info!("=== Starting Drain Mode Max Batch Test ===");
 
         let num_withdrawals: usize = hashi::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS;
-        let num_deposits: usize = 8;
+        let num_deposits: usize = 16;
 
         // 24-hour batching delay: the batch fires only at capacity, not on
         // a timer, so every request lands in one Bitcoin transaction.
@@ -2642,12 +2642,12 @@ mod tests {
 
         let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
 
-        // --- Create 8 large Bitcoin deposits ---
-        // 8 × 2,000,000 sats = 16,000,000 sats against 298 × 40,001 =
+        // --- Create 16 large Bitcoin deposits ---
+        // 16 × 2,000,000 sats = 32,000,000 sats against 298 × 40,001 =
         // 11,920,298 sats of withdrawals. Six largest-first inputs fund the
-        // batch, and low-fee consolidation sweeps the two leftovers — all
-        // well inside the 16-input funding reserve that the commit object
-        // budget leaves at the request cap.
+        // batch, and low-fee consolidation sweeps the ten leftovers —
+        // exactly filling the 16-input funding reserve that the commit
+        // object budget leaves at the request cap.
         let deposit_amount_sats = 2_000_000u64;
         info!(
             "Creating {} Bitcoin deposits of {} sats each...",
@@ -2793,9 +2793,9 @@ mod tests {
         );
 
         // The drain-mode property: the batch is output-heavy, not
-        // input-heavy. Funding needs six of the eight UTXOs and low-fee
-        // consolidation sweeps the rest, all inside the 16-input reserve
-        // the commit object budget leaves at the request cap.
+        // input-heavy. Funding needs six of the sixteen UTXOs and low-fee
+        // consolidation sweeps the rest, exactly filling the 16-input
+        // reserve the commit object budget leaves at the request cap.
         assert_eq!(
             picked.inputs.len(),
             num_deposits,
