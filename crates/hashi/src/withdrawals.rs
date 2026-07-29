@@ -199,6 +199,14 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
         ))
 }
 
+/// Cap on the trailing change outputs a commitment may declare. Coin
+/// selection emits at most one, but the shape check deliberately leaves
+/// room for a future leader that splits change into several UTXOs. Each
+/// change output becomes a pending UTXO object in the Sui flow, so the cap
+/// keeps a certified commitment's object cost inside the headroom the
+/// runtime-object budget leaves below Sui's hard cache limit.
+const WITHDRAWAL_MAX_CHANGE_OUTPUTS: usize = 8;
+
 /// Batch cap while the leader is in consolidation mode: the shape in which
 /// the per-request consolidation budget exactly fills the configured input
 /// cap (40 requests x 10 inputs = 400 inputs), so every batch keeps its
@@ -285,6 +293,16 @@ fn validate_commitment_shape(
         "Estimated transaction weight {tx_weight} exceeds Bitcoin's \
          standardness limit of {}",
         CoinSelectionParams::DEFAULT_MAX_TX_WEIGHT,
+    );
+
+    // Bound the change outputs that survive the weight check: each one
+    // costs Sui objects the runtime-object models above do not price, so
+    // the count must stay inside the budget headroom.
+    let change_count = outputs.len().saturating_sub(request_count);
+    anyhow::ensure!(
+        change_count <= WITHDRAWAL_MAX_CHANGE_OUTPUTS,
+        "Commitment has {change_count} change outputs, exceeding the cap of {}",
+        WITHDRAWAL_MAX_CHANGE_OUTPUTS,
     );
     Ok(())
 }
@@ -2230,6 +2248,23 @@ mod tests {
         // limit (~2,300 P2TR outputs).
         let err = validate_commitment_shape(298, 16, &p2tr_outputs(3_000)).unwrap_err();
         assert!(err.to_string().contains("standardness limit"), "{err}");
+    }
+
+    #[test]
+    fn commitment_shape_accepts_change_outputs_at_cap() {
+        validate_commitment_shape(40, 400, &p2tr_outputs(40 + WITHDRAWAL_MAX_CHANGE_OUTPUTS))
+            .expect("a commitment at the change-output cap must validate");
+    }
+
+    #[test]
+    fn commitment_shape_rejects_change_outputs_above_cap() {
+        let err = validate_commitment_shape(
+            298,
+            16,
+            &p2tr_outputs(298 + WITHDRAWAL_MAX_CHANGE_OUTPUTS + 1),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("change outputs"), "{err}");
     }
 
     #[test]
