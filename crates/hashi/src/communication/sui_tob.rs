@@ -172,10 +172,7 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        match self.certs.pop_front() {
-            Some(cert) => Ok(cert),
-            None => std::future::pending().await,
-        }
+        self.certs.pop_front().ok_or(ChannelError::Exhausted)
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {

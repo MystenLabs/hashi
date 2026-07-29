@@ -14284,3 +14284,69 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
         );
     }
 }
+
+#[tokio::test]
+async fn exhausted_prefetched_stream_pre_floor_does_not_block() {
+    let mut channel = crate::communication::PrefetchedTobChannel::new(vec![]);
+    let mut window = NonceCollectionWindow::new(100, 2_000);
+    assert_eq!(window.cutoff_ms(), None, "window must start pre-floor");
+
+    let received = tokio::time::timeout(
+        Duration::from_secs(2),
+        MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window, &(|| 0u64)),
+    )
+    .await;
+
+    let outcome = received
+        .expect("receive_nonce_cert_in_window never returned on an exhausted replay stream");
+    assert!(
+        outcome.is_err(),
+        "pre-floor exhaustion must fail recovery rather than report a usable outcome"
+    );
+}
+
+#[tokio::test]
+async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
+    let mut channel = crate::communication::PrefetchedTobChannel::new(vec![]);
+    let mut window = NonceCollectionWindow::new(100, 2_000);
+    let admission = window.try_admit(1_000).expect("floor admits");
+    window.record(admission, 100);
+    assert_eq!(
+        window.cutoff_ms(),
+        Some(3_000),
+        "window must be open for this case"
+    );
+
+    let started = std::time::Instant::now();
+    let outcome =
+        MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window, &(|| 1_500u64))
+            .await
+            .expect("exhaustion is not an error once the floor is met");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(outcome, WindowedNonceReceive::Closed),
+        "an exhausted stream must close the window"
+    );
+    assert!(
+        elapsed < NONCE_WINDOW_DRAIN_POLL,
+        "closed after {elapsed:?}, i.e. waited out the drain poll instead of \
+         recognising exhaustion"
+    );
+}
+
+
+#[tokio::test]
+async fn closed_window_short_circuits_before_touching_the_channel() {
+    let mut channel = crate::communication::PrefetchedTobChannel::new(vec![]);
+    let mut window = NonceCollectionWindow::new(1, 0);
+    let admission = window.try_admit(0).expect("floor admits");
+    window.record(admission, 1);
+    assert!(window.closed(), "window must be closed for this case");
+    assert_eq!(window.cutoff_ms(), None);
+
+    let outcome = MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window, &(|| 0u64))
+        .await
+        .expect("a closed window is not an error");
+    assert!(matches!(outcome, WindowedNonceReceive::Closed));
+}

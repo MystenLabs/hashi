@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
@@ -1781,9 +1782,13 @@ impl MpcManager {
         window: &mut NonceCollectionWindow,
         chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
     ) -> MpcResult<WindowedNonceReceive> {
+        if window.closed() {
+            return Ok(WindowedNonceReceive::Closed);
+        }
         let cert = if let Some(cutoff_ms) = window.cutoff_ms() {
             let closing = chain_time_ms() > cutoff_ms;
             match tokio::time::timeout(NONCE_WINDOW_DRAIN_POLL, tob_channel.receive()).await {
+                Ok(Err(ChannelError::Exhausted)) => return Ok(WindowedNonceReceive::Closed),
                 Ok(received) => received.map_err(|e| MpcError::BroadcastError(e.to_string()))?,
                 Err(_) => {
                     return Ok(if closing {
