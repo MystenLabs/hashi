@@ -59,7 +59,11 @@ pub struct SuiTobChannel {
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
     pending_certs: VecDeque<CertificateV1>,
+    pending_fetch: Option<(PendingFetch, tokio::time::Instant)>,
+    wait_started: Option<tokio::time::Instant>,
 }
+
+type PendingFetch = tokio::task::JoinHandle<Result<Vec<(Address, CertificateV1)>, TobError>>;
 
 impl SuiTobChannel {
     pub fn new(
@@ -80,6 +84,8 @@ impl SuiTobChannel {
             idle_timeout: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
+            pending_fetch: None,
+            wait_started: None,
         }
     }
 
@@ -96,6 +102,14 @@ impl SuiTobChannel {
         )
         .with_timeout(TX_CONFIRMATION_TIMEOUT)
         .with_stamped_nonce_certs(self.onchain_state.supports_stamped_nonce_certs())
+    }
+}
+
+impl Drop for SuiTobChannel {
+    fn drop(&mut self) {
+        if let Some((fetch, _)) = &self.pending_fetch {
+            fetch.abort();
+        }
     }
 }
 
@@ -216,25 +230,48 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        let wait_started = tokio::time::Instant::now();
+        let wait_started = *self
+            .wait_started
+            .get_or_insert_with(tokio::time::Instant::now);
         loop {
             if let Some(cert) = self.pending_certs.pop_front() {
+                self.wait_started = None;
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = match tokio::time::timeout(
-                FETCH_STALL_TIMEOUT,
-                fetch_certificates(
-                    &self.onchain_state,
-                    self.epoch,
-                    self.batch_index,
-                    self.protocol_type,
-                ),
-            )
-            .await
-            {
-                Ok(result) => result.map_err(ChannelError::from)?,
+            let fetched = {
+                if self.pending_fetch.is_none() {
+                    let onchain_state = self.onchain_state.clone();
+                    let (epoch, batch_index, protocol_type) =
+                        (self.epoch, self.batch_index, self.protocol_type);
+                    self.pending_fetch = Some((
+                        tokio::spawn(async move {
+                            fetch_certificates(&onchain_state, epoch, batch_index, protocol_type)
+                                .await
+                        }),
+                        tokio::time::Instant::now(),
+                    ));
+                }
+                let (fetch, started) = self.pending_fetch.as_mut().expect("just populated");
+                let remaining = FETCH_STALL_TIMEOUT.saturating_sub(started.elapsed());
+                tokio::time::timeout(remaining, fetch).await
+            };
+            let all_certs = match fetched {
+                Ok(Ok(result)) => {
+                    self.pending_fetch = None;
+                    result.map_err(ChannelError::from)?
+                }
+                Ok(Err(join_err)) => {
+                    self.pending_fetch = None;
+                    return Err(ChannelError::Other(format!(
+                        "{:?} TOB cert fetch task failed for epoch {}: {join_err}",
+                        self.protocol_type, self.epoch,
+                    )));
+                }
                 Err(_) => {
+                    if let Some((fetch, _)) = self.pending_fetch.take() {
+                        fetch.abort();
+                    }
                     tracing::warn!(
                         "{:?} TOB cert fetch for epoch {} stalled >{:?}; retrying",
                         self.protocol_type,
@@ -352,5 +389,36 @@ mod tests {
             assert!(tob_wait_superseded(p, 6, 5, None));
             assert!(tob_wait_superseded(p, 6, 5, Some(7)));
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_awaits_do_not_discard_spawned_fetch_progress() {
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = std::sync::Arc::clone(&polls);
+        let mut fetch: tokio::task::JoinHandle<usize> = tokio::spawn(async move {
+            started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            42
+        });
+
+        for _ in 0..3 {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut fetch)
+                    .await
+                    .is_err(),
+                "expected the short poll to elapse"
+            );
+        }
+
+        let out = tokio::time::timeout(Duration::from_millis(500), &mut fetch)
+            .await
+            .expect("fetch must still be progressing, not restarted")
+            .expect("task must not have been cancelled by the dropped awaits");
+        assert_eq!(out, 42);
+        assert_eq!(
+            polls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the fetch must have run once, not restarted per poll"
+        );
     }
 }
