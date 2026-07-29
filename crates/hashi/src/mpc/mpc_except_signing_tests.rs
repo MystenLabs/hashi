@@ -14293,7 +14293,14 @@ async fn exhausted_prefetched_stream_pre_floor_does_not_block() {
 
     let received = tokio::time::timeout(
         Duration::from_secs(2),
-        MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window, &(|| 0u64)),
+        MpcManager::receive_nonce_cert_in_window(
+            &mut channel,
+            &mut window,
+            &(|| 0u64),
+            7,
+            3,
+            &test_metrics(),
+        ),
     )
     .await;
 
@@ -14318,10 +14325,16 @@ async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
     );
 
     let started = std::time::Instant::now();
-    let outcome =
-        MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window, &(|| 1_500u64))
-            .await
-            .expect("exhaustion is not an error once the floor is met");
+    let outcome = MpcManager::receive_nonce_cert_in_window(
+        &mut channel,
+        &mut window,
+        &(|| 1_500u64),
+        7,
+        3,
+        &test_metrics(),
+    )
+    .await
+    .expect("exhaustion is not an error once the floor is met");
     let elapsed = started.elapsed();
 
     assert!(
@@ -14368,6 +14381,9 @@ async fn stalled_chain_clock_keeps_skipping_within_the_stall_limit() {
         &mut NeverDeliversChannel,
         &mut window,
         &(|| 1_500u64),
+        7,
+        3,
+        &test_metrics(),
     )
     .await
     .expect("waiting is not an error inside the bound");
@@ -14386,6 +14402,9 @@ async fn frozen_chain_clock_fails_the_batch() {
         &mut NeverDeliversChannel,
         &mut window,
         &(|| 1_500u64),
+        7,
+        3,
+        &test_metrics(),
     )
     .await;
     assert!(
@@ -14425,6 +14444,9 @@ async fn closed_window_returns_without_reading_the_channel() {
         &mut PanicsOnReceiveChannel,
         &mut window,
         &(|| 1_500u64),
+        7,
+        3,
+        &test_metrics(),
     )
     .await
     .expect("a closed window is not an error");
