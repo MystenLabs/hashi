@@ -165,6 +165,10 @@ pub struct Config {
     /// automatically shrink the input side: coin selection reserves the
     /// commit object budget for requests first, so a full batch spends only
     /// a handful of funding inputs and performs no consolidation.
+    ///
+    /// The leader only fills batches past 40 requests while the queue is
+    /// deeper than the available UTXO pool (drain mode); otherwise it caps
+    /// batches at 40 so each keeps its full consolidation budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
 

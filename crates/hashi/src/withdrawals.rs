@@ -199,6 +199,35 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
         ))
 }
 
+/// Batch cap while the leader is in consolidation mode: the shape in which
+/// the per-request consolidation budget exactly fills the configured input
+/// cap (40 requests x 10 inputs = 400 inputs), so every batch keeps its
+/// full consolidation envelope instead of trading inputs for requests.
+const CONSOLIDATION_MODE_MAX_REQUESTS: usize = 40;
+
+const _: () = assert!(
+    CONSOLIDATION_MODE_MAX_REQUESTS * CoinSelectionParams::DEFAULT_INPUT_BUDGET
+        == CoinSelectionParams::DEFAULT_MAX_INPUTS,
+    "CONSOLIDATION_MODE_MAX_REQUESTS must fill the input cap at the per-request budget"
+);
+
+/// The request cap for one batch, chosen by comparing the depth of the
+/// withdrawal queue to the number of available (unlocked) pool UTXOs.
+///
+/// A queue deeper than the pool means throughput is the scarce resource:
+/// fill batches up to [`CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS`] and
+/// let the Sui commit object budget squeeze the input side (drain mode).
+/// Otherwise pool health is the scarce resource: cap the batch at
+/// [`CONSOLIDATION_MODE_MAX_REQUESTS`] so the full per-request
+/// consolidation budget stays available (consolidation mode).
+fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize) -> usize {
+    if pending_requests > available_utxos {
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+    } else {
+        CONSOLIDATION_MODE_MAX_REQUESTS
+    }
+}
+
 /// Estimate the weight of the unsigned withdrawal transaction described by
 /// a commitment: fixed segwit overhead, script-path 2-of-2 inputs, and the
 /// declared outputs.
@@ -1279,7 +1308,6 @@ impl Hashi {
 
         let configured_max_inputs = CoinSelectionParams::DEFAULT_MAX_INPUTS;
         let configured_long_term_fee_rate = CoinSelectionParams::DEFAULT_LONG_TERM_FEE_RATE;
-        let configured_max_requests = self.config.withdrawal_max_batch_size().min(requests.len());
 
         // Snapshot both maps under a single read-lock so they are always
         // mutually consistent (e.g., a WithdrawalConfirmed cannot update
@@ -1312,6 +1340,22 @@ impl Hashi {
                 }
             })
             .collect();
+
+        // Drain versus consolidate: size the batch cap by comparing the
+        // queue depth to the available pool. `candidates` counts every
+        // unlocked UTXO — the same set coin selection draws from.
+        let batch_request_cap = withdrawal_batch_request_cap(requests.len(), candidates.len());
+        let configured_max_requests = self
+            .config
+            .withdrawal_max_batch_size()
+            .min(batch_request_cap)
+            .min(requests.len());
+        tracing::debug!(
+            pending_requests = requests.len(),
+            available_utxos = candidates.len(),
+            batch_request_cap,
+            "Sized the withdrawal batch cap from queue depth versus pool size",
+        );
 
         // Map on-chain WithdrawalRequests to the coin-selector view.
         // btc_amount is the full withdrawal amount.
@@ -1963,6 +2007,30 @@ mod tests {
             signatures,
             epoch: 7,
         }
+    }
+
+    #[test]
+    fn batch_cap_drains_when_queue_outnumbers_pool() {
+        assert_eq!(
+            withdrawal_batch_request_cap(5_000, 1_000),
+            CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        );
+    }
+
+    #[test]
+    fn batch_cap_consolidates_when_pool_outnumbers_queue() {
+        assert_eq!(
+            withdrawal_batch_request_cap(10, 1_000),
+            CONSOLIDATION_MODE_MAX_REQUESTS
+        );
+    }
+
+    #[test]
+    fn batch_cap_prefers_consolidation_at_parity() {
+        assert_eq!(
+            withdrawal_batch_request_cap(500, 500),
+            CONSOLIDATION_MODE_MAX_REQUESTS
+        );
     }
 
     #[test]
