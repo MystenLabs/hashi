@@ -14361,7 +14361,7 @@ fn open_window_at(crossing_ms: u64, window_ms: u64) -> NonceCollectionWindow {
 }
 
 #[tokio::test]
-async fn stalled_chain_clock_keeps_skipping_within_the_wall_clock_bound() {
+async fn stalled_chain_clock_keeps_skipping_within_the_stall_limit() {
     let mut window = open_window_at(1_000, 2_000);
 
     let received = MpcManager::receive_nonce_cert_in_window(

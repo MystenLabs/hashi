@@ -263,6 +263,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 }
                 Ok(Err(join_err)) => {
                     self.pending_fetch = None;
+                    self.wait_started = None;
                     return Err(ChannelError::Other(format!(
                         "{:?} TOB cert fetch task failed for epoch {}: {join_err}",
                         self.protocol_type, self.epoch,
@@ -300,6 +301,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                         self.protocol_type,
                         self.epoch,
                     );
+                    self.wait_started = None;
                     return Err(ChannelError::Superseded(format!(
                         "{:?} TOB wait for epoch {} (onchain epoch {onchain_epoch}, \
                          pending epoch change {pending:?})",
@@ -317,6 +319,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                         idle_timeout,
                         self.seen_dealers.len(),
                     );
+                    self.wait_started = None;
                     return Err(ChannelError::Timeout);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
