@@ -14335,21 +14335,6 @@ async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
     );
 }
 
-#[tokio::test]
-async fn closed_window_short_circuits_before_touching_the_channel() {
-    let mut channel = crate::communication::PrefetchedTobChannel::new(vec![]);
-    let mut window = NonceCollectionWindow::new(1, 0);
-    let admission = window.try_admit(0).expect("floor admits");
-    window.record(admission, 1);
-    assert!(window.closed(), "window must be closed for this case");
-    assert_eq!(window.cutoff_ms(), None);
-
-    let outcome = MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window, &(|| 0u64))
-        .await
-        .expect("a closed window is not an error");
-    assert!(matches!(outcome, WindowedNonceReceive::Closed));
-}
-
 struct NeverDeliversChannel;
 
 #[async_trait::async_trait]
@@ -14390,10 +14375,11 @@ async fn stalled_chain_clock_keeps_skipping_within_the_wall_clock_bound() {
 }
 
 #[tokio::test]
-async fn stalled_chain_clock_fails_the_batch_past_the_wall_clock_bound() {
+async fn frozen_chain_clock_fails_the_batch() {
     let mut window = open_window_at(1_000, 2_000);
-    window.backdate_open_for_testing(
-        crate::mpc::service::NONCE_WINDOW_WAIT_SLACK + Duration::from_secs(5),
+    assert!(!window.chain_clock_stalled(1_500, NONCE_CHAIN_CLOCK_STALL_LIMIT));
+    window.backdate_chain_progress_for_testing(
+        NONCE_CHAIN_CLOCK_STALL_LIMIT + Duration::from_secs(5),
     );
 
     let outcome = MpcManager::receive_nonce_cert_in_window(
@@ -14404,6 +14390,43 @@ async fn stalled_chain_clock_fails_the_batch_past_the_wall_clock_bound() {
     .await;
     assert!(
         outcome.is_err(),
-        "a stalled checkpoint clock past the bound must fail the batch, not Skip forever"
+        "a checkpoint clock frozen below the cutoff must fail the batch, not Skip forever"
     );
+}
+
+struct PanicsOnReceiveChannel;
+
+#[async_trait::async_trait]
+impl OrderedBroadcastChannel<CertificateV1> for PanicsOnReceiveChannel {
+    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        panic!("a closed window must not read from the channel");
+    }
+
+    async fn certified_dealers(&mut self) -> Vec<Address> {
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn closed_window_returns_without_reading_the_channel() {
+    let mut window = open_window_at(1_000, 2_000);
+    assert!(window.try_admit(9_999).is_none(), "past cutoff closes");
+    assert!(window.closed());
+    assert!(
+        window.cutoff_ms().is_some(),
+        "closed window still exposes a cutoff"
+    );
+
+    let outcome = MpcManager::receive_nonce_cert_in_window(
+        &mut PanicsOnReceiveChannel,
+        &mut window,
+        &(|| 1_500u64),
+    )
+    .await
+    .expect("a closed window is not an error");
+    assert!(matches!(outcome, WindowedNonceReceive::Closed));
 }

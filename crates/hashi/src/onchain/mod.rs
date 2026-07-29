@@ -49,7 +49,7 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
 pub mod types;
-mod watcher;
+pub(crate) mod watcher;
 
 fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::mpc::EncryptionGroupElement> {
     let array: [u8; 32] = bytes.try_into().ok()?;

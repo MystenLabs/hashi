@@ -35,13 +35,13 @@ use crate::withdrawals::withdrawal_limiter_consumption_amount;
 /// stream yields neither an item nor an error, so an unbounded read hangs — the
 /// SDK's keepalive only trips on a fully-dead connection, not a live one whose
 /// server silently stopped sending checkpoints.
-const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const CHECKPOINT_STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often to unconditionally rescrape the full on-chain state. The event
 /// stream can drift from chain state (e.g. writes that emit no event, such as
 /// `cleanup_spent_utxos`); a periodic rescrape bounds how long any such drift
 /// can persist.
-const PERIODIC_RESCRAPE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const PERIODIC_RESCRAPE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {

@@ -113,6 +113,12 @@ const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const NONCE_WINDOW_DRAIN_POLL: Duration = Duration::from_millis(600);
+/// Exceeds the watcher's own stall detection plus its reconnect and rescrape, so a
+/// stream that will heal itself is never pre-empted. Only ever compared against
+/// *zero* clock progress, so lag alone cannot trip it.
+const NONCE_CHAIN_CLOCK_STALL_LIMIT: Duration =
+    crate::onchain::watcher::CHECKPOINT_STREAM_STALL_TIMEOUT
+        .saturating_add(Duration::from_secs(60));
 
 type AvidEchoAndVote = (
     BLS12381Signature,
@@ -1788,29 +1794,45 @@ impl MpcManager {
         let cert = if let Some(cutoff_ms) = window.cutoff_ms() {
             let closing = chain_time_ms() > cutoff_ms;
             match tokio::time::timeout(NONCE_WINDOW_DRAIN_POLL, tob_channel.receive()).await {
-                Ok(Err(ChannelError::Exhausted)) => return Ok(WindowedNonceReceive::Closed),
+                Ok(Err(ChannelError::Exhausted)) => {
+                    tracing::warn!(
+                        "nonce collection closed early: replay stream exhausted at weight {} \
+                         (cutoff {cutoff_ms}, chain time already past it: {closing})",
+                        window.weight(),
+                    );
+                    return Ok(WindowedNonceReceive::Closed);
+                }
                 Ok(received) => received.map_err(|e| MpcError::BroadcastError(e.to_string()))?,
                 Err(_) => {
                     if closing {
                         return Ok(WindowedNonceReceive::Closed);
                     }
-                    if window.wall_clock_stalled(crate::mpc::service::NONCE_WINDOW_WAIT_SLACK) {
+                    let chain_time = chain_time_ms();
+                    if window.chain_clock_stalled(chain_time, NONCE_CHAIN_CLOCK_STALL_LIMIT) {
                         tracing::warn!(
-                            "nonce collection: checkpoint clock stalled below window cutoff \
-                             {cutoff_ms}; failing the batch to retry"
+                            "nonce collection: this node's checkpoint clock has not advanced \
+                             past {chain_time} in {NONCE_CHAIN_CLOCK_STALL_LIMIT:?} while \
+                             awaiting cutoff {cutoff_ms}; failing the batch to retry"
                         );
                         return Err(MpcError::ProtocolFailed(format!(
-                            "nonce window did not close: checkpoint clock stalled below {cutoff_ms}"
+                            "nonce window did not close: checkpoint clock stuck at {chain_time}, \
+                             cutoff {cutoff_ms}"
                         )));
                     }
                     return Ok(WindowedNonceReceive::Skip);
                 }
             }
         } else {
-            tob_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?
+            match tob_channel.receive().await {
+                Ok(cert) => cert,
+                Err(ChannelError::Exhausted) => {
+                    return Err(MpcError::NotEnoughParticipants {
+                        expected: window.required_weight() as usize,
+                        got: window.weight() as usize,
+                    });
+                }
+                Err(e) => return Err(MpcError::BroadcastError(e.to_string())),
+            }
         };
         let CertificateV1::NonceGeneration {
             cert: nonce_cert,

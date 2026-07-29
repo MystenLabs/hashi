@@ -165,7 +165,11 @@ pub struct NonceCollectionWindow {
     window_ms: u64,
     weight: u32,
     state: NonceCollectionState,
-    opened_at: Option<std::time::Instant>,
+    /// Last observed checkpoint clock value and when it was seen. `cutoff_ms` is a
+    /// fixed chain timestamp and the checkpoint clock is monotonic, so if it
+    /// advances it must reach the cutoff; failing to advance at all is the only way
+    /// the window can never close.
+    chain_progress: Option<(u64, std::time::Instant)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,24 +190,27 @@ impl NonceCollectionWindow {
             window_ms,
             weight: 0,
             state: NonceCollectionState::Floor,
-            opened_at: None,
+            chain_progress: None,
         }
     }
 
-    pub fn wall_clock_stalled(&self, slack: std::time::Duration) -> bool {
-        self.opened_at.is_some_and(|opened_at| {
-            opened_at.elapsed() > std::time::Duration::from_millis(self.window_ms) + slack
-        })
+    pub fn chain_clock_stalled(&mut self, chain_time_ms: u64, limit: std::time::Duration) -> bool {
+        match self.chain_progress {
+            Some((seen_ms, since)) if seen_ms == chain_time_ms => since.elapsed() > limit,
+            _ => {
+                self.chain_progress = Some((chain_time_ms, std::time::Instant::now()));
+                false
+            }
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn backdate_open_for_testing(&mut self, by: std::time::Duration) {
-        self.opened_at = Some(
-            self.opened_at
-                .expect("window must be open to backdate")
-                .checked_sub(by)
-                .expect("monotonic clock underflow"),
-        );
+    pub(crate) fn backdate_chain_progress_for_testing(&mut self, by: std::time::Duration) {
+        let (seen_ms, since) = self.chain_progress.expect("tracker must be armed");
+        self.chain_progress = Some((
+            seen_ms,
+            since.checked_sub(by).expect("monotonic clock underflow"),
+        ));
     }
 
     pub fn closed(&self) -> bool {
@@ -216,6 +223,10 @@ impl NonceCollectionWindow {
 
     pub fn weight(&self) -> u32 {
         self.weight
+    }
+
+    pub fn required_weight(&self) -> u32 {
+        self.required_weight
     }
 
     pub fn cutoff_ms(&self) -> Option<u64> {
@@ -251,7 +262,6 @@ impl NonceCollectionWindow {
             self.state = if self.window_ms == 0 || admission.timestamp_ms == 0 {
                 NonceCollectionState::Closed { cutoff_ms: None }
             } else {
-                self.opened_at = Some(std::time::Instant::now());
                 NonceCollectionState::Window {
                     cutoff_ms: admission.timestamp_ms.saturating_add(self.window_ms),
                 }
@@ -1483,26 +1493,18 @@ mod tests {
     }
 
     #[test]
-    fn nonce_collection_window_wall_clock_bound_is_independent_of_chain_time() {
-        let pre_floor = NonceCollectionWindow::new(100, 1);
-        assert!(!pre_floor.wall_clock_stalled(std::time::Duration::ZERO));
+    fn chain_clock_stall_needs_zero_progress_not_merely_lag() {
+        let mut window = NonceCollectionWindow::new(1, 2_000);
+        let limit = std::time::Duration::ZERO;
 
-        let mut floor_only = NonceCollectionWindow::new(1, 0);
-        let admission = floor_only.try_admit(1_000).expect("floor admits");
-        floor_only.record(admission, 1);
-        assert!(floor_only.closed());
-        assert!(!floor_only.wall_clock_stalled(std::time::Duration::ZERO));
+        assert!(!window.chain_clock_stalled(500, limit));
+        assert!(!window.chain_clock_stalled(600, limit));
+        assert!(!window.chain_clock_stalled(700, limit));
 
-        let mut window = NonceCollectionWindow::new(1, 1);
-        let admission = window.try_admit(1_000).expect("floor admits");
-        window.record(admission, 1);
-        assert_eq!(window.cutoff_ms(), Some(1_001));
-        assert!(!window.wall_clock_stalled(std::time::Duration::from_secs(60)));
+        assert!(!window.chain_clock_stalled(700, std::time::Duration::from_secs(60)));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(window.chain_clock_stalled(700, limit));
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        assert!(
-            window.wall_clock_stalled(std::time::Duration::ZERO),
-            "a window open past window_ms in wall time must report stalled"
-        );
+        assert!(!window.chain_clock_stalled(800, limit));
     }
 }
