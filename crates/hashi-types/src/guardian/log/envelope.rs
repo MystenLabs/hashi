@@ -530,7 +530,7 @@ mod tests {
                 LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                     request_data,
                     request_sign: request_sign.clone(),
-                    error: GuardianError::RateLimitExceeded,
+                    error: GuardianError::RateLimitExceeded.to_string(),
                 })),
             ),
             (
@@ -570,7 +570,7 @@ mod tests {
                     from_epoch: 0,
                     new_committee: committee_1,
                     request_sign,
-                    error: GuardianError::InvalidInputs("test failure".into()),
+                    error: GuardianError::InvalidInputs("test failure".into()).to_string(),
                 })),
             ),
             (
@@ -662,9 +662,14 @@ mod tests {
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
-                error: GuardianError::RateLimitExceeded,
+                error: GuardianError::RateLimitExceeded.to_string(),
             })),
             &signing_key,
+        );
+        let json = serde_json::to_value(&log).unwrap();
+        assert_eq!(
+            json["message"]["Withdrawal"]["Failure"]["error"],
+            GuardianError::RateLimitExceeded.to_string()
         );
 
         assert_writer_key_is_stable_and_verifies(log, &signing_key);
@@ -687,9 +692,14 @@ mod tests {
                     config: crate::move_types::Config::default(),
                 },
                 request_sign,
-                error: GuardianError::InvalidInputs("test failure".to_string()),
+                error: GuardianError::InvalidInputs("test failure".to_string()).to_string(),
             })),
             &signing_key,
+        );
+        let json = serde_json::to_value(&log).unwrap();
+        assert_eq!(
+            json["message"]["CommitteeUpdate"]["Failure"]["error"],
+            GuardianError::InvalidInputs("test failure".to_string()).to_string()
         );
 
         assert_writer_key_is_stable_and_verifies(log, &signing_key);
@@ -809,7 +819,7 @@ mod tests {
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
-                error: GuardianError::RateLimitExceeded,
+                error: GuardianError::RateLimitExceeded.to_string(),
             })),
             &signing_key,
         );

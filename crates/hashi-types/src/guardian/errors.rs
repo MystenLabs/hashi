@@ -1,14 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use super::SessionID;
 use super::lifecycle::EnclaveLifecycle;
 use super::time_utils::UnixSeconds;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GuardianError {
     // ========================================================================
     // Errors requiring corrected input/data or investigation

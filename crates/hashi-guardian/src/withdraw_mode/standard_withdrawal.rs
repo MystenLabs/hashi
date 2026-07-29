@@ -53,7 +53,7 @@ pub async fn standard_withdrawal(
             let msg = WithdrawalLogMessage::Failure {
                 request_data: unsigned_request,
                 request_sign: request_signature,
-                error: withdraw_err.clone(),
+                error: withdraw_err.to_string(),
             };
             log_withdrawal_failure(enclave.as_ref(), wid, msg, &withdraw_err).await?;
             Err(withdraw_err)
@@ -322,6 +322,6 @@ mod tests {
             panic!("expected failed withdrawal record");
         };
         assert_eq!(request_data.seq, 1);
-        assert_eq!(error, GuardianError::RateLimitExceeded);
+        assert_eq!(error, GuardianError::RateLimitExceeded.to_string());
     }
 }
