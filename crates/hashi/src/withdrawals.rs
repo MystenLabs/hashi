@@ -229,8 +229,10 @@ fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize)
 }
 
 /// Estimate the weight of the unsigned withdrawal transaction described by
-/// a commitment: fixed segwit overhead, script-path 2-of-2 inputs, and the
-/// declared outputs.
+/// a commitment: fixed segwit overhead, the CompactSize input and output
+/// counts, script-path 2-of-2 inputs, and the declared outputs. Matches the
+/// leader-side `TransactionBuilder::weight` term for term, so validator
+/// estimates cannot drift below what coin selection priced.
 fn estimated_withdrawal_tx_weight(
     input_count: usize,
     outputs: &[OutputUtxo],
@@ -242,9 +244,11 @@ fn estimated_withdrawal_tx_weight(
         .collect::<anyhow::Result<Vec<_>>>()?
         .iter()
         .sum();
-    Ok(Weight::from_wu(
-        hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight,
-    ))
+    Ok(
+        Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight)
+            + utxo_pool::varint_weight(input_count as u64)
+            + utxo_pool::varint_weight(outputs.len() as u64),
+    )
 }
 
 /// Structural caps on a withdrawal commitment, checked before any state
@@ -2226,6 +2230,20 @@ mod tests {
         // limit (~2,300 P2TR outputs).
         let err = validate_commitment_shape(298, 16, &p2tr_outputs(3_000)).unwrap_err();
         assert!(err.to_string().contains("standardness limit"), "{err}");
+    }
+
+    #[test]
+    fn estimated_weight_includes_count_varints() {
+        // 16 inputs encode as a 1-byte varint (4 WU) and 299 outputs as a
+        // 3-byte varint (12 WU); the fixed overhead alone would undercount
+        // the drain-mode shape by 16 WU.
+        let weight = estimated_withdrawal_tx_weight(16, &p2tr_outputs(299)).unwrap();
+        let expected = hashi_bitcoin::TX_FIXED_WEIGHT_WU
+            + 16 * hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT
+            + 299 * hashi_bitcoin::P2TR_OUTPUT_WEIGHT_WU
+            + 4
+            + 12;
+        assert_eq!(weight, Weight::from_wu(expected));
     }
 
     /// The confirm model has a lower per-request cost (2 versus 3) but a

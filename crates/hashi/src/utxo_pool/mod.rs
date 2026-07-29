@@ -1213,7 +1213,7 @@ impl<'a> TransactionBuilder<'a> {
 /// - 253–0xFFFF: 3 bytes
 /// - 0x10000–0xFFFFFFFF: 5 bytes
 /// - 0x100000000–: 9 bytes
-fn varint_weight(n: u64) -> Weight {
+pub(crate) fn varint_weight(n: u64) -> Weight {
     let bytes = match n {
         0..=252 => 1u64,
         253..=0xFFFF => 3,
