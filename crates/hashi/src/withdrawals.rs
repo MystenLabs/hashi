@@ -200,12 +200,12 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
 }
 
 /// Cap on the trailing change outputs a commitment may declare. Coin
-/// selection emits at most one, but the shape check deliberately leaves
-/// room for a future leader that splits change into several UTXOs. Each
-/// change output becomes a pending UTXO object in the Sui flow, so the cap
-/// keeps a certified commitment's object cost inside the headroom the
-/// runtime-object budget leaves below Sui's hard cache limit.
-const WITHDRAWAL_MAX_CHANGE_OUTPUTS: usize = 8;
+/// selection emits at most one, and the shape check deliberately leaves
+/// room for one more so a future leader can split change into two UTXOs.
+/// Each change output becomes a pending UTXO object in the Sui flow, so
+/// the cap keeps a certified commitment's object cost inside the headroom
+/// the runtime-object budget leaves below Sui's hard cache limit.
+const WITHDRAWAL_MAX_CHANGE_OUTPUTS: usize = 2;
 
 /// Batch cap while the leader is in consolidation mode: the shape in which
 /// the per-request consolidation budget exactly fills the configured input
