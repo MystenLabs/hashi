@@ -1165,7 +1165,10 @@ impl MpcManager {
             };
             let mgr = Arc::clone(mpc_manager);
             let verification = spawn_blocking(move || {
-                mgr.read().unwrap().committee.verify_signature(&dealer_cert)
+                mgr.read()
+                    .unwrap()
+                    .committee
+                    .verify_signature_any_weight(&dealer_cert)
             })
             .await;
             match verification {
@@ -1289,7 +1292,7 @@ impl MpcManager {
                 let cert = dkg_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature_any_weight(&cert)
                 })
                 .await;
                 drop(_timer);
@@ -1560,7 +1563,7 @@ impl MpcManager {
                 let cert = rotation_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature_any_weight(&cert)
                 })
                 .await;
                 drop(_timer);
@@ -1844,7 +1847,7 @@ impl MpcManager {
                 let cert = nonce_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature_any_weight(&cert)
                 })
                 .await;
                 drop(_timer);
@@ -3327,7 +3330,7 @@ impl MpcManager {
                 let result = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
                     mgr.committee
-                        .verify_signature(&cert)
+                        .verify_signature_any_weight(&cert)
                         .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
                     mgr.reduced_weight_of_cert(&cert)
                 })

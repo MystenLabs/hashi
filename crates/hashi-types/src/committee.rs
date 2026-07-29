@@ -290,10 +290,9 @@ impl Committee {
             .map_err(SignatureError::from_source)
     }
 
-    /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
-    /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
-    /// function.
-    pub fn verify_signature<T: IntentMessage>(
+    /// Verify the aggregate signature only — no minimum signer weight, so a
+    /// single-member "certificate" passes. Pair with a weight gate.
+    pub fn verify_signature_any_weight<T: IntentMessage>(
         &self,
         signed_message: &SignedMessage<T>,
     ) -> Result<(), SignatureError> {
@@ -330,7 +329,7 @@ impl Committee {
                 signed_weight, required_weight,
             )));
         }
-        self.verify_signature(signed_message)
+        self.verify_signature_any_weight(signed_message)
     }
 
     /// The number of members of this committee.
@@ -672,7 +671,8 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T> {
                 };
 
                 // Double check that the aggregated sig still verifies
-                self.committee.verify_signature(&signed_message)?;
+                self.committee
+                    .verify_signature_any_weight(&signed_message)?;
 
                 Ok(signed_message)
             }
@@ -887,7 +887,10 @@ mod test {
 
         // Aggregating with sufficient weight succeeds and verifies
         let signature = aggregator.finish().unwrap();
-        aggregator.committee.verify_signature(&signature).unwrap();
+        aggregator
+            .committee
+            .verify_signature_any_weight(&signature)
+            .unwrap();
 
         committee
             .verify_signature_and_weight(&signature, 3)
@@ -902,7 +905,10 @@ mod test {
             .unwrap();
 
         let signature = aggregator.finish().unwrap();
-        aggregator.committee.verify_signature(&signature).unwrap();
+        aggregator
+            .committee
+            .verify_signature_any_weight(&signature)
+            .unwrap();
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
     }
 
@@ -1074,7 +1080,7 @@ mod test {
 
         // finish() still works and produces a valid cert
         let cert = agg.finish().unwrap();
-        committee.verify_signature(&cert).unwrap();
+        committee.verify_signature_any_weight(&cert).unwrap();
     }
 
     #[proptest]
@@ -1175,7 +1181,7 @@ mod test {
 
     /// Regression test: a peer-supplied bitmap whose set bits exceed the
     /// committee size must not cause an out-of-bounds panic.  Prior to the
-    /// fix, `verify_signature` indexed `committee.members[index]` directly
+    /// fix, `verify_signature_any_weight` indexed `committee.members[index]` directly
     /// without first validating the bitmap, allowing a malicious peer to
     /// crash the MPC supervisor task by sending a forged certificate.
     #[test]
@@ -1225,7 +1231,7 @@ mod test {
             SignedMessage::new(epoch, message, valid_cert.signature_bytes(), &forged_bitmap)
                 .unwrap();
 
-        assert!(committee.verify_signature(&forged).is_err());
+        assert!(committee.verify_signature_any_weight(&forged).is_err());
         assert!(committee.verify_signature_and_weight(&forged, 3).is_err());
     }
 }
