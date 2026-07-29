@@ -15,6 +15,7 @@ use crate::withdrawals::WithdrawalTxSigning;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
+use futures::StreamExt;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
@@ -22,6 +23,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::proto::SignMpcInputSignaturesRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
+use hashi_types::proto::SignWithdrawalTransactionPartial;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
 use std::collections::BTreeMap;
@@ -185,6 +187,43 @@ impl ExpectedSignatureCollector {
     fn into_collected(self) -> Vec<(u64, SchnorrSignature)> {
         self.collected.into_iter().collect()
     }
+}
+
+async fn collect_member_signatures<S>(
+    mut stream: S,
+    validator_address: Address,
+    expected_indices: &[u64],
+) -> Vec<(u64, SchnorrSignature)>
+where
+    S: futures::Stream<Item = Result<SignWithdrawalTransactionPartial, tonic::Status>> + Unpin,
+{
+    let mut collector = ExpectedSignatureCollector::new(expected_indices);
+    while let Some(item) = stream.next().await {
+        let partial = match item {
+            Ok(partial) => partial,
+            Err(e) => {
+                warn!(
+                    "Withdrawal tx signature stream from {validator_address} ended early \
+                     after {} of {} signature(s): {e}",
+                    collector.collected_count(),
+                    collector.expected_count(),
+                );
+                break;
+            }
+        };
+        let idx = partial.input_index as u64;
+        match collector.record(idx, partial.signature.as_ref()) {
+            Ok(CollectOutcome::Ignored) => trace!(
+                "Withdrawal tx signature stream from {validator_address} returned extra input_index {idx}; ignoring"
+            ),
+            Ok(CollectOutcome::Recorded) => {}
+            Ok(CollectOutcome::Complete) => break,
+            Err(e) => warn!(
+                "Withdrawal tx signature stream from {validator_address}: dropping input_index {idx}: {e}"
+            ),
+        }
+    }
+    collector.into_collected()
 }
 
 impl LeaderService {
@@ -735,7 +774,7 @@ impl LeaderService {
             input_indices: expected_indices.to_vec(),
         };
 
-        let mut stream = rpc_client
+        let stream = rpc_client
             .sign_withdrawal_transaction(proto_request)
             .await
             .map_err(|e| {
@@ -745,31 +784,7 @@ impl LeaderService {
             })?
             .into_inner();
 
-        let mut collector = ExpectedSignatureCollector::new(expected_indices);
-        while let Some(partial) = stream
-            .message()
-            .await
-            .map_err(|e| anyhow::anyhow!("stream error from {validator_address}: {e}"))?
-        {
-            let idx = partial.input_index as u64;
-            match collector.record(idx, partial.signature.as_ref()) {
-                Ok(CollectOutcome::Ignored) => trace!(
-                    "Withdrawal tx signature stream from {validator_address} returned extra input_index {idx}; ignoring"
-                ),
-                Ok(CollectOutcome::Recorded) => {}
-                // Every requested index is in hand. Stop reading instead of
-                // draining to EOF, so a peer that keeps signing unrequested
-                // inputs can't stall this chunk.
-                Ok(CollectOutcome::Complete) => break,
-                // Drop just this candidate (malformed length / duplicate index)
-                // and keep the member's other sigs — mirrors merge_into_union's
-                // per-candidate drop instead of failing the member's whole stream.
-                Err(e) => warn!(
-                    "Withdrawal tx signature stream from {validator_address}: dropping input_index {idx}: {e}"
-                ),
-            }
-        }
-        Ok(collector.into_collected())
+        Ok(collect_member_signatures(stream, validator_address, expected_indices).await)
     }
 
     /// Requests a committee member's BLS signature over the on-chain withdrawal signing message.
@@ -1485,12 +1500,32 @@ mod tests {
         assert!(SchnorrSignature::from_byte_array(&valid_sig_b().try_into().unwrap()).is_ok());
     }
 
+    #[tokio::test]
+    async fn stream_error_keeps_the_signatures_already_received() {
+        let items = vec![
+            Ok(SignWithdrawalTransactionPartial {
+                input_index: 0,
+                signature: valid_sig_a().into(),
+            }),
+            Err(tonic::Status::resource_exhausted("pool exhausted")),
+            Ok(SignWithdrawalTransactionPartial {
+                input_index: 1,
+                signature: valid_sig_b().into(),
+            }),
+        ];
+        let collected = collect_member_signatures(
+            futures::stream::iter(items),
+            Address::new([0u8; 32]),
+            &[0, 1],
+        )
+        .await;
+        let indices: Vec<u64> = collected.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![0]);
+    }
+
     #[test]
     fn collector_ignores_unexpected_extra_index_before_parsing() {
         let mut collector = ExpectedSignatureCollector::new(&[0, 1]);
-        // Unrequested index carrying deliberately malformed (too-short) bytes:
-        // it must be ignored *before* the signature is parsed, so the malformed
-        // extra can't fail the chunk.
         assert_eq!(
             collector.record(7, &[0u8; 3]).unwrap(),
             CollectOutcome::Ignored
