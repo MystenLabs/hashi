@@ -1,15 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LogRecord` envelope written to S3: it wraps a `super::message::LogMessage`
+//! The `LogRecord` envelope written to S3: it wraps a `super::schema::LogMessage`
 //! with the session id, timestamp, and (for signed logs) the guardian signature.
 //! The object key and lock duration are derived from the wrapped message.
 
-use super::S3ObjectLockPolicy;
-use super::message::LogMessage;
-use super::message::LogMessageV1;
-use super::message::ObjectKeyPattern;
-use super::message::VersionedLogMessage;
+use super::ObjectKeyPattern;
+use super::retention::S3ObjectLockPolicy;
+use super::schema::LogMessage;
+use super::schema::LogMessageV1;
+use super::schema::VersionedLogMessage;
 use crate::guardian::BuildPcrs;
 use crate::guardian::GuardianError::InvalidS3Log;
 use crate::guardian::GuardianPubKey;
@@ -290,7 +290,7 @@ impl LogRecord {
             VersionedLogMessage::V2(LogMessage::Init(init)) => init,
             _ => unreachable!("is_allowed_unsigned only permits an init message"),
         };
-        let super::message::InitLogMessage::OIAttestationUnsigned {
+        let super::messages::InitLogMessage::OIAttestationUnsigned {
             signing_public_key, ..
         } = init.as_ref()
         else {

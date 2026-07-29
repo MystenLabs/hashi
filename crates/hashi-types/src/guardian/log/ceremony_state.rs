@@ -3,8 +3,8 @@
 
 //! Combined ceremony and KP share state derived from guardian log messages.
 
-use super::message::CeremonyLogMessage;
-use super::message::KpShareStateLogMessage;
+use super::messages::CeremonyLogMessage;
+use super::messages::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianResult;
