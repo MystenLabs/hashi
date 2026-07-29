@@ -1806,8 +1806,8 @@ impl MpcManager {
                     );
                     return Ok(WindowedNonceReceive::Closed);
                 }
-                Ok(received) => received.map_err(|e| MpcError::BroadcastError(e.to_string()))?,
-                Err(_) => {
+                Ok(Ok(cert)) => cert,
+                Ok(Err(ChannelError::Timeout)) | Err(_) => {
                     if closing {
                         return Ok(WindowedNonceReceive::Closed);
                     }
@@ -1827,6 +1827,7 @@ impl MpcManager {
                     }
                     return Ok(WindowedNonceReceive::Skip);
                 }
+                Ok(Err(e)) => return Err(MpcError::BroadcastError(e.to_string())),
             }
         } else {
             match tob_channel.receive().await {

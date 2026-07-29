@@ -14452,3 +14452,54 @@ async fn closed_window_returns_without_reading_the_channel() {
     .expect("a closed window is not an error");
     assert!(matches!(outcome, WindowedNonceReceive::Closed));
 }
+
+struct IdleTimeoutChannel;
+
+#[async_trait::async_trait]
+impl OrderedBroadcastChannel<CertificateV1> for IdleTimeoutChannel {
+    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        Err(crate::communication::ChannelError::Timeout)
+    }
+
+    async fn certified_dealers(&mut self) -> Vec<Address> {
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn channel_idle_timeout_leaves_a_closable_window_alive() {
+    let mut window = open_window_at(1_000, 2_000);
+
+    let outcome = MpcManager::receive_nonce_cert_in_window(
+        &mut IdleTimeoutChannel,
+        &mut window,
+        &(|| 1_500u64),
+        7,
+        3,
+        &test_metrics(),
+    )
+    .await
+    .expect("an idle channel must not fail a window that can still close");
+    assert!(matches!(outcome, WindowedNonceReceive::Skip));
+}
+
+#[tokio::test]
+async fn channel_idle_timeout_closes_a_window_past_its_cutoff() {
+    let mut window = open_window_at(1_000, 2_000);
+
+    let outcome = MpcManager::receive_nonce_cert_in_window(
+        &mut IdleTimeoutChannel,
+        &mut window,
+        &(|| 9_999u64),
+        7,
+        3,
+        &test_metrics(),
+    )
+    .await
+    .expect("an idle channel past the cutoff must close, not error");
+    assert!(matches!(outcome, WindowedNonceReceive::Closed));
+}

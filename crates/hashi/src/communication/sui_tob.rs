@@ -259,7 +259,13 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
             let all_certs = match fetched {
                 Ok(Ok(result)) => {
                     self.pending_fetch = None;
-                    result.map_err(ChannelError::from)?
+                    match result {
+                        Ok(certs) => certs,
+                        Err(e) => {
+                            self.wait_started = None;
+                            return Err(ChannelError::from(e));
+                        }
+                    }
                 }
                 Ok(Err(join_err)) => {
                     self.pending_fetch = None;
@@ -328,7 +334,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(Ok(all_certs)) = tokio::time::timeout(
+        match tokio::time::timeout(
             FETCH_STALL_TIMEOUT,
             fetch_certificates(
                 &self.onchain_state,
@@ -339,12 +345,29 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         )
         .await
         {
-            for (dealer, cert) in all_certs {
-                if !self.seen_dealers.contains(&dealer) {
-                    self.seen_dealers.insert(dealer);
-                    self.pending_certs.push_back(cert);
+            Ok(Ok(all_certs)) => {
+                for (dealer, cert) in all_certs {
+                    if !self.seen_dealers.contains(&dealer) {
+                        self.seen_dealers.insert(dealer);
+                        self.pending_certs.push_back(cert);
+                    }
                 }
             }
+            Ok(Err(e)) => tracing::warn!(
+                "{:?} certified_dealers fetch for epoch {} failed: {e}; \
+                 reporting {} dealers seen so far",
+                self.protocol_type,
+                self.epoch,
+                self.seen_dealers.len(),
+            ),
+            Err(_) => tracing::warn!(
+                "{:?} certified_dealers fetch for epoch {} stalled >{:?}; \
+                 reporting {} dealers seen so far",
+                self.protocol_type,
+                self.epoch,
+                FETCH_STALL_TIMEOUT,
+                self.seen_dealers.len(),
+            ),
         }
         self.seen_dealers.iter().copied().collect()
     }
@@ -395,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_awaits_do_not_discard_spawned_fetch_progress() {
+    async fn tokio_joinhandle_survives_cancelled_awaits() {
         let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started = std::sync::Arc::clone(&polls);
         let mut fetch: tokio::task::JoinHandle<usize> = tokio::spawn(async move {
