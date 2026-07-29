@@ -1791,11 +1791,19 @@ impl MpcManager {
                 Ok(Err(ChannelError::Exhausted)) => return Ok(WindowedNonceReceive::Closed),
                 Ok(received) => received.map_err(|e| MpcError::BroadcastError(e.to_string()))?,
                 Err(_) => {
-                    return Ok(if closing {
-                        WindowedNonceReceive::Closed
-                    } else {
-                        WindowedNonceReceive::Skip
-                    });
+                    if closing {
+                        return Ok(WindowedNonceReceive::Closed);
+                    }
+                    if window.wall_clock_stalled(crate::mpc::service::NONCE_WINDOW_WAIT_SLACK) {
+                        tracing::warn!(
+                            "nonce collection: checkpoint clock stalled below window cutoff \
+                             {cutoff_ms}; failing the batch to retry"
+                        );
+                        return Err(MpcError::ProtocolFailed(format!(
+                            "nonce window did not close: checkpoint clock stalled below {cutoff_ms}"
+                        )));
+                    }
+                    return Ok(WindowedNonceReceive::Skip);
                 }
             }
         } else {

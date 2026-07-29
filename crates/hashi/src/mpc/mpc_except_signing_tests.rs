@@ -14335,7 +14335,6 @@ async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
     );
 }
 
-
 #[tokio::test]
 async fn closed_window_short_circuits_before_touching_the_channel() {
     let mut channel = crate::communication::PrefetchedTobChannel::new(vec![]);
@@ -14349,4 +14348,62 @@ async fn closed_window_short_circuits_before_touching_the_channel() {
         .await
         .expect("a closed window is not an error");
     assert!(matches!(outcome, WindowedNonceReceive::Closed));
+}
+
+struct NeverDeliversChannel;
+
+#[async_trait::async_trait]
+impl OrderedBroadcastChannel<CertificateV1> for NeverDeliversChannel {
+    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        std::future::pending().await
+    }
+
+    async fn certified_dealers(&mut self) -> Vec<Address> {
+        Vec::new()
+    }
+}
+
+fn open_window_at(crossing_ms: u64, window_ms: u64) -> NonceCollectionWindow {
+    let mut window = NonceCollectionWindow::new(1, window_ms);
+    let admission = window.try_admit(crossing_ms).expect("floor admits");
+    window.record(admission, 1);
+    assert!(window.cutoff_ms().is_some(), "window must be open");
+    window
+}
+
+#[tokio::test]
+async fn stalled_chain_clock_keeps_skipping_within_the_wall_clock_bound() {
+    let mut window = open_window_at(1_000, 2_000);
+
+    let received = MpcManager::receive_nonce_cert_in_window(
+        &mut NeverDeliversChannel,
+        &mut window,
+        &(|| 1_500u64),
+    )
+    .await
+    .expect("waiting is not an error inside the bound");
+    assert!(matches!(received, WindowedNonceReceive::Skip));
+}
+
+#[tokio::test]
+async fn stalled_chain_clock_fails_the_batch_past_the_wall_clock_bound() {
+    let mut window = open_window_at(1_000, 2_000);
+    window.backdate_open_for_testing(
+        crate::mpc::service::NONCE_WINDOW_WAIT_SLACK + Duration::from_secs(5),
+    );
+
+    let outcome = MpcManager::receive_nonce_cert_in_window(
+        &mut NeverDeliversChannel,
+        &mut window,
+        &(|| 1_500u64),
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "a stalled checkpoint clock past the bound must fail the batch, not Skip forever"
+    );
 }
