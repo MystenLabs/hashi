@@ -304,18 +304,6 @@ impl LogRecord {
         Ok((self.session_id, self.timestamp_ms, message))
     }
 
-    /// Rejects a record whose signed intended key differs from the key at which
-    /// the S3 reader found it.
-    pub fn validate_actual_object_key(&self, actual_object_key: &str) -> GuardianResult<()> {
-        if self.object_key != actual_object_key {
-            return Err(InvalidS3Log(format!(
-                "S3 object key mismatch: record contains {}, actual key is {actual_object_key}",
-                self.object_key
-            )));
-        }
-        Ok(())
-    }
-
     fn validate_object_key(&self) -> GuardianResult<()> {
         match self
             .message
@@ -421,19 +409,8 @@ mod tests {
         let record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
         assert_eq!(record_read_from_s3.object_key(), writer_key);
         record_read_from_s3
-            .validate_actual_object_key(&writer_key)
-            .expect("the serialized key must match the writer's S3 destination");
-        record_read_from_s3
             .verify(&signing_key.verification_key())
             .expect("the serialized record must verify at the key used by the writer");
-    }
-
-    fn assert_heartbeat_relocation_rejected(relocated_key: String) {
-        let (_, log, _) = signed_heartbeat(1_700_000_000_000);
-        let err = log
-            .validate_actual_object_key(&relocated_key)
-            .expect_err("relocated record must be rejected");
-        assert!(format!("{err:?}").contains("S3 object key mismatch"));
     }
 
     fn test_sharing_instance(sharing_seq: u64) -> SecretSharingInstance {
@@ -598,9 +575,11 @@ mod tests {
                 json,
                 "{name} did not reserialize canonically"
             );
-            decoded
-                .validate_actual_object_key(&object_key)
-                .unwrap_or_else(|error| panic!("{name} failed key validation: {error}"));
+            assert_eq!(
+                decoded.object_key(),
+                object_key,
+                "{name} did not preserve its object key"
+            );
             if decoded.message.is_allowed_unsigned() {
                 decoded
                     .validate_unsigned()
@@ -622,12 +601,6 @@ mod tests {
             VersionedLogMessage::V1(LogMessageV1::KpShareState(..))
         ));
         assert_eq!(serde_json::to_string(&record).unwrap(), fixture);
-        record
-            .validate_actual_object_key(
-                "kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json",
-            )
-            .unwrap();
-
         let signing_pubkey =
             hex::decode("916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca")
                 .unwrap();
@@ -739,9 +712,6 @@ mod tests {
 
         let from_s3: LogRecord = serde_json::from_value(json).unwrap();
         from_s3
-            .validate_actual_object_key(&object_key)
-            .expect("embedded key should match the S3 destination");
-        from_s3
             .verify(&signing_key.verification_key())
             .expect("serialized object key should be covered by the signature");
     }
@@ -756,37 +726,6 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("unsupported log schema version: 3")
-        );
-    }
-
-    #[test]
-    fn signed_log_rejects_cross_prefix_relocation() {
-        assert_heartbeat_relocation_rejected(format!(
-            "withdraw/2023/11/14/22/{}-00000000000000000042.json",
-            heartbeat_session_id()
-        ));
-    }
-
-    #[test]
-    fn signed_log_rejects_lexicographically_higher_key_relocation() {
-        assert_heartbeat_relocation_rejected(format!(
-            "heartbeat/2023/11/14/22/{}-00000000000000000043.json",
-            heartbeat_session_id()
-        ));
-    }
-
-    #[test]
-    fn signed_log_rejects_future_hour_relocation() {
-        assert_heartbeat_relocation_rejected(format!(
-            "heartbeat/2023/11/14/23/{}-00000000000000000042.json",
-            heartbeat_session_id()
-        ));
-    }
-
-    #[test]
-    fn signed_log_rejects_changed_session_relocation() {
-        assert_heartbeat_relocation_rejected(
-            "heartbeat/2023/11/14/22/aliased-session-00000000000000000042.json".to_string(),
         );
     }
 
@@ -831,12 +770,6 @@ mod tests {
 
         let mut record_read_from_s3: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
-        let err = record_read_from_s3
-            .validate_actual_object_key(&relocated_key)
-            .expect_err("changing only the random failure suffix must invalidate placement");
-
-        assert!(format!("{err:?}").contains("S3 object key mismatch"));
-
         record_read_from_s3.object_key = relocated_key;
         let err = record_read_from_s3
             .verify(&signing_key.verification_key())
@@ -889,8 +822,6 @@ mod tests {
         );
 
         log.object_key = "init/copied-attestation.json".to_string();
-        log.validate_actual_object_key("init/copied-attestation.json")
-            .expect("the operator can edit an unsigned record's embedded key");
         let err = log
             .validate_unsigned()
             .expect_err("unsigned record copied to another S3 key must be rejected");
