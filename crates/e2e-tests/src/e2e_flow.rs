@@ -737,7 +737,20 @@ mod tests {
         )
         .await?;
         rotate_into_avid(&mut networks).await?;
-
+        {
+            let hashi = networks.hashi_network.nodes()[0].hashi();
+            let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
+            let window_ms = mpc_manager
+                .read()
+                .unwrap()
+                .mpc_config
+                .nonce_accumulation_window_ms;
+            assert!(
+                window_ms > 0,
+                "the accumulation window must be open for this test to mean anything, \
+                 got {window_ms}ms"
+            );
+        }
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();

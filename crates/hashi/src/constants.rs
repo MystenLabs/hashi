@@ -29,8 +29,7 @@ pub fn is_production_sui_chain(chain_id: &str) -> bool {
 
 /// The `versioning::PACKAGE_VERSION` at which the stamped nonce-cert path becomes available on-chain.
 ///
-/// Never raise past the deployed version; upgrades only insert, so a lagging value is
-/// safe. Genesis seeds `1..=PACKAGE_VERSION`, so later bumps keep this gate live.
+/// Never raise past the deployed version.
 pub const STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION: u64 = 2;
 #[cfg(test)]
 mod tests {

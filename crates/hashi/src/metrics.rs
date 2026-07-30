@@ -736,7 +736,8 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_mixed_stamp_batches_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_mixed_stamp_batches_total",
-                "Nonce batches carrying both zero and non-zero cert timestamps.",
+                "Nonce batch attempts carrying both zero and non-zero cert timestamps \
+                 (once per attempt, so a retried batch counts again)",
                 registry,
             )
             .unwrap(),

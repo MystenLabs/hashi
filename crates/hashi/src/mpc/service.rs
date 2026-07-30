@@ -1123,10 +1123,6 @@ impl MpcService {
         )>,
     > {
         let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
-        // Progress buys more time, but not without limit: re-anchoring on each new
-        // weight maximum otherwise scales the wait with committee size, and this whole
-        // function runs while `self.reconciling` is held. Past this ceiling, bail and
-        // let the caller retry rather than hold the lock.
         let overall_deadline = tokio::time::Instant::now() + NONCE_WAIT_TOTAL_BUDGET;
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
@@ -1149,10 +1145,23 @@ impl MpcService {
                      (onchain epoch {onchain_epoch}, pending epoch change {pending:?})"
                 );
             }
-            let certs = onchain_state
+            let certs = match onchain_state
                 .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
-                .await?
-                .unwrap_or_default();
+                .await
+            {
+                Ok(certs) => certs.unwrap_or_default(),
+                Err(e)
+                    if e.downcast_ref::<crate::onchain::IncompleteCertTableRead>()
+                        .is_some() =>
+                {
+                    if tokio::time::Instant::now() >= wait_deadline {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let certs =
                 MpcManager::verified_nonce_certs(mpc_manager, epoch, certs, &mut already_verified)
                     .await;
@@ -1225,7 +1234,8 @@ impl MpcService {
                 );
             }
             if !read_side_past_cutoff(cutoff_ms).await {
-                let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
+                let deadline = (Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK)
+                    .min(overall_deadline.saturating_duration_since(tokio::time::Instant::now()));
                 let wait = async {
                     while !read_side_past_cutoff(cutoff_ms).await {
                         tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;

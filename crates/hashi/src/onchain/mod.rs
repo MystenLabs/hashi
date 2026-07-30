@@ -116,6 +116,21 @@ struct Inner {
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "incomplete cert table read: {dealer} is referenced by the linked list but absent from \
+     the paginated fields"
+)]
+pub struct IncompleteCertTableRead {
+    pub dealer: Address,
+}
+
+fn stamped_certs_supported(enabled_versions: &std::collections::BTreeSet<u64>) -> bool {
+    enabled_versions
+        .iter()
+        .any(|v| *v >= crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
+}
+
 #[derive(Debug)]
 pub struct State {
     package_versions: move_types::PackageVersions,
@@ -797,10 +812,7 @@ impl OnchainState {
         let mut current = Some(head);
         while let Some(dealer) = current {
             let Some(node) = nodes.remove(&dealer) else {
-                tracing::warn!(
-                    "cert table walk stopped early: {dealer} missing from the paginated read"
-                );
-                break;
+                return Err(IncompleteCertTableRead { dealer }.into());
             };
             entries.push((dealer, node.value));
             current = node.next;
@@ -828,11 +840,7 @@ impl OnchainState {
     }
 
     pub fn supports_stamped_nonce_certs(&self) -> bool {
-        self.state()
-            .hashi()
-            .config
-            .enabled_versions
-            .contains(&crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
+        stamped_certs_supported(&self.state().hashi().config.enabled_versions)
     }
 
     pub async fn fetch_nonce_certs_stamped_or_bare(
@@ -1838,6 +1846,19 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stamped_gate_survives_disabling_an_older_version() {
+        use std::collections::BTreeSet;
+        let set = |v: &[u64]| v.iter().copied().collect::<BTreeSet<u64>>();
+
+        assert!(!stamped_certs_supported(&set(&[1])), "v1 only");
+        assert!(stamped_certs_supported(&set(&[1, 2])), "fresh v2 publish");
+        assert!(
+            stamped_certs_supported(&set(&[1, 3])),
+            "a version past the threshold still has the stamped entry point"
+        );
+    }
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::KeyPair;
     use fastcrypto::traits::ToFromBytes;
