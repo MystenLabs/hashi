@@ -282,7 +282,7 @@ impl LogRecord {
         &self.data().message
     }
 
-    /// Validate a record and return the exact entry that was authenticated.
+    /// Validate a record without consuming it.
     ///
     /// Validation checks record-local invariants and verifies a signed record
     /// against the caller-supplied key. It does not establish that the key
@@ -292,19 +292,15 @@ impl LogRecord {
     /// Signed records require `Some(signing_public_key)`; the one permitted
     /// unsigned record kind requires `None`. The caller is responsible for
     /// authenticating the Nitro attestation carried by an unsigned record.
-    pub fn validate(self, signing_public_key: Option<&GuardianPubKey>) -> GuardianResult<LogEntry> {
+    pub fn validate(&self, signing_public_key: Option<&GuardianPubKey>) -> GuardianResult<()> {
         match (self, signing_public_key) {
             (Self::Signed(signed), Some(signing_public_key)) => {
                 signed.data.validate_signed(signing_public_key)?;
                 signed
                     .verify_signature(signing_public_key)
-                    .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
-                Ok(signed.data)
+                    .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))
             }
-            (Self::Unsigned(unsigned), None) => {
-                unsigned.validate_unsigned()?;
-                Ok(unsigned)
-            }
+            (Self::Unsigned(unsigned), None) => unsigned.validate_unsigned(),
             (Self::Unsigned(unsigned), Some(_)) if unsigned.message.is_allowed_unsigned() => Err(
                 InvalidS3Log("expected signed log record but message is unsigned".into()),
             ),
@@ -436,13 +432,13 @@ mod tests {
     }
 
     fn validate_signed(
-        record: LogRecord,
+        record: &LogRecord,
         signing_public_key: &GuardianPubKey,
-    ) -> GuardianResult<LogEntry> {
+    ) -> GuardianResult<()> {
         record.validate(Some(signing_public_key))
     }
 
-    fn validate_unsigned(record: LogRecord) -> GuardianResult<LogEntry> {
+    fn validate_unsigned(record: &LogRecord) -> GuardianResult<()> {
         record.validate(None)
     }
 
@@ -459,7 +455,7 @@ mod tests {
         let body = serde_json::to_vec(&log).unwrap();
         let record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
         assert_eq!(record_read_from_s3.object_key(), writer_key);
-        validate_signed(record_read_from_s3, &signing_key.verification_key())
+        validate_signed(&record_read_from_s3, &signing_key.verification_key())
             .expect("the serialized record must verify at the key used by the writer");
     }
 
@@ -634,10 +630,10 @@ mod tests {
                 "{name} did not preserve its object key"
             );
             if decoded.message().is_allowed_unsigned() {
-                validate_unsigned(decoded)
+                validate_unsigned(&decoded)
                     .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
             } else {
-                validate_signed(decoded, &signing_key.verification_key())
+                validate_signed(&decoded, &signing_key.verification_key())
                     .unwrap_or_else(|error| panic!("{name} failed verification: {error}"));
             }
         }
@@ -656,8 +652,10 @@ mod tests {
             hex::decode("916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca")
                 .unwrap();
         let signing_pubkey = GuardianPubKey::try_from(signing_pubkey.as_slice()).unwrap();
-        let entry = validate_signed(record, &signing_pubkey)
-            .expect("the deployed V1 signature must verify");
+        validate_signed(&record, &signing_pubkey).expect("the deployed V1 signature must verify");
+        let entry = record
+            .into_entry_unchecked()
+            .expect("the deployed V1 record is signed");
         assert_eq!(entry.session_id().as_str(), "916c711a5e81c2b0");
         assert_eq!(entry.timestamp_ms(), 1_784_219_535_816);
         let VersionedLogMessage::V1(LogMessageV1::KpShareState(message)) = entry.into_message()
@@ -736,12 +734,12 @@ mod tests {
     fn signed_log_verifies_at_canonical_object_key() {
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
 
-        let entry = validate_signed(log, &signing_key.verification_key())
+        validate_signed(&log, &signing_key.verification_key())
             .expect("record should verify at its intended S3 key");
 
-        assert_eq!(entry.timestamp_ms(), 1_700_000_000_000);
+        assert_eq!(log.timestamp_ms(), 1_700_000_000_000);
         assert!(matches!(
-            entry.message(),
+            log.message(),
             VersionedLogMessage::V2(LogMessageV2::Heartbeat(HeartbeatLogMessage { seq: 42 }))
         ));
     }
@@ -764,7 +762,7 @@ mod tests {
         assert!(serde_json::from_value::<LogRecord>(malformed).is_err());
 
         let from_s3: LogRecord = serde_json::from_value(json).unwrap();
-        validate_signed(from_s3, &signing_key.verification_key())
+        validate_signed(&from_s3, &signing_key.verification_key())
             .expect("serialized object key should be covered by the signature");
     }
 
@@ -822,7 +820,7 @@ mod tests {
             heartbeat_session_id()
         );
 
-        let err = validate_signed(tampered, &signing_key.verification_key())
+        let err = validate_signed(&tampered, &signing_key.verification_key())
             .expect_err("signature must cover the canonical object key and message");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -852,7 +850,7 @@ mod tests {
         let mut record_read_from_s3: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         record_read_from_s3.data_mut().object_key = relocated_key;
-        let err = validate_signed(record_read_from_s3, &signing_key.verification_key())
+        let err = validate_signed(&record_read_from_s3, &signing_key.verification_key())
             .expect_err("the signature must authenticate the random failure suffix");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -880,7 +878,7 @@ mod tests {
         aliased.data_mut().session_id = "aliased-session".into();
         aliased.data_mut().object_key = GenesisLogMessage::object_key();
 
-        let err = validate_signed(aliased, &signing_key.verification_key())
+        let err = validate_signed(&aliased, &signing_key.verification_key())
             .expect_err("session ID must be part of the signed routing context");
 
         assert!(format!("{err:?}").contains("session ID mismatch"));
@@ -901,7 +899,7 @@ mod tests {
         );
 
         log.data_mut().object_key = "init/copied-attestation.json".to_string();
-        let err = validate_unsigned(log)
+        let err = validate_unsigned(&log)
             .expect_err("unsigned record copied to another S3 key must be rejected");
 
         assert!(format!("{err:?}").contains("non-canonical S3 object key"));
@@ -919,7 +917,7 @@ mod tests {
             &signing_key,
             1_700_000_000_000,
         );
-        let err = validate_unsigned(log)
+        let err = validate_unsigned(&log)
             .expect_err("attestation session ID must come from its signing public key");
 
         assert!(format!("{err:?}").contains("session ID mismatch"));
@@ -982,7 +980,7 @@ mod tests {
         assert_eq!(message["config_hash"], hex::encode([0xcd; 32]));
 
         let from_json: LogRecord = serde_json::from_value(json).unwrap();
-        validate_signed(from_json, &signing_key.verification_key()).unwrap();
+        validate_signed(&from_json, &signing_key.verification_key()).unwrap();
     }
 
     #[test]

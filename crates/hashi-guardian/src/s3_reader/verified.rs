@@ -34,7 +34,8 @@ impl VerifiedSessionInfo {
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
         let attestation_record = s3.get_log_record(&att_key).await?;
-        let attestation_message = match attestation_record.validate(None)?.into_message() {
+        attestation_record.validate(None)?;
+        let attestation_message = match into_validated_entry(attestation_record).into_message() {
             VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
             VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
             VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
@@ -56,7 +57,8 @@ impl VerifiedSessionInfo {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = s3.get_log_record(&info_key).await?;
-        let info_message = match info_record.validate(Some(&signing_pubkey))?.into_message() {
+        info_record.validate(Some(&signing_pubkey))?;
+        let info_message = match into_validated_entry(info_record).into_message() {
             VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
             VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
             VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
@@ -119,7 +121,8 @@ impl VerifiedLogRecord {
         record: LogRecord,
         session_info: &VerifiedSessionInfo,
     ) -> GuardianResult<Self> {
-        let entry = record.validate(Some(&session_info.signing_pubkey))?;
+        record.validate(Some(&session_info.signing_pubkey))?;
+        let entry = into_validated_entry(record);
         Ok(Self {
             entry,
             build_pcrs: session_info.build_pcrs.clone(),
@@ -141,5 +144,12 @@ impl VerifiedLogRecord {
 
     pub fn into_entry(self) -> LogEntry {
         self.entry
+    }
+}
+
+fn into_validated_entry(record: LogRecord) -> LogEntry {
+    match record {
+        LogRecord::Signed(signed) => signed.into_data_unchecked(),
+        LogRecord::Unsigned(entry) => entry,
     }
 }
