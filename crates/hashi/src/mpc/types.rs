@@ -164,12 +164,24 @@ impl NonceCollectionWindow {
         }
     }
 
+    pub fn with_cutoff(required_weight: u32, cutoff_ms: Option<u64>) -> Self {
+        let Some(cutoff_ms) = cutoff_ms else {
+            return Self::new(required_weight, 0);
+        };
+        Self {
+            required_weight,
+            window_ms: 0,
+            weight: 0,
+            state: NonceCollectionState::Window { cutoff_ms },
+        }
+    }
+
     pub fn closed(&self) -> bool {
         matches!(self.state, NonceCollectionState::Closed { .. })
     }
 
     pub fn floor_reached(&self) -> bool {
-        !matches!(self.state, NonceCollectionState::Floor)
+        self.weight >= self.required_weight
     }
 
     pub fn weight(&self) -> u32 {
@@ -1408,5 +1420,53 @@ mod tests {
         window.record(admission, 6);
         assert!(!window.floor_reached());
         assert_eq!(window.weight(), 6);
+    }
+
+    fn party_loop_cutoff(
+        stamps: &[u64],
+        weight_each: u32,
+        required_weight: u32,
+        window_ms: u64,
+        skip: &[usize],
+    ) -> Option<u64> {
+        let decided = {
+            let mut gate = NonceCollectionWindow::new(required_weight, window_ms);
+            for &ts in stamps {
+                let Some(admission) = gate.try_admit(ts) else {
+                    break;
+                };
+                gate.record(admission, weight_each);
+            }
+            gate.cutoff_ms()
+        };
+        let mut window = NonceCollectionWindow::with_cutoff(required_weight, decided);
+        for (i, &ts) in stamps.iter().enumerate() {
+            if window.closed() {
+                break;
+            }
+            let Some(admission) = window.try_admit(ts) else {
+                break;
+            };
+            if skip.contains(&i) {
+                continue;
+            }
+            window.record(admission, weight_each);
+        }
+        window.cutoff_ms()
+    }
+
+    #[test]
+    fn cutoff_must_not_depend_on_locally_unconsumable_certs() {
+        let stamps = [1_000u64, 1_000, 1_000, 1_000, 1_800];
+        let baseline = party_loop_cutoff(&stamps, 1, 4, 700, &[]);
+        for skipped in 0..stamps.len() {
+            assert_eq!(
+                party_loop_cutoff(&stamps, 1, 4, 700, &[skipped]),
+                baseline,
+                "skipping cert {skipped} moved the cutoff from {baseline:?}; the cutoff \
+                 must be a function of the on-chain cert list, not of which certs this \
+                 node could process"
+            );
+        }
     }
 }

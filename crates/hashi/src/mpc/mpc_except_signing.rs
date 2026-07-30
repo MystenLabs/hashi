@@ -994,6 +994,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        cutoff_ms: Option<u64>,
         metrics: &Metrics,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         let protocol = {
@@ -1007,6 +1008,7 @@ impl MpcManager {
                     batch_index,
                     p2p_channel,
                     tob_channel,
+                    cutoff_ms,
                     metrics,
                 )
                 .await?
@@ -1017,6 +1019,7 @@ impl MpcManager {
                     batch_index,
                     p2p_channel,
                     tob_channel,
+                    cutoff_ms,
                     metrics,
                 )
                 .await?
@@ -1872,11 +1875,12 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        cutoff_ms: Option<u64>,
         metrics: &Metrics,
     ) -> MpcResult<HashSet<Address>> {
         let mut window = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.nonce_collection_window()
+            NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms)
         };
         let mut certified_dealers = HashSet::new();
         loop {
@@ -3348,13 +3352,14 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        cutoff_ms: Option<u64>,
         metrics: &Metrics,
     ) -> MpcResult<HashSet<Address>> {
         let (mut window, total_reduced_weight, vote_quorum_weight) = {
             let mgr = mpc_manager.read().unwrap();
             let total = mgr.mpc_config.nodes.total_weight() as u32;
             (
-                mgr.nonce_collection_window(),
+                NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms),
                 total,
                 total - mgr.mpc_config.max_faulty as u32,
             )

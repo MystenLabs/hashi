@@ -527,6 +527,10 @@ impl MpcService {
             true,
         )
         .await?;
+        let cutoff_ms = {
+            let mgr = mpc_manager.read().unwrap();
+            mgr.nonce_collection_cutoff_ms(&final_certs)
+        };
         let canonical: Vec<(sui_sdk_types::Address, CertificateV1)> = final_certs
             .iter()
             .filter_map(|(dealer, stamped)| {
@@ -547,6 +551,7 @@ impl MpcService {
             batch_index,
             &p2p_channel,
             &mut party_channel,
+            cutoff_ms,
             metrics,
         )
         .await;
@@ -1168,12 +1173,17 @@ impl MpcService {
                 // converted certs; the generic weight would count sub-quorum ones.
                 let expected_size =
                     expected_from(avid_certified_nonce_weight(mpc_manager, &avid_certs))?;
+                let cutoff_ms = {
+                    let mgr = mpc_manager.read().unwrap();
+                    mgr.nonce_collection_cutoff_ms(&certs)
+                };
                 let mut prefetched = PrefetchedTobChannel::new(avid_certs);
                 let outputs = MpcManager::run_nonce_party_phase(
                     mpc_manager,
                     batch_index,
                     &p2p_channel,
                     &mut prefetched,
+                    cutoff_ms,
                     &self.inner.metrics,
                 )
                 .await

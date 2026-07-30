@@ -23,8 +23,15 @@ async fn run_nonce_generation_for_test(
     {
         tracing::error!("Nonce dealer phase failed: {e}. Continuing as party only.");
     }
-    MpcManager::run_nonce_party_phase(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
-        .await
+    MpcManager::run_nonce_party_phase(
+        mpc_manager,
+        batch_index,
+        p2p_channel,
+        tob_channel,
+        None,
+        metrics,
+    )
+    .await
 }
 
 fn test_metrics() -> Metrics {
@@ -10864,12 +10871,21 @@ async fn test_nonce_window_live_collection_past_floor() {
         let test_manager = Arc::clone(&test_manager);
         let mock_p2p = &mock_p2p;
         async move {
+            // Production decides the cutoff once over the canonical list and hands it
+            // to the party phase; do the same here rather than let the loop derive it.
+            let cutoff_ms = test_manager
+                .read()
+                .unwrap()
+                .window_certified_nonce_dealers(&tob_certs)
+                .1
+                .cutoff_ms();
             let mut tob = crate::communication::PrefetchedTobChannel::new(tob_certs);
             MpcManager::run_as_nonce_party(
                 &test_manager,
                 batch_index,
                 mock_p2p,
                 &mut tob,
+                cutoff_ms,
                 &test_metrics(),
             )
             .await
@@ -10987,6 +11003,7 @@ async fn test_run_nonce_generation() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
+        None,
         &test_metrics(),
     )
     .await
@@ -11139,6 +11156,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
+        None,
         &test_metrics(),
     )
     .await
@@ -12577,6 +12595,7 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
+        None,
         &metrics,
     )
     .await
@@ -12650,6 +12669,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
+        None,
         &test_metrics(),
     )
     .await
@@ -12806,6 +12826,7 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
         batch_index,
         &laggard_p2p,
         &mut mock_tob,
+        None,
         &metrics,
     )
     .await;
@@ -12889,6 +12910,7 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
         batch_index,
         &party_p2p,
         &mut mock_tob,
+        None,
         &test_metrics(),
     )
     .await
@@ -13200,6 +13222,7 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         batch_index,
         &party_p2p,
         &mut mock_tob,
+        None,
         &metrics,
     )
     .await;
@@ -13759,6 +13782,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
+        None,
         &test_metrics(),
     )
     .await
@@ -14068,6 +14092,7 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
+        None,
         &test_metrics(),
     )
     .await
