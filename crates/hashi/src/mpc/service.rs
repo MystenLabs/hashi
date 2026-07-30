@@ -1116,6 +1116,7 @@ impl MpcService {
         let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
+        let mut mixed_stamps_reported = false;
         let mut already_verified = HashSet::new();
         loop {
             let (onchain_epoch, pending) = {
@@ -1159,7 +1160,8 @@ impl MpcService {
                         (z, n + 1)
                     }
                 });
-            if zero_stamps > 0 && stamped > 0 {
+            if zero_stamps > 0 && stamped > 0 && !mixed_stamps_reported {
+                mixed_stamps_reported = true;
                 metrics.mpc_nonce_mixed_stamp_batches_total.inc();
                 warn!(
                     "nonce batch {batch_index} for epoch {epoch} mixes {zero_stamps} bare \
