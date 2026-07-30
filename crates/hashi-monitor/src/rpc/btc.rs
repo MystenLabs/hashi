@@ -505,6 +505,7 @@ mod tests {
         assert!(unconfirmed.is_none(), "expected unconfirmed transaction");
 
         node.generate_blocks(1)?;
+        btc_rpc_client.clear_confirmation_cache();
 
         let confirmed = btc_rpc_client.lookup_confirmation(txid)?;
         assert!(confirmed.is_some(), "expected confirmed transaction");
