@@ -656,7 +656,6 @@ impl GuardianS3Client {
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = self.get_log_record(&info_key).await?;
         let signed = info_record.into_signed()?;
-        let timestamp_ms = signed.data.timestamp_ms();
         signed.data.validate(&signing_pubkey)?;
         let data = signed
             .authenticate(&signing_pubkey)
