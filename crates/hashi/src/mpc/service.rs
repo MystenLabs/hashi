@@ -627,7 +627,8 @@ impl MpcService {
                      served certs size to {served_implies} (weight {served_weight}). The \
                      certs are frozen, so a restart rebuilds this boundary at the larger \
                      size. If this is the last recovered boundary that fails the \
-                     Phase-1/Phase-2 assert; otherwise it is not cross-checked at all and \
+                     Phase-1/Phase-2 assert identically on every later tick, since the \
+                     certs are frozen; otherwise it is not cross-checked at all and \
                      silently shifts every later batch's start_index",
                     presignatures.len(),
                 );
@@ -842,9 +843,17 @@ impl MpcService {
         let onchain_state = self.inner.onchain_state().clone();
         let weight = match protocol {
             NonceGenerationProtocol::Vanilla => {
-                let Some(certs) = onchain_state
-                    .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
-                    .await?
+                let Some(certs) = tokio::time::timeout(
+                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                    onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "nonce cert fetch for epoch {epoch} batch {batch_index} stalled; \
+                         retrying on the next reconcile tick"
+                    )
+                })??
                 else {
                     return Ok(None);
                 };
@@ -858,13 +867,22 @@ impl MpcService {
                 certified_nonce_weight(mpc_manager, &certs)
             }
             NonceGenerationProtocol::Avid => {
-                let certs = fetch_certificates(
-                    &onchain_state,
-                    epoch,
-                    Some(batch_index),
-                    move_types::ProtocolType::NonceGeneration,
+                let certs = tokio::time::timeout(
+                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                    fetch_certificates(
+                        &onchain_state,
+                        epoch,
+                        Some(batch_index),
+                        move_types::ProtocolType::NonceGeneration,
+                    ),
                 )
-                .await?;
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "nonce cert fetch for epoch {epoch} batch {batch_index} stalled; \
+                         retrying on the next reconcile tick"
+                    )
+                })??;
                 if certs.is_empty() {
                     return Ok(None);
                 }

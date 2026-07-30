@@ -779,8 +779,11 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_floor_unreached_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_floor_unreached_total",
-                "Nonce batches abandoned because the on-chain certified weight never \
-                 reached the required floor",
+                "Nonce batches abandoned below the floor with no node-local skip and the \
+                 window still open. On the recovery path that means the chain genuinely \
+                 never certified enough weight; on the live path the fetch already proved \
+                 the floor over the same certs, so it means the party loop admitted fewer \
+                 than the sizing walk — check the AVID per-kind quorum before the fleet",
                 registry,
             )
             .unwrap(),

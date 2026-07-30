@@ -836,7 +836,23 @@ impl OnchainState {
         else {
             return Ok(None);
         };
-        Ok(Some(self.fetch_cert_table(&epoch_certs.certs).await?))
+        let certs = self.fetch_cert_table(&epoch_certs.certs).await?;
+        if let Some(bad) =
+            certs
+                .windows(2)
+                .find(|w: &&[(Address, move_types::StampedDealerSubmissionV1)]| {
+                    w[1].1.timestamp_ms < w[0].1.timestamp_ms
+                })
+        {
+            return Err(anyhow::anyhow!(
+                "cert table is not timestamp-ordered: {} stamped {} follows {} stamped {}",
+                bad[1].0,
+                bad[1].1.timestamp_ms,
+                bad[0].0,
+                bad[0].1.timestamp_ms,
+            ));
+        }
+        Ok(Some(certs))
     }
 
     pub fn supports_stamped_nonce_certs(&self) -> bool {

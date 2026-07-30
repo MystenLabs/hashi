@@ -12757,6 +12757,67 @@ async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() 
 }
 
 #[tokio::test]
+async fn test_avid_below_floor_attribution_distinguishes_cause() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature], ts: u64| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs.iter().take(6) {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+            timestamp_ms: ts,
+        }
+    };
+
+    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+    let mut tob = crate::communication::PrefetchedTobChannel::new(vec![(
+        setup.address(0),
+        make_cert(&confirm_target, &sigs, 0),
+    )]);
+    let metrics = test_metrics();
+    let dry = MpcManager::run_as_avid_nonce_party(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut tob,
+        None,
+        &metrics,
+    )
+    .await;
+
+    assert!(
+        matches!(dry, Err(MpcError::NotEnoughParticipants { .. })),
+        "a dry stream below the floor must fail, got {:?}",
+        dry.map(|a| a.certified.len())
+    );
+    assert_eq!(
+        metrics.mpc_nonce_floor_unreached_total.get(),
+        1,
+        "an exhausted list is a floor-unreached batch"
+    );
+    assert_eq!(
+        metrics.mpc_nonce_window_closed_below_floor_total.get(),
+        0,
+        "nothing closed the window — the list simply ran out"
+    );
+    assert_eq!(
+        metrics.mpc_nonce_local_skip_batches_total.get(),
+        0,
+        "no dealer was skipped for a node-local reason"
+    );
+}
+
+#[tokio::test]
 async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let mut rng = rand::thread_rng();
     // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
