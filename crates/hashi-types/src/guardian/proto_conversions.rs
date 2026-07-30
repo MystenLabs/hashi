@@ -17,9 +17,11 @@ use super::GuardianError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianPubKey;
+use super::GuardianResponse;
 use super::GuardianResult;
 use super::GuardianSignature;
 use super::GuardianSigned;
+use super::GuardianSignedResponse;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
@@ -133,7 +135,7 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     }
 }
 
-impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyResponse> {
+impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSignedResponse<SetupNewKeyResponse> {
     type Error = GuardianError;
 
     fn try_from(resp: pb::SignedSetupNewKeyResponse) -> Result<Self, Self::Error> {
@@ -162,12 +164,14 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned {
-            data: SetupNewKeyResponse {
-                encrypted_shares,
-                secret_sharing_instance,
-                btc_master_pubkey,
-            },
-            timestamp_ms,
+            data: GuardianResponse::new(
+                SetupNewKeyResponse {
+                    encrypted_shares,
+                    secret_sharing_instance,
+                    btc_master_pubkey,
+                },
+                timestamp_ms,
+            ),
             signature,
         })
     }
@@ -387,7 +391,7 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
     }
 }
 
-impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> {
+impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSignedResponse<RotateKpsResponse> {
     type Error = GuardianError;
 
     fn try_from(resp: pb::SignedRotateKpsResponse) -> Result<Self, Self::Error> {
@@ -406,15 +410,14 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned {
-            data: RotateKpsResponse { encrypted_shares },
-            timestamp_ms,
+            data: GuardianResponse::new(RotateKpsResponse { encrypted_shares }, timestamp_ms),
             signature,
         })
     }
 }
 
 impl TryFrom<pb::SignedProvisionerRotateCertResponse>
-    for GuardianSigned<ProvisionerRotateCertResponse>
+    for GuardianSignedResponse<ProvisionerRotateCertResponse>
 {
     type Error = GuardianError;
 
@@ -429,11 +432,13 @@ impl TryFrom<pb::SignedProvisionerRotateCertResponse>
         )?;
 
         Ok(GuardianSigned {
-            data: ProvisionerRotateCertResponse {
-                cert_seq: resp.cert_seq.ok_or_else(|| missing("cert_seq"))?,
-                encrypted_shares,
-            },
-            timestamp_ms,
+            data: GuardianResponse::new(
+                ProvisionerRotateCertResponse {
+                    cert_seq: resp.cert_seq.ok_or_else(|| missing("cert_seq"))?,
+                    encrypted_shares,
+                },
+                timestamp_ms,
+            ),
             signature,
         })
     }
@@ -521,7 +526,7 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             .map_err(|e| InvalidInputs(format!("invalid signing_pub_key: {e}")))?;
 
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
-        let signed_info = GuardianSigned::<GuardianInfo>::try_from(signed_info_pb)?;
+        let signed_info = GuardianSignedResponse::<GuardianInfo>::try_from(signed_info_pb)?;
 
         Ok(GetGuardianInfoResponse::new(
             NitroAttestation::new(attestation.to_vec()),
@@ -563,7 +568,9 @@ impl TryFrom<pb::SignedStandardWithdrawalRequest> for SignedStandardWithdrawalRe
     }
 }
 
-impl TryFrom<pb::SignedStandardWithdrawalResponse> for GuardianSigned<StandardWithdrawalResponse> {
+impl TryFrom<pb::SignedStandardWithdrawalResponse>
+    for GuardianSignedResponse<StandardWithdrawalResponse>
+{
     type Error = GuardianError;
 
     fn try_from(resp: pb::SignedStandardWithdrawalResponse) -> Result<Self, Self::Error> {
@@ -584,8 +591,10 @@ impl TryFrom<pb::SignedStandardWithdrawalResponse> for GuardianSigned<StandardWi
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(GuardianSigned {
-            data: StandardWithdrawalResponse { enclave_signatures },
-            timestamp_ms,
+            data: GuardianResponse::new(
+                StandardWithdrawalResponse { enclave_signatures },
+                timestamp_ms,
+            ),
             signature,
         })
     }
@@ -596,19 +605,19 @@ impl TryFrom<pb::SignedStandardWithdrawalResponse> for GuardianSigned<StandardWi
 // ----------------------------------------------------------
 
 pub fn setup_new_key_response_signed_to_pb(
-    s: GuardianSigned<SetupNewKeyResponse>,
+    s: GuardianSignedResponse<SetupNewKeyResponse>,
 ) -> pb::SignedSetupNewKeyResponse {
     let signature = s.signature.to_bytes().to_vec();
 
     pb::SignedSetupNewKeyResponse {
-        data: Some(setup_new_key_response_to_pb(s.data)),
-        timestamp_ms: Some(s.timestamp_ms),
+        data: Some(setup_new_key_response_to_pb(s.data.response)),
+        timestamp_ms: Some(s.data.timestamp_ms),
         signature: Some(signature.into()),
     }
 }
 
 pub fn rotate_kps_response_signed_to_pb(
-    s: GuardianSigned<RotateKpsResponse>,
+    s: GuardianSignedResponse<RotateKpsResponse>,
 ) -> pb::SignedRotateKpsResponse {
     let signature = s.signature.to_bytes().to_vec();
 
@@ -616,24 +625,25 @@ pub fn rotate_kps_response_signed_to_pb(
         data: Some(pb::RotateKpsResponseData {
             encrypted_shares: s
                 .data
+                .response
                 .encrypted_shares
                 .into_vec()
                 .into_iter()
                 .map(kp_encrypted_shares_to_pb)
                 .collect(),
         }),
-        timestamp_ms: Some(s.timestamp_ms),
+        timestamp_ms: Some(s.data.timestamp_ms),
         signature: Some(signature.into()),
     }
 }
 
 pub fn provisioner_rotate_cert_response_signed_to_pb(
-    s: GuardianSigned<ProvisionerRotateCertResponse>,
+    s: GuardianSignedResponse<ProvisionerRotateCertResponse>,
 ) -> pb::SignedProvisionerRotateCertResponse {
     pb::SignedProvisionerRotateCertResponse {
-        cert_seq: Some(s.data.cert_seq),
-        encrypted_shares: Some(kp_encrypted_shares_to_pb(s.data.encrypted_shares)),
-        timestamp_ms: Some(s.timestamp_ms),
+        cert_seq: Some(s.data.response.cert_seq),
+        encrypted_shares: Some(kp_encrypted_shares_to_pb(s.data.response.encrypted_shares)),
+        timestamp_ms: Some(s.data.timestamp_ms),
         signature: Some(s.signature.to_bytes().to_vec().into()),
     }
 }
@@ -815,7 +825,7 @@ pub fn signed_standard_withdrawal_request_to_pb(
 }
 
 pub fn standard_withdrawal_response_signed_to_pb(
-    s: GuardianSigned<StandardWithdrawalResponse>,
+    s: GuardianSignedResponse<StandardWithdrawalResponse>,
 ) -> pb::SignedStandardWithdrawalResponse {
     let signature = s.signature.to_bytes().to_vec();
 
@@ -823,12 +833,13 @@ pub fn standard_withdrawal_response_signed_to_pb(
         data: Some(pb::StandardWithdrawalResponseData {
             enclave_signatures: s
                 .data
+                .response
                 .enclave_signatures
                 .iter()
                 .map(|sig| sig.to_vec().into())
                 .collect(),
         }),
-        timestamp_ms: Some(s.timestamp_ms),
+        timestamp_ms: Some(s.data.timestamp_ms),
         signature: Some(signature.into()),
     }
 }
@@ -1063,7 +1074,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
     }
 }
 
-impl TryFrom<pb::SignedGuardianInfo> for GuardianSigned<GuardianInfo> {
+impl TryFrom<pb::SignedGuardianInfo> for GuardianSignedResponse<GuardianInfo> {
     type Error = GuardianError;
 
     fn try_from(s: pb::SignedGuardianInfo) -> Result<Self, Self::Error> {
@@ -1079,17 +1090,16 @@ impl TryFrom<pb::SignedGuardianInfo> for GuardianSigned<GuardianInfo> {
             .map_err(|e| InvalidInputs(format!("invalid signed_info.signature: {e}")))?;
 
         Ok(Self {
-            data: GuardianInfo::try_from(data_pb)?,
-            timestamp_ms,
+            data: GuardianResponse::new(GuardianInfo::try_from(data_pb)?, timestamp_ms),
             signature,
         })
     }
 }
 
-fn signed_guardian_info_to_pb(s: GuardianSigned<GuardianInfo>) -> pb::SignedGuardianInfo {
+fn signed_guardian_info_to_pb(s: GuardianSignedResponse<GuardianInfo>) -> pb::SignedGuardianInfo {
     pb::SignedGuardianInfo {
-        data: Some(guardian_info_data_to_pb(s.data)),
-        timestamp_ms: Some(s.timestamp_ms),
+        data: Some(guardian_info_data_to_pb(s.data.response)),
+        timestamp_ms: Some(s.data.timestamp_ms),
         signature: Some(s.signature.to_bytes().to_vec().into()),
     }
 }
@@ -1670,25 +1680,26 @@ mod tests {
 
     #[test]
     fn setup_new_key_response_round_trip() {
-        let resp = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing();
+        let resp = GuardianSignedResponse::<SetupNewKeyResponse>::mock_for_testing();
         let pb = setup_new_key_response_signed_to_pb(resp.clone());
-        let back = GuardianSigned::<SetupNewKeyResponse>::try_from(pb).unwrap();
+        let back = GuardianSignedResponse::<SetupNewKeyResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
     }
 
     #[test]
     fn signed_rotate_kps_response_round_trip() {
-        let resp = GuardianSigned::<RotateKpsResponse>::mock_for_testing();
+        let resp = GuardianSignedResponse::<RotateKpsResponse>::mock_for_testing();
         let pb = rotate_kps_response_signed_to_pb(resp.clone());
-        let back = GuardianSigned::<RotateKpsResponse>::try_from(pb).unwrap();
+        let back = GuardianSignedResponse::<RotateKpsResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
     }
 
     #[test]
     fn signed_provisioner_rotate_cert_response_round_trip() {
-        let response = GuardianSigned::<ProvisionerRotateCertResponse>::mock_for_testing();
+        let response = GuardianSignedResponse::<ProvisionerRotateCertResponse>::mock_for_testing();
         let pb = provisioner_rotate_cert_response_signed_to_pb(response.clone());
-        let round_trip = GuardianSigned::<ProvisionerRotateCertResponse>::try_from(pb).unwrap();
+        let round_trip =
+            GuardianSignedResponse::<ProvisionerRotateCertResponse>::try_from(pb).unwrap();
         assert_eq!(response, round_trip);
     }
 
@@ -1797,9 +1808,9 @@ mod tests {
 
     #[test]
     fn standard_withdrawal_response_round_trip() {
-        let resp = GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing();
+        let resp = GuardianSignedResponse::<StandardWithdrawalResponse>::mock_for_testing();
         let pb = standard_withdrawal_response_signed_to_pb(resp.clone());
-        let back = GuardianSigned::<StandardWithdrawalResponse>::try_from(pb).unwrap();
+        let back = GuardianSignedResponse::<StandardWithdrawalResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
     }
 

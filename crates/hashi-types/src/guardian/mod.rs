@@ -26,7 +26,9 @@ pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
 pub use log::*;
+pub use signing::GuardianResponse;
 pub use signing::GuardianSigned;
+pub use signing::GuardianSignedResponse;
 pub use signing::GuardianSigningIntent;
 pub use signing::GuardianSigningIntentType;
 pub use signing::KpSigned;
@@ -86,7 +88,7 @@ pub struct GetGuardianInfoResponse {
     /// Signing pub key of the guardian
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
-    signed_info: GuardianSigned<GuardianInfo>,
+    signed_info: GuardianSignedResponse<GuardianInfo>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -299,8 +301,8 @@ pub struct ProvisionerRotateCertRequest {
     encrypted_share: GuardianEncryptedShare,
 }
 
-/// `GuardianSigned<ProvisionerRotateCertResponse>`. Returned after the guardian appends
-/// the next `kp-shares/` certificate-state snapshot.
+/// `GuardianSignedResponse<ProvisionerRotateCertResponse>`. Returned after the
+/// guardian appends the next `kp-shares/` certificate-state snapshot.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ProvisionerRotateCertResponse {
     pub cert_seq: u64,
@@ -896,7 +898,7 @@ impl GetGuardianInfoResponse {
     pub fn new(
         attestation: NitroAttestation,
         signing_pub_key: GuardianPubKey,
-        signed_info: GuardianSigned<GuardianInfo>,
+        signed_info: GuardianSignedResponse<GuardianInfo>,
     ) -> Self {
         Self {
             attestation,
@@ -923,7 +925,8 @@ impl GetGuardianInfoResponse {
         let info = self
             .signed_info
             .clone()
-            .authenticate(&self.signing_pub_key)?;
+            .authenticate(&self.signing_pub_key)?
+            .into_response();
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",
@@ -943,7 +946,10 @@ impl GetGuardianInfoResponse {
     /// Extract the guardian's self-reported info and signing key WITHOUT verifying
     /// the signature or attestation.
     pub fn into_info_unchecked(self) -> (GuardianInfo, GuardianPubKey) {
-        (self.signed_info.into_data_unchecked(), self.signing_pub_key)
+        (
+            self.signed_info.into_data_unchecked().into_response(),
+            self.signing_pub_key,
+        )
     }
 }
 
@@ -1092,7 +1098,7 @@ mod tests {
     #[test]
     fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
         let resp = GetGuardianInfoResponse::mock_for_testing();
-        let expected_info = resp.signed_info.data.clone();
+        let expected_info = resp.signed_info.data.response.clone();
         let expected_signing_pub_key = resp.signing_pub_key;
         let (info, signing_pub_key) = resp.into_info_unchecked();
 

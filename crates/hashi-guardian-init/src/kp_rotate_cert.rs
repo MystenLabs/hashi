@@ -11,7 +11,7 @@ use anyhow::anyhow;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::ProvisionerRotateCertResponse;
@@ -167,11 +167,13 @@ pub async fn run(
         .await
         .context("ProvisionerRotateCert RPC failed")?
         .into_inner();
-    let signed_response = GuardianSigned::<ProvisionerRotateCertResponse>::try_from(response_pb)
-        .map_err(|e| anyhow!("decode SignedProvisionerRotateCertResponse: {e:?}"))?;
+    let signed_response =
+        GuardianSignedResponse::<ProvisionerRotateCertResponse>::try_from(response_pb)
+            .map_err(|e| anyhow!("decode SignedProvisionerRotateCertResponse: {e:?}"))?;
     let response = signed_response
         .authenticate(&signing_pub_key)
-        .map_err(|e| anyhow!("authenticate ProvisionerRotateCertResponse: {e}"))?;
+        .map_err(|e| anyhow!("authenticate ProvisionerRotateCertResponse: {e}"))?
+        .into_response();
     let expected_cert_seq = old_cert_seq.checked_add(1).context("cert_seq overflow")?;
     anyhow::ensure!(
         response.cert_seq == expected_cert_seq,

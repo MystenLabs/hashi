@@ -166,8 +166,10 @@ fn parse_success_seq(key: &str) -> Option<u64> {
 
 fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSuccess> {
     let record: LogRecord = serde_json::from_slice(bytes)?;
-    let timestamp_ms = record.timestamp_ms;
-    let LogMessage::Withdrawal(message) = record.message.into_current()? else {
+    let signed = record.into_signed()?;
+    let timestamp_ms = signed.data.timestamp_ms();
+    let (_, message) = signed.into_data_unchecked().into_current()?;
+    let LogMessage::Withdrawal(message) = message else {
         anyhow::bail!("not a withdrawal record");
     };
     let WithdrawalLogMessage::Success {

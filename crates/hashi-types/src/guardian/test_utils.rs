@@ -6,7 +6,9 @@ use super::Ciphertext;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
+use super::GuardianResponse;
 use super::GuardianSigned;
+use super::GuardianSignedResponse;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
@@ -107,7 +109,7 @@ impl GetGuardianInfoResponse {
         GetGuardianInfoResponse::new(
             NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
-            GuardianSigned::sign(info, &signing_key, 1234),
+            GuardianSigned::sign(GuardianResponse::new(info, 1234), &signing_key),
         )
     }
 }
@@ -156,7 +158,7 @@ fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
     .unwrap()
 }
 
-impl GuardianSigned<SetupNewKeyResponse> {
+impl GuardianSignedResponse<SetupNewKeyResponse> {
     pub fn mock_for_testing() -> Self {
         let resp = SetupNewKeyResponse {
             encrypted_shares: dummy_encrypted_shares(),
@@ -167,21 +169,21 @@ impl GuardianSigned<SetupNewKeyResponse> {
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::sign(resp, &signing_kp, 0)
+        GuardianSigned::sign(GuardianResponse::new(resp, 0), &signing_kp)
     }
 }
 
-impl GuardianSigned<RotateKpsResponse> {
+impl GuardianSignedResponse<RotateKpsResponse> {
     pub fn mock_for_testing() -> Self {
         let resp = RotateKpsResponse {
             encrypted_shares: dummy_encrypted_shares(),
         };
         let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::sign(resp, &signing_kp, 0)
+        GuardianSigned::sign(GuardianResponse::new(resp, 0), &signing_kp)
     }
 }
 
-impl GuardianSigned<ProvisionerRotateCertResponse> {
+impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
     pub fn mock_for_testing() -> Self {
         let response = ProvisionerRotateCertResponse {
             cert_seq: 7,
@@ -192,7 +194,7 @@ impl GuardianSigned<ProvisionerRotateCertResponse> {
                 .expect("dummy shares should be non-empty"),
         };
         let signing_key = SigningKey::from([1u8; 32]);
-        GuardianSigned::sign(response, &signing_key, 0)
+        GuardianSigned::sign(GuardianResponse::new(response, 0), &signing_key)
     }
 }
 
@@ -400,7 +402,7 @@ impl StandardWithdrawalRequest {
     }
 }
 
-impl GuardianSigned<StandardWithdrawalResponse> {
+impl GuardianSignedResponse<StandardWithdrawalResponse> {
     pub fn mock_for_testing() -> Self {
         let kp = create_btc_keypair_for_test(&[3u8; 32]);
         let msg = Message::from_digest([5u8; 32]);
@@ -409,7 +411,7 @@ impl GuardianSigned<StandardWithdrawalResponse> {
         let resp = StandardWithdrawalResponse { enclave_signatures };
 
         let signing_kp = SigningKey::from([4u8; 32]);
-        GuardianSigned::sign(resp, &signing_kp, 0)
+        GuardianSigned::sign(GuardianResponse::new(resp, 0), &signing_kp)
     }
 }
 

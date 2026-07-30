@@ -21,7 +21,7 @@ use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -165,14 +165,18 @@ pub async fn run(cfg: Config) -> Result<()> {
         .await
         .context("SetupNewKey RPC failed")?
         .into_inner();
-    let signed_resp = GuardianSigned::<SetupNewKeyResponse>::try_from(signed_resp_pb)
+    let signed_resp = GuardianSignedResponse::<SetupNewKeyResponse>::try_from(signed_resp_pb)
         .map_err(|e| anyhow!("decode SignedSetupNewKeyResponse: {e:?}"))?;
     info!(
         phase = "setup_new_key",
         n = cfg.kp_roster.num_shares,
         t = cfg.kp_roster.threshold,
-        share_count = signed_resp.data.encrypted_shares.share_count(),
-        ciphertext_count = signed_resp.data.encrypted_shares.ciphertext_count(),
+        share_count = signed_resp.data.response.encrypted_shares.share_count(),
+        ciphertext_count = signed_resp
+            .data
+            .response
+            .encrypted_shares
+            .ciphertext_count(),
         "setup_new_key response received",
     );
 
@@ -180,7 +184,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    and sanity-check the shape; keep the now-authenticated BTC master pubkey.
     let response = signed_resp
         .authenticate(&signing_pub_key)
-        .map_err(|e| anyhow!("authenticate SetupNewKeyResponse: {e}"))?;
+        .map_err(|e| anyhow!("authenticate SetupNewKeyResponse: {e}"))?
+        .into_response();
     let live = CeremonyState::from(response);
     live.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(

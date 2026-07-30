@@ -16,7 +16,7 @@ use tracing::info;
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
-) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
+) -> GuardianResult<GuardianSignedResponse<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
 
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
@@ -119,7 +119,7 @@ mod tests {
         let verification_key = &enclave.signing_pubkey();
         let (request, secret_keys) = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
-        let validated_resp = resp.authenticate(verification_key).unwrap();
+        let validated_resp = resp.authenticate(verification_key).unwrap().into_response();
         assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
 
         // Response still carries the armored ciphertexts.
@@ -162,22 +162,22 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message else {
+        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message() else {
             panic!("expected V2 Ceremony variant");
         };
         let CeremonyLogMessage::NewKey {
             instance,
             btc_master_pubkey,
-        } = *ceremony
+        } = ceremony.as_ref()
         else {
             panic!("expected NewKey variant");
         };
-        assert_eq!(instance, validated_resp.secret_sharing_instance);
+        assert_eq!(instance, &validated_resp.secret_sharing_instance);
         assert_eq!(instance.sharing_seq(), 0);
         assert_eq!(instance.num_shares(), TEST_N);
         assert_eq!(instance.threshold(), TEST_T);
         // The ceremony log records the same BTC master pubkey as the response.
-        assert_eq!(btc_master_pubkey, validated_resp.btc_master_pubkey);
+        assert_eq!(*btc_master_pubkey, validated_resp.btc_master_pubkey);
 
         // The encrypted shares are persisted to kp-shares/ keyed by sharing_seq
         // and cert_seq, and carry the ciphertexts the ceremony log omits.
@@ -197,10 +197,11 @@ mod tests {
             )
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message
+        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message()
         else {
             panic!("expected V2 KpShareState variant");
         };
+        let shares = shares.as_ref();
         assert_eq!(shares.sharing_seq, 0);
         assert_eq!(shares.cert_seq, 0);
         assert_eq!(shares.encrypted_shares, validated_resp.encrypted_shares);

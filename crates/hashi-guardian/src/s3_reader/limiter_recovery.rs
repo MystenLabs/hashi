@@ -161,7 +161,7 @@ mod tests {
     use bitcoin::Txid;
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::GuardianError;
-    use hashi_types::guardian::GuardianSigned;
+    use hashi_types::guardian::GuardianSignedResponse;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -185,7 +185,9 @@ mod tests {
             txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
             request_data: StandardWithdrawalRequestWire::from(request_data),
             request_sign,
-            response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+            response: GuardianSignedResponse::<StandardWithdrawalResponse>::mock_for_testing()
+                .data
+                .response,
             post_state: state_with_seq(next_seq),
         };
         VerifiedLogRecord {

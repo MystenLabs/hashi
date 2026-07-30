@@ -9,7 +9,7 @@ use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
@@ -25,7 +25,7 @@ use tracing::info;
 pub async fn standard_withdrawal(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
-) -> GuardianResult<GuardianSigned<StandardWithdrawalResponse>> {
+) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
     let unsigned_request = StandardWithdrawalRequestWire::from(signed_request.message().clone()); // for logging

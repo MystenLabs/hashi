@@ -13,6 +13,7 @@ use super::CryptoVerificationResult;
 use super::GuardianError::InternalError;
 use super::GuardianInfo;
 use super::GuardianResult;
+use super::LogEntry;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
@@ -55,10 +56,6 @@ pub trait GuardianSigningIntent: Serialize {
     const INTENT: GuardianSigningIntentType;
 }
 
-fn guardian_signing_bytes<T: GuardianSigningIntent>(data: &T, timestamp_ms: UnixMillis) -> Vec<u8> {
-    bcs::to_bytes(&(T::INTENT, data, timestamp_ms)).expect("serialization should not fail")
-}
-
 /// All possible KP signing intent types.
 ///
 /// These signatures are detached OpenPGP signatures produced by KPs, not
@@ -77,6 +74,10 @@ pub enum KpSigningIntentType {
 /// KP-signed payloads and their intent-based domain separation.
 pub trait KpSigningIntent: Serialize {
     const INTENT: KpSigningIntentType;
+}
+
+impl GuardianSigningIntent for LogEntry {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogMessage;
 }
 
 impl GuardianSigningIntent for SetupNewKeyResponse {
@@ -117,33 +118,69 @@ pub struct KpSigned<T> {
     pub signature: String,
 }
 
-/// Guardian-signed wrapper - adds timestamp and signature to any data
+/// A timestamped response produced by the Guardian.
+///
+/// The timestamp is response metadata rather than a property of every
+/// Guardian-signed payload. Wrapping this value in [`GuardianSigned`] keeps the
+/// timestamp authenticated.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct GuardianSigned<T> {
-    pub data: T,
+pub struct GuardianResponse<T> {
+    pub response: T,
     /// Milliseconds since Unix epoch.
     pub timestamp_ms: UnixMillis,
-    pub signature: GuardianSignature,
 }
 
-impl<T: GuardianSigningIntent> GuardianSigned<T> {
-    /// Sign a payload with intent-based domain separation.
-    pub fn sign(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let signature = signing_key.sign(&guardian_signing_bytes(&data, timestamp_ms));
+impl<T> GuardianResponse<T> {
+    pub fn new(response: T, timestamp_ms: UnixMillis) -> Self {
         Self {
-            data,
+            response,
             timestamp_ms,
-            signature,
         }
     }
 
+    pub fn into_response(self) -> T {
+        self.response
+    }
+}
+
+impl<T: GuardianSigningIntent> GuardianSigningIntent for GuardianResponse<T> {
+    const INTENT: GuardianSigningIntentType = T::INTENT;
+}
+
+/// A signed, timestamped response produced by the Guardian.
+pub type GuardianSignedResponse<T> = GuardianSigned<GuardianResponse<T>>;
+
+/// Guardian-signed wrapper - adds a signature to any signable payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GuardianSigned<T> {
+    pub data: T,
+    pub signature: GuardianSignature,
+}
+
+impl<T> GuardianSigned<T> {
+    fn signed_bytes(data: &T) -> Vec<u8>
+    where
+        T: GuardianSigningIntent,
+    {
+        bcs::to_bytes(&(T::INTENT, data)).expect("serialization should not fail")
+    }
+
+    /// Sign a payload with intent-based domain separation.
+    pub fn sign(data: T, signing_key: &SigningKey) -> Self
+    where
+        T: GuardianSigningIntent,
+    {
+        let signature = signing_key.sign(&Self::signed_bytes(&data));
+        Self { data, signature }
+    }
+
     /// Verify the Guardian signature without consuming the signed payload.
-    pub fn verify_signature(&self, pub_key: &VerificationKey) -> CryptoVerificationResult<()> {
+    pub fn verify_signature(&self, pub_key: &VerificationKey) -> CryptoVerificationResult<()>
+    where
+        T: GuardianSigningIntent,
+    {
         pub_key
-            .verify(
-                &self.signature,
-                &guardian_signing_bytes(&self.data, self.timestamp_ms),
-            )
+            .verify(&self.signature, &Self::signed_bytes(&self.data))
             .map_err(|_| CryptoVerificationError::new("signature invalid"))
     }
 
@@ -151,9 +188,19 @@ impl<T: GuardianSigningIntent> GuardianSigned<T> {
     ///
     /// The caller remains responsible for authorizing the signing key for the
     /// requested operation and current state.
-    pub fn authenticate(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T> {
+    pub fn authenticate(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T>
+    where
+        T: GuardianSigningIntent,
+    {
         self.verify_signature(pub_key)?;
         Ok(self.data)
+    }
+
+    /// Move out the payload WITHOUT verifying the signature. The node uses this
+    /// on guardian responses it has already authenticated over TLS; the ed25519
+    /// signing key is verified only by KPs/monitors on the S3 audit logs.
+    pub fn into_data_unchecked(self) -> T {
+        self.data
     }
 }
 
@@ -205,14 +252,5 @@ impl<T: KpSigningIntent> KpSigned<T> {
 
     pub fn signer_fingerprint(&self) -> Fingerprint {
         self.signer_cert.fingerprint()
-    }
-}
-
-impl<T> GuardianSigned<T> {
-    /// Move out the payload WITHOUT verifying the signature. The node uses this
-    /// on guardian responses it has already authenticated over TLS; the ed25519
-    /// signing key is verified only by KPs/monitors on the S3 audit logs.
-    pub fn into_data_unchecked(self) -> T {
-        self.data
     }
 }

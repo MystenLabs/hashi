@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LogRecord` envelope written to S3: it wraps a `super::schema::LogMessage`
-//! with the session id, timestamp, and (for signed logs) the guardian signature.
+//! The `LogRecord` written to S3: it wraps a `super::schema::LogMessage` with
+//! its routing context and, for signed logs, a guardian signature.
 //! The object key and lock duration are derived from the wrapped message.
 
 use super::ObjectKeyPattern;
@@ -17,8 +17,6 @@ use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
 use crate::guardian::GuardianSignature;
 use crate::guardian::GuardianSigned;
-use crate::guardian::GuardianSigningIntent;
-use crate::guardian::GuardianSigningIntentType;
 use crate::guardian::SessionID;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
@@ -30,7 +28,7 @@ use std::time::Duration;
 
 /// The data authenticated by a signed log record.
 ///
-/// Field order is part of the deployed BCS signing format and must not change.
+/// Field order defines the BCS signing format.
 #[derive(Debug, Serialize)]
 pub struct LogEntry {
     schema_version: u64,
@@ -39,13 +37,7 @@ pub struct LogEntry {
     /// intended key with the actual key returned by S3.
     object_key: String,
     message: VersionedLogMessage,
-}
-
-/// A log entry authenticated by its embedded Nitro attestation instead of a
-/// Guardian signature.
-#[derive(Debug)]
-pub struct UnsignedLogEntry {
-    data: LogEntry,
+    /// Milliseconds since Unix epoch.
     timestamp_ms: UnixMillis,
 }
 
@@ -54,7 +46,7 @@ pub struct UnsignedLogEntry {
 #[derive(Debug)]
 pub enum LogRecord {
     Signed(GuardianSigned<LogEntry>),
-    Unsigned(UnsignedLogEntry),
+    Unsigned(LogEntry),
 }
 
 impl Serialize for LogRecord {
@@ -73,9 +65,9 @@ impl Serialize for LogRecord {
             signature: &'a Option<GuardianSignature>,
         }
 
-        let (data, timestamp_ms, signature) = match self {
-            Self::Signed(signed) => (&signed.data, signed.timestamp_ms, Some(signed.signature)),
-            Self::Unsigned(unsigned) => (&unsigned.data, unsigned.timestamp_ms, None),
+        let (data, signature) = match self {
+            Self::Signed(signed) => (&signed.data, Some(signed.signature)),
+            Self::Unsigned(unsigned) => (unsigned, None),
         };
 
         match &data.message {
@@ -83,7 +75,7 @@ impl Serialize for LogRecord {
                 schema_version: data.schema_version,
                 object_key: &data.object_key,
                 session_id: &data.session_id,
-                timestamp_ms,
+                timestamp_ms: data.timestamp_ms,
                 message,
                 signature: &signature,
             }
@@ -92,7 +84,7 @@ impl Serialize for LogRecord {
                 schema_version: data.schema_version,
                 object_key: &data.object_key,
                 session_id: &data.session_id,
-                timestamp_ms,
+                timestamp_ms: data.timestamp_ms,
                 message,
                 signature: &signature,
             }
@@ -141,38 +133,28 @@ impl<'de> Deserialize<'de> for LogRecord {
             object_key: raw.object_key,
             session_id: raw.session_id,
             message,
+            timestamp_ms: raw.timestamp_ms,
         };
         Ok(match raw.signature {
-            Some(signature) => Self::Signed(GuardianSigned {
-                data,
-                timestamp_ms: raw.timestamp_ms,
-                signature,
-            }),
-            None => Self::Unsigned(UnsignedLogEntry {
-                data,
-                timestamp_ms: raw.timestamp_ms,
-            }),
+            Some(signature) => Self::Signed(GuardianSigned { data, signature }),
+            None => Self::Unsigned(data),
         })
     }
 }
 
-impl GuardianSigningIntent for LogEntry {
-    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogMessage;
-}
-
 impl LogEntry {
+    pub fn timestamp_ms(&self) -> UnixMillis {
+        self.timestamp_ms
+    }
+
     /// Validate log-specific routing context without performing cryptography.
-    pub fn validate(
-        &self,
-        timestamp_ms: UnixMillis,
-        signing_public_key: &GuardianPubKey,
-    ) -> GuardianResult<()> {
+    pub fn validate(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
         if self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
                 "expected signed log record but message is unsigned".into(),
             ));
         }
-        self.validate_object_key(timestamp_ms)?;
+        self.validate_object_key()?;
         self.validate_session_id(signing_public_key)
     }
 
@@ -184,10 +166,10 @@ impl LogEntry {
         Ok((self.session_id, message))
     }
 
-    fn validate_object_key(&self, timestamp_ms: UnixMillis) -> GuardianResult<()> {
+    fn validate_object_key(&self) -> GuardianResult<()> {
         match self
             .message
-            .object_key_pattern(&self.session_id, timestamp_ms)
+            .object_key_pattern(&self.session_id, self.timestamp_ms)
         {
             ObjectKeyPattern::Fixed(expected) if self.object_key != expected => {
                 return Err(InvalidS3Log(format!(
@@ -216,19 +198,16 @@ impl LogEntry {
         }
         Ok(())
     }
-}
-
-impl UnsignedLogEntry {
     /// Validate an unsigned OI-attestation entry. The Nitro attestation itself
     /// must be authenticated separately.
-    pub fn validate(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        if !self.data.message.is_allowed_unsigned() {
+    pub fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
+        if !self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
                 "expected unsigned log record but message requires a signature".into(),
             ));
         }
-        self.data.validate_object_key(self.timestamp_ms)?;
-        let init = match &self.data.message {
+        self.validate_object_key()?;
+        let init = match &self.message {
             VersionedLogMessage::V1(LogMessageV1::Init(init)) => init,
             VersionedLogMessage::V2(LogMessage::Init(init)) => init,
             _ => unreachable!("is_allowed_unsigned only permits an init message"),
@@ -239,9 +218,9 @@ impl UnsignedLogEntry {
         else {
             unreachable!("is_allowed_unsigned only permits OIAttestationUnsigned");
         };
-        self.data.validate_session_id(signing_public_key)?;
+        self.validate_session_id(signing_public_key)?;
         let timestamp_ms = self.timestamp_ms;
-        let (session_id, message) = self.data.into_current()?;
+        let (session_id, message) = self.into_current()?;
         Ok((session_id, timestamp_ms, message))
     }
 }
@@ -312,10 +291,7 @@ impl LogRecord {
     }
 
     pub fn timestamp_ms(&self) -> UnixMillis {
-        match self {
-            Self::Signed(signed) => signed.timestamp_ms,
-            Self::Unsigned(unsigned) => unsigned.timestamp_ms,
-        }
+        self.data().timestamp_ms
     }
 
     pub fn message(&self) -> &VersionedLogMessage {
@@ -329,14 +305,14 @@ impl LogRecord {
     pub fn into_signed(self) -> GuardianResult<GuardianSigned<LogEntry>> {
         match self {
             Self::Signed(signed) => Ok(signed),
-            Self::Unsigned(unsigned) if unsigned.data.message.is_allowed_unsigned() => Err(
+            Self::Unsigned(unsigned) if unsigned.message.is_allowed_unsigned() => Err(
                 InvalidS3Log("expected signed log record but message is unsigned".into()),
             ),
             Self::Unsigned(_) => Err(InvalidS3Log("missing log signature".into())),
         }
     }
 
-    pub fn into_unsigned(self) -> GuardianResult<UnsignedLogEntry> {
+    pub fn into_unsigned(self) -> GuardianResult<LogEntry> {
         match self {
             Self::Unsigned(unsigned) => Ok(unsigned),
             Self::Signed(signed) if signed.data.message.is_allowed_unsigned() => Err(InvalidS3Log(
@@ -360,8 +336,9 @@ impl LogRecord {
             object_key,
             session_id,
             message,
+            timestamp_ms,
         };
-        Self::Signed(GuardianSigned::sign(data, signing_key, timestamp_ms))
+        Self::Signed(GuardianSigned::sign(data, signing_key))
     }
 
     fn unsigned(
@@ -374,13 +351,11 @@ impl LogRecord {
             message.is_allowed_unsigned(),
             "message must be Init(OIAttestationUnsigned)"
         );
-        Self::Unsigned(UnsignedLogEntry {
-            data: LogEntry {
-                schema_version: message.schema_version(),
-                object_key,
-                session_id,
-                message,
-            },
+        Self::Unsigned(LogEntry {
+            schema_version: message.schema_version(),
+            object_key,
+            session_id,
+            message,
             timestamp_ms,
         })
     }
@@ -388,7 +363,7 @@ impl LogRecord {
     fn data(&self) -> &LogEntry {
         match self {
             Self::Signed(signed) => &signed.data,
-            Self::Unsigned(unsigned) => &unsigned.data,
+            Self::Unsigned(unsigned) => unsigned,
         }
     }
 
@@ -396,7 +371,7 @@ impl LogRecord {
     fn data_mut(&mut self) -> &mut LogEntry {
         match self {
             Self::Signed(signed) => &mut signed.data,
-            Self::Unsigned(unsigned) => &mut unsigned.data,
+            Self::Unsigned(unsigned) => unsigned,
         }
     }
 }
@@ -409,7 +384,7 @@ mod tests {
     use crate::guardian::GenesisLogMessage;
     use crate::guardian::GetGuardianInfoResponse;
     use crate::guardian::GuardianError;
-    use crate::guardian::GuardianSigned;
+    use crate::guardian::GuardianSignedResponse;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedSharesRoster;
@@ -454,8 +429,8 @@ mod tests {
         signing_public_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         let signed = record.into_signed()?;
-        let timestamp_ms = signed.timestamp_ms;
-        signed.data.validate(timestamp_ms, signing_public_key)?;
+        let timestamp_ms = signed.data.timestamp_ms;
+        signed.data.validate(signing_public_key)?;
         let data = signed
             .authenticate(signing_public_key)
             .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
@@ -464,7 +439,7 @@ mod tests {
     }
 
     fn validate_unsigned(record: LogRecord) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        record.into_unsigned()?.validate()
+        record.into_unsigned()?.validate_unsigned()
     }
 
     fn assert_writer_key_is_stable_and_verifies(log: LogRecord, signing_key: &GuardianSignKeyPair) {
@@ -510,9 +485,12 @@ mod tests {
             StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed_request.into_parts();
         let request_data: StandardWithdrawalRequestWire = request_data.into();
-        let response = GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data;
-        let encrypted_shares = GuardianSigned::<RotateKpsResponse>::mock_for_testing()
+        let response = GuardianSignedResponse::<StandardWithdrawalResponse>::mock_for_testing()
             .data
+            .response;
+        let encrypted_shares = GuardianSignedResponse::<RotateKpsResponse>::mock_for_testing()
+            .data
+            .response
             .encrypted_shares;
         let (guardian_info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
@@ -797,20 +775,20 @@ mod tests {
         let LogRecord::Signed(signed) = log else {
             panic!("heartbeat must be signed");
         };
-        let deployed_payload = DeployedLogSigningPayload {
+        let payload = DeployedLogSigningPayload {
             schema_version: signed.data.schema_version,
             session_id: &signed.data.session_id,
             object_key: &signed.data.object_key,
             message: &signed.data.message,
         };
-        let deployed_bytes = bcs::to_bytes(&(
+        let signed_bytes = bcs::to_bytes(&(
             GuardianSigningIntentType::LogMessage,
-            deployed_payload,
-            signed.timestamp_ms,
+            payload,
+            signed.data.timestamp_ms,
         ))
         .unwrap();
 
-        assert_eq!(signed.signature, signing_key.sign(&deployed_bytes));
+        assert_eq!(signed.signature, signing_key.sign(&signed_bytes));
     }
 
     #[test]
@@ -1089,7 +1067,9 @@ mod tests {
                 txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
                 request_data,
                 request_sign,
-                response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+                response: GuardianSignedResponse::<StandardWithdrawalResponse>::mock_for_testing()
+                    .data
+                    .response,
                 post_state: LimiterState {
                     num_tokens_available: 0,
                     last_updated_at: 0,

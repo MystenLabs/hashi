@@ -418,7 +418,7 @@ mod tests {
             "provisioner init should write one record"
         );
         let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Init(message)) = record.message else {
+        let VersionedLogMessage::V2(LogMessage::Init(message)) = record.message() else {
             panic!("expected V2 init record");
         };
         assert_eq!(
@@ -429,20 +429,20 @@ mod tests {
             sharing_seq,
             share_ids,
             enclave_btc_pubkey,
-        } = *message
+        } = message.as_ref()
         else {
             panic!("expected provisioner-init completion record");
         };
-        assert_eq!(sharing_seq, 0);
+        assert_eq!(*sharing_seq, 0);
         assert_eq!(
             share_ids,
-            ctx.shares[..TEST_T]
+            &ctx.shares[..TEST_T]
                 .iter()
                 .map(|share| share.id)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            enclave_btc_pubkey,
+            *enclave_btc_pubkey,
             ctx.enclave.config.enclave_btc_pubkey().unwrap()
         );
     }
