@@ -444,13 +444,19 @@ impl SigningManager {
         let threshold = self.config.threshold;
         let verifying_key = self.config.verifying_key;
         let self_address = self.config.address;
+        // Peers already blamed for bad shares are left out of the session's
+        // peer set entirely (not merely skipped when polling): an excluded
+        // peer that stayed in `peers_remaining` would keep `peers_exhausted`
+        // false forever, turning every unreachable-threshold failure into a
+        // full deadline wait instead of a fast `TooManyInvalidSignatures`.
+        let blamed = self.bad_share_peers.lock().unwrap().clone();
         let all_peers: HashSet<Address> = self
             .config
             .committee
             .members()
             .iter()
             .map(|m| m.validator_address())
-            .filter(|addr| *addr != self_address)
+            .filter(|addr| *addr != self_address && !blamed.contains(addr))
             .collect();
         let deadline = Instant::now() + timeout;
         let mut pending: Vec<InputSigningState> = Vec::with_capacity(inputs.len());
@@ -2333,6 +2339,52 @@ mod tests {
                 .with_label_values(&[&bad_peer.to_string()])
                 .get(),
             1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_fast_fails_when_blamed_peers_make_threshold_unreachable() {
+        // Blamed peers must be excluded from the session's peer set up
+        // front: if they merely stayed unpollable inside `peers_remaining`,
+        // exhaustion would never trigger and this sign would burn the whole
+        // deadline before failing with Timeout instead of failing fast.
+        let setup = SigningTestSetup::new(4);
+        let message = b"blamed-fast-fail";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        {
+            let mut blamed = setup.managers[0].bad_share_peers.lock().unwrap();
+            for i in 1..4usize {
+                blamed.insert(test_address(i));
+            }
+        }
+
+        let p2p = setup.mock_p2p_for(0);
+        let started = Instant::now();
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(SigningError::TooManyInvalidSignatures { .. })),
+            "expected fast TooManyInvalidSignatures, got: {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fast-fail should not wait out the deadline: {elapsed:?}"
         );
     }
 
