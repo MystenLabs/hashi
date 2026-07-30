@@ -12,17 +12,8 @@ async fn run_nonce_generation_for_test(
     tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     metrics: &Metrics,
 ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
-    if let Err(e) = MpcManager::run_nonce_dealer_phase(
-        mpc_manager,
-        batch_index,
-        p2p_channel,
-        tob_channel,
-        metrics,
-    )
-    .await
-    {
-        tracing::error!("Nonce dealer phase failed: {e}. Continuing as party only.");
-    }
+    MpcManager::run_nonce_dealer_phase(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
+        .await;
     MpcManager::run_nonce_party_phase(
         mpc_manager,
         batch_index,

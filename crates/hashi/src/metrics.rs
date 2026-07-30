@@ -128,6 +128,11 @@ pub struct Metrics {
     pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
+    /// Nonce batches abandoned because the checkpoint clock never passed the
+    /// accumulation window's cutoff
+    pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
+    /// Nonce batches abandoned because the on-chain certs never reached the floor
+    pub mpc_nonce_floor_unreached_total: IntCounter,
 
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
@@ -735,6 +740,20 @@ impl Metrics {
                 "hashi_mpc_key_reregistration_bumps_total",
                 "Snapshot races observed by the lost-key heal (registration landed after the \
                  target committee froze; re-targeted one epoch later)",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_window_cutoff_unreached_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_window_cutoff_unreached_total",
+                "Nonce batches abandoned because this node's checkpoint clock never \
+                 passed the accumulation window cutoff",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_floor_unreached_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_floor_unreached_total",
+                "Nonce batches abandoned because the on-chain certified weight never \
+                 reached the required floor",
                 registry,
             )
             .unwrap(),

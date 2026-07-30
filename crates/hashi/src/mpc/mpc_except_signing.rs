@@ -934,7 +934,7 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
-    ) -> MpcResult<()> {
+    ) {
         Self::prune_nonce_state(mpc_manager, batch_index);
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, required_reduced_weight) = {
@@ -986,7 +986,6 @@ impl MpcManager {
                 );
             }
         }
-        Ok(())
     }
 
     pub async fn run_nonce_party_phase(
@@ -1051,7 +1050,7 @@ impl MpcManager {
             }
         };
         tracing::info!(
-            "run_nonce_generation: epoch={}, batch_index={batch_index}, \
+            "run_nonce_party_phase: epoch={}, batch_index={batch_index}, \
              {pre_filter} outputs before filter, {} after. dealers={dealers:?}",
             mgr.mpc_config.epoch,
             dealers.len(),
