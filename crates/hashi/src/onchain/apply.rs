@@ -212,6 +212,13 @@ pub(super) enum Effect {
     /// version. Apply extends the version map itself (under the same
     /// state guard); this effect is the caller's signal to log.
     PackageUpgraded { package: Address, version: u64 },
+    /// An active deposit request was created or updated.
+    DepositRequestUpserted {
+        request_id: Address,
+        outpoint: bitcoin::OutPoint,
+    },
+    /// A deposit request left the active queue.
+    DepositRequestRemoved(Address),
     /// A withdrawal transaction transitioned to fully signed in this
     /// transaction (2-of-2 witness complete). Drives the local limiter
     /// and the pick-to-sign metric.
@@ -601,6 +608,10 @@ fn apply_write(
         Slot::DepositRequests => {
             decode::<move_types::DepositRequest>(contents, &id).map(|request| {
                 let request_id = request.id;
+                out.effects.push(Effect::DepositRequestUpserted {
+                    request_id,
+                    outpoint: request.utxo.id.into(),
+                });
                 hashi
                     .bitcoin_mut()
                     .deposit_queue
@@ -780,6 +791,7 @@ fn retire(
         }
         TrackedKind::DepositRequest(id) => {
             hashi.bitcoin_mut().deposit_queue.requests.remove(id);
+            effects.push(Effect::DepositRequestRemoved(*id));
         }
         TrackedKind::WithdrawalRequest(id) => {
             hashi.bitcoin_mut().withdrawal_queue.requests.remove(id);
@@ -1108,6 +1120,18 @@ mod tests {
         size: u64,
     }
 
+    #[derive(serde_derive::Serialize)]
+    struct DepositRequestEnc {
+        id: Address,
+        sender: Address,
+        created_timestamp_ms: u64,
+        sui_tx_digest: Digest,
+        utxo: move_types::Utxo,
+        approval_cert: Option<move_types::CommitteeSignature>,
+        approved_timestamp_ms: Option<u64>,
+        confirmed_timestamp_ms: Option<u64>,
+    }
+
     impl BagEnc {
         fn new(id: Address) -> Self {
             Self { id, size: 0 }
@@ -1265,6 +1289,25 @@ mod tests {
         )
     }
 
+    fn deposit_request_object(id: Address, version: u64, approved: bool) -> Object {
+        obj(
+            tag(addr(PACKAGE), "deposit_queue", "DepositRequest", vec![]),
+            version,
+            Owner::Object(dep_requests_id()),
+            bcs::to_bytes(&DepositRequestEnc {
+                id,
+                sender: addr(0x41),
+                created_timestamp_ms: 1_000,
+                sui_tx_digest: Digest::ZERO,
+                utxo: utxo(0x77, 0, 1_000),
+                approval_cert: None,
+                approved_timestamp_ms: approved.then_some(2_000),
+                confirmed_timestamp_ms: None,
+            })
+            .unwrap(),
+        )
+    }
+
     fn withdrawal_txn(value_id: Address, fully_signed: bool) -> move_types::WithdrawalTransaction {
         move_types::WithdrawalTransaction {
             id: value_id,
@@ -1323,6 +1366,29 @@ mod tests {
     }
 
     // ---- tests ------------------------------------------------------
+
+    #[test]
+    fn deposit_request_writes_and_deletion_emit_tracker_effects() {
+        let mut fixture = Fixture::new();
+        let request_id = addr(0x50);
+
+        for (version, approved) in [(1, false), (2, true)] {
+            let out = fixture.apply(&tx(vec![written(deposit_request_object(
+                request_id, version, approved,
+            ))]));
+            assert!(matches!(
+                out.effects.as_slice(),
+                [Effect::DepositRequestUpserted { request_id: id, outpoint }]
+                    if *id == request_id && *outpoint == utxo(0x77, 0, 1_000).id.into()
+            ));
+        }
+
+        let out = fixture.apply(&tx(vec![TxChange::Deleted { id: request_id }]));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::DepositRequestRemoved(id)] if *id == request_id
+        ));
+    }
 
     #[test]
     fn utxo_record_write_then_eventless_cleanup_delete() {

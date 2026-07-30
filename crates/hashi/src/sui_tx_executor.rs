@@ -576,7 +576,7 @@ impl SuiTxExecutor {
     /// committee certificate against the deposit request via
     /// `deposit::approve_deposit`. The deposit is not yet final — it
     /// must still pass `confirm_deposit` after the configured time-delay
-    /// window has elapsed.
+    /// window has elapsed. Returns the checkpoint containing the transaction.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -586,7 +586,7 @@ impl SuiTxExecutor {
         &mut self,
         deposit_request: &DepositRequest,
         signed_message: SignedMessage<DepositConfirmationMessage>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
         let package_id = self.active_call_package_id();
 
@@ -623,20 +623,24 @@ impl SuiTxExecutor {
                 deposit_request.id
             );
         }
-        Ok(())
+        response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("approve_deposit response missing checkpoint"))
     }
 
     /// Execute the second phase of deposit confirmation: finalize a
     /// previously-approved deposit via `deposit::confirm_deposit`. The
     /// on-chain function re-verifies the stored committee certificate
     /// against the current committee and asserts that the configured
-    /// time-delay since approval has elapsed.
+    /// time-delay since approval has elapsed. Returns the checkpoint containing
+    /// the transaction.
     #[tracing::instrument(
         level = "info",
         skip_all,
         fields(deposit_id = %request_id),
     )]
-    pub async fn execute_confirm_deposit(&mut self, request_id: Address) -> anyhow::Result<()> {
+    pub async fn execute_confirm_deposit(&mut self, request_id: Address) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -667,7 +671,10 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("confirm_deposit response missing checkpoint"))
     }
 
     /// Execute a batch deletion of expired deposit requests.

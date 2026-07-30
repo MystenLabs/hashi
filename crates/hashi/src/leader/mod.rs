@@ -7,13 +7,13 @@ mod guardian;
 mod retry;
 mod withdrawal_request_flow;
 mod withdrawal_transactions;
+use deposits::UnapprovedDepositTaskResult;
 pub(crate) use retry::RetryPolicy;
 
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
 use crate::deposits::ApprovedDepositError;
 use crate::deposits::ApprovedDepositErrorKind;
-use crate::deposits::UnapprovedDepositError;
 use crate::grpc::BoxedChannel;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
@@ -28,6 +28,7 @@ use fastcrypto::traits::ToFromBytes;
 use futures::future::OptionFuture;
 use hashi_types::committee::MemberSignature;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -60,9 +61,11 @@ const UNSUPPORTED_WARN_EVERY_CHECKPOINTS: u64 = 240;
 pub(crate) struct LeaderService {
     // Shared application state and external service clients used by leader jobs.
     inner: Arc<Hashi>,
+    // Leadership decision cached for the latest observed checkpoint.
+    is_leader: bool,
 
     // Background tasks currently approving Bitcoin deposits.
-    unapproved_deposit_tasks: JoinSet<(Address, Result<(), UnapprovedDepositError>)>,
+    unapproved_deposit_tasks: JoinSet<UnapprovedDepositTaskResult>,
     // Background tasks currently confirming approved Bitcoin deposits.
     approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
     // Deposit requests loaded from Bitcoin/on-chain state and waiting for approval processing.
@@ -71,6 +74,16 @@ pub(crate) struct LeaderService {
     last_unapproved_deposit_epoch: Option<u64>,
     // Deposit IDs that should not be retried by this leader process.
     never_retry_deposit_ids: HashSet<Address>,
+    // Deposit outpoints parked until Bitcoin advances after a transient failure.
+    unapproved_deposits_waiting_for_btc_block: HashMap<bitcoin::OutPoint, u64>,
+    // Spent observations are suppressed until a reorg resets Bitcoin state.
+    spent_deposit_outpoints: HashMap<bitcoin::OutPoint, u64>,
+    // Confirmation threshold used by the last full actionable-deposit reload;
+    // None after processing was stopped (halt or leadership change), which may
+    // have dropped deposit work. The checkpoint arm reloads whenever this
+    // differs from the live threshold, since neither a lifted halt nor a
+    // governance threshold change produces a tracker event of its own.
+    last_reload_confirmation_threshold: Option<u32>,
     // Deposit IDs currently running in either deposit task pool.
     inflight_deposits: HashSet<Address>,
     // Singleton task that deletes expired or spent deposit-related on-chain state.
@@ -140,6 +153,7 @@ impl LeaderService {
     pub(crate) fn new(hashi: Arc<Hashi>) -> Self {
         Self {
             inner: hashi,
+            is_leader: false,
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_broadcast_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
@@ -148,6 +162,9 @@ impl LeaderService {
             pending_unapproved_deposit_requests: VecDeque::new(),
             last_unapproved_deposit_epoch: None,
             never_retry_deposit_ids: HashSet::new(),
+            unapproved_deposits_waiting_for_btc_block: HashMap::new(),
+            spent_deposit_outpoints: HashMap::new(),
+            last_reload_confirmation_threshold: None,
             inflight_deposits: HashSet::new(),
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
@@ -231,7 +248,11 @@ impl LeaderService {
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
-        let mut was_leader = false;
+        let mut deposit_work_rx = self
+            .inner
+            .onchain_state()
+            .deposit_tracker()
+            .subscribe_work();
 
         loop {
             trace!("Waiting for next checkpoint or task completion...");
@@ -246,33 +267,41 @@ impl LeaderService {
                         (checkpoint_info.height, checkpoint_info.timestamp_ms)
                     };
 
-                    let is_leader = self.is_current_leader(checkpoint_height);
-                    // Heartbeat before the non-leader `continue` so followers
-                    // report liveness too.
+                    // Heartbeat before checking leadership so followers report liveness too.
                     self.inner.metrics.task_heartbeat("leader_loop");
-                    self.inner.metrics.is_leader.set(i64::from(is_leader));
-                    if is_leader {
-                        was_leader = true;
+                    let was_leader = self.is_leader;
+                    if self.update_leadership(checkpoint_height) {
                         debug!("Checkpoint {checkpoint_height}: We are the leader node");
-                    } else {
-                        if was_leader {
-                            self.reset_approved_deposit_metrics();
-                            was_leader = false;
+                        self.process_stale_unapproved_deposits_if_new_epoch();
+                        // Also replay deposit work dropped while processing
+                        // was stopped (e.g. a reconfig halt consumed a tracker
+                        // notification) and pick up confirmation-threshold
+                        // changes; neither produces another tracker event.
+                        if !was_leader || self.needs_actionable_deposit_reload() {
+                            self.process_actionable_unapproved_deposits();
                         }
+                        self.process_approved_deposit_requests();
+                        self.check_reconcile_guardian_committee();
+                        self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
+                        self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
+                        self.process_unsigned_withdrawal_txns();
+                        self.process_signed_withdrawal_txns();
+                        self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
+                        self.check_delete_proposals(checkpoint_timestamp_ms);
+                        self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
+                    } else {
                         trace!("We are not the leader node");
-                        continue;
                     }
-
-                    self.check_reconcile_guardian_committee();
-                    self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_unsigned_withdrawal_txns();
-                    self.process_signed_withdrawal_txns();
-                    self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
-                    self.check_delete_proposals(checkpoint_timestamp_ms);
-                    self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
-                    self.process_stale_unapproved_deposits_if_new_epoch();
-                    self.process_approved_deposit_requests();
+                }
+                wait_result = deposit_work_rx.changed() => {
+                    if let Err(e) = wait_result {
+                        error!("Error waiting for deposit tracker work change: {e}");
+                        break;
+                    }
+                    if self.is_leader {
+                        debug!("Deposit tracker changed: processing deposit requests");
+                        self.process_actionable_unapproved_deposits();
+                    }
                 }
                 wait_result = btc_block_rx.changed() => {
                     if let Err(e) = wait_result {
@@ -280,15 +309,9 @@ impl LeaderService {
                         break;
                     }
 
-                    let block_height = *btc_block_rx.borrow_and_update();
-                    let checkpoint_height = checkpoint_rx.borrow().height;
-
+                    let block_sequence = self.inner.btc_monitor().block_sequence();
+                    self.activate_unapproved_deposits_for_btc_block(block_sequence);
                     self.schedule_withdrawal_checks_for_btc_block();
-
-                    if self.is_current_leader(checkpoint_height) {
-                        debug!("New Bitcoin block {block_height}: processing deposit requests");
-                        self.process_deposits_on_bitcoin_block();
-                    }
                 }
                 Some(result) = self.unapproved_deposit_tasks.join_next() => {
                     self.handle_completed_unapproved_deposit_task(result);
@@ -386,10 +409,6 @@ impl LeaderService {
             .is_some()
     }
 
-    fn is_current_leader(&self, checkpoint_height: u64) -> bool {
-        Self::node_is_leader(&self.inner, checkpoint_height)
-    }
-
     /// Whether this node is the leader for the given checkpoint. An
     /// associated function (rather than a method) so long-running leader
     /// tasks can re-check leadership mid-flight and stop driving work that
@@ -453,6 +472,20 @@ impl LeaderService {
         let is_leader = (current_turn % num_validators) == this_validator_idx;
 
         trace!("Node index {this_validator_idx} is leader node: {is_leader}");
+        is_leader
+    }
+
+    /// Only the checkpoint arm of the leader loop calls this: leadership is a
+    /// function of checkpoint height, so it cannot change between checkpoints,
+    /// and a single writer keeps its regain catch-up reliable. Other arms read
+    /// the cached `is_leader`.
+    fn update_leadership(&mut self, checkpoint_height: u64) -> bool {
+        let is_leader = Self::node_is_leader(&self.inner, checkpoint_height);
+        self.inner.metrics.is_leader.set(i64::from(is_leader));
+        if self.is_leader && !is_leader {
+            self.stop_deposit_processing();
+        }
+        self.is_leader = is_leader;
         is_leader
     }
 }
