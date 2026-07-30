@@ -128,9 +128,6 @@ pub struct Metrics {
     pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
-    /// Nonce batches failed because this node's checkpoint clock stopped advancing
-    /// below the accumulation window's cutoff
-    pub mpc_nonce_window_chain_clock_stalled_total: IntCounter,
 
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
@@ -738,13 +735,6 @@ impl Metrics {
                 "hashi_mpc_key_reregistration_bumps_total",
                 "Snapshot races observed by the lost-key heal (registration landed after the \
                  target committee froze; re-targeted one epoch later)",
-                registry,
-            )
-            .unwrap(),
-            mpc_nonce_window_chain_clock_stalled_total: register_int_counter_with_registry!(
-                "hashi_mpc_nonce_window_chain_clock_stalled_total",
-                "Nonce batches failed because this node's checkpoint clock stopped advancing \
-                 below the accumulation window cutoff",
                 registry,
             )
             .unwrap(),

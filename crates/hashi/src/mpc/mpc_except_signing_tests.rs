@@ -5,6 +5,28 @@ use super::*;
 use crate::communication::ChannelResult;
 use crate::metrics::Metrics;
 
+async fn run_nonce_generation_for_test(
+    mpc_manager: &Arc<RwLock<MpcManager>>,
+    batch_index: u32,
+    p2p_channel: &impl P2PChannel,
+    tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+    metrics: &Metrics,
+) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+    if let Err(e) = MpcManager::run_nonce_dealer_phase(
+        mpc_manager,
+        batch_index,
+        p2p_channel,
+        tob_channel,
+        metrics,
+    )
+    .await
+    {
+        tracing::error!("Nonce dealer phase failed: {e}. Continuing as party only.");
+    }
+    MpcManager::run_nonce_party_phase(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
+        .await
+}
+
 fn test_metrics() -> Metrics {
     Metrics::new(&prometheus::Registry::new())
 }
@@ -10848,7 +10870,6 @@ async fn test_nonce_window_live_collection_past_floor() {
                 batch_index,
                 mock_p2p,
                 &mut tob,
-                &(|| 10_000u64),
                 &test_metrics(),
             )
             .await
@@ -10966,7 +10987,6 @@ async fn test_run_nonce_generation() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -11119,7 +11139,6 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -11197,12 +11216,11 @@ async fn test_run_nonce_generation_skips_dealer_phase() {
     let test_manager = Arc::new(RwLock::new(test_manager));
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
-    let outputs = MpcManager::run_nonce_generation(
+    let outputs = run_nonce_generation_for_test(
         &test_manager,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -11285,12 +11303,11 @@ async fn test_run_nonce_generation_preserves_other_batch_state() {
             .insert((fake_batch, fake_dealer), fake_msg);
     }
 
-    MpcManager::run_nonce_generation(
+    run_nonce_generation_for_test(
         &test_manager,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -12560,7 +12577,6 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &metrics,
     )
     .await
@@ -12634,7 +12650,6 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -12791,7 +12806,6 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
         batch_index,
         &laggard_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &metrics,
     )
     .await;
@@ -12875,7 +12889,6 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
         batch_index,
         &party_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -12919,12 +12932,11 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert, second_cert]);
-    let outputs = MpcManager::run_nonce_generation(
+    let outputs = run_nonce_generation_for_test(
         &party,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -13109,12 +13121,11 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
         (dealer_addr, cert),
         (second_dealer_addr, second_cert),
     ]);
-    let outputs = MpcManager::run_nonce_generation(
+    let outputs = run_nonce_generation_for_test(
         &party,
         batch_index,
         &mock_p2p,
         &mut prefetched,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -13189,7 +13200,6 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         batch_index,
         &party_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &metrics,
     )
     .await;
@@ -13652,12 +13662,11 @@ async fn test_run_nonce_generation_prunes_old_batch_state() {
         }
     }
 
-    MpcManager::run_nonce_generation(
+    run_nonce_generation_for_test(
         &test_manager,
         run_batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -13750,7 +13759,6 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -14060,7 +14068,6 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &(|| 0u64),
         &test_metrics(),
     )
     .await
@@ -14373,14 +14380,7 @@ async fn exhausted_prefetched_stream_pre_floor_does_not_block() {
 
     let received = tokio::time::timeout(
         Duration::from_secs(2),
-        MpcManager::receive_nonce_cert_in_window(
-            &mut channel,
-            &mut window,
-            &(|| 0u64),
-            7,
-            3,
-            &test_metrics(),
-        ),
+        MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window),
     )
     .await;
 
@@ -14403,183 +14403,12 @@ async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
         Some(3_000),
         "window must be open for this case"
     );
-
-    let started = std::time::Instant::now();
-    let outcome = MpcManager::receive_nonce_cert_in_window(
-        &mut channel,
-        &mut window,
-        &(|| 1_500u64),
-        7,
-        3,
-        &test_metrics(),
-    )
-    .await
-    .expect("exhaustion is not an error once the floor is met");
-    let elapsed = started.elapsed();
+    let outcome = MpcManager::receive_nonce_cert_in_window(&mut channel, &mut window)
+        .await
+        .expect("exhaustion is not an error once the floor is met");
 
     assert!(
         matches!(outcome, WindowedNonceReceive::Closed),
         "an exhausted stream must close the window"
     );
-    assert!(
-        elapsed < NONCE_WINDOW_DRAIN_POLL,
-        "closed after {elapsed:?}, i.e. waited out the drain poll instead of \
-         recognising exhaustion"
-    );
-}
-
-struct NeverDeliversChannel;
-
-#[async_trait::async_trait]
-impl OrderedBroadcastChannel<CertificateV1> for NeverDeliversChannel {
-    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
-        Ok(())
-    }
-
-    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        std::future::pending().await
-    }
-
-    async fn certified_dealers(&mut self) -> Vec<Address> {
-        Vec::new()
-    }
-}
-
-fn open_window_at(crossing_ms: u64, window_ms: u64) -> NonceCollectionWindow {
-    let mut window = NonceCollectionWindow::new(1, window_ms);
-    let admission = window.try_admit(crossing_ms).expect("floor admits");
-    window.record(admission, 1);
-    assert!(window.cutoff_ms().is_some(), "window must be open");
-    window
-}
-
-#[tokio::test]
-async fn stalled_chain_clock_keeps_skipping_within_the_stall_limit() {
-    let mut window = open_window_at(1_000, 2_000);
-
-    let received = MpcManager::receive_nonce_cert_in_window(
-        &mut NeverDeliversChannel,
-        &mut window,
-        &(|| 1_500u64),
-        7,
-        3,
-        &test_metrics(),
-    )
-    .await
-    .expect("waiting is not an error inside the bound");
-    assert!(matches!(received, WindowedNonceReceive::Skip));
-}
-
-#[tokio::test]
-async fn frozen_chain_clock_fails_the_batch() {
-    let mut window = open_window_at(1_000, 2_000);
-    assert!(!window.chain_clock_stalled(1_500, NONCE_CHAIN_CLOCK_STALL_LIMIT));
-    window.backdate_chain_progress_for_testing(
-        NONCE_CHAIN_CLOCK_STALL_LIMIT + Duration::from_secs(5),
-    );
-
-    let outcome = MpcManager::receive_nonce_cert_in_window(
-        &mut NeverDeliversChannel,
-        &mut window,
-        &(|| 1_500u64),
-        7,
-        3,
-        &test_metrics(),
-    )
-    .await;
-    assert!(
-        outcome.is_err(),
-        "a checkpoint clock frozen below the cutoff must fail the batch, not Skip forever"
-    );
-}
-
-struct PanicsOnReceiveChannel;
-
-#[async_trait::async_trait]
-impl OrderedBroadcastChannel<CertificateV1> for PanicsOnReceiveChannel {
-    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
-        Ok(())
-    }
-
-    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        panic!("a closed window must not read from the channel");
-    }
-
-    async fn certified_dealers(&mut self) -> Vec<Address> {
-        Vec::new()
-    }
-}
-
-#[tokio::test]
-async fn closed_window_returns_without_reading_the_channel() {
-    let mut window = open_window_at(1_000, 2_000);
-    assert!(window.try_admit(9_999).is_none(), "past cutoff closes");
-    assert!(window.closed());
-    assert!(
-        window.cutoff_ms().is_some(),
-        "closed window still exposes a cutoff"
-    );
-
-    let outcome = MpcManager::receive_nonce_cert_in_window(
-        &mut PanicsOnReceiveChannel,
-        &mut window,
-        &(|| 1_500u64),
-        7,
-        3,
-        &test_metrics(),
-    )
-    .await
-    .expect("a closed window is not an error");
-    assert!(matches!(outcome, WindowedNonceReceive::Closed));
-}
-
-struct IdleTimeoutChannel;
-
-#[async_trait::async_trait]
-impl OrderedBroadcastChannel<CertificateV1> for IdleTimeoutChannel {
-    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
-        Ok(())
-    }
-
-    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        Err(crate::communication::ChannelError::Timeout)
-    }
-
-    async fn certified_dealers(&mut self) -> Vec<Address> {
-        Vec::new()
-    }
-}
-
-#[tokio::test]
-async fn channel_idle_timeout_leaves_a_closable_window_alive() {
-    let mut window = open_window_at(1_000, 2_000);
-
-    let outcome = MpcManager::receive_nonce_cert_in_window(
-        &mut IdleTimeoutChannel,
-        &mut window,
-        &(|| 1_500u64),
-        7,
-        3,
-        &test_metrics(),
-    )
-    .await
-    .expect("an idle channel must not fail a window that can still close");
-    assert!(matches!(outcome, WindowedNonceReceive::Skip));
-}
-
-#[tokio::test]
-async fn channel_idle_timeout_closes_a_window_past_its_cutoff() {
-    let mut window = open_window_at(1_000, 2_000);
-
-    let outcome = MpcManager::receive_nonce_cert_in_window(
-        &mut IdleTimeoutChannel,
-        &mut window,
-        &(|| 9_999u64),
-        7,
-        3,
-        &test_metrics(),
-    )
-    .await
-    .expect("an idle channel past the cutoff must close, not error");
-    assert!(matches!(outcome, WindowedNonceReceive::Closed));
 }

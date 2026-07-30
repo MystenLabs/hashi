@@ -141,11 +141,6 @@ pub struct NonceCollectionWindow {
     window_ms: u64,
     weight: u32,
     state: NonceCollectionState,
-    /// Last observed checkpoint clock value and when it was seen. `cutoff_ms` is a
-    /// fixed chain timestamp and the checkpoint clock is monotonic, so if it
-    /// advances it must reach the cutoff; failing to advance at all is the only way
-    /// the window can never close.
-    chain_progress: Option<(u64, std::time::Instant)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,27 +161,7 @@ impl NonceCollectionWindow {
             window_ms,
             weight: 0,
             state: NonceCollectionState::Floor,
-            chain_progress: None,
         }
-    }
-
-    pub fn chain_clock_stalled(&mut self, chain_time_ms: u64, limit: std::time::Duration) -> bool {
-        match self.chain_progress {
-            Some((seen_ms, since)) if seen_ms == chain_time_ms => since.elapsed() > limit,
-            _ => {
-                self.chain_progress = Some((chain_time_ms, std::time::Instant::now()));
-                false
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn backdate_chain_progress_for_testing(&mut self, by: std::time::Duration) {
-        let (seen_ms, since) = self.chain_progress.expect("tracker must be armed");
-        self.chain_progress = Some((
-            seen_ms,
-            since.checked_sub(by).expect("monotonic clock underflow"),
-        ));
     }
 
     pub fn closed(&self) -> bool {
@@ -1433,21 +1408,5 @@ mod tests {
         window.record(admission, 6);
         assert!(!window.floor_reached());
         assert_eq!(window.weight(), 6);
-    }
-
-    #[test]
-    fn chain_clock_stall_needs_zero_progress_not_merely_lag() {
-        let mut window = NonceCollectionWindow::new(1, 2_000);
-        let limit = std::time::Duration::ZERO;
-
-        assert!(!window.chain_clock_stalled(500, limit));
-        assert!(!window.chain_clock_stalled(600, limit));
-        assert!(!window.chain_clock_stalled(700, limit));
-
-        assert!(!window.chain_clock_stalled(700, std::time::Duration::from_secs(60)));
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        assert!(window.chain_clock_stalled(700, limit));
-
-        assert!(!window.chain_clock_stalled(800, limit));
     }
 }

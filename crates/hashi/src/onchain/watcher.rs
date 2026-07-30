@@ -30,7 +30,7 @@ use crate::onchain::OnchainState;
 /// stream yields neither an item nor an error, so an unbounded read hangs — the
 /// SDK's keepalive only trips on a fully-dead connection, not a live one whose
 /// server silently stopped sending checkpoints.
-pub(crate) const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration =
+const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(120);
 
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);

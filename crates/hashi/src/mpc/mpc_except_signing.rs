@@ -111,13 +111,6 @@ const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
-const NONCE_WINDOW_DRAIN_POLL: Duration = Duration::from_millis(600);
-/// Exceeds the watcher's own stall detection plus its reconnect and rescrape, so a
-/// stream that will heal itself is never pre-empted. Only ever compared against
-/// *zero* clock progress, so lag alone cannot trip it.
-const NONCE_CHAIN_CLOCK_STALL_LIMIT: Duration =
-    crate::onchain::watcher::CHECKPOINT_STREAM_STALL_TIMEOUT
-        .saturating_add(Duration::from_secs(60));
 
 type AvidEchoAndVote = (
     BLS12381Signature,
@@ -935,14 +928,13 @@ impl MpcManager {
         Ok(output)
     }
 
-    pub async fn run_nonce_generation(
+    pub async fn run_nonce_dealer_phase(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
         metrics: &Metrics,
-    ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+    ) -> MpcResult<()> {
         Self::prune_nonce_state(mpc_manager, batch_index);
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, required_reduced_weight) = {
@@ -994,6 +986,20 @@ impl MpcManager {
                 );
             }
         }
+        Ok(())
+    }
+
+    pub async fn run_nonce_party_phase(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        p2p_channel: &impl P2PChannel,
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        metrics: &Metrics,
+    ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+        let protocol = {
+            let mgr = mpc_manager.read().unwrap();
+            mgr.mpc_config.nonce_generation_protocol
+        };
         let certified = match protocol {
             NonceGenerationProtocol::Vanilla => {
                 Self::run_as_nonce_party(
@@ -1001,7 +1007,6 @@ impl MpcManager {
                     batch_index,
                     p2p_channel,
                     tob_channel,
-                    chain_time_ms,
                     metrics,
                 )
                 .await?
@@ -1012,7 +1017,6 @@ impl MpcManager {
                     batch_index,
                     p2p_channel,
                     tob_channel,
-                    chain_time_ms,
                     metrics,
                 )
                 .await?
@@ -1834,60 +1838,18 @@ impl MpcManager {
     async fn receive_nonce_cert_in_window(
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         window: &mut NonceCollectionWindow,
-        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
-        epoch: u64,
-        batch_index: u32,
-        metrics: &Metrics,
     ) -> MpcResult<WindowedNonceReceive> {
-        if window.closed() {
-            return Ok(WindowedNonceReceive::Closed);
-        }
-        let cert = if let Some(cutoff_ms) = window.cutoff_ms() {
-            let closing = chain_time_ms() > cutoff_ms;
-            match tokio::time::timeout(NONCE_WINDOW_DRAIN_POLL, tob_channel.receive()).await {
-                Ok(Err(ChannelError::Exhausted)) => {
-                    tracing::warn!(
-                        "nonce collection for epoch {epoch} batch {batch_index} closed early: \
-                         replay stream exhausted at weight {} (cutoff {cutoff_ms}, chain time \
-                         already past it: {closing})",
-                        window.weight(),
-                    );
-                    return Ok(WindowedNonceReceive::Closed);
-                }
-                Ok(Ok(cert)) => cert,
-                Ok(Err(ChannelError::Timeout)) | Err(_) => {
-                    if closing {
-                        return Ok(WindowedNonceReceive::Closed);
-                    }
-                    let chain_time = chain_time_ms();
-                    if window.chain_clock_stalled(chain_time, NONCE_CHAIN_CLOCK_STALL_LIMIT) {
-                        metrics.mpc_nonce_window_chain_clock_stalled_total.inc();
-                        tracing::warn!(
-                            "nonce collection for epoch {epoch} batch {batch_index}: this \
-                             node's checkpoint clock has not advanced past {chain_time} in \
-                             {NONCE_CHAIN_CLOCK_STALL_LIMIT:?} while awaiting cutoff \
-                             {cutoff_ms}; failing the batch to retry"
-                        );
-                        return Err(MpcError::ProtocolFailed(format!(
-                            "nonce window did not close: checkpoint clock stuck at {chain_time}, \
-                             cutoff {cutoff_ms}"
-                        )));
-                    }
-                    return Ok(WindowedNonceReceive::Skip);
-                }
-                Ok(Err(e)) => return Err(MpcError::BroadcastError(e.to_string())),
+        let cert = match tob_channel.receive().await {
+            Ok(cert) => cert,
+            // A finite set that runs dry before the floor never reached it on chain.
+            Err(ChannelError::Exhausted) if !window.floor_reached() => {
+                return Err(MpcError::NotEnoughParticipants {
+                    expected: window.required_weight() as usize,
+                    got: window.weight() as usize,
+                });
             }
-        } else {
-            match tob_channel.receive().await {
-                Ok(cert) => cert,
-                Err(ChannelError::Exhausted) => {
-                    return Err(MpcError::NotEnoughParticipants {
-                        expected: window.required_weight() as usize,
-                        got: window.weight() as usize,
-                    });
-                }
-                Err(e) => return Err(MpcError::BroadcastError(e.to_string())),
-            }
+            Err(ChannelError::Exhausted) => return Ok(WindowedNonceReceive::Closed),
+            Err(e) => return Err(MpcError::BroadcastError(e.to_string())),
         };
         let CertificateV1::NonceGeneration {
             cert: nonce_cert,
@@ -1905,18 +1867,16 @@ impl MpcManager {
             None => Ok(WindowedNonceReceive::Closed),
         }
     }
-
     async fn run_as_nonce_party(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
         metrics: &Metrics,
     ) -> MpcResult<HashSet<Address>> {
-        let (mut window, epoch) = {
+        let mut window = {
             let mgr = mpc_manager.read().unwrap();
-            (mgr.nonce_collection_window(), mgr.mpc_config.epoch)
+            mgr.nonce_collection_window()
         };
         let mut certified_dealers = HashSet::new();
         loop {
@@ -1927,15 +1887,7 @@ impl MpcManager {
                 .mpc_tob_poll_duration_seconds
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
-            let received = Self::receive_nonce_cert_in_window(
-                tob_channel,
-                &mut window,
-                chain_time_ms,
-                epoch,
-                batch_index,
-                metrics,
-            )
-            .await?;
+            let received = Self::receive_nonce_cert_in_window(tob_channel, &mut window).await?;
             drop(_timer);
             let (nonce_cert, admission) = match received {
                 WindowedNonceReceive::Cert {
@@ -3396,17 +3348,15 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
         metrics: &Metrics,
     ) -> MpcResult<HashSet<Address>> {
-        let (mut window, total_reduced_weight, vote_quorum_weight, epoch) = {
+        let (mut window, total_reduced_weight, vote_quorum_weight) = {
             let mgr = mpc_manager.read().unwrap();
             let total = mgr.mpc_config.nodes.total_weight() as u32;
             (
                 mgr.nonce_collection_window(),
                 total,
                 total - mgr.mpc_config.max_faulty as u32,
-                mgr.mpc_config.epoch,
             )
         };
         let mut certified_dealers = HashSet::new();
@@ -3418,15 +3368,7 @@ impl MpcManager {
                 .mpc_tob_poll_duration_seconds
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
-            let received = Self::receive_nonce_cert_in_window(
-                tob_channel,
-                &mut window,
-                chain_time_ms,
-                epoch,
-                batch_index,
-                metrics,
-            )
-            .await?;
+            let received = Self::receive_nonce_cert_in_window(tob_channel, &mut window).await?;
             drop(_timer);
             let (nonce_cert, admission) = match received {
                 WindowedNonceReceive::Cert {

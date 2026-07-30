@@ -493,6 +493,7 @@ impl MpcService {
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel =
             RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GENERATION);
+        let onchain_state_for_certs = onchain_state.clone();
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -507,16 +508,45 @@ impl MpcService {
             .mpc_total_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let chain_time_ms = {
-            let onchain_state = self.inner.onchain_state().clone();
-            move || onchain_state.latest_checkpoint_timestamp_ms()
-        };
-        let nonce_result = MpcManager::run_nonce_generation(
+        if let Err(e) = MpcManager::run_nonce_dealer_phase(
             &mpc_manager,
             batch_index,
             &p2p_channel,
             &mut tob_channel,
-            &chain_time_ms,
+            metrics,
+        )
+        .await
+        {
+            error!("Nonce dealer phase failed: {e}. Continuing as party only.");
+        }
+        let final_certs = Self::fetch_final_nonce_certs(
+            &onchain_state_for_certs,
+            &mpc_manager,
+            epoch,
+            batch_index,
+            true,
+        )
+        .await?;
+        let canonical: Vec<(sui_sdk_types::Address, CertificateV1)> = final_certs
+            .iter()
+            .filter_map(|(dealer, stamped)| {
+                let cert = stamped.to_dealer_certificate(epoch).ok()?;
+                Some((
+                    *dealer,
+                    CertificateV1::NonceGeneration {
+                        batch_index,
+                        cert,
+                        timestamp_ms: stamped.timestamp_ms,
+                    },
+                ))
+            })
+            .collect();
+        let mut party_channel = PrefetchedTobChannel::new(canonical);
+        let nonce_result = MpcManager::run_nonce_party_phase(
+            &mpc_manager,
+            batch_index,
+            &p2p_channel,
+            &mut party_channel,
             metrics,
         )
         .await;
@@ -1009,25 +1039,38 @@ impl MpcService {
         mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
         epoch: u64,
         batch_index: u32,
+        wait_for_floor: bool,
     ) -> anyhow::Result<
         Vec<(
             sui_sdk_types::Address,
             move_types::StampedDealerSubmissionV1,
         )>,
     > {
+        let floor_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
         loop {
             let certs = onchain_state
                 .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
                 .await?
                 .unwrap_or_default();
             let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-            let (cutoff_ms, window_ms) = {
+            let (floor_reached, cutoff_ms, window_ms) = {
                 let mgr = mpc_manager.read().unwrap();
+                let window = mgr.window_certified_nonce_dealers(&certs).1;
                 (
-                    mgr.nonce_collection_cutoff_ms(&certs),
+                    window.floor_reached(),
+                    window.cutoff_ms(),
                     mgr.mpc_config.nonce_accumulation_window_ms,
                 )
             };
+            if wait_for_floor && !floor_reached {
+                if tokio::time::Instant::now() >= floor_deadline {
+                    anyhow::bail!(
+                        "nonce certs never reached the floor for epoch {epoch} batch {batch_index}"
+                    );
+                }
+                tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
+                continue;
+            }
             match cutoff_ms {
                 Some(cutoff_ms) if onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms => {
                     let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
@@ -1083,7 +1126,8 @@ impl MpcService {
             Ok(presig_count(weight as usize, params, batch_size_per_weight))
         };
         let certs =
-            Self::fetch_final_nonce_certs(&onchain_state, mpc_manager, epoch, batch_index).await?;
+            Self::fetch_final_nonce_certs(&onchain_state, mpc_manager, epoch, batch_index, false)
+                .await?;
         if certs.is_empty() {
             return Err(anyhow::anyhow!(
                 "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
@@ -1124,17 +1168,12 @@ impl MpcService {
                 // converted certs; the generic weight would count sub-quorum ones.
                 let expected_size =
                     expected_from(avid_certified_nonce_weight(mpc_manager, &avid_certs))?;
-                let chain_time_ms = {
-                    let onchain_state = onchain_state.clone();
-                    move || onchain_state.latest_checkpoint_timestamp_ms()
-                };
                 let mut prefetched = PrefetchedTobChannel::new(avid_certs);
-                let outputs = MpcManager::run_nonce_generation(
+                let outputs = MpcManager::run_nonce_party_phase(
                     mpc_manager,
                     batch_index,
                     &p2p_channel,
                     &mut prefetched,
-                    &chain_time_ms,
                     &self.inner.metrics,
                 )
                 .await
