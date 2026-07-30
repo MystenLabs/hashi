@@ -25,6 +25,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const DEDUP_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -62,6 +63,7 @@ pub struct SuiTobChannel {
     signer: SimpleKeypair,
     idle_timeout: Option<Duration>,
     stall_counter: Option<prometheus::IntCounter>,
+    stall_failed_counter: Option<prometheus::IntCounter>,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
@@ -90,6 +92,7 @@ impl SuiTobChannel {
             signer,
             idle_timeout: None,
             stall_counter: None,
+            stall_failed_counter: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
             pending_fetch: None,
@@ -97,9 +100,25 @@ impl SuiTobChannel {
         }
     }
 
-    pub fn with_stall_counter(mut self, counter: prometheus::IntCounter) -> Self {
-        self.stall_counter = Some(counter);
+    pub fn with_stall_counters(
+        mut self,
+        absorbed: prometheus::IntCounter,
+        failed: prometheus::IntCounter,
+    ) -> Self {
+        self.stall_counter = Some(absorbed);
+        self.stall_failed_counter = Some(failed);
         self
+    }
+
+    fn record_stall(&self, terminal: bool) {
+        let counter = if terminal {
+            &self.stall_failed_counter
+        } else {
+            &self.stall_counter
+        };
+        if let Some(counter) = counter {
+            counter.inc();
+        }
     }
 
     pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
@@ -239,7 +258,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
         let fetched = tokio::time::timeout(
-            FETCH_STALL_TIMEOUT,
+            DEDUP_READ_TIMEOUT,
             fetch_certificates(
                 &self.onchain_state,
                 self.epoch,
@@ -250,17 +269,24 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         .await;
         let existing = match fetched {
             Ok(Ok(existing)) => existing,
-            Ok(Err(TobError::IncompleteRead(_) | TobError::UnorderedRead(_))) => Vec::new(),
+            Ok(Err(e @ (TobError::IncompleteRead(_) | TobError::UnorderedRead(_)))) => {
+                tracing::warn!(
+                    "{:?} dedup read for epoch {} batch {:?} unusable ({e}); submitting anyway",
+                    self.protocol_type,
+                    self.epoch,
+                    self.batch_index,
+                );
+                Vec::new()
+            }
             Ok(Err(e)) => return Err(ChannelError::from(e)),
             Err(_) => {
-                if let Some(counter) = &self.stall_counter {
-                    counter.inc();
-                }
+                self.record_stall(false);
                 tracing::warn!(
-                    "{:?} dedup read for epoch {} stalled >{FETCH_STALL_TIMEOUT:?}; \
+                    "{:?} dedup read for epoch {} batch {:?} stalled >{DEDUP_READ_TIMEOUT:?}; \
                      submitting anyway",
                     self.protocol_type,
                     self.epoch,
+                    self.batch_index,
                 );
                 Vec::new()
             }
@@ -303,6 +329,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 let remaining = FETCH_STALL_TIMEOUT.saturating_sub(started.elapsed());
                 tokio::time::timeout(remaining, fetch).await
             };
+            let mut stalled = false;
             let all_certs = match fetched {
                 Ok(Ok(result)) => {
                     self.pending_fetch = None;
@@ -335,11 +362,9 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                     if let Some((fetch, _)) = self.pending_fetch.take() {
                         fetch.abort();
                     }
-                    if let Some(counter) = &self.stall_counter {
-                        counter.inc();
-                    }
+                    stalled = true;
                     tracing::warn!(
-                        "{:?} TOB cert fetch for epoch {} stalled >{:?}; retrying",
+                        "{:?} TOB cert fetch for epoch {} stalled >{:?}",
                         self.protocol_type,
                         self.epoch,
                         FETCH_STALL_TIMEOUT,
@@ -360,6 +385,9 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                     (committees.epoch(), committees.pending_epoch_change())
                 };
                 if tob_wait_superseded(self.protocol_type, self.epoch, onchain_epoch, pending) {
+                    if stalled {
+                        self.record_stall(false);
+                    }
                     tracing::info!(
                         "aborting {:?} TOB wait for epoch {}: superseded (onchain epoch \
                          {onchain_epoch}, pending epoch change {pending:?})",
@@ -376,6 +404,9 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 if let Some(idle_timeout) = self.idle_timeout
                     && wait_started.elapsed() >= idle_timeout
                 {
+                    if stalled {
+                        self.record_stall(true);
+                    }
                     tracing::info!(
                         "aborting {:?} TOB wait for epoch {}: no certificate in {:?} \
                          ({} dealers seen)",
@@ -388,6 +419,9 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                     return Err(ChannelError::Timeout);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            if stalled {
+                self.record_stall(false);
             }
         }
     }
@@ -420,9 +454,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 self.seen_dealers.len(),
             ),
             Err(_) => {
-                if let Some(counter) = &self.stall_counter {
-                    counter.inc();
-                }
+                self.record_stall(false);
                 tracing::warn!(
                     "{:?} certified_dealers fetch for epoch {} stalled >{:?}; \
                      reporting {} dealers seen so far",

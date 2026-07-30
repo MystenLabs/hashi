@@ -743,9 +743,10 @@ impl Metrics {
             .unwrap(),
             mpc_tob_fetch_stalls_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_tob_fetch_stalls_total",
-                "TOB certificate fetches abandoned after stalling, by protocol and by \
-                 whether the operation survived: `absorbed` retried or continued without \
-                 the read, `failed` aborted it (a recovery or reconfig gave up).",
+                "TOB certificate fetches abandoned after stalling, by protocol and by whether \
+                 the stall itself ended the operation: `absorbed` means it retried or carried \
+                 on without the read (including when a reconfig superseded it for unrelated \
+                 reasons), `failed` means this stall is what gave up.",
                 &["protocol", "outcome"],
                 registry,
             )

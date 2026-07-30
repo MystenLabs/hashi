@@ -506,11 +506,15 @@ impl MpcService {
             signer,
         )
         .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT)
-        .with_stall_counter(
+        .with_stall_counters(
             self.inner
                 .metrics
                 .mpc_tob_fetch_stalls_total
                 .with_label_values(&[MPC_LABEL_DKG, STALL_OUTCOME_ABSORBED]),
+            self.inner
+                .metrics
+                .mpc_tob_fetch_stalls_total
+                .with_label_values(&[MPC_LABEL_DKG, STALL_OUTCOME_FAILED]),
         );
         let output = MpcManager::run_dkg(
             &mpc_manager,
@@ -553,12 +557,15 @@ impl MpcService {
             move_types::ProtocolType::NonceGeneration,
             signer,
         )
-        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT)
-        .with_stall_counter(
+        .with_stall_counters(
             self.inner
                 .metrics
                 .mpc_tob_fetch_stalls_total
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_ABSORBED]),
+            self.inner
+                .metrics
+                .mpc_tob_fetch_stalls_total
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_FAILED]),
         );
         let metrics = &self.inner.metrics;
         let _timer = metrics
@@ -668,12 +675,11 @@ impl MpcService {
                 metrics.mpc_nonce_size_mismatch_total.inc();
                 error!(
                     "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
-                     served certs size to {served_implies} (weight {served_weight}). The \
-                     certs are frozen, so a restart rebuilds this boundary at the larger \
-                     size. If this is the last recovered boundary that fails the \
-                     Phase-1/Phase-2 assert identically on every later tick, since the \
-                     certs are frozen; otherwise it is not cross-checked at all and \
-                     silently shifts every later batch's start_index",
+                     served certs size to {served_implies} (weight {served_weight}). The certs \
+                     are frozen, so a restart rebuilds this boundary at {served_implies}: if \
+                     this is the last recovered boundary the Phase-1/Phase-2 assert then fails \
+                     identically on every later tick, and otherwise it is not cross-checked at \
+                     all and silently shifts every later batch's start_index",
                     presignatures.len(),
                 );
             }
@@ -1214,16 +1220,25 @@ impl MpcService {
             .await;
             let certs = match fetched {
                 Err(_) => {
+                    let expired = tokio::time::Instant::now() >= wait_deadline;
                     metrics
                         .mpc_tob_fetch_stalls_total
-                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_ABSORBED])
+                        .with_label_values(&[
+                            MPC_LABEL_NONCE_GENERATION,
+                            if expired {
+                                STALL_OUTCOME_FAILED
+                            } else {
+                                STALL_OUTCOME_ABSORBED
+                            },
+                        ])
                         .inc();
                     warn!(
                         "nonce cert fetch for epoch {epoch} batch {batch_index} stalled \
-                         >{:?}; retrying",
+                         >{:?}; {}",
                         crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                        if expired { "giving up" } else { "retrying" },
                     );
-                    if tokio::time::Instant::now() >= wait_deadline {
+                    if expired {
                         anyhow::bail!(
                             "nonce cert fetch never completed for epoch {epoch} batch \
                              {batch_index}"
@@ -1761,11 +1776,15 @@ impl MpcService {
             signer,
         )
         .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT)
-        .with_stall_counter(
+        .with_stall_counters(
             self.inner
                 .metrics
                 .mpc_tob_fetch_stalls_total
                 .with_label_values(&[MPC_LABEL_KEY_ROTATION, STALL_OUTCOME_ABSORBED]),
+            self.inner
+                .metrics
+                .mpc_tob_fetch_stalls_total
+                .with_label_values(&[MPC_LABEL_KEY_ROTATION, STALL_OUTCOME_FAILED]),
         );
         let output = MpcManager::run_key_rotation(
             &mpc_manager,

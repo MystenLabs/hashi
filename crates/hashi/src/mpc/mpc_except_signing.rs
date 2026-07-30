@@ -1911,6 +1911,45 @@ impl MpcManager {
             None => Ok(WindowedNonceReceive::Closed),
         }
     }
+
+    fn below_floor_error(
+        window: &NonceCollectionWindow,
+        local_skips: u32,
+        batch_index: u32,
+        metrics: &Metrics,
+    ) -> MpcError {
+        if local_skips > 0 {
+            metrics.mpc_nonce_local_skip_batches_total.inc();
+            tracing::warn!(
+                "nonce batch {batch_index} fell under the floor after {local_skips} \
+                 node-local skip(s): admitted {} of {} required; peers can admit \
+                 dealers this node could not",
+                window.weight(),
+                window.required_weight(),
+            );
+        } else if window.closed() {
+            metrics.mpc_nonce_window_closed_below_floor_total.inc();
+            tracing::warn!(
+                "nonce batch {batch_index} closed on the window cutoff under the \
+                 floor: admitted {} of {} required",
+                window.weight(),
+                window.required_weight(),
+            );
+        } else {
+            metrics.mpc_nonce_floor_unreached_total.inc();
+            tracing::warn!(
+                "nonce batch {batch_index} ran out of certs under the floor: admitted \
+                 {} of {} required",
+                window.weight(),
+                window.required_weight(),
+            );
+        }
+        MpcError::NotEnoughParticipants {
+            expected: window.required_weight() as usize,
+            got: window.weight() as usize,
+        }
+    }
+
     async fn run_as_nonce_party(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
@@ -2088,36 +2127,12 @@ impl MpcManager {
             certified_dealers.insert(dealer);
         }
         if !window.floor_reached() {
-            if local_skips > 0 {
-                metrics.mpc_nonce_local_skip_batches_total.inc();
-                tracing::warn!(
-                    "nonce batch {batch_index} fell under the floor after {local_skips} \
-                     node-local skip(s): admitted {} of {} required; peers can admit \
-                     dealers this node could not",
-                    window.weight(),
-                    window.required_weight(),
-                );
-            } else if window.closed() {
-                metrics.mpc_nonce_window_closed_below_floor_total.inc();
-                tracing::warn!(
-                    "nonce batch {batch_index} closed on the window cutoff under the \
-                     floor: admitted {} of {} required",
-                    window.weight(),
-                    window.required_weight(),
-                );
-            } else {
-                metrics.mpc_nonce_floor_unreached_total.inc();
-                tracing::warn!(
-                    "nonce batch {batch_index} ran out of certs under the floor: admitted \
-                     {} of {} required",
-                    window.weight(),
-                    window.required_weight(),
-                );
-            }
-            return Err(MpcError::NotEnoughParticipants {
-                expected: window.required_weight() as usize,
-                got: window.weight() as usize,
-            });
+            return Err(Self::below_floor_error(
+                &window,
+                local_skips,
+                batch_index,
+                metrics,
+            ));
         }
         Ok(NoncePartyAdmission {
             certified: certified_dealers,
@@ -3576,36 +3591,12 @@ impl MpcManager {
             certified_dealers.insert(dealer);
         }
         if !window.floor_reached() {
-            if local_skips > 0 {
-                metrics.mpc_nonce_local_skip_batches_total.inc();
-                tracing::warn!(
-                    "nonce batch {batch_index} fell under the floor after {local_skips} \
-                     node-local skip(s): admitted {} of {} required; peers can admit \
-                     dealers this node could not",
-                    window.weight(),
-                    window.required_weight(),
-                );
-            } else if window.closed() {
-                metrics.mpc_nonce_window_closed_below_floor_total.inc();
-                tracing::warn!(
-                    "nonce batch {batch_index} closed on the window cutoff under the \
-                     floor: admitted {} of {} required",
-                    window.weight(),
-                    window.required_weight(),
-                );
-            } else {
-                metrics.mpc_nonce_floor_unreached_total.inc();
-                tracing::warn!(
-                    "nonce batch {batch_index} ran out of certs under the floor: admitted \
-                     {} of {} required",
-                    window.weight(),
-                    window.required_weight(),
-                );
-            }
-            return Err(MpcError::NotEnoughParticipants {
-                expected: window.required_weight() as usize,
-                got: window.weight() as usize,
-            });
+            return Err(Self::below_floor_error(
+                &window,
+                local_skips,
+                batch_index,
+                metrics,
+            ));
         }
         Ok(NoncePartyAdmission {
             certified: certified_dealers,
