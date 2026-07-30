@@ -425,6 +425,36 @@ pub(crate) fn tob_wait_superseded(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raced_cert_reads_classify_as_retryable() {
+        use crate::onchain::IncompleteCertTableRead;
+
+        let raced: anyhow::Error = IncompleteCertTableRead {
+            dealer: Address::ZERO,
+        }
+        .into();
+        assert!(
+            matches!(super::tob_fetch_error(raced), TobError::IncompleteRead(_)),
+            "a raced cert-table read must stay distinguishable from an RPC failure"
+        );
+
+        let wrapped = anyhow::Error::from(IncompleteCertTableRead {
+            dealer: Address::ZERO,
+        })
+        .context("fetching stamped certs");
+        assert!(matches!(
+            super::tob_fetch_error(wrapped),
+            TobError::IncompleteRead(_)
+        ));
+
+        assert!(
+            matches!(
+                super::tob_fetch_error(anyhow::anyhow!("connection reset")),
+                TobError::RpcError(_)
+            ),
+            "a genuine RPC failure must not be swallowed as retryable"
+        );
+    }
     use super::*;
 
     #[test]

@@ -1126,7 +1126,6 @@ impl MpcService {
         let overall_deadline = tokio::time::Instant::now() + NONCE_WAIT_TOTAL_BUDGET;
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
-        let mut mixed_stamps_reported = false;
         let mut already_verified = HashSet::new();
         loop {
             let (onchain_epoch, pending) = {
@@ -1175,23 +1174,6 @@ impl MpcService {
                     window.weight(),
                 )
             };
-            let (zero_stamps, stamped) =
-                certs.iter().fold((0usize, 0usize), |(z, n), (_, cert)| {
-                    if cert.timestamp_ms == 0 {
-                        (z + 1, n)
-                    } else {
-                        (z, n + 1)
-                    }
-                });
-            if zero_stamps > 0 && stamped > 0 && !mixed_stamps_reported {
-                mixed_stamps_reported = true;
-                metrics.mpc_nonce_mixed_stamp_batches_total.inc();
-                warn!(
-                    "nonce batch {batch_index} for epoch {epoch} mixes {zero_stamps} bare \
-                     and {stamped} stamped cert(s); the window decision depends on which \
-                     one crosses the floor"
-                );
-            }
             if weight > best_weight {
                 best_weight = weight;
                 wait_deadline = (tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT)

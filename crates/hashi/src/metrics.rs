@@ -138,7 +138,6 @@ pub struct Metrics {
     pub mpc_nonce_window_closed_below_floor_total: IntCounter,
     pub mpc_tob_fetch_stalls_total: IntCounterVec,
     pub mpc_nonce_size_mismatch_total: IntCounter,
-    pub mpc_nonce_mixed_stamp_batches_total: IntCounter,
     pub mpc_nonce_read_side_clock_errors_total: IntCounter,
     /// Batch index of the most recent nonce batch this node accepted.
     pub mpc_nonce_batch_index: IntGauge,
@@ -731,13 +730,6 @@ impl Metrics {
                 "hashi_mpc_nonce_size_mismatch_total",
                 "Live nonce batches whose built size differs from what the cert list this \
                  node was served implies.",
-                registry,
-            )
-            .unwrap(),
-            mpc_nonce_mixed_stamp_batches_total: register_int_counter_with_registry!(
-                "hashi_mpc_nonce_mixed_stamp_batches_total",
-                "Nonce batch attempts carrying both zero and non-zero cert timestamps \
-                 (once per attempt, so a retried batch counts again)",
                 registry,
             )
             .unwrap(),

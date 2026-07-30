@@ -125,10 +125,10 @@ pub struct IncompleteCertTableRead {
     pub dealer: Address,
 }
 
+/// Exact membership, not `any(>=)`: `enable_version` accepts undeployed versions, so a
+/// looser test lets a pre-enabled v3 switch the stamped ABI on against a v1 package.
 fn stamped_certs_supported(enabled_versions: &std::collections::BTreeSet<u64>) -> bool {
-    enabled_versions
-        .iter()
-        .any(|v| *v >= crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
+    enabled_versions.contains(&crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
 }
 
 #[derive(Debug)]
@@ -1848,15 +1848,15 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 mod tests {
 
     #[test]
-    fn stamped_gate_survives_disabling_an_older_version() {
+    fn pre_enabled_version_does_not_switch_on_the_stamped_abi() {
         use std::collections::BTreeSet;
         let set = |v: &[u64]| v.iter().copied().collect::<BTreeSet<u64>>();
 
         assert!(!stamped_certs_supported(&set(&[1])), "v1 only");
         assert!(stamped_certs_supported(&set(&[1, 2])), "fresh v2 publish");
         assert!(
-            stamped_certs_supported(&set(&[1, 3])),
-            "a version past the threshold still has the stamped entry point"
+            !stamped_certs_supported(&set(&[1, 3])),
+            "pre-enabling an undeployed version must not switch on the stamped ABI"
         );
     }
     use fastcrypto::serde_helpers::ToFromByteArray;
