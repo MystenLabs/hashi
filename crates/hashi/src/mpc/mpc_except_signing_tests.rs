@@ -14590,7 +14590,7 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
         captured: captured.clone(),
     };
 
-    let mgr_arc = Arc::new(std::sync::RwLock::new(manager));
+    let mgr_arc = Arc::new(RwLock::new(manager));
     let _ = MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1).await;
 
     let captured = captured.lock().unwrap();
@@ -14621,9 +14621,6 @@ async fn exhausted_prefetched_stream_pre_floor_does_not_block() {
 
     let outcome = received
         .expect("receive_nonce_cert_in_window never returned on an exhausted replay stream");
-    // Closes rather than erroring: the caller's post-loop floor check owns the failure, so
-    // that it can attribute it to node-local skips and increment the right counter. Failing
-    // here bypassed both. Recovery still fails — see the party-loop test below.
     assert!(
         matches!(outcome, Ok(WindowedNonceReceive::Closed)),
         "pre-floor exhaustion must close the window for the caller to judge"

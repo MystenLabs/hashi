@@ -24,7 +24,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum TobError {

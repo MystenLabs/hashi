@@ -626,8 +626,9 @@ impl MpcService {
                     "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
                      served certs size to {served_implies} (weight {served_weight}). The \
                      certs are frozen, so a restart rebuilds this boundary at the larger \
-                     size, the Phase-1/Phase-2 assert fails, and this node cannot recover \
-                     the batch on any later tick",
+                     size. If this is the last recovered boundary that fails the \
+                     Phase-1/Phase-2 assert; otherwise it is not cross-checked at all and \
+                     silently shifts every later batch's start_index",
                     presignatures.len(),
                 );
             }
@@ -1146,12 +1147,32 @@ impl MpcService {
                      (onchain epoch {onchain_epoch}, pending epoch change {pending:?})"
                 );
             }
-            let certs = match onchain_state
-                .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
-                .await
-            {
-                Ok(certs) => certs.unwrap_or_default(),
-                Err(e)
+            let fetched = tokio::time::timeout(
+                crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
+            )
+            .await;
+            let certs = match fetched {
+                Err(_) => {
+                    metrics
+                        .mpc_tob_fetch_stalls_total
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                        .inc();
+                    warn!(
+                        "nonce cert fetch for epoch {epoch} batch {batch_index} stalled \
+                         >{:?}; retrying",
+                        crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                    );
+                    if tokio::time::Instant::now() >= wait_deadline {
+                        anyhow::bail!(
+                            "nonce cert fetch never completed for epoch {epoch} batch \
+                             {batch_index}"
+                        );
+                    }
+                    continue;
+                }
+                Ok(Ok(certs)) => certs.unwrap_or_default(),
+                Ok(Err(e))
                     if e.downcast_ref::<crate::onchain::IncompleteCertTableRead>()
                         .is_some() =>
                 {
@@ -1161,7 +1182,7 @@ impl MpcService {
                     tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Ok(Err(e)) => return Err(e),
             };
             let certs =
                 MpcManager::verified_nonce_certs(mpc_manager, epoch, certs, &mut already_verified)
@@ -1192,7 +1213,17 @@ impl MpcService {
                 continue;
             }
             let read_side_past_cutoff = |cutoff_ms: u64| async move {
-                match onchain_state.read_side_checkpoint_timestamp_ms().await {
+                let read = tokio::time::timeout(
+                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                    onchain_state.read_side_checkpoint_timestamp_ms(),
+                )
+                .await;
+                match read.unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "read-side clock read stalled >{:?}",
+                        crate::communication::sui_tob::FETCH_STALL_TIMEOUT
+                    ))
+                }) {
                     Ok(ts) => ts > cutoff_ms,
                     Err(e) => {
                         metrics.mpc_nonce_read_side_clock_errors_total.inc();
