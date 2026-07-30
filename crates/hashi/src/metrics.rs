@@ -134,9 +134,11 @@ pub struct Metrics {
     /// Nonce batches abandoned because the on-chain certs never reached the floor
     pub mpc_nonce_floor_unreached_total: IntCounter,
     pub mpc_nonce_local_skip_batches_total: IntCounter,
-    /// Batch index of the most recently collected nonce batch.
+    pub mpc_nonce_cutoff_unsettled_total: IntCounter,
+    pub mpc_nonce_read_side_clock_errors_total: IntCounter,
+    /// Batch index of the most recent nonce batch this node accepted.
     pub mpc_nonce_batch_index: IntGauge,
-    /// Dealers admitted into that batch.
+    /// Dealer outputs retained in that batch (post-filter), not certs admitted.
     pub mpc_nonce_batch_dealers: IntGauge,
 
     // MPC profiling metrics
@@ -750,7 +752,7 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_window_cutoff_unreached_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_window_cutoff_unreached_total",
-                "Nonce batches abandoned because this node's checkpoint clock never \
+                "Nonce batches abandoned because the read side's checkpoint clock never \
                  passed the accumulation window cutoff",
                 registry,
             )
@@ -764,20 +766,34 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_local_skip_batches_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_local_skip_batches_total",
-                "Nonce batches discarded because this node skipped a dealer its peers \
-                 admitted",
+                "Nonce batches discarded because this node skipped a dealer for a \
+                 node-local reason, so the batch cannot match the one its peers built",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_cutoff_unsettled_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_cutoff_unsettled_total",
+                "Nonce batches abandoned because successive reads kept moving the \
+                 accumulation window cutoff, so no snapshot could be confirmed",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_read_side_clock_errors_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_read_side_clock_errors_total",
+                "Failed reads of the read-side checkpoint clock while waiting out an \
+                 accumulation window; distinguishes a broken RPC from a stalled clock",
                 registry,
             )
             .unwrap(),
             mpc_nonce_batch_index: register_int_gauge_with_registry!(
-                "hashi_mpc_nonce_batch_index",
-                "Batch index of the most recently collected nonce batch",
+"hashi_mpc_nonce_batch_index",
+                "Batch index of the most recent nonce batch this node accepted",
                 registry,
             )
             .unwrap(),
             mpc_nonce_batch_dealers: register_int_gauge_with_registry!(
                 "hashi_mpc_nonce_batch_dealers",
-                "Dealers admitted into the most recently collected nonce batch",
+                "Dealer outputs retained in the most recent accepted nonce batch",
                 registry,
             )
             .unwrap(),

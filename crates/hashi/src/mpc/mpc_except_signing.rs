@@ -1060,8 +1060,6 @@ impl MpcManager {
                 )
             }
         };
-        metrics.mpc_nonce_batch_index.set(batch_index as i64);
-        metrics.mpc_nonce_batch_dealers.set(dealers.len() as i64);
         tracing::info!(
             "run_nonce_party_phase: epoch={}, batch_index={batch_index}, \
              cutoff_ms={cutoff_ms:?}, {pre_filter} outputs before filter, {} after, \
@@ -1138,18 +1136,32 @@ impl MpcManager {
         mut window: NonceCollectionWindow,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         let mut certified = HashSet::new();
-        for (dealer, cert) in certs {
-            if certified.contains(dealer) {
+        for (table_dealer, cert) in certs {
+            let dealer = match cert.signed_dealer(self.mpc_config.epoch) {
+                Some(signed) => {
+                    if signed != *table_dealer {
+                        tracing::warn!(
+                            "Nonce cert served under table key {:?} but signed for dealer {:?}; \
+                             counting the signed dealer",
+                            table_dealer,
+                            signed
+                        );
+                    }
+                    signed
+                }
+                None => *table_dealer,
+            };
+            if certified.contains(&dealer) {
                 continue;
             }
             let Some(admission) = window.try_admit(cert.nonce_timestamp_ms()) else {
                 break;
             };
-            if let Some(party_id) = self.committee.index_of(dealer)
+            if let Some(party_id) = self.committee.index_of(&dealer)
                 && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
             {
                 window.record(admission, w as u32);
-                certified.insert(*dealer);
+                certified.insert(dealer);
             }
         }
         (certified, window)
@@ -1166,10 +1178,7 @@ impl MpcManager {
         let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
         let mut certified = HashSet::new();
         for (table_dealer, stamped) in certs {
-            let CertificateV1::NonceGeneration {
-                batch_index, cert, ..
-            } = stamped
-            else {
+            let CertificateV1::NonceGeneration { cert, .. } = stamped else {
                 continue;
             };
             let dealer = &cert.message().dealer_address;
@@ -1191,19 +1200,13 @@ impl MpcManager {
                     continue;
                 }
             };
-            let required_cert_weight = self
-                .resolve_avid_cert_kind_locally(*batch_index, dealer, &cert.message().messages_hash)
-                .map_or(vote_quorum_weight, |kind| match kind {
-                    CertKind::AvssVote => total_reduced_weight,
-                    CertKind::AvidVote => vote_quorum_weight,
-                });
-            if signer_weight < required_cert_weight {
+            if signer_weight < vote_quorum_weight {
                 tracing::warn!(
                     "Excluding AVID nonce cert for dealer {:?} from sizing: \
-                     signer weight {} below the required {}",
+                     signer weight {} below the vote quorum {}",
                     dealer,
                     signer_weight,
-                    required_cert_weight,
+                    vote_quorum_weight,
                 );
                 continue;
             }
@@ -1219,11 +1222,12 @@ impl MpcManager {
         }
         (certified, window.weight())
     }
-
+    
     pub(crate) async fn verified_nonce_certs<T>(
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         certs: Vec<(Address, T)>,
+        already_verified: &mut HashSet<Vec<u8>>,
     ) -> Vec<(Address, T)>
     where
         T: NonceCertToVerify,
@@ -1237,13 +1241,23 @@ impl MpcManager {
                     continue;
                 }
             };
+            let key = bcs::to_bytes(&dealer_cert).ok();
+            if key.as_ref().is_some_and(|k| already_verified.contains(k)) {
+                verified.push((dealer, cert));
+                continue;
+            }
             let mgr = Arc::clone(mpc_manager);
             let verification = spawn_blocking(move || {
                 mgr.read().unwrap().committee.verify_signature(&dealer_cert)
             })
             .await;
             match verification {
-                Ok(()) => verified.push((dealer, cert)),
+                Ok(()) => {
+                    if let Some(key) = key {
+                        already_verified.insert(key);
+                    }
+                    verified.push((dealer, cert));
+                }
                 Err(e) => tracing::info!(
                     "recovery: dropping nonce cert with invalid signature from {dealer:?}: {e}"
                 ),

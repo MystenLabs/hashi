@@ -567,6 +567,10 @@ impl MpcService {
                 outcome.local_skips,
             );
         }
+        metrics.mpc_nonce_batch_index.set(batch_index as i64);
+        metrics
+            .mpc_nonce_batch_dealers
+            .set(outcome.outputs.len() as i64);
         let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
             (
@@ -804,7 +808,13 @@ impl MpcService {
                 else {
                     return Ok(None);
                 };
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let certs = MpcManager::verified_nonce_certs(
+                    mpc_manager,
+                    epoch,
+                    certs,
+                    &mut HashSet::new(),
+                )
+                .await;
                 certified_nonce_weight(mpc_manager, &certs)
             }
             NonceGenerationProtocol::Avid => {
@@ -818,7 +828,13 @@ impl MpcService {
                 if certs.is_empty() {
                     return Ok(None);
                 }
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let certs = MpcManager::verified_nonce_certs(
+                    mpc_manager,
+                    epoch,
+                    certs,
+                    &mut HashSet::new(),
+                )
+                .await;
                 let cutoff_ms = {
                     let mgr = mpc_manager.read().unwrap();
                     mgr.nonce_collection_cutoff_ms(&certs)
@@ -1069,8 +1085,10 @@ impl MpcService {
             move_types::StampedDealerSubmissionV1,
         )>,
     > {
-        let floor_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
+        let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
+        let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
+        let mut already_verified = HashSet::new();
         loop {
             let (onchain_epoch, pending) = {
                 let state = onchain_state.state();
@@ -1092,18 +1110,25 @@ impl MpcService {
                 .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
                 .await?
                 .unwrap_or_default();
-            let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-            let (floor_reached, cutoff_ms, window_ms) = {
+            let certs =
+                MpcManager::verified_nonce_certs(mpc_manager, epoch, certs, &mut already_verified)
+                    .await;
+            let (floor_reached, cutoff_ms, window_ms, weight) = {
                 let mgr = mpc_manager.read().unwrap();
                 let window = mgr.window_certified_nonce_dealers(&certs).1;
                 (
                     window.floor_reached(),
                     window.cutoff_ms(),
                     mgr.mpc_config.nonce_accumulation_window_ms,
+                    window.weight(),
                 )
             };
+            if weight > best_weight {
+                best_weight = weight;
+                wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
+            }
             if wait_for_floor && !floor_reached {
-                if tokio::time::Instant::now() >= floor_deadline {
+                if tokio::time::Instant::now() >= wait_deadline {
                     metrics.mpc_nonce_floor_unreached_total.inc();
                     anyhow::bail!(
                         "nonce certs never reached the floor for epoch {epoch} batch {batch_index}"
@@ -1113,16 +1138,29 @@ impl MpcService {
                 continue;
             }
             let read_side_past_cutoff = |cutoff_ms: u64| async move {
-                onchain_state
-                    .read_side_checkpoint_timestamp_ms()
-                    .await
-                    .is_ok_and(|ts| ts > cutoff_ms)
+                match onchain_state.read_side_checkpoint_timestamp_ms().await {
+                    Ok(ts) => ts > cutoff_ms,
+                    Err(e) => {
+                        metrics.mpc_nonce_read_side_clock_errors_total.inc();
+                        warn!(
+                            "read-side checkpoint clock unavailable for epoch {epoch} \
+                             batch {batch_index}: {e}"
+                        );
+                        false
+                    }
+                }
             };
             let Some(cutoff_ms) = cutoff_ms else {
                 return Ok(certs);
             };
             if cutoff_confirmed == Some(cutoff_ms) {
                 return Ok(certs);
+            }
+            if tokio::time::Instant::now() >= wait_deadline {
+                metrics.mpc_nonce_cutoff_unsettled_total.inc();
+                anyhow::bail!(
+                    "nonce cert cutoff never settled for epoch {epoch} batch {batch_index}                      (last confirmed {cutoff_confirmed:?}, now {cutoff_ms})"
+                );
             }
             if !read_side_past_cutoff(cutoff_ms).await {
                 let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
@@ -1244,6 +1282,11 @@ impl MpcService {
                         outcome.local_skips,
                     );
                 }
+                let metrics = &self.inner.metrics;
+                metrics.mpc_nonce_batch_index.set(batch_index as i64);
+                metrics
+                    .mpc_nonce_batch_dealers
+                    .set(outcome.outputs.len() as i64);
                 (outcome.outputs, None)
             }
         };

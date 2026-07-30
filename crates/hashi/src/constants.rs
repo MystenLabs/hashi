@@ -29,7 +29,8 @@ pub fn is_production_sui_chain(chain_id: &str) -> bool {
 
 /// The `versioning::PACKAGE_VERSION` at which the stamped nonce-cert path becomes available on-chain.
 ///
-/// Must stay equal to Move's `PACKAGE_VERSION`.
+/// Never raise past the deployed version; upgrades only insert, so a lagging value is
+/// safe. A fresh publish enables only `PACKAGE_VERSION`, so a later bump turns this off.
 pub const STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION: u64 = 2;
 #[cfg(test)]
 mod tests {

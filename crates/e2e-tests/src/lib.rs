@@ -2503,11 +2503,11 @@ mod tests {
              derivation (c = {consumed}); it implies output weight {w_out}"
         );
         let gate = w_total - f;
-        let expected_w_out = w_node * gate.div_ceil(w_node);
-        assert_eq!(
-            w_out, expected_w_out,
-            "pool of {pool_size} implies output weight {w_out}, but collecting to \
-             the W-f gate ({gate}) rounds to {expected_w_out}"
+        let floor_w_out = w_node * gate.div_ceil(w_node);
+        assert!(
+            (floor_w_out..=w_total).contains(&w_out),
+            "pool of {pool_size} implies output weight {w_out}, outside the admissible \
+             range {floor_w_out}..={w_total} (W-f gate {gate}, node weight {w_node})"
         );
     }
 

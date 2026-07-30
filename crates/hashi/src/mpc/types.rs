@@ -520,11 +520,19 @@ impl NonceCertToVerify for StampedDealerSubmissionV1 {
 
 pub(crate) trait NonceCertTimestamp {
     fn nonce_timestamp_ms(&self) -> u64;
+
+    fn signed_dealer(&self, epoch: u64) -> Option<Address>;
 }
 
 impl NonceCertTimestamp for StampedDealerSubmissionV1 {
     fn nonce_timestamp_ms(&self) -> u64 {
         self.timestamp_ms
+    }
+
+    fn signed_dealer(&self, epoch: u64) -> Option<Address> {
+        self.to_dealer_certificate(epoch)
+            .ok()
+            .map(|cert| cert.message().dealer_address)
     }
 }
 
@@ -533,6 +541,13 @@ impl NonceCertTimestamp for CertificateV1 {
         match self {
             CertificateV1::NonceGeneration { timestamp_ms, .. } => *timestamp_ms,
             _ => 0,
+        }
+    }
+
+    fn signed_dealer(&self, _epoch: u64) -> Option<Address> {
+        match self {
+            CertificateV1::NonceGeneration { cert, .. } => Some(cert.message().dealer_address),
+            _ => None,
         }
     }
 }

@@ -10756,7 +10756,7 @@ async fn test_verified_nonce_certs_drops_unverified() {
     certs[1].1.submission.signature.signature = certs[0].1.submission.signature.signature.clone();
 
     let mgr = Arc::new(RwLock::new(mgr));
-    let verified = MpcManager::verified_nonce_certs(&mgr, epoch, certs).await;
+    let verified = MpcManager::verified_nonce_certs(&mgr, epoch, certs, &mut HashSet::new()).await;
     assert_eq!(
         verified.len(),
         3,
@@ -12851,13 +12851,12 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     assert!(certified.contains(&setup.address(0)));
     assert!(
         certified.contains(&setup.address(1)),
-        "NARROWED GAP: this cert sits exactly at the vote quorum. Sizing now mirrors \
-         the replay's kind-dependent gate, but only when the kind resolves from local \
-         state; these synthetic certs have no AVID round state, so the resolver returns \
-         None and sizing falls back to the vote quorum and admits it. A Byzantine dealer \
-         aggregating to exactly W-f therefore still diverges from a replay that pulls the \
-         kind and gates AvssVote at full W. Pinning current behaviour, not asserting it \
-         is correct."
+        "KNOWN GAP, deliberately kept: this cert sits exactly at the vote quorum, so \
+         sizing admits it while the replay gates AvssVote at full W. Mirroring the \
+         replay here was tried and reverted — it needs local AVID round state, and this \
+         same walk sizes restart boundaries that feed uncross-checked start_index \
+         offsets, so a node-dependent size is a safety bug where this disagreement is \
+         only a liveness one. Pinning current behaviour, not asserting it is correct."
     );
     assert!(
         weight >= mgr.required_nonce_weight(),
