@@ -10911,6 +10911,33 @@ async fn test_nonce_window_live_collection_past_floor() {
             .len(),
         4
     );
+
+    let closes_below_floor = {
+        let test_manager = Arc::clone(&test_manager);
+        let mut tob = crate::communication::PrefetchedTobChannel::new(stamped([
+            1_000, 5_000, 5_000, 5_000, 5_000,
+        ]));
+        MpcManager::run_as_nonce_party(
+            &test_manager,
+            batch_index,
+            &mock_p2p,
+            &mut tob,
+            Some(1_000),
+            &test_metrics(),
+        )
+        .await
+    };
+    assert!(
+        matches!(
+            closes_below_floor,
+            Err(MpcError::NotEnoughParticipants {
+                expected: 4,
+                got: 1
+            })
+        ),
+        "closing on the cutoff below the floor must fail, got {:?}",
+        closes_below_floor.map(|a| a.certified.len())
+    );
 }
 
 #[tokio::test]
@@ -12824,9 +12851,13 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     assert!(certified.contains(&setup.address(0)));
     assert!(
         certified.contains(&setup.address(1)),
-        "KNOWN GAP: this cert sits exactly at the vote quorum, so sizing admits it, \
-         but the replay gates AvssVote at full W — a Byzantine dealer aggregating to \
-         exactly W-f still diverges. Pinning current behaviour, not asserting it is correct."
+        "NARROWED GAP: this cert sits exactly at the vote quorum. Sizing now mirrors \
+         the replay's kind-dependent gate, but only when the kind resolves from local \
+         state; these synthetic certs have no AVID round state, so the resolver returns \
+         None and sizing falls back to the vote quorum and admits it. A Byzantine dealer \
+         aggregating to exactly W-f therefore still diverges from a replay that pulls the \
+         kind and gates AvssVote at full W. Pinning current behaviour, not asserting it \
+         is correct."
     );
     assert!(
         weight >= mgr.required_nonce_weight(),

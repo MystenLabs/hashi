@@ -18,6 +18,8 @@ const VANILLA_NONCE_GENERATION_PROTOCOL: u64 = 0;
 /// How long nodes keep collecting nonce dealer certs past the `W − f` floor.
 const DEFAULT_NONCE_ACCUMULATION_WINDOW_MS: u64 = 2000;
 
+const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
+
 const MAX_BPS: u64 = 10000;
 
 const KEY_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_points";
@@ -40,7 +42,7 @@ public(package) fun is_valid_value(key: &std::string::String, value: &config_val
     } else if (k == &KEY_NONCE_GENERATION_PROTOCOL) {
         value.is_u64() && (*value).as_u64() <= 1
     } else if (k == &KEY_NONCE_ACCUMULATION_WINDOW_MS) {
-        value.is_u64()
+        value.is_u64() && (*value).as_u64() <= MAX_NONCE_ACCUMULATION_WINDOW_MS
     } else {
         true
     }

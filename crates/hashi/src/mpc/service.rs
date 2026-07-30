@@ -1070,6 +1070,7 @@ impl MpcService {
         )>,
     > {
         let floor_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
+        let mut cutoff_confirmed: Option<u64> = None;
         loop {
             let (onchain_epoch, pending) = {
                 let state = onchain_state.state();
@@ -1117,28 +1118,32 @@ impl MpcService {
                     .await
                     .is_ok_and(|ts| ts > cutoff_ms)
             };
-            match cutoff_ms {
-                Some(cutoff_ms) if !read_side_past_cutoff(cutoff_ms).await => {
-                    let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
-                    let wait = async {
-                        while !read_side_past_cutoff(cutoff_ms).await {
-                            tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
-                        }
-                    };
-                    if tokio::time::timeout(deadline, wait).await.is_err() {
-                        metrics.mpc_nonce_window_cutoff_unreached_total.inc();
-                        warn!(
-                            "fetch_final_nonce_certs: checkpoint clock stalled below window cutoff \
-                             {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?}; \
-                             failing recovery to retry on the next tick"
-                        );
-                        anyhow::bail!(
-                            "nonce window did not close for epoch {epoch} batch {batch_index}"
-                        );
-                    }
-                }
-                _ => return Ok(certs),
+            let Some(cutoff_ms) = cutoff_ms else {
+                return Ok(certs);
+            };
+            if cutoff_confirmed == Some(cutoff_ms) {
+                return Ok(certs);
             }
+            if !read_side_past_cutoff(cutoff_ms).await {
+                let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
+                let wait = async {
+                    while !read_side_past_cutoff(cutoff_ms).await {
+                        tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
+                    }
+                };
+                if tokio::time::timeout(deadline, wait).await.is_err() {
+                    metrics.mpc_nonce_window_cutoff_unreached_total.inc();
+                    warn!(
+                        "fetch_final_nonce_certs: checkpoint clock stalled below window cutoff \
+                         {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?}; \
+                         failing recovery to retry on the next tick"
+                    );
+                    anyhow::bail!(
+                        "nonce window did not close for epoch {epoch} batch {batch_index}"
+                    );
+                }
+            }
+            cutoff_confirmed = Some(cutoff_ms);
         }
     }
 

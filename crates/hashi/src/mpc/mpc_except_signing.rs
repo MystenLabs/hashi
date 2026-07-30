@@ -1166,7 +1166,10 @@ impl MpcManager {
         let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
         let mut certified = HashSet::new();
         for (table_dealer, stamped) in certs {
-            let CertificateV1::NonceGeneration { cert, .. } = stamped else {
+            let CertificateV1::NonceGeneration {
+                batch_index, cert, ..
+            } = stamped
+            else {
                 continue;
             };
             let dealer = &cert.message().dealer_address;
@@ -1188,13 +1191,19 @@ impl MpcManager {
                     continue;
                 }
             };
-            if signer_weight < vote_quorum_weight {
+            let required_cert_weight = self
+                .resolve_avid_cert_kind_locally(*batch_index, dealer, &cert.message().messages_hash)
+                .map_or(vote_quorum_weight, |kind| match kind {
+                    CertKind::AvssVote => total_reduced_weight,
+                    CertKind::AvidVote => vote_quorum_weight,
+                });
+            if signer_weight < required_cert_weight {
                 tracing::warn!(
                     "Excluding AVID nonce cert for dealer {:?} from sizing: \
-                     signer weight {} below the vote quorum {}",
+                     signer weight {} below the required {}",
                     dealer,
                     signer_weight,
-                    vote_quorum_weight,
+                    required_cert_weight,
                 );
                 continue;
             }
@@ -2070,6 +2079,12 @@ impl MpcManager {
             };
             window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
+        }
+        if !window.floor_reached() {
+            return Err(MpcError::NotEnoughParticipants {
+                expected: window.required_weight() as usize,
+                got: window.weight() as usize,
+            });
         }
         Ok(NoncePartyAdmission {
             certified: certified_dealers,
@@ -3526,6 +3541,17 @@ impl MpcManager {
                 .inc();
             window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
+        }
+        // A pinned-cutoff window starts in `Window`, so `record` never runs the
+        // floor-crossing branch and the loop can close on an over-cutoff stamp at
+        // any weight. The floor is a precondition of the presig weight range, so
+        // check it on this exit edge too — the `Exhausted` arm only covers the
+        // stream-ran-dry edge.
+        if !window.floor_reached() {
+            return Err(MpcError::NotEnoughParticipants {
+                expected: window.required_weight() as usize,
+                got: window.weight() as usize,
+            });
         }
         Ok(NoncePartyAdmission {
             certified: certified_dealers,

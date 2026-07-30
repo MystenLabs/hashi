@@ -28,7 +28,7 @@ use tracing::info;
 /// 1. Watcher picks up new package — PackageUpgraded updates OnchainState
 /// 2. Validators confirm deposits post-upgrade — leader routes calls correctly
 /// 3. Package ID routing — OnchainState.package_id() returns the new package
-#[ignore = "re-enable after the upgrade-mechanism rework"]
+#[ignore = "enabled_versions collides with UpgradeCap::version() on first upgrade"]
 #[tokio::test]
 async fn test_upgrade_v1_to_v2() -> Result<()> {
     init_test_logging();

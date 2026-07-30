@@ -28,6 +28,10 @@ fun mpc_nonce_generation_protocol_key(): std::string::String {
     b"mpc_nonce_generation_protocol".to_string()
 }
 
+fun mpc_nonce_accumulation_window_key(): std::string::String {
+    b"mpc_nonce_accumulation_window_ms".to_string()
+}
+
 #[test]
 fun test_single_key_update_via_multikey_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
@@ -270,6 +274,7 @@ fun test_propose_vote_execute_through_quorum() {
 }
 
 const MAX_BPS: u64 = 10000;
+const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
 
 fun reject_single(key: std::string::String, value: config_value::Value) {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
@@ -321,6 +326,15 @@ fun test_reject_allowed_delta_above_max() {
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
 fun test_reject_nonce_protocol_above_one() {
     reject_single(mpc_nonce_generation_protocol_key(), config_value::new_u64(2));
+}
+
+#[test]
+#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
+fun test_reject_nonce_window_above_max() {
+    reject_single(
+        mpc_nonce_accumulation_window_key(),
+        config_value::new_u64(MAX_NONCE_ACCUMULATION_WINDOW_MS + 1),
+    );
 }
 
 #[test]
