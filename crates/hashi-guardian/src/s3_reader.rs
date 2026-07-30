@@ -12,8 +12,7 @@
 //! advances/retreats and feeds to [`GuardianReader::read_logs_in_dir`].
 
 use crate::s3_client::GuardianS3Client;
-use crate::s3_client::HistoryCheck;
-use crate::s3_client::LockCheck;
+use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
@@ -159,7 +158,7 @@ impl GuardianReader {
     ) -> GuardianResult<Option<CeremonyLogMessage>> {
         let keys = self
             .s3
-            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
+            .list_keys(&format!("{}/", S3_DIR_CEREMONY), true)
             .await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
@@ -193,17 +192,12 @@ impl GuardianReader {
         build_policy: BuildPolicy,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self
-            .s3
-            .validate_prefix_history_and_list_keys(&prefix)
-            .await?;
+        let keys = self.s3.list_keys(&prefix, false).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        // The enclosing prefix's version history was checked while listing the
-        // candidate keys above, so the selected key does not need another check.
         let msg = self
-            .read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::AlreadyChecked)
+            .read_kp_share_state_log_at_key(&key, build_policy)
             .await?;
         if msg.sharing_seq != sharing_seq {
             return Err(InvalidS3Log(format!(
@@ -227,9 +221,7 @@ impl GuardianReader {
         cert_seq: u64,
     ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
-        // Unlike the latest-state path, this direct read has not already
-        // checked an enclosing prefix, so validate this exact key's history.
-        self.read_kp_share_state_log_at_key(&key, BuildPolicy::Current, HistoryCheck::Required)
+        self.read_kp_share_state_log_at_key(&key, BuildPolicy::Current)
             .await
     }
 
@@ -238,14 +230,13 @@ impl GuardianReader {
         &mut self,
         key: &str,
         build_policy: BuildPolicy,
-        history_check: HistoryCheck,
     ) -> GuardianResult<KpShareStateLogMessage> {
         // KP-share locks are short-lived and expected to expire. Expiry permits
         // deletion but does not cause it; while an object remains, its contents
         // are authenticatable through the enclave signature verified below.
         let record = self
             .s3
-            .get_log_record_inner(key, LockCheck::Skipped, history_check)
+            .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
         let verified_record = self.verify_record(record).await?;
         build_policy.enforce(&self.allowlist, verified_record.build_pcrs())?;
@@ -320,7 +311,7 @@ impl GuardianReader {
     async fn read_latest_committee_update(&mut self) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
-            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
+            .list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE), true)
             .await?;
         let Some(key) = keys
             .into_iter()
@@ -356,7 +347,7 @@ impl GuardianReader {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_GENESIS))
+            .list_keys(&format!("{}/", S3_DIR_GENESIS), true)
             .await?;
         if keys.is_empty() {
             return Ok(None);

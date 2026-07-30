@@ -127,7 +127,7 @@ async fn hour_bucket_has_success(
     bucket: &str,
 ) -> GuardianResult<bool> {
     let keys = s3_client
-        .validate_prefix_history_and_list_keys(&format!("{bucket}success-"))
+        .list_keys(&format!("{bucket}success-"), true)
         .await?;
     Ok(!keys.is_empty())
 }
