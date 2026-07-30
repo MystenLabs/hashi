@@ -36,6 +36,9 @@ pub enum TobError {
 
     #[error("Invalid state: {0}")]
     InvalidState(String),
+
+    #[error("incomplete cert table read: {0}")]
+    IncompleteRead(String),
 }
 
 impl From<TobError> for ChannelError {
@@ -120,6 +123,16 @@ impl Drop for SuiTobChannel {
     }
 }
 
+fn tob_fetch_error(e: anyhow::Error) -> TobError {
+    if e.downcast_ref::<crate::onchain::IncompleteCertTableRead>()
+        .is_some()
+    {
+        TobError::IncompleteRead(e.to_string())
+    } else {
+        TobError::RpcError(e.to_string())
+    }
+}
+
 pub async fn fetch_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
@@ -133,7 +146,7 @@ pub async fn fetch_certificates(
         let Some(certs) = onchain_state
             .fetch_stamped_certs(epoch, batch_index, protocol_type)
             .await
-            .map_err(|e| TobError::RpcError(e.to_string()))?
+            .map_err(tob_fetch_error)?
         else {
             return Ok(vec![]);
         };
@@ -145,7 +158,7 @@ pub async fn fetch_certificates(
         let Some(certs) = onchain_state
             .fetch_certs(epoch, batch_index, protocol_type)
             .await
-            .map_err(|e| TobError::RpcError(e.to_string()))?
+            .map_err(tob_fetch_error)?
         else {
             return Ok(vec![]);
         };
@@ -268,6 +281,15 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                     self.pending_fetch = None;
                     match result {
                         Ok(certs) => certs,
+                        Err(TobError::IncompleteRead(msg)) => {
+                            tracing::debug!(
+                                "{:?} TOB cert read for epoch {} raced an insert ({msg}); \
+                                 retrying",
+                                self.protocol_type,
+                                self.epoch,
+                            );
+                            Vec::new()
+                        }
                         Err(e) => {
                             self.wait_started = None;
                             return Err(ChannelError::from(e));
