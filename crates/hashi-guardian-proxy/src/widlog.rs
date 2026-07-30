@@ -20,7 +20,6 @@
 use crate::metrics::ProxyMetrics;
 use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::log::S3_DIR_WITHDRAW;
-use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
@@ -306,6 +305,7 @@ pub(crate) mod test_store {
     use bitcoin::hashes::Hash as _;
     use bitcoin::Network;
     use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
