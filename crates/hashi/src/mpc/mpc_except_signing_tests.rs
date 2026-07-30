@@ -10966,9 +10966,15 @@ async fn test_nonce_window_live_collection_past_floor() {
         dry_below_floor.map(|a| a.certified.len())
     );
     assert_eq!(
-        metrics.mpc_nonce_window_closed_below_floor_total.get(),
+        metrics.mpc_nonce_floor_unreached_total.get(),
         1,
-        "the below-floor exit must be counted; erroring earlier skipped this"
+        "a dry stream below the floor is a floor-unreached batch; erroring earlier \
+         skipped the attribution entirely"
+    );
+    assert_eq!(
+        metrics.mpc_nonce_window_closed_below_floor_total.get(),
+        0,
+        "nothing closed the window here — the cert list simply ran out"
     );
 }
 

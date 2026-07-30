@@ -2097,11 +2097,19 @@ impl MpcManager {
                     window.weight(),
                     window.required_weight(),
                 );
-            } else {
+            } else if window.closed() {
                 metrics.mpc_nonce_window_closed_below_floor_total.inc();
                 tracing::warn!(
                     "nonce batch {batch_index} closed on the window cutoff under the \
                      floor: admitted {} of {} required",
+                    window.weight(),
+                    window.required_weight(),
+                );
+            } else {
+                metrics.mpc_nonce_floor_unreached_total.inc();
+                tracing::warn!(
+                    "nonce batch {batch_index} ran out of certs under the floor: admitted \
+                     {} of {} required",
                     window.weight(),
                     window.required_weight(),
                 );
@@ -3577,11 +3585,19 @@ impl MpcManager {
                     window.weight(),
                     window.required_weight(),
                 );
-            } else {
+            } else if window.closed() {
                 metrics.mpc_nonce_window_closed_below_floor_total.inc();
                 tracing::warn!(
                     "nonce batch {batch_index} closed on the window cutoff under the \
                      floor: admitted {} of {} required",
+                    window.weight(),
+                    window.required_weight(),
+                );
+            } else {
+                metrics.mpc_nonce_floor_unreached_total.inc();
+                tracing::warn!(
+                    "nonce batch {batch_index} ran out of certs under the floor: admitted \
+                     {} of {} required",
                     window.weight(),
                     window.required_weight(),
                 );
