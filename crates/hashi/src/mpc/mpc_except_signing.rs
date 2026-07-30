@@ -5677,6 +5677,29 @@ impl MpcManager {
         }
     }
 
+    /// The owner of each reduced-domain share index for `epoch`, keyed by
+    /// share index and valued by validator address (party ids are
+    /// committee-member indices). Signing accepts a partial signature for a
+    /// share index only from that index's owner, which is what makes
+    /// bad-share attribution authoritative — a peer cannot claim (or
+    /// poison) another peer's shares.
+    pub fn share_owners_for_epoch(&self, epoch: u64) -> MpcResult<HashMap<ShareIndex, Address>> {
+        let (nodes, _, _) = self.config_for_epoch(epoch)?;
+        let committee = self.committee_for_epoch(epoch)?;
+        let mut owners = HashMap::new();
+        for (index, member) in committee.members().iter().enumerate() {
+            let share_ids = nodes.share_ids_of(index as PartyId).map_err(|e| {
+                MpcError::InvalidConfig(format!(
+                    "no share ids for committee member {index} in epoch {epoch}: {e}"
+                ))
+            })?;
+            for share_id in share_ids {
+                owners.insert(share_id, member.validator_address());
+            }
+        }
+        Ok(owners)
+    }
+
     fn accuser_party_id(&self, epoch: u64, caller: &Address) -> MpcResult<PartyId> {
         self.committee_for_epoch(epoch)?
             .index_of(caller)

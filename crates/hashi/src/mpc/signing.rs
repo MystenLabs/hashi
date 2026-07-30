@@ -97,6 +97,12 @@ struct SigningEpochConfig {
     threshold: u16,
     key_shares: avss::SharesForNode,
     verifying_key: G,
+    /// Authoritative owner of each reduced-domain share index (from the
+    /// epoch's reduced `Nodes`; see `MpcManager::share_owners_for_epoch`).
+    /// Merging accepts a partial signature for an index only from its
+    /// owner, and blame attribution reads the same map, so a peer can
+    /// neither poison nor take credit for another peer's shares.
+    share_owners: HashMap<ShareIndex, Address>,
     refill_divisor: usize,
 }
 
@@ -245,6 +251,7 @@ impl SigningManager {
         threshold: u16,
         key_shares: avss::SharesForNode,
         verifying_key: G,
+        share_owners: HashMap<ShareIndex, Address>,
         presignatures: Presignatures,
         batch_index: u32,
         batch_start_index: u64,
@@ -270,6 +277,7 @@ impl SigningManager {
                 threshold,
                 key_shares,
                 verifying_key,
+                share_owners,
                 refill_divisor,
             }),
             state: RwLock::new(SigningPoolState {
@@ -290,6 +298,7 @@ impl SigningManager {
         threshold: u16,
         key_shares: avss::SharesForNode,
         verifying_key: G,
+        share_owners: HashMap<ShareIndex, Address>,
         retained: Vec<(Presignatures, u32, u64)>,
         num_consumed: u64,
         pending: &HashSet<u64>,
@@ -339,6 +348,7 @@ impl SigningManager {
                 threshold,
                 key_shares,
                 verifying_key,
+                share_owners,
                 refill_divisor,
             }),
             state: RwLock::new(SigningPoolState {
@@ -526,18 +536,14 @@ impl SigningManager {
                 )
                 .await
             {
-                Ok((public_nonce, partials)) => {
-                    let contributors = partials.iter().map(|e| (e.index, self_address)).collect();
-                    pending.push(InputSigningState {
-                        signing_id: input.signing_id,
-                        message: input.message,
-                        public_nonce,
-                        derivation_address: input.derivation_address,
-                        partials,
-                        contributors,
-                        peers_remaining: all_peers.clone(),
-                    })
-                }
+                Ok((public_nonce, partials)) => pending.push(InputSigningState {
+                    signing_id: input.signing_id,
+                    message: input.message,
+                    public_nonce,
+                    derivation_address: input.derivation_address,
+                    partials,
+                    peers_remaining: all_peers.clone(),
+                }),
                 Err(e) => {
                     let _ = result_tx.send((input.signing_id, Err(e)));
                 }
@@ -572,12 +578,7 @@ impl SigningManager {
                         let st = pending.swap_remove(i);
                         let _ = result_tx.send((st.signing_id, Ok(sig)));
                         if !bad_indices.is_empty() {
-                            self.blame_bad_shares(
-                                &bad_indices,
-                                &st.contributors,
-                                &mut pending,
-                                metrics,
-                            );
+                            self.blame_bad_shares(&bad_indices, &mut pending, metrics);
                         }
                     }
                     FinalizeOutcome::Failed(e) => {
@@ -806,15 +807,6 @@ struct InputSigningState {
     public_nonce: G,
     derivation_address: Option<DerivationAddress>,
     partials: Vec<Eval<S>>,
-    /// The peer whose value was accepted for each share index in `partials`
-    /// (self for locally generated partials). Exactly one value per index is
-    /// ever accepted — first writer wins — so when RS recovery proves an
-    /// index's value bad, this map names the peer that sent it. The
-    /// first-writer rule also keeps a peer claiming someone else's index
-    /// from either failing aggregation (duplicate indices are rejected by
-    /// `aggregate_signatures`) or shifting blame onto the index's real
-    /// owner: whichever value is in the pool, its actual sender is recorded.
-    contributors: HashMap<ShareIndex, Address>,
     /// Peers not yet merged for this input
     peers_remaining: HashSet<Address>,
 }
@@ -986,19 +978,30 @@ impl SigningManager {
                         {
                             let st = &mut pending[i];
                             for eval in sigs {
-                                // First writer wins per share index: a
-                                // duplicate would fail aggregation outright
-                                // (`aggregate_signatures` rejects duplicate
-                                // indices), and recording the accepted
-                                // value's actual sender is what keeps blame
-                                // attribution honest.
-                                if let std::collections::hash_map::Entry::Vacant(slot) =
-                                    st.contributors.entry(eval.index)
-                                {
-                                    slot.insert(peer);
-                                    st.partials.push(eval);
-                                    progressed = true;
+                                // Only the index's owner may supply its
+                                // value. A peer squatting other peers'
+                                // indices could otherwise push the pool's
+                                // error count past RS capacity, and since
+                                // blame runs only on successful recovery,
+                                // such a flooder would stall every chunk
+                                // without ever being identified.
+                                if self.config.share_owners.get(&eval.index) != Some(&peer) {
+                                    tracing::warn!(
+                                        "Dropping partial signature from {peer} for share \
+                                         index {} it does not own",
+                                        eval.index,
+                                    );
+                                    continue;
                                 }
+                                // A duplicate index would fail aggregation
+                                // outright (`aggregate_signatures` rejects
+                                // duplicates), so keep the first value even
+                                // if the owner sends an index twice.
+                                if st.partials.iter().any(|e| e.index == eval.index) {
+                                    continue;
+                                }
+                                st.partials.push(eval);
+                                progressed = true;
                             }
                         }
                     }
@@ -1025,24 +1028,25 @@ impl SigningManager {
         progressed
     }
 
-    /// Excludes the peers that contributed provably bad shares (per the
-    /// completed input's contributor map) for the rest of the epoch, and
-    /// scrubs *all* of their contributions from the still-pending inputs:
-    /// once one share from a peer is proven bad, its other shares are not
-    /// trusted either, and removing them returns the remaining aggregations
-    /// to the clean first-`threshold`-shares path instead of paying the RS
-    /// recovery detour (more partials, more rounds) per input.
+    /// Excludes the peers that own provably bad shares (ownership is
+    /// authoritative — merging only ever accepts an index's value from its
+    /// owner in `SigningEpochConfig::share_owners`), and scrubs *all* of
+    /// their shares from the still-pending inputs: once one share from a
+    /// peer is proven bad, its other shares are not trusted either, and
+    /// removing them returns the remaining aggregations to the clean
+    /// first-`threshold`-shares path instead of paying the RS recovery
+    /// detour (more partials, more rounds) per input.
     fn blame_bad_shares(
         &self,
         bad_indices: &[ShareIndex],
-        contributors: &HashMap<ShareIndex, Address>,
         pending: &mut [InputSigningState],
         metrics: &Metrics,
     ) {
         let self_address = self.config.address;
+        let share_owners = &self.config.share_owners;
         let mut blamed: HashSet<Address> = HashSet::new();
         for idx in bad_indices {
-            match contributors.get(idx) {
+            match share_owners.get(idx) {
                 Some(peer) if *peer == self_address => {
                     // Locally generated shares failing verification points at
                     // local state corruption, not a peer to exclude.
@@ -1058,13 +1062,14 @@ impl SigningManager {
                         .with_label_values(&[&peer.to_string()])
                         .inc();
                     tracing::warn!(
-                        "Peer {peer} contributed a provably bad partial signature \
-                         (share index {idx}); excluding its shares for the rest of the epoch"
+                        "Peer {peer} owns a provably bad partial signature \
+                         (share index {idx}); excluding its shares"
                     );
                 }
+                // Unreachable in practice: merging rejects unowned indices
+                // and local shares are self-owned.
                 None => tracing::warn!(
-                    "RS recovery corrected a bad share at index {idx} with no recorded \
-                     contributor"
+                    "RS recovery corrected a bad share at unowned index {idx}"
                 ),
             }
         }
@@ -1072,15 +1077,13 @@ impl SigningManager {
             return;
         }
         self.bad_share_peers.blame(&blamed);
+        let scrub: HashSet<ShareIndex> = share_owners
+            .iter()
+            .filter(|(_, owner)| blamed.contains(*owner))
+            .map(|(idx, _)| *idx)
+            .collect();
         for st in pending.iter_mut() {
-            let scrub: HashSet<ShareIndex> = st
-                .contributors
-                .iter()
-                .filter(|(_, peer)| blamed.contains(*peer))
-                .map(|(idx, _)| *idx)
-                .collect();
             st.partials.retain(|eval| !scrub.contains(&eval.index));
-            st.contributors.retain(|_, peer| !blamed.contains(peer));
             // Drop blamed peers from the not-yet-merged set too, so inputs
             // that can no longer reach threshold fail fast as
             // TooManyInvalidSignatures instead of waiting out the deadline.
@@ -1176,6 +1179,13 @@ mod tests {
 
     fn test_address(i: usize) -> Address {
         Address::new([i as u8; 32])
+    }
+
+    /// Ownership map matching the mock setup: member `i` owns share `i + 1`.
+    fn test_share_owners(n: u16) -> HashMap<ShareIndex, Address> {
+        (0..n as usize)
+            .map(|i| (ShareIndex::new(i as u16 + 1).unwrap(), test_address(i)))
+            .collect()
     }
 
     fn test_request_id() -> Address {
@@ -1559,6 +1569,7 @@ mod tests {
                         t,
                         key_shares,
                         vk,
+                        test_share_owners(n),
                         presignatures,
                         0, // batch_index
                         0, // batch_start_index
@@ -1914,6 +1925,7 @@ mod tests {
                 shares: vec![sk_shares[0].clone()],
             },
             vk,
+            test_share_owners(4),
             vec![(new_batch(), 0, 0), (new_batch(), 1, size0)],
             num_consumed,
             &pending,
@@ -1955,6 +1967,7 @@ mod tests {
                 shares: vec![sk_shares[0].clone()],
             },
             vk,
+            test_share_owners(4),
             vec![(new_batch(), 1, size0)], // batch 0 dropped
             num_consumed,
             &pending, // pending {3} lives in the dropped batch 0
@@ -2319,7 +2332,6 @@ mod tests {
     fn test_input_state(
         signing_id: Address,
         partials: Vec<Eval<S>>,
-        contributors: Vec<(u16, Address)>,
         peers_remaining: Vec<Address>,
     ) -> InputSigningState {
         InputSigningState {
@@ -2328,29 +2340,22 @@ mod tests {
             public_nonce: G::generator(),
             derivation_address: None,
             partials,
-            contributors: contributors
-                .into_iter()
-                .map(|(i, a)| (share_index(i), a))
-                .collect(),
             peers_remaining: peers_remaining.into_iter().collect(),
         }
     }
 
     #[tokio::test]
-    async fn test_blame_bad_shares_excludes_peer_and_scrubs_pending() {
+    async fn test_blame_bad_shares_excludes_owner_and_scrubs_pending() {
+        // In the mock setup member i owns share i + 1, so a bad share 2 is
+        // authoritatively peer 1's fault.
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
         let metrics = test_metrics();
         let bad_peer = test_address(1);
-        let good_peer = test_address(2);
         let other_peer = test_address(3);
 
-        // The completed input attributed share 2 to `bad_peer`.
-        let done_contributors: HashMap<ShareIndex, Address> =
-            [(share_index(2), bad_peer)].into_iter().collect();
-
-        // A still-pending input holds two shares from `bad_peer` (2 and 3)
-        // and one from `good_peer` (4).
+        // A still-pending input holds the blamed peer's share (2) and two
+        // other members' shares (3 and 4).
         let mut pending = vec![test_input_state(
             test_request_id(),
             vec![
@@ -2358,26 +2363,21 @@ mod tests {
                 eval_at(3, S::zero()),
                 eval_at(4, S::zero()),
             ],
-            vec![(2, bad_peer), (3, bad_peer), (4, good_peer)],
             vec![bad_peer, other_peer],
         )];
 
-        mgr.blame_bad_shares(&[share_index(2)], &done_contributors, &mut pending, &metrics);
+        mgr.blame_bad_shares(&[share_index(2)], &mut pending, &metrics);
 
         assert!(mgr.bad_share_peers.is_blamed(&bad_peer, Instant::now()));
         let st = &pending[0];
-        // Both of the blamed peer's shares are scrubbed, not only the caught
-        // one.
+        // The blamed peer's share is scrubbed; other owners' shares stay.
         assert_eq!(
             st.partials
                 .iter()
                 .map(|e| e.index.get())
                 .collect::<Vec<_>>(),
-            vec![4]
+            vec![3, 4]
         );
-        assert!(!st.contributors.contains_key(&share_index(2)));
-        assert!(!st.contributors.contains_key(&share_index(3)));
-        assert!(st.contributors.contains_key(&share_index(4)));
         assert!(!st.peers_remaining.contains(&bad_peer));
         assert!(st.peers_remaining.contains(&other_peer));
         assert_eq!(
@@ -2447,7 +2447,6 @@ mod tests {
         let mut pending = vec![test_input_state(
             test_request_id(),
             vec![],
-            vec![],
             vec![blamed, healthy],
         )];
 
@@ -2465,24 +2464,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collect_first_writer_wins_per_share_index() {
-        // A peer claiming a share index that is already in the pool must not
-        // overwrite it (a duplicate would fail aggregation, and accepting the
-        // second value would let a squatter shift blame onto the index's real
-        // owner); its genuinely new shares are still accepted and attributed
-        // to it.
+    async fn test_collect_drops_evals_for_shares_the_peer_does_not_own() {
+        // A garbage-flooding peer answers with values for every index. Only
+        // the value for its own share (member 1 owns share 2) may enter the
+        // pool: accepted squats would push the pool's error count past RS
+        // capacity, and a recovery that never succeeds never blames anyone.
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
         let metrics = test_metrics();
-        let self_address = mgr.config.address;
-        let squatter = test_address(1);
+        let flooder = test_address(1);
         let mut rng = StdRng::seed_from_u64(4242);
 
         let responses = HashMap::from([(
-            squatter,
+            flooder,
             Ok(vec![
-                eval_at(1, S::rand(&mut rng)),
-                eval_at(5, S::rand(&mut rng)),
+                eval_at(1, S::rand(&mut rng)), // caller's share
+                eval_at(2, S::rand(&mut rng)), // flooder's own share
+                eval_at(3, S::rand(&mut rng)), // another member's share
+                eval_at(4, S::rand(&mut rng)), // another member's share
+                eval_at(9, S::rand(&mut rng)), // nonexistent share
             ]),
         )]);
         let p2p = CannedP2PChannel { responses };
@@ -2490,8 +2490,7 @@ mod tests {
         let mut pending = vec![test_input_state(
             test_request_id(),
             vec![eval_at(1, S::zero())],
-            vec![(1, self_address)],
-            vec![squatter],
+            vec![flooder],
         )];
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2499,16 +2498,68 @@ mod tests {
             .await;
 
         let st = &pending[0];
-        let index_1_values: Vec<&S> = st
+        let mut indices: Vec<u16> = st.partials.iter().map(|e| e.index.get()).collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            vec![1, 2],
+            "only the local share and the flooder's own share may be in the pool"
+        );
+        let share_1_values: Vec<&S> = st
             .partials
             .iter()
             .filter(|e| e.index == share_index(1))
             .map(|e| &e.value)
             .collect();
-        assert_eq!(index_1_values, vec![&S::zero()], "share 1 must keep the first-written value");
-        assert_eq!(st.contributors.get(&share_index(1)), Some(&self_address));
-        assert_eq!(st.contributors.get(&share_index(5)), Some(&squatter));
-        assert_eq!(st.partials.len(), 2);
+        assert_eq!(
+            share_1_values,
+            vec![&S::zero()],
+            "the local value for share 1 must be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_succeeds_and_blames_despite_a_garbage_flooder() {
+        // End-to-end regression for the flooding attack: one peer answers
+        // with garbage for every share index. Ownership filtering caps the
+        // damage at the flooder's own share, so signing must still succeed,
+        // and only the flooder may end up blamed (whether blame runs depends
+        // on whether the clean path or RS recovery finishes the input).
+        let setup = SigningTestSetup::new(4);
+        let message = b"garbage-flood";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        let mut rng = StdRng::seed_from_u64(1717);
+
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let flood: Vec<Eval<S>> = (1..=4u16).map(|i| eval_at(i, S::rand(&mut rng))).collect();
+        let mut responses = HashMap::new();
+        responses.insert(test_address(1), Ok(flood));
+        responses.insert(test_address(2), Ok(all_sigs[2].clone()));
+        responses.insert(test_address(3), Ok(all_sigs[3].clone()));
+        let p2p = CannedP2PChannel { responses };
+
+        let metrics = test_metrics();
+        let sig = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &metrics,
+        )
+        .await
+        .expect("a single flooder must not block signing");
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+        let blamed = setup.managers[0].bad_share_peers.snapshot(Instant::now());
+        assert!(
+            blamed.is_subset(&[test_address(1)].into_iter().collect()),
+            "only the flooder may be blamed, got: {blamed:?}"
+        );
     }
 
     #[tokio::test]

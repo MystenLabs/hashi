@@ -542,12 +542,14 @@ impl MpcService {
     async fn prepare_signing(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
         let (committee, presignatures) = self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
+        let share_owners = self.share_owners_for_epoch(epoch)?;
         let signing_manager = SigningManager::new(
             address,
             committee,
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
+            share_owners,
             presignatures,
             0, // batch_index
             0, // batch_start_index
@@ -556,6 +558,26 @@ impl MpcService {
         );
         self.inner.store_signing_manager(signing_manager);
         Ok(())
+    }
+
+    /// The authoritative share-index → owner map for `epoch`, from the MPC
+    /// manager's reduced node set.
+    fn share_owners_for_epoch(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<
+        std::collections::HashMap<fastcrypto_tbls::types::ShareIndex, sui_sdk_types::Address>,
+    > {
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
+        let owners = mpc_manager
+            .read()
+            .unwrap()
+            .share_owners_for_epoch(epoch)
+            .map_err(|e| anyhow::anyhow!("Failed to derive share owners for epoch {epoch}: {e}"))?;
+        Ok(owners)
     }
 
     fn bail_if_reconfig_pending(&self) -> anyhow::Result<()> {
@@ -704,12 +726,14 @@ impl MpcService {
         );
         let address = self.inner.config.validator_address()?;
         let retained_count = retained.len();
+        let share_owners = self.share_owners_for_epoch(epoch)?;
         let signing_manager = SigningManager::new_recovered(
             address,
             committee,
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
+            share_owners,
             retained,
             num_consumed,
             &pending,
