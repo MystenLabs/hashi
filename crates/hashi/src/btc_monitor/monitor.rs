@@ -502,7 +502,7 @@ impl Monitor {
                     }
                 }
                 Some(join_result) = self.deposit_check_workers.join_next() => {
-                    if let Err(e) = join_result {
+                    if let Err(e) = join_result && !e.is_cancelled() {
                         error!("Deposit check worker task failed: {e}");
                     }
                 }
@@ -586,8 +586,8 @@ impl Monitor {
                     reorganized.len()
                 );
                 self.metrics.kyoto_reorgs.inc();
-                // Checks are tied to the tip they started against. Cancel them before
-                // clearing caches so stale workers cannot repopulate disconnected data.
+                // Checks are tied to the tip they started against. Request cancellation
+                // before clearing caches, though workers may run until their next await.
                 self.deposit_check_workers.abort_all();
                 self.deposit_lookup_cache.clear();
                 self.deposit_observation_cache.clear();
@@ -660,12 +660,9 @@ impl Monitor {
                 observation,
             } => {
                 self.record_deposit_observation(outpoint, observation);
-                self.rebuild_confirmation_metrics();
             }
             MonitorMessage::ForgetDeposit(outpoint) => {
-                if self.deposit_observation_cache.remove(&outpoint).is_some() {
-                    self.rebuild_confirmation_metrics();
-                }
+                self.forget_deposit_observation(outpoint);
             }
         }
     }
@@ -676,12 +673,31 @@ impl Monitor {
         observation: CachedDepositObservation,
     ) {
         let last_updated_tip = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
-        self.deposit_observation_cache.insert(
+        let previous = self.deposit_observation_cache.insert(
             outpoint,
             CachedDepositEntry {
                 observation,
                 last_updated_tip,
             },
+        );
+        update_confirmation_metrics_for_change(
+            &self.metrics,
+            last_updated_tip,
+            previous.map(|entry| entry.observation),
+            Some(observation),
+        );
+    }
+
+    fn forget_deposit_observation(&mut self, outpoint: bitcoin::OutPoint) {
+        let Some(previous) = self.deposit_observation_cache.remove(&outpoint) else {
+            return;
+        };
+        let tip_height = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
+        update_confirmation_metrics_for_change(
+            &self.metrics,
+            tip_height,
+            Some(previous.observation),
+            None,
         );
     }
 
@@ -1056,15 +1072,7 @@ fn rebuild_confirmation_metrics_inner(
 
     let mut counts = [0i64; crate::metrics::CONFIRMATION_STATUS_LABELS.len()];
     for entry in cache.values() {
-        let idx = match entry.observation {
-            CachedDepositObservation::NotFound => 0,
-            CachedDepositObservation::InMempool => 1,
-            CachedDepositObservation::InBlock { height } => {
-                let confirmations = (tip_height + 1).saturating_sub(height);
-                // +2 skips the not_found/mempool slots; 0..=6 confirmations land in indices 2..=8.
-                (2 + confirmations.min(6) as usize).min(8)
-            }
-        };
+        let idx = confirmation_bucket(entry.observation, tip_height);
         counts[idx] += 1;
     }
 
@@ -1079,22 +1087,71 @@ fn rebuild_confirmation_metrics_inner(
     }
 }
 
+fn update_confirmation_metrics_for_change(
+    metrics: &Metrics,
+    tip_height: u32,
+    previous: Option<CachedDepositObservation>,
+    current: Option<CachedDepositObservation>,
+) {
+    if let Some(previous) = previous {
+        let label =
+            crate::metrics::CONFIRMATION_STATUS_LABELS[confirmation_bucket(previous, tip_height)];
+        metrics
+            .deposit_request_confirmations
+            .with_label_values(&[label])
+            .dec();
+    }
+    if let Some(current) = current {
+        let label =
+            crate::metrics::CONFIRMATION_STATUS_LABELS[confirmation_bucket(current, tip_height)];
+        metrics
+            .deposit_request_confirmations
+            .with_label_values(&[label])
+            .inc();
+    }
+}
+
+fn confirmation_bucket(observation: CachedDepositObservation, tip_height: u32) -> usize {
+    match observation {
+        CachedDepositObservation::NotFound => 0,
+        CachedDepositObservation::InMempool => 1,
+        CachedDepositObservation::InBlock { height } => {
+            let confirmations = (tip_height + 1).saturating_sub(height);
+            // +2 skips the not_found/mempool slots; 0..=6 confirmations land in indices 2..=8.
+            (2 + confirmations.min(6) as usize).min(8)
+        }
+    }
+}
+
 fn send_observation(
     client_tx: &tokio::sync::mpsc::Sender<MonitorMessage>,
     outpoint: bitcoin::OutPoint,
     observation: CachedDepositObservation,
 ) {
-    if let Err(e) = client_tx.try_send(MonitorMessage::RecordDepositObservation {
+    let result = client_tx.try_send(MonitorMessage::RecordDepositObservation {
         outpoint,
         observation,
-    }) {
-        debug!("Failed to record deposit observation (monitor shutting down?): {e}");
+    });
+    match result {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            debug!("Dropping deposit observation because the monitor channel is full");
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            debug!("Dropping deposit observation because the monitor channel is closed");
+        }
     }
 }
 
 fn send_forget(client_tx: &tokio::sync::mpsc::Sender<MonitorMessage>, outpoint: bitcoin::OutPoint) {
-    if let Err(e) = client_tx.try_send(MonitorMessage::ForgetDeposit(outpoint)) {
-        debug!("Failed to forget deposit observation (monitor shutting down?): {e}");
+    match client_tx.try_send(MonitorMessage::ForgetDeposit(outpoint)) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            debug!("Dropping deposit observation removal because the monitor channel is full");
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            debug!("Dropping deposit observation removal because the monitor channel is closed");
+        }
     }
 }
 
@@ -1404,6 +1461,45 @@ mod tests {
                 "{observation:?} with tip {tip} should land in {want_label}"
             );
         }
+    }
+
+    #[test]
+    fn incremental_observation_changes_update_affected_buckets() {
+        let metrics = fresh_metrics();
+        let tip = 100;
+
+        update_confirmation_metrics_for_change(
+            &metrics,
+            tip,
+            None,
+            Some(CachedDepositObservation::InMempool),
+        );
+        assert_eq!(bucket(&metrics, "mempool"), 1);
+
+        update_confirmation_metrics_for_change(
+            &metrics,
+            tip,
+            Some(CachedDepositObservation::InMempool),
+            Some(CachedDepositObservation::InBlock { height: 100 }),
+        );
+        assert_eq!(bucket(&metrics, "mempool"), 0);
+        assert_eq!(bucket(&metrics, "1"), 1);
+
+        update_confirmation_metrics_for_change(
+            &metrics,
+            tip,
+            Some(CachedDepositObservation::InBlock { height: 100 }),
+            Some(CachedDepositObservation::InBlock { height: 100 }),
+        );
+        assert_eq!(bucket(&metrics, "1"), 1);
+
+        update_confirmation_metrics_for_change(
+            &metrics,
+            tip,
+            Some(CachedDepositObservation::InBlock { height: 100 }),
+            None,
+        );
+        assert_eq!(bucket(&metrics, "1"), 0);
     }
 
     #[test]
