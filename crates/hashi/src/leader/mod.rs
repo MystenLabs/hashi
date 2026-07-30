@@ -29,6 +29,7 @@ use futures::future::OptionFuture;
 use hashi_types::committee::MemberSignature;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +56,7 @@ pub(crate) struct LeaderService {
     // Background tasks currently confirming approved Bitcoin deposits.
     approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
     // Deposit requests loaded from Bitcoin/on-chain state and waiting for approval processing.
-    pending_unapproved_deposit_requests: Vec<DepositRequest>,
+    pending_unapproved_deposit_requests: VecDeque<DepositRequest>,
     // Last hashi epoch processed by the checkpoint-triggered deposit path.
     last_unapproved_deposit_epoch: Option<u64>,
     // Deposit IDs that should not be retried by this leader process.
@@ -134,7 +135,7 @@ impl LeaderService {
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             unapproved_deposit_tasks: JoinSet::new(),
             approved_deposit_tasks: JoinSet::new(),
-            pending_unapproved_deposit_requests: Vec::new(),
+            pending_unapproved_deposit_requests: VecDeque::new(),
             last_unapproved_deposit_epoch: None,
             never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),

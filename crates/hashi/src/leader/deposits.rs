@@ -71,6 +71,7 @@ impl LeaderService {
         self.pending_unapproved_deposit_requests = deposit_requests
             .into_iter()
             .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
+            .filter(|request| !self.inflight_deposits.contains(&request.id))
             .filter(|request| match mode {
                 UnapprovedDepositReloadMode::All => request
                     .approval_cert
@@ -96,15 +97,14 @@ impl LeaderService {
         }
 
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
-        for deposit_request in self.pending_unapproved_deposit_requests.clone() {
-            if self.unapproved_deposit_tasks.len() >= max_concurrent {
+        while self.unapproved_deposit_tasks.len() < max_concurrent {
+            let Some(deposit_request) = self.pending_unapproved_deposit_requests.pop_front() else {
                 break;
-            }
+            };
             let deposit_id = deposit_request.id;
             if self.inflight_deposits.contains(&deposit_id) {
                 continue;
             }
-
             let inner = self.inner.clone();
 
             self.inflight_deposits.insert(deposit_id);
@@ -231,11 +231,15 @@ impl LeaderService {
         match result {
             Ok((deposit_id, result)) => {
                 self.inflight_deposits.remove(&deposit_id);
-                self.pending_unapproved_deposit_requests
-                    .retain(|request| request.id != deposit_id);
                 match result {
                     Ok(()) => {
                         info!(deposit_id = %deposit_id, "Deposit processed successfully");
+                    }
+                    Err(err @ UnapprovedDepositError::BitcoinNotConfirmed(_)) => {
+                        debug!(deposit_id = %deposit_id, "Deferring deposit retry: {err:#}");
+                    }
+                    Err(err @ UnapprovedDepositError::AlreadyApprovedThisEpoch) => {
+                        debug!(deposit_id = %deposit_id, "Skipping stale deposit approval work: {err:#}");
                     }
                     Err(err) => match err.kind() {
                         UnapprovedDepositErrorKind::RetryOnNextBlock => {
