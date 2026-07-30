@@ -133,6 +133,7 @@ pub struct Metrics {
     pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
     /// Nonce batches abandoned because the on-chain certs never reached the floor
     pub mpc_nonce_floor_unreached_total: IntCounter,
+    pub mpc_nonce_local_skip_batches_total: IntCounter,
     /// Batch index of the most recently collected nonce batch.
     pub mpc_nonce_batch_index: IntGauge,
     /// Dealers admitted into that batch.
@@ -758,6 +759,13 @@ impl Metrics {
                 "hashi_mpc_nonce_floor_unreached_total",
                 "Nonce batches abandoned because the on-chain certified weight never \
                  reached the required floor",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_local_skip_batches_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_local_skip_batches_total",
+                "Nonce batches discarded because this node skipped a dealer its peers \
+                 admitted",
                 registry,
             )
             .unwrap(),

@@ -737,7 +737,7 @@ mod tests {
         )
         .await?;
         rotate_into_avid(&mut networks).await?;
-        
+
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();

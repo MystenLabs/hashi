@@ -134,6 +134,17 @@ enum WindowedNonceReceive {
     Closed,
 }
 
+#[derive(Debug)]
+pub struct NoncePartyAdmission {
+    pub certified: HashSet<Address>,
+    pub local_skips: u32,
+}
+
+pub struct NoncePartyOutcome {
+    pub outputs: Vec<batch_avss::ReceiverOutput>,
+    pub local_skips: u32,
+}
+
 pub struct MpcManager {
     // Immutable during the epoch
     pub party_id: PartyId,
@@ -995,12 +1006,12 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         cutoff_ms: Option<u64>,
         metrics: &Metrics,
-    ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+    ) -> MpcResult<NoncePartyOutcome> {
         let protocol = {
             let mgr = mpc_manager.read().unwrap();
             mgr.mpc_config.nonce_generation_protocol
         };
-        let certified = match protocol {
+        let admission = match protocol {
             NonceGenerationProtocol::Vanilla => {
                 Self::run_as_nonce_party(
                     mpc_manager,
@@ -1032,7 +1043,7 @@ impl MpcManager {
             NonceGenerationProtocol::Vanilla => consume_certified_nonce_outputs(
                 &mut mgr.dealer_nonce_outputs,
                 batch_index,
-                &certified,
+                &admission.certified,
                 |output| output.clone(),
             ),
             NonceGenerationProtocol::Avid => {
@@ -1044,7 +1055,7 @@ impl MpcManager {
                 consume_certified_nonce_outputs(
                     &mut mgr.dealer_avid_nonce_outputs,
                     batch_index,
-                    &certified,
+                    &admission.certified,
                     |output| output.clone().into_legacy(&indices),
                 )
             }
@@ -1053,12 +1064,16 @@ impl MpcManager {
         metrics.mpc_nonce_batch_dealers.set(dealers.len() as i64);
         tracing::info!(
             "run_nonce_party_phase: epoch={}, batch_index={batch_index}, \
-             cutoff_ms={cutoff_ms:?}, {pre_filter} outputs before filter, {} after. \
-             dealers={dealers:?}",
+             cutoff_ms={cutoff_ms:?}, {pre_filter} outputs before filter, {} after, \
+             local_skips={}. dealers={dealers:?}",
             mgr.mpc_config.epoch,
             dealers.len(),
+            admission.local_skips,
         );
-        Ok(outputs)
+        Ok(NoncePartyOutcome {
+            outputs,
+            local_skips: admission.local_skips,
+        })
     }
 
     pub fn reconstruct_presignatures(
@@ -1115,15 +1130,6 @@ impl MpcManager {
         certs: &[(Address, T)],
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window())
-    }
-
-    pub(crate) fn pinned_certified_nonce_dealers<T: NonceCertTimestamp>(
-        &self,
-        certs: &[(Address, T)],
-        cutoff_ms: Option<u64>,
-    ) -> (HashSet<Address>, NonceCollectionWindow) {
-        let window = NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms);
-        self.certified_nonce_dealers_in_window(certs, window)
     }
 
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
@@ -1896,12 +1902,13 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         cutoff_ms: Option<u64>,
         metrics: &Metrics,
-    ) -> MpcResult<HashSet<Address>> {
+    ) -> MpcResult<NoncePartyAdmission> {
         let mut window = {
             let mgr = mpc_manager.read().unwrap();
             NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms)
         };
         let mut certified_dealers = HashSet::new();
+        let mut local_skips = 0u32;
         loop {
             if window.closed() {
                 break;
@@ -2049,6 +2056,7 @@ impl MpcManager {
                     .contains_key(&(batch_index, dealer))
                 {
                     tracing::warn!("No nonce output for {:?} after processing", dealer);
+                    local_skips += 1;
                     continue;
                 }
                 let party_id = mgr
@@ -2063,7 +2071,10 @@ impl MpcManager {
             window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
         }
-        Ok(certified_dealers)
+        Ok(NoncePartyAdmission {
+            certified: certified_dealers,
+            local_skips,
+        })
     }
 
     fn create_dealer_message(
@@ -3373,7 +3384,7 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         cutoff_ms: Option<u64>,
         metrics: &Metrics,
-    ) -> MpcResult<HashSet<Address>> {
+    ) -> MpcResult<NoncePartyAdmission> {
         let (mut window, total_reduced_weight, vote_quorum_weight) = {
             let mgr = mpc_manager.read().unwrap();
             let total = mgr.mpc_config.nodes.total_weight() as u32;
@@ -3384,6 +3395,7 @@ impl MpcManager {
             )
         };
         let mut certified_dealers = HashSet::new();
+        let mut local_skips = 0u32;
         loop {
             if window.closed() {
                 break;
@@ -3460,6 +3472,7 @@ impl MpcManager {
                                 dealer,
                                 e
                             );
+                            local_skips += 1;
                             continue;
                         }
                     }
@@ -3487,6 +3500,7 @@ impl MpcManager {
                         dealer,
                         e
                     );
+                    local_skips += 1;
                     continue;
                 }
                 let party_id = mgr
@@ -3513,7 +3527,10 @@ impl MpcManager {
             window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
         }
-        Ok(certified_dealers)
+        Ok(NoncePartyAdmission {
+            certified: certified_dealers,
+            local_skips,
+        })
     }
 
     async fn publish_nonce_generation_cert(

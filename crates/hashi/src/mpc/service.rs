@@ -533,10 +533,6 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             mgr.nonce_collection_cutoff_ms(&final_certs)
         };
-        let protocol = {
-            let mgr = mpc_manager.read().unwrap();
-            mgr.mpc_config.nonce_generation_protocol
-        };
         let canonical: Vec<(sui_sdk_types::Address, CertificateV1)> = final_certs
             .iter()
             .filter_map(|(dealer, stamped)| {
@@ -551,14 +547,6 @@ impl MpcService {
                 ))
             })
             .collect();
-        let certified_weight = match protocol {
-            NonceGenerationProtocol::Avid => {
-                avid_certified_nonce_weight(&mpc_manager, &canonical, cutoff_ms)
-            }
-            NonceGenerationProtocol::Vanilla => {
-                pinned_certified_nonce_weight(&mpc_manager, &canonical, cutoff_ms)
-            }
-        };
         let mut party_channel = PrefetchedTobChannel::new(canonical);
         let nonce_result = MpcManager::run_nonce_party_phase(
             &mpc_manager,
@@ -570,8 +558,15 @@ impl MpcService {
         )
         .await;
         drop(_timer);
-        let nonce_outputs =
-            nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
+        let outcome = nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
+        if outcome.local_skips > 0 {
+            metrics.mpc_nonce_local_skip_batches_total.inc();
+            anyhow::bail!(
+                "nonce batch {batch_index} for epoch {epoch} skipped {} dealer(s) for \
+                 node-local reasons; discarding so this node does not install a batch its peers did not build",
+                outcome.local_skips,
+            );
+        }
         let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
             (
@@ -582,24 +577,20 @@ impl MpcService {
                 },
             )
         };
-        let expected_size = presig_count(certified_weight as usize, params, batch_size_per_weight);
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
         let presignatures = Presignatures::new(
-            nonce_outputs,
+            outcome.outputs,
             batch_size_per_weight,
             params,
             USE_LEGACY_PRESIG_DERIVATION,
         )
         .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
-        anyhow::ensure!(
-            presignatures.len() == expected_size,
-            "nonce batch {batch_index} for epoch {epoch} produced {} presigs but the \
-             certified set implies {expected_size}; this node admitted a different \
-             dealer set than its peers",
+        info!(
+            "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
             presignatures.len(),
         );
         Ok((committee, presignatures))
@@ -1229,13 +1220,8 @@ impl MpcService {
                     let mgr = mpc_manager.read().unwrap();
                     mgr.nonce_collection_cutoff_ms(&certs)
                 };
-                let expected_size = expected_from(avid_certified_nonce_weight(
-                    mpc_manager,
-                    &avid_certs,
-                    cutoff_ms,
-                ))?;
                 let mut prefetched = PrefetchedTobChannel::new(avid_certs);
-                let outputs = MpcManager::run_nonce_party_phase(
+                let outcome = MpcManager::run_nonce_party_phase(
                     mpc_manager,
                     batch_index,
                     &p2p_channel,
@@ -1245,7 +1231,15 @@ impl MpcService {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("AVID nonce recovery from certs failed: {e}"))?;
-                (outputs, Some(expected_size))
+                if outcome.local_skips > 0 {
+                    self.inner.metrics.mpc_nonce_local_skip_batches_total.inc();
+                    anyhow::bail!(
+                        "AVID nonce recovery for epoch {epoch} batch {batch_index} skipped {} \
+                         dealer(s) for node-local reasons; cannot rebuild the original batch",
+                        outcome.local_skips,
+                    );
+                }
+                (outcome.outputs, None)
             }
         };
         if outputs.is_empty() {
@@ -1845,19 +1839,6 @@ fn certified_nonce_weight<T: NonceCertTimestamp>(
         .read()
         .unwrap()
         .window_certified_nonce_dealers(certs)
-        .1
-        .weight()
-}
-
-fn pinned_certified_nonce_weight<T: NonceCertTimestamp>(
-    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, T)],
-    cutoff_ms: Option<u64>,
-) -> u32 {
-    mpc_manager
-        .read()
-        .unwrap()
-        .pinned_certified_nonce_dealers(certs, cutoff_ms)
         .1
         .weight()
 }
