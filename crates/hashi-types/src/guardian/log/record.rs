@@ -347,8 +347,8 @@ impl LogRecord {
 
     /// Consume the record and extract its entry without validation.
     ///
-    /// This does not check the routing context, whether the message requires a
-    /// signature, the Guardian signature, or the Nitro attestation.
+    /// This bypasses routing checks, signed-versus-unsigned envelope checks,
+    /// Guardian signature verification, and Nitro attestation authentication.
     pub fn into_entry_unchecked(self) -> LogEntry {
         match self {
             Self::Signed(signed) => signed.into_data_unchecked(),
