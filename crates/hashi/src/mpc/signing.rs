@@ -1093,9 +1093,7 @@ impl SigningManager {
                 }
                 // Unreachable in practice: merging rejects unowned indices
                 // and local shares are self-owned.
-                None => tracing::warn!(
-                    "RS recovery corrected a bad share at unowned index {idx}"
-                ),
+                None => tracing::warn!("RS recovery corrected a bad share at unowned index {idx}"),
             }
         }
         if blamed.is_empty() {
@@ -2483,11 +2481,7 @@ mod tests {
             .await;
 
         let calls = p2p.calls.lock().unwrap();
-        assert_eq!(
-            calls.get(&blamed),
-            None,
-            "a blamed peer must not be polled"
-        );
+        assert_eq!(calls.get(&blamed), None, "a blamed peer must not be polled");
         assert_eq!(calls.get(&healthy), Some(&1));
     }
 
@@ -2636,7 +2630,10 @@ mod tests {
 
         verify_schnorr(&setup.verifying_key, message, &sig);
         assert!(
-            setup.managers[0].bad_share_peers.snapshot(Instant::now()).is_empty(),
+            setup.managers[0]
+                .bad_share_peers
+                .snapshot(Instant::now())
+                .is_empty(),
             "a corrupt local share must not get any peer excluded"
         );
     }
@@ -2763,7 +2760,8 @@ mod tests {
 
         let mut responses = HashMap::new();
         responses.insert(test_address(1), all_sigs[1].clone());
-        let hanging: HashSet<Address> = [2usize, 3, 4, 5, 6].into_iter().map(test_address).collect();
+        let hanging: HashSet<Address> =
+            [2usize, 3, 4, 5, 6].into_iter().map(test_address).collect();
         let p2p = HangingP2PChannel { responses, hanging };
 
         let deadline = Duration::from_secs(2);
