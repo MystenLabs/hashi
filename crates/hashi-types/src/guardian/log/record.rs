@@ -318,16 +318,11 @@ impl LogRecord {
         policy.duration_for(self.data().message.log_type())
     }
 
-    /// Extract a signed record's entry without authenticating its Guardian
-    /// signature. This is only for callers that independently authenticate the
-    /// extracted payload.
-    pub fn into_entry_unchecked(self) -> GuardianResult<LogEntry> {
+    /// Extract the entry without validating the record.
+    pub fn into_entry_unchecked(self) -> LogEntry {
         match self {
-            Self::Signed(signed) => Ok(signed.into_data_unchecked()),
-            Self::Unsigned(unsigned) if unsigned.message.is_allowed_unsigned() => Err(
-                InvalidS3Log("expected signed log record but message is unsigned".into()),
-            ),
-            Self::Unsigned(_) => Err(InvalidS3Log("missing log signature".into())),
+            Self::Signed(signed) => signed.into_data_unchecked(),
+            Self::Unsigned(unsigned) => unsigned,
         }
     }
 
@@ -653,9 +648,7 @@ mod tests {
                 .unwrap();
         let signing_pubkey = GuardianPubKey::try_from(signing_pubkey.as_slice()).unwrap();
         validate_signed(&record, &signing_pubkey).expect("the deployed V1 signature must verify");
-        let entry = record
-            .into_entry_unchecked()
-            .expect("the deployed V1 record is signed");
+        let entry = record.into_entry_unchecked();
         assert_eq!(entry.session_id().as_str(), "916c711a5e81c2b0");
         assert_eq!(entry.timestamp_ms(), 1_784_219_535_816);
         let VersionedLogMessage::V1(LogMessageV1::KpShareState(message)) = entry.into_message()

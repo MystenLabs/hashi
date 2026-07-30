@@ -219,8 +219,7 @@ mod tests {
             &signing_key,
             0,
         )
-        .into_entry_unchecked()
-        .expect("withdrawal records are signed");
+        .into_entry_unchecked();
         VerifiedLogRecord::new_for_test(entry, build_pcrs())
     }
 

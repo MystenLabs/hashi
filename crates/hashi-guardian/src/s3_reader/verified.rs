@@ -34,16 +34,16 @@ impl VerifiedSessionInfo {
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
         let attestation_record = s3.get_log_record(&att_key).await?;
-        attestation_record.validate(None)?;
-        let attestation_message = match into_validated_entry(attestation_record).into_message() {
-            VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
-            VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
-                return Err(InvalidS3Log(format!(
-                    "expected OIAttestationUnsigned at key {att_key}"
-                )));
-            }
-        };
+        let attestation_message =
+            match validate_into_entry(attestation_record, None)?.into_message() {
+                VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
+                VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
+                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                    return Err(InvalidS3Log(format!(
+                        "expected OIAttestationUnsigned at key {att_key}"
+                    )));
+                }
+            };
         let InitLogMessage::OIAttestationUnsigned {
             attestation,
             signing_public_key: signing_pubkey,
@@ -57,16 +57,16 @@ impl VerifiedSessionInfo {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = s3.get_log_record(&info_key).await?;
-        info_record.validate(Some(&signing_pubkey))?;
-        let info_message = match into_validated_entry(info_record).into_message() {
-            VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
-            VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
-                return Err(InvalidS3Log(format!(
-                    "expected OIGuardianInfo at key {info_key}"
-                )));
-            }
-        };
+        let info_message =
+            match validate_into_entry(info_record, Some(&signing_pubkey))?.into_message() {
+                VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
+                VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
+                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                    return Err(InvalidS3Log(format!(
+                        "expected OIGuardianInfo at key {info_key}"
+                    )));
+                }
+            };
         let InitLogMessage::OIGuardianInfo(info) = *info_message else {
             return Err(InvalidS3Log(format!(
                 "expected OIGuardianInfo at key {info_key}"
@@ -121,8 +121,7 @@ impl VerifiedLogRecord {
         record: LogRecord,
         session_info: &VerifiedSessionInfo,
     ) -> GuardianResult<Self> {
-        record.validate(Some(&session_info.signing_pubkey))?;
-        let entry = into_validated_entry(record);
+        let entry = validate_into_entry(record, Some(&session_info.signing_pubkey))?;
         Ok(Self {
             entry,
             build_pcrs: session_info.build_pcrs.clone(),
@@ -147,9 +146,10 @@ impl VerifiedLogRecord {
     }
 }
 
-fn into_validated_entry(record: LogRecord) -> LogEntry {
-    match record {
-        LogRecord::Signed(signed) => signed.into_data_unchecked(),
-        LogRecord::Unsigned(entry) => entry,
-    }
+fn validate_into_entry(
+    record: LogRecord,
+    signing_public_key: Option<&GuardianPubKey>,
+) -> GuardianResult<LogEntry> {
+    record.validate(signing_public_key)?;
+    Ok(record.into_entry_unchecked())
 }

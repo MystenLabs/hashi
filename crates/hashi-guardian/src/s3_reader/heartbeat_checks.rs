@@ -197,8 +197,7 @@ mod tests {
             &signing_key,
             timestamp_ms,
         )
-        .into_entry_unchecked()
-        .unwrap();
+        .into_entry_unchecked();
         VerifiedLogRecord::new_for_test(entry, build_pcrs())
     }
 

@@ -20,6 +20,7 @@
 use crate::metrics::ProxyMetrics;
 use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::log::S3_DIR_WITHDRAW;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
@@ -168,7 +169,15 @@ fn parse_success_seq(key: &str) -> Option<u64> {
 
 fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSuccess> {
     let record: LogRecord = serde_json::from_slice(bytes)?;
-    let entry = record.into_entry_unchecked()?;
+    if let LogRecord::Unsigned(entry) = &record {
+        let message = if entry.message().is_allowed_unsigned() {
+            "expected signed log record but message is unsigned"
+        } else {
+            "missing log signature"
+        };
+        return Err(InvalidS3Log(message.into()).into());
+    }
+    let entry = record.into_entry_unchecked();
     let timestamp_ms = entry.timestamp_ms();
     let message = match entry.into_message() {
         VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) => message,
