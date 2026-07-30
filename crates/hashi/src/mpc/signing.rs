@@ -922,9 +922,15 @@ impl SigningManager {
         let now = Instant::now();
         let blamed = self.bad_share_peers.snapshot(now);
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
-        for st in pending.iter() {
+        for st in pending.iter_mut() {
+            // Drop blamed peers from the not-yet-merged set (not merely from
+            // this round's poll list): they can never contribute again, and
+            // a session already in flight when another task blamed them
+            // would otherwise never see `peers_exhausted` and would wait out
+            // the deadline instead of fast-failing.
+            st.peers_remaining.retain(|peer| !blamed.contains(peer));
             for peer in &st.peers_remaining {
-                if !blamed.contains(peer) && !self.peer_cooldowns.is_cooling(peer, now) {
+                if !self.peer_cooldowns.is_cooling(peer, now) {
                     peer_ids.entry(*peer).or_default().push(st.signing_id);
                 }
             }
@@ -937,9 +943,7 @@ impl SigningManager {
             // out signing for a whole cooldown window.
             for st in pending.iter() {
                 for peer in &st.peers_remaining {
-                    if !blamed.contains(peer) {
-                        peer_ids.entry(*peer).or_default().push(st.signing_id);
-                    }
+                    peer_ids.entry(*peer).or_default().push(st.signing_id);
                 }
             }
         }
@@ -2484,6 +2488,14 @@ mod tests {
         let calls = p2p.calls.lock().unwrap();
         assert_eq!(calls.get(&blamed), None, "a blamed peer must not be polled");
         assert_eq!(calls.get(&healthy), Some(&1));
+        drop(calls);
+        // The blamed peer must also leave the in-flight session's remaining
+        // set, so an unreachable threshold still trips peers_exhausted.
+        assert!(
+            !pending[0].peers_remaining.contains(&blamed),
+            "a blamed peer must be removed from peers_remaining"
+        );
+        assert!(pending[0].peers_remaining.contains(&healthy));
     }
 
     #[tokio::test]
