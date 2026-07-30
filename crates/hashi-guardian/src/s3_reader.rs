@@ -127,8 +127,9 @@ impl GuardianReader {
         let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
-        for log in all_logs {
-            out.push(self.cache.verify_record(&self.s3, log).await?);
+        for record in all_logs {
+            let verified_record = self.cache.verify_record(&self.s3, record).await?;
+            out.push(verified_record);
         }
         Ok(out)
     }
@@ -180,10 +181,10 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
+        let verified_record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy(build_policy, verified_record.build_pcrs())?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
             VersionedLogMessage::V1(LogMessageV1::Ceremony(msg)) => msg,
             VersionedLogMessage::V2(LogMessageV2::Ceremony(msg)) => msg,
             VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
@@ -263,10 +264,10 @@ impl GuardianReader {
             .s3
             .get_log_record_inner(key, LockCheck::Skipped, history_check)
             .await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
+        let verified_record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy(build_policy, verified_record.build_pcrs())?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
             VersionedLogMessage::V1(LogMessageV1::KpShareState(msg)) => (*msg).try_into()?,
             VersionedLogMessage::V2(LogMessageV2::KpShareState(msg)) => *msg,
             VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
@@ -333,10 +334,10 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
+        let verified_record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy(build_policy, verified_record.build_pcrs())?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
             VersionedLogMessage::V1(LogMessageV1::CommitteeUpdate(msg)) => msg,
             VersionedLogMessage::V2(LogMessageV2::CommitteeUpdate(msg)) => msg,
             VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
@@ -377,10 +378,10 @@ impl GuardianReader {
             )));
         }
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
+        let verified_record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy(build_policy, verified_record.build_pcrs())?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
             VersionedLogMessage::V1(LogMessageV1::Genesis(msg)) => msg,
             VersionedLogMessage::V2(LogMessageV2::Genesis(msg)) => msg,
             VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
