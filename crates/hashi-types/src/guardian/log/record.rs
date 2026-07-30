@@ -385,6 +385,7 @@ mod tests {
     use crate::guardian::GetGuardianInfoResponse;
     use crate::guardian::GuardianError;
     use crate::guardian::GuardianSignedResponse;
+    use crate::guardian::GuardianSigningIntentType;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedSharesRoster;
