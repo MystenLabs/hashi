@@ -589,7 +589,7 @@ mod tests {
             current_committee_epoch: None,
             mpc_master_g: Some(master_g),
         };
-        let signed_info = GuardianSigned::new(info, &signing_key, 1);
+        let signed_info = GuardianSigned::sign(info, &signing_key, 1);
         let domain = GetGuardianInfoResponse::new(
             NitroAttestation::new(vec![1, 2, 3]),
             signing_key.verification_key(),

@@ -209,7 +209,7 @@ mod tests {
     ) -> KPEncryptedSharesRoster {
         let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
         signed
-            .verify(&enclave.signing_pubkey())
+            .authenticate(&enclave.signing_pubkey())
             .expect("response signed by enclave")
             .encrypted_shares
     }

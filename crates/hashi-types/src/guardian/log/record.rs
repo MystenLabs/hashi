@@ -16,11 +16,13 @@ use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
 use crate::guardian::GuardianSignature;
-use crate::guardian::IntentType;
+use crate::guardian::GuardianSigningIntent;
+use crate::guardian::GuardianSigningIntentType;
 use crate::guardian::SessionID;
-use crate::guardian::SigningIntent;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
+use crate::guardian::signing::sign_guardian_payload;
+use crate::guardian::signing::verify_guardian_payload_signature;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Error as _;
@@ -133,8 +135,8 @@ impl<'de> Deserialize<'de> for LogRecord {
     }
 }
 
-impl SigningIntent for LogSigningPayload<'_> {
-    const INTENT: IntentType = IntentType::LogMessage;
+impl GuardianSigningIntent for LogSigningPayload<'_> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogMessage;
 }
 
 /// A log record whose message signature and writing session's attestation/PCRs
@@ -216,7 +218,11 @@ impl LogRecord {
             message,
             signature: None,
         };
-        record.signature = Some(record.signing_payload().sign(timestamp_ms, signing_key));
+        record.signature = Some(sign_guardian_payload(
+            &record.signing_payload(),
+            timestamp_ms,
+            signing_key,
+        ));
         record
     }
 
@@ -257,9 +263,13 @@ impl LogRecord {
             .signature
             .as_ref()
             .ok_or_else(|| InvalidS3Log("missing log signature".into()))?;
-        self.signing_payload()
-            .verify_signature(timestamp_ms, signature, pub_key)
-            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
+        verify_guardian_payload_signature(
+            &self.signing_payload(),
+            timestamp_ms,
+            signature,
+            pub_key,
+        )
+        .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
 
         let message = self
             .message

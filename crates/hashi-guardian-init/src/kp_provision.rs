@@ -499,7 +499,7 @@ async fn submit_provisioner_init_to_relay(
     // Detached-sign the exact (session, config, share) bytes with this KP's
     // offline key. The relay pre-verifies the request before buffering it and
     // the enclave authoritatively re-verifies it before using the share.
-    let signed_request = KpSigned::new(request, signer_cert.clone(), None)
+    let signed_request = KpSigned::sign(request, signer_cert.clone(), None)
         .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
     let resp = relay_client

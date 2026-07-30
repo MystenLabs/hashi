@@ -27,11 +27,11 @@ pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
 pub use log::*;
 pub use signing::GuardianSigned;
-pub use signing::IntentType;
+pub use signing::GuardianSigningIntent;
+pub use signing::GuardianSigningIntentType;
 pub use signing::KpSigned;
 pub use signing::KpSigningIntent;
 pub use signing::KpSigningIntentType;
-pub use signing::SigningIntent;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
 pub use time_utils::now_timestamp_secs;
@@ -920,7 +920,10 @@ impl GetGuardianInfoResponse {
         &self,
         expected_build: &BuildPcrs,
     ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
-        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
+        let info = self
+            .signed_info
+            .clone()
+            .authenticate(&self.signing_pub_key)?;
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",

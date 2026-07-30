@@ -107,7 +107,7 @@ impl GetGuardianInfoResponse {
         GetGuardianInfoResponse::new(
             NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
-            GuardianSigned::new(info, &signing_key, 1234),
+            GuardianSigned::sign(info, &signing_key, 1234),
         )
     }
 }
@@ -167,7 +167,7 @@ impl GuardianSigned<SetupNewKeyResponse> {
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, 0)
+        GuardianSigned::sign(resp, &signing_kp, 0)
     }
 }
 
@@ -177,7 +177,7 @@ impl GuardianSigned<RotateKpsResponse> {
             encrypted_shares: dummy_encrypted_shares(),
         };
         let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, 0)
+        GuardianSigned::sign(resp, &signing_kp, 0)
     }
 }
 
@@ -192,7 +192,7 @@ impl GuardianSigned<ProvisionerRotateCertResponse> {
                 .expect("dummy shares should be non-empty"),
         };
         let signing_key = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(response, &signing_key, 0)
+        GuardianSigned::sign(response, &signing_key, 0)
     }
 }
 
@@ -409,7 +409,7 @@ impl GuardianSigned<StandardWithdrawalResponse> {
         let resp = StandardWithdrawalResponse { enclave_signatures };
 
         let signing_kp = SigningKey::from([4u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, 0)
+        GuardianSigned::sign(resp, &signing_kp, 0)
     }
 }
 

@@ -176,11 +176,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         "setup_new_key response received",
     );
 
-    // 7. Verify the response signature under the pinned session's signing key,
-    //    and sanity-check the shape; keep the now-verified BTC master pubkey.
+    // 7. Authenticate the response under the pinned session's signing key,
+    //    and sanity-check the shape; keep the now-authenticated BTC master pubkey.
     let response = signed_resp
-        .verify(&signing_pub_key)
-        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e}"))?;
+        .authenticate(&signing_pub_key)
+        .map_err(|e| anyhow!("authenticate SetupNewKeyResponse: {e}"))?;
     let live = CeremonyState::from(response);
     live.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(

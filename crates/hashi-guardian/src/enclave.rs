@@ -492,10 +492,10 @@ impl Enclave {
         self.config.signing_keys.verification_key()
     }
 
-    pub fn sign<T: SigningIntent>(&self, data: T) -> GuardianSigned<T> {
+    pub fn sign<T: GuardianSigningIntent>(&self, data: T) -> GuardianSigned<T> {
         let kp = &self.config.signing_keys;
         let timestamp = now_timestamp_ms();
-        GuardianSigned::new(data, kp, timestamp)
+        GuardianSigned::sign(data, kp, timestamp)
     }
 
     // ========================================================================
