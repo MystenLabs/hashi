@@ -15,7 +15,10 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::PriorSessionHeartbeatStillRecent;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
+use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::SessionID;
+use hashi_types::guardian::VersionedLogMessage;
 use std::collections::BTreeMap;
 use tracing::info;
 
@@ -79,14 +82,20 @@ fn summarize_heartbeats_by_session(
     let mut map: BTreeMap<SessionID, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
 
     for log in logs {
-        if !matches!(log.message, LogMessage::Heartbeat(..)) {
-            return Err(InvalidS3Log(
-                "non-heartbeat log found under the heartbeat prefix".into(),
-            ));
+        let entry = log.into_entry();
+        let session_id = entry.session_id().clone();
+        let ts = unix_millis_to_seconds(entry.timestamp_ms());
+        match entry.into_message() {
+            VersionedLogMessage::V1(LogMessageV1::Heartbeat(..))
+            | VersionedLogMessage::V2(LogMessageV2::Heartbeat(..)) => {}
+            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                return Err(InvalidS3Log(
+                    "non-heartbeat log found under the heartbeat prefix".into(),
+                ));
+            }
         }
 
-        let ts = unix_millis_to_seconds(log.timestamp_ms);
-        map.entry(log.session_id)
+        map.entry(session_id)
             .and_modify(|(first, last)| {
                 *first = (*first).min(ts);
                 *last = (*last).max(ts);
@@ -150,6 +159,7 @@ fn validate_session_live_and_others_quiet(
 mod tests {
     use super::*;
     use hashi_types::guardian::BuildPcrs;
+    use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
 
@@ -158,29 +168,38 @@ mod tests {
     }
 
     fn heartbeat_log(session_id: &str, timestamp_secs: UnixSeconds) -> VerifiedLogRecord {
-        VerifiedLogRecord {
-            object_key: format!("heartbeat/{session_id}.json"),
-            session_id: session_id.into(),
-            timestamp_ms: timestamp_secs * 1_000,
-            message: LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
-            build_pcrs: build_pcrs(),
-        }
+        verified_log(
+            session_id,
+            timestamp_secs * 1_000,
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
+        )
     }
 
     fn non_heartbeat_log() -> VerifiedLogRecord {
-        VerifiedLogRecord {
-            object_key: "init/test-session/03-pi-enclave-fully-initialized.json".to_string(),
-            session_id: "test-session".into(),
-            timestamp_ms: 0,
-            message: LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+        verified_log(
+            "test-session",
+            0,
+            LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
                 share_ids: vec![],
                 enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
                     .x_only_public_key()
                     .0,
             })),
-            build_pcrs: build_pcrs(),
-        }
+        )
+    }
+
+    fn verified_log(session_id: &str, timestamp_ms: u64, message: LogMessage) -> VerifiedLogRecord {
+        let signing_key = GuardianSignKeyPair::from([7u8; 32]);
+        let entry = hashi_types::guardian::LogRecord::new_at_timestamp(
+            session_id.into(),
+            message,
+            &signing_key,
+            timestamp_ms,
+        )
+        .into_entry_unchecked()
+        .unwrap();
+        VerifiedLogRecord::new_for_test(entry, build_pcrs())
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::collections::BTreeSet;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use super::CryptoVerificationError;
 use super::CryptoVerificationResult;
-use super::GuardianInfo;
 use super::GuardianPubKey;
 use super::GuardianResult;
 use super::errors::GuardianError::BuildNotAllowlisted;
@@ -133,15 +132,6 @@ impl NitroAttestation {
 enum VerifyTime {
     Now,
     DocumentTimestamp,
-}
-
-/// A session's verified guardian info: the attestation-anchored signing pubkey,
-/// the signed `GuardianInfo`, and the build PCRs proven by attestation.
-#[derive(Debug, Clone)]
-pub struct VerifiedSessionInfo {
-    pub signing_pubkey: GuardianPubKey,
-    pub info: GuardianInfo,
-    pub build_pcrs: BuildPcrs,
 }
 
 /// One enclave build: its git revision and known-good Nitro measurement. A build is

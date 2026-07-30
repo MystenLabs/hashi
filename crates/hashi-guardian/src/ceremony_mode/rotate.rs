@@ -136,6 +136,7 @@ mod tests {
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
     use k256::SecretKey;
@@ -253,7 +254,7 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message() else {
+        let VersionedLogMessage::V2(LogMessageV2::Ceremony(ceremony)) = record.message() else {
             panic!("expected V2 Ceremony variant");
         };
         let CeremonyLogMessage::Rotate {
@@ -299,7 +300,7 @@ mod tests {
             "expected sharing_seq=1 cert_seq=0, got key {shares_key}"
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message()
+        let VersionedLogMessage::V2(LogMessageV2::KpShareState(shares)) = shares_record.message()
         else {
             panic!("expected V2 KpShareState variant");
         };
