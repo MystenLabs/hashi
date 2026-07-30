@@ -132,6 +132,8 @@ pub struct Metrics {
     /// accumulation window's cutoff
     pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
     /// Nonce batches abandoned because the on-chain certs never reached the floor
+    pub mpc_nonce_fetch_floor_unreached_total: IntCounter,
+    /// Nonce batches abandoned because this node's party loop admitted below the floor
     pub mpc_nonce_floor_unreached_total: IntCounter,
     pub mpc_nonce_local_skip_batches_total: IntCounter,
     pub mpc_nonce_cutoff_unsettled_total: IntCounter,
@@ -180,6 +182,7 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
 
 pub const MPC_LABEL_DKG: &str = "dkg";
 pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
+pub const MPC_LABEL_KEY_GENERATION: &str = "key_generation";
 pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
 pub const MPC_LABEL_SIGNING: &str = "signing";
 
@@ -777,13 +780,20 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_nonce_fetch_floor_unreached_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_fetch_floor_unreached_total",
+                "Nonce batches abandoned because the on-chain certified weight never reached \
+                 the floor within the wait budget — a fleet-wide dealer shortage, not a \
+                 node-local one. Live path only; recovery does not wait for the floor",
+                registry,
+            )
+            .unwrap(),
             mpc_nonce_floor_unreached_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_floor_unreached_total",
-                "Nonce batches abandoned below the floor with no node-local skip and the \
-                 window still open. On the recovery path that means the chain genuinely \
-                 never certified enough weight; on the live path the fetch already proved \
-                 the floor over the same certs, so it means the party loop admitted fewer \
-                 than the sizing walk — check the AVID per-kind quorum before the fleet",
+                "Nonce batches abandoned because this node's party loop admitted below the \
+                 floor, with no node-local skip and the window still open. Distinct from a \
+                 fleet shortage: the certs cleared the floor for the sizing walk but this \
+                 node admitted fewer — check the AVID per-kind quorum",
                 registry,
             )
             .unwrap(),

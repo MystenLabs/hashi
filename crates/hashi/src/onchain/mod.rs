@@ -125,6 +125,18 @@ pub struct IncompleteCertTableRead {
     pub dealer: Address,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "cert table is not timestamp-ordered: {later} stamped {later_ms} follows {earlier} \
+     stamped {earlier_ms}"
+)]
+pub struct UnorderedCertTableRead {
+    pub earlier: Address,
+    pub earlier_ms: u64,
+    pub later: Address,
+    pub later_ms: u64,
+}
+
 /// Exact membership, not `any(>=)`: `enable_version` accepts undeployed versions, so a
 /// looser test lets a pre-enabled v3 switch the stamped ABI on against a v1 package.
 fn stamped_certs_supported(enabled_versions: &std::collections::BTreeSet<u64>) -> bool {
@@ -844,13 +856,13 @@ impl OnchainState {
                     w[1].1.timestamp_ms < w[0].1.timestamp_ms
                 })
         {
-            return Err(anyhow::anyhow!(
-                "cert table is not timestamp-ordered: {} stamped {} follows {} stamped {}",
-                bad[1].0,
-                bad[1].1.timestamp_ms,
-                bad[0].0,
-                bad[0].1.timestamp_ms,
-            ));
+            return Err(UnorderedCertTableRead {
+                earlier: bad[0].0,
+                earlier_ms: bad[0].1.timestamp_ms,
+                later: bad[1].0,
+                later_ms: bad[1].1.timestamp_ms,
+            }
+            .into());
         }
         Ok(Some(certs))
     }

@@ -10912,6 +10912,7 @@ async fn test_nonce_window_live_collection_past_floor() {
         4
     );
 
+    let closed_metrics = test_metrics();
     let closes_below_floor = {
         let test_manager = Arc::clone(&test_manager);
         let mut tob = crate::communication::PrefetchedTobChannel::new(stamped([
@@ -10923,10 +10924,18 @@ async fn test_nonce_window_live_collection_past_floor() {
             &mock_p2p,
             &mut tob,
             Some(1_000),
-            &test_metrics(),
+            &closed_metrics,
         )
         .await
     };
+    assert_eq!(
+        closed_metrics
+            .mpc_nonce_window_closed_below_floor_total
+            .get(),
+        1
+    );
+    assert_eq!(closed_metrics.mpc_nonce_floor_unreached_total.get(), 0);
+    assert_eq!(closed_metrics.mpc_nonce_local_skip_batches_total.get(), 0);
     assert!(
         matches!(
             closes_below_floor,
@@ -12815,6 +12824,50 @@ async fn test_avid_below_floor_attribution_distinguishes_cause() {
         0,
         "no dealer was skipped for a node-local reason"
     );
+
+    let mut closed_managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (closed_sigs, closed_target) =
+        avid_confirm_signatures(&setup, &mut closed_managers, 0, batch_index, &mut rng);
+    let closed_party = Arc::new(RwLock::new(
+        closed_managers.remove(&setup.address(1)).unwrap(),
+    ));
+    let closed_p2p = MockP2PChannel::new(closed_managers, setup.address(1));
+    let mut closed_tob = crate::communication::PrefetchedTobChannel::new(vec![(
+        setup.address(0),
+        make_cert(&closed_target, &closed_sigs, 5_000),
+    )]);
+    let closed_metrics = test_metrics();
+    let closed = MpcManager::run_as_avid_nonce_party(
+        &closed_party,
+        batch_index,
+        &closed_p2p,
+        &mut closed_tob,
+        Some(1_000),
+        &closed_metrics,
+    )
+    .await;
+
+    assert!(
+        matches!(closed, Err(MpcError::NotEnoughParticipants { .. })),
+        "a window closed below the floor must fail, got {:?}",
+        closed.map(|a| a.certified.len())
+    );
+    assert_eq!(
+        closed_metrics
+            .mpc_nonce_window_closed_below_floor_total
+            .get(),
+        1,
+        "the window closed on a past-cutoff stamp"
+    );
+    assert_eq!(
+        closed_metrics.mpc_nonce_floor_unreached_total.get(),
+        0,
+        "the stream did not run out — attributing this to a floor shortage misdirects the \
+         on-call to the fleet"
+    );
+    assert_eq!(closed_metrics.mpc_nonce_local_skip_batches_total.get(), 0);
 }
 
 #[tokio::test]

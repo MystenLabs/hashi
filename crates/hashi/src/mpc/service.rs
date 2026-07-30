@@ -27,6 +27,7 @@ use crate::communication::fetch_certificates;
 use crate::communication::fetch_key_generation_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::metrics::MPC_LABEL_DKG;
+use crate::metrics::MPC_LABEL_KEY_GENERATION;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::mpc::MpcManager;
@@ -315,10 +316,40 @@ impl MpcService {
         }
     }
 
+    async fn bounded_cert_read<T, E>(
+        &self,
+        protocol_label: &str,
+        what: &str,
+        fut: impl Future<Output = Result<T, E>>,
+    ) -> anyhow::Result<T>
+    where
+        anyhow::Error: From<E>,
+    {
+        match tokio::time::timeout(crate::communication::sui_tob::FETCH_STALL_TIMEOUT, fut).await {
+            Ok(result) => result.map_err(anyhow::Error::from),
+            Err(_) => {
+                self.inner
+                    .metrics
+                    .mpc_tob_fetch_stalls_total
+                    .with_label_values(&[protocol_label])
+                    .inc();
+                anyhow::bail!(
+                    "{what} stalled >{:?}",
+                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT
+                )
+            }
+        }
+    }
+
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let certs = fetch_key_generation_certificates(&onchain_state, epoch)
+        let certs = self
+            .bounded_cert_read(
+                MPC_LABEL_KEY_GENERATION,
+                &format!("reconfig cert read for epoch {epoch}"),
+                fetch_key_generation_certificates(&onchain_state, epoch),
+            )
             .await
             .map_err(|e| {
                 anyhow::anyhow!("failed to fetch reconfig certs for epoch {epoch}: {e}")
@@ -349,13 +380,17 @@ impl MpcService {
     ) -> anyhow::Result<MpcOutput> {
         self.setup_initial_dkg(epoch)?;
         let onchain_state = self.inner.onchain_state().clone();
-        let certs: Vec<CertificateV1> =
-            fetch_certificates(&onchain_state, epoch, None, move_types::ProtocolType::Dkg)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to fetch DKG certs for epoch {epoch}: {e}"))?
-                .into_iter()
-                .map(|(_, cert)| cert)
-                .collect();
+        let certs: Vec<CertificateV1> = self
+            .bounded_cert_read(
+                MPC_LABEL_DKG,
+                &format!("DKG cert read for epoch {epoch}"),
+                fetch_certificates(&onchain_state, epoch, None, move_types::ProtocolType::Dkg),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch DKG certs for epoch {epoch}: {e}"))?
+            .into_iter()
+            .map(|(_, cert)| cert)
+            .collect();
         let mpc_manager = self
             .inner
             .mpc_manager()
@@ -394,28 +429,35 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for rotation recovery"))?;
         let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
-        let current_certs: Vec<CertificateV1> = fetch_certificates(
-            &onchain_state,
-            epoch,
-            None,
-            move_types::ProtocolType::KeyRotation,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to fetch rotation certs for epoch {epoch}: {e}"))?
-        .into_iter()
-        .map(|(_, cert)| cert)
-        .collect();
-        let previous_certs: Vec<CertificateV1> =
-            fetch_key_generation_certificates(&onchain_state, previous_epoch)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to fetch certs for previous epoch {previous_epoch}: {e}"
-                    )
-                })?
-                .into_iter()
-                .map(|(_, cert)| cert)
-                .collect();
+        let current_certs: Vec<CertificateV1> = self
+            .bounded_cert_read(
+                MPC_LABEL_KEY_ROTATION,
+                &format!("rotation cert read for epoch {epoch}"),
+                fetch_certificates(
+                    &onchain_state,
+                    epoch,
+                    None,
+                    move_types::ProtocolType::KeyRotation,
+                ),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch rotation certs for epoch {epoch}: {e}"))?
+            .into_iter()
+            .map(|(_, cert)| cert)
+            .collect();
+        let previous_certs: Vec<CertificateV1> = self
+            .bounded_cert_read(
+                MPC_LABEL_KEY_GENERATION,
+                &format!("previous-epoch cert read for epoch {previous_epoch}"),
+                fetch_key_generation_certificates(&onchain_state, previous_epoch),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("failed to fetch certs for previous epoch {previous_epoch}: {e}")
+            })?
+            .into_iter()
+            .map(|(_, cert)| cert)
+            .collect();
         match MpcManager::reconstruct_current_rotation_output(
             &mpc_manager,
             &current_certs,
@@ -843,17 +885,16 @@ impl MpcService {
         let onchain_state = self.inner.onchain_state().clone();
         let weight = match protocol {
             NonceGenerationProtocol::Vanilla => {
-                let Some(certs) = tokio::time::timeout(
-                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
-                    onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
-                )
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "nonce cert fetch for epoch {epoch} batch {batch_index} stalled; \
-                         retrying on the next reconcile tick"
+                let Some(certs) = self
+                    .bounded_cert_read(
+                        MPC_LABEL_NONCE_GENERATION,
+                        &format!(
+                            "nonce cert read for epoch {epoch} batch {batch_index} \
+                             (boundary rebuild)"
+                        ),
+                        onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
                     )
-                })??
+                    .await?
                 else {
                     return Ok(None);
                 };
@@ -867,22 +908,21 @@ impl MpcService {
                 certified_nonce_weight(mpc_manager, &certs)
             }
             NonceGenerationProtocol::Avid => {
-                let certs = tokio::time::timeout(
-                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
-                    fetch_certificates(
-                        &onchain_state,
-                        epoch,
-                        Some(batch_index),
-                        move_types::ProtocolType::NonceGeneration,
-                    ),
-                )
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "nonce cert fetch for epoch {epoch} batch {batch_index} stalled; \
-                         retrying on the next reconcile tick"
+                let certs = self
+                    .bounded_cert_read(
+                        MPC_LABEL_NONCE_GENERATION,
+                        &format!(
+                            "nonce cert read for epoch {epoch} batch {batch_index} \
+                             (boundary rebuild)"
+                        ),
+                        fetch_certificates(
+                            &onchain_state,
+                            epoch,
+                            Some(batch_index),
+                            move_types::ProtocolType::NonceGeneration,
+                        ),
                     )
-                })??;
+                    .await?;
                 if certs.is_empty() {
                     return Ok(None);
                 }
@@ -1222,7 +1262,7 @@ impl MpcService {
             }
             if wait_for_floor && !floor_reached {
                 if tokio::time::Instant::now() >= wait_deadline {
-                    metrics.mpc_nonce_floor_unreached_total.inc();
+                    metrics.mpc_nonce_fetch_floor_unreached_total.inc();
                     anyhow::bail!(
                         "nonce certs never reached the floor for epoch {epoch} batch {batch_index}"
                     );

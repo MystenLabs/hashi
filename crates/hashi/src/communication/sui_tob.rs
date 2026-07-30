@@ -39,6 +39,9 @@ pub enum TobError {
 
     #[error("incomplete cert table read: {0}")]
     IncompleteRead(String),
+
+    #[error("unordered cert table read: {0}")]
+    UnorderedRead(String),
 }
 
 impl From<TobError> for ChannelError {
@@ -128,6 +131,11 @@ fn tob_fetch_error(e: anyhow::Error) -> TobError {
         .is_some()
     {
         TobError::IncompleteRead(e.to_string())
+    } else if e
+        .downcast_ref::<crate::onchain::UnorderedCertTableRead>()
+        .is_some()
+    {
+        TobError::UnorderedRead(e.to_string())
     } else {
         TobError::RpcError(e.to_string())
     }
@@ -239,7 +247,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         .await
         {
             Ok(existing) => existing,
-            Err(TobError::IncompleteRead(_)) => Vec::new(),
+            Err(TobError::IncompleteRead(_) | TobError::UnorderedRead(_)) => Vec::new(),
             Err(e) => return Err(ChannelError::from(e)),
         };
         if existing.iter().any(|(d, _)| *d == dealer) {
@@ -458,6 +466,28 @@ mod tests {
             ),
             "a genuine RPC failure must not be swallowed as retryable"
         );
+
+        use crate::onchain::UnorderedCertTableRead;
+        let unordered = || UnorderedCertTableRead {
+            earlier: Address::ZERO,
+            earlier_ms: 5_000,
+            later: Address::ZERO,
+            later_ms: 1_000,
+        };
+        assert!(
+            matches!(
+                super::tob_fetch_error(unordered().into()),
+                TobError::UnorderedRead(_)
+            ),
+            "an unordered read must stay distinguishable: publish tolerates it, the window \
+             walks must not"
+        );
+        assert!(matches!(
+            super::tob_fetch_error(
+                anyhow::Error::from(unordered()).context("fetching stamped certs")
+            ),
+            TobError::UnorderedRead(_)
+        ));
     }
     use super::*;
 
