@@ -472,13 +472,7 @@ impl GuardianSessionCache {
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
         let signing_pubkey = session_info.signing_pubkey;
         let build_pcrs = session_info.build_pcrs.clone();
-        let signed = record.into_signed()?;
-        let timestamp_ms = signed.data.timestamp_ms();
-        signed.data.validate(&signing_pubkey)?;
-        let data = signed
-            .authenticate(&signing_pubkey)
-            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
-        let (session_id, message) = data.into_current()?;
+        let (session_id, timestamp_ms, message) = record.validate(&signing_pubkey)?;
         Ok(VerifiedLogRecord::new(
             object_key,
             session_id,

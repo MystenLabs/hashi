@@ -147,8 +147,8 @@ impl LogEntry {
         self.timestamp_ms
     }
 
-    /// Validate log-specific routing context without performing cryptography.
-    pub fn validate(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
+    /// Validate signed-log routing context without performing cryptography.
+    fn validate_signed(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
         if self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
                 "expected signed log record but message is unsigned".into(),
@@ -200,7 +200,7 @@ impl LogEntry {
     }
     /// Validate an unsigned OI-attestation entry. The Nitro attestation itself
     /// must be authenticated separately.
-    pub fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
+    fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         if !self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
                 "expected unsigned log record but message requires a signature".into(),
@@ -265,6 +265,30 @@ impl LogRecord {
 
     pub fn message(&self) -> &VersionedLogMessage {
         &self.data().message
+    }
+
+    /// Validate a signed record under `signing_public_key` and normalize its
+    /// message to the current schema. The caller is responsible for establishing
+    /// that the signing key is authorized.
+    pub fn validate(
+        self,
+        signing_public_key: &GuardianPubKey,
+    ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
+        let signed = self.into_signed()?;
+        let timestamp_ms = signed.data.timestamp_ms;
+        signed.data.validate_signed(signing_public_key)?;
+        let data = signed
+            .authenticate(signing_public_key)
+            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
+        let (session_id, message) = data.into_current()?;
+        Ok((session_id, timestamp_ms, message))
+    }
+
+    /// Validate the one permitted unsigned record kind and normalize its
+    /// message to the current schema. The embedded Nitro attestation must be
+    /// authenticated separately.
+    pub fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
+        self.into_unsigned()?.validate_unsigned()
     }
 
     pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
@@ -398,18 +422,11 @@ mod tests {
         record: LogRecord,
         signing_public_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        let signed = record.into_signed()?;
-        let timestamp_ms = signed.data.timestamp_ms;
-        signed.data.validate(signing_public_key)?;
-        let data = signed
-            .authenticate(signing_public_key)
-            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
-        let (session_id, message) = data.into_current()?;
-        Ok((session_id, timestamp_ms, message))
+        record.validate(signing_public_key)
     }
 
     fn validate_unsigned(record: LogRecord) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        record.into_unsigned()?.validate_unsigned()
+        record.validate_unsigned()
     }
 
     fn assert_writer_key_is_stable_and_verifies(log: LogRecord, signing_key: &GuardianSignKeyPair) {
