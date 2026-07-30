@@ -8,8 +8,9 @@ use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
-use hashi_guardian::s3_reader::withdraw_cursor;
-use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
+use hashi_types::guardian::LogMessageV2;
+use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -27,9 +28,14 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
     type Error = anyhow::Error;
 
     fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
-        let timestamp_ms = log.timestamp_ms();
-        let LogMessage::Withdrawal(withdrawal_message) = log.into_message() else {
-            anyhow::bail!("non-withdrawal logs found");
+        let entry = log.into_entry();
+        let timestamp_ms = entry.timestamp_ms();
+        let withdrawal_message = match entry.into_message() {
+            VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) => message,
+            VersionedLogMessage::V2(LogMessageV2::Withdrawal(message)) => message,
+            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                anyhow::bail!("non-withdrawal logs found");
+            }
         };
 
         match *withdrawal_message {
@@ -70,7 +76,7 @@ impl GuardianWithdrawalsPoller {
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         Ok(Self {
             reader: GuardianReader::new(&config.guardian, config.pcr_allowlist()).await?,
-            cursor: withdraw_cursor(start),
+            cursor: S3HourScopedDirectory::withdraw(start),
         })
     }
 

@@ -8,7 +8,6 @@ use std::collections::BTreeSet;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use super::CryptoVerificationError;
 use super::CryptoVerificationResult;
-use super::GuardianInfo;
 use super::GuardianPubKey;
 use super::GuardianResult;
 use super::errors::GuardianError::BuildNotAllowlisted;
@@ -135,15 +134,6 @@ enum VerifyTime {
     DocumentTimestamp,
 }
 
-/// A session's verified guardian info: the attestation-anchored signing pubkey,
-/// the signed `GuardianInfo`, and the build PCRs proven by attestation.
-#[derive(Debug, Clone)]
-pub struct VerifiedSessionInfo {
-    pub signing_pubkey: GuardianPubKey,
-    pub info: GuardianInfo,
-    pub build_pcrs: BuildPcrs,
-}
-
 /// One enclave build: its git revision and known-good Nitro measurement. A build is
 /// identified by its revision and pinned by PCR0 - the hash of the whole enclave
 /// image (EIF), which uniquely identifies the build.
@@ -175,7 +165,7 @@ impl BuildPcrs {
 }
 
 /// PCR pins for enclave builds that may appear in guardian attestations.
-/// Used by GuardianReader in s3_reader.rs.
+/// Used by the guardian S3 reader.
 ///
 /// `current_build` is the current/live build. `prev_builds` contains older
 /// builds that may still appear in persisted logs during an upgrade or replay.

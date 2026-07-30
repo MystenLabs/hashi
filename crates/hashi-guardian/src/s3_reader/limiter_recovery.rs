@@ -32,7 +32,10 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
+use hashi_types::guardian::LogMessageV2;
+use hashi_types::guardian::VersionedLogMessage::V1;
+use hashi_types::guardian::VersionedLogMessage::V2;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
@@ -50,7 +53,7 @@ impl GuardianReader {
         &mut self,
         limiter_config: &LimiterConfig,
     ) -> GuardianResult<LimiterState> {
-        let Some(mut cursor) = find_latest_success_bucket(self.s3()).await? else {
+        let Some(mut cursor) = find_latest_success_bucket(&self.s3).await? else {
             // The search covers the complete S3 withdrawal history, so this
             // branch is reachable only if no withdrawal has ever succeeded.
             info!("no successful withdrawal logs found; using genesis limiter state");
@@ -132,8 +135,11 @@ async fn hour_bucket_has_success(
 fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
     logs.into_iter()
         .filter_map(|log| {
-            let LogMessage::Withdrawal(boxed) = log.message else {
-                return None;
+            let boxed = match log.into_entry().into_message() {
+                V1(LogMessageV1::Withdrawal(message)) | V2(LogMessageV2::Withdrawal(message)) => {
+                    message
+                }
+                V1(_) | V2(_) => return None,
             };
             match *boxed {
                 WithdrawalLogMessage::Success { post_state, .. } => Some(post_state),
@@ -161,7 +167,10 @@ mod tests {
     use bitcoin::Txid;
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::GuardianError;
+    use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSignedResponse;
+    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -190,13 +199,7 @@ mod tests {
                 .response,
             post_state: state_with_seq(next_seq),
         };
-        VerifiedLogRecord {
-            object_key: format!("withdraw/success-{next_seq}.json"),
-            session_id: "test-session".into(),
-            timestamp_ms: 0,
-            message: LogMessage::Withdrawal(Box::new(msg)),
-            build_pcrs: build_pcrs(),
-        }
+        verified_withdrawal_log(msg)
     }
 
     fn withdrawal_failure_log() -> VerifiedLogRecord {
@@ -207,13 +210,19 @@ mod tests {
             request_sign,
             error: GuardianError::RateLimitExceeded.to_string(),
         };
-        VerifiedLogRecord {
-            object_key: "withdraw/failure.json".to_string(),
-            session_id: "test-session".into(),
-            timestamp_ms: 0,
-            message: LogMessage::Withdrawal(Box::new(msg)),
-            build_pcrs: build_pcrs(),
-        }
+        verified_withdrawal_log(msg)
+    }
+
+    fn verified_withdrawal_log(message: WithdrawalLogMessage) -> VerifiedLogRecord {
+        let signing_key = GuardianSignKeyPair::from([7u8; 32]);
+        let entry = LogRecord::new_at_timestamp(
+            "test-session".into(),
+            LogMessage::Withdrawal(Box::new(message)),
+            &signing_key,
+            0,
+        )
+        .into_entry_unchecked();
+        VerifiedLogRecord::new_for_test(entry, build_pcrs())
     }
 
     #[test]

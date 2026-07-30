@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::anyhow;
-use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -114,15 +113,13 @@ pub async fn run(
         guardian_s3.bucket_info,
         endpoint_bucket_info
     );
-    let verified_session = reader
-        .get_session_info(&session_id, BuildPolicy::Current)
-        .await?;
+    let verified_session = reader.get_current_session_info(&session_id).await?;
     anyhow::ensure!(
-        verified_session.signing_pubkey == signing_pub_key,
+        verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     anyhow::ensure!(
-        verified_session.info.bucket_info.as_ref() == Some(endpoint_bucket_info),
+        verified_session.info().bucket_info.as_ref() == Some(endpoint_bucket_info),
         "guardian S3 session bucket info differs from live GuardianInfo"
     );
     let endpoint_btc_pubkey = endpoint_verified
@@ -134,7 +131,7 @@ pub async fn run(
         .map_err(anyhow::Error::msg)?;
 
     let state = reader
-        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
+        .read_latest_ceremony_state()
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
@@ -213,12 +210,7 @@ pub async fn run(
     );
 
     let updated_state = reader
-        .read_kp_share_state_log(
-            &session_id,
-            sharing_seq,
-            response.cert_seq,
-            BuildPolicy::Current,
-        )
+        .read_kp_share_state_log_from_current_build(&session_id, sharing_seq, response.cert_seq)
         .await
         .context("read the certificate-rotation kp-shares snapshot")?;
     updated_state

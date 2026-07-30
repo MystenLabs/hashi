@@ -14,8 +14,13 @@ pub struct GenesisLogMessage {
 }
 
 impl GenesisLogMessage {
+    /// The slash-terminated prefix containing the genesis record.
+    pub fn object_key_dir() -> String {
+        format!("{S3_DIR_GENESIS}/")
+    }
+
     pub fn object_key() -> String {
-        format!("{S3_DIR_GENESIS}/record.json")
+        format!("{}record.json", Self::object_key_dir())
     }
 
     pub fn object_key_pattern(&self) -> ObjectKeyPattern {

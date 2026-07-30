@@ -1,9 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The versioned `LogMessage` family the enclave emits and conversion into the
-//! current message shape. The `LogRecord` wrapper that carries these to S3 lives
-//! in `super::record`.
+//! The versioned `LogMessage` family the enclave emits. The `LogRecord` wrapper
+//! that carries these to S3 lives in `super::record`.
 
 use super::LogType;
 use super::ObjectKeyPattern;
@@ -15,7 +14,6 @@ use super::messages::InitLogMessage;
 use super::messages::KpShareStateLogMessageV1;
 use super::messages::KpShareStateLogMessageV2;
 use super::messages::WithdrawalLogMessage;
-use crate::guardian::GuardianError;
 use crate::guardian::UnixMillis;
 use serde::Deserialize;
 use serde::Serialize;
@@ -23,6 +21,9 @@ use serde::Serialize;
 /// The wire message stored in a [`super::LogRecord`]. Its version is serialized
 /// as the record's sibling `schema_version` field rather than as an additional
 /// JSON enum layer.
+///
+/// Readers match these variants exhaustively at their consumption boundary so
+/// adding a schema version requires each reader to opt in explicitly.
 #[derive(Debug)]
 pub enum VersionedLogMessage {
     V1(LogMessageV1),
@@ -67,7 +68,7 @@ pub enum LogMessageV1 {
     Genesis(Box<GenesisLogMessage>),
 }
 
-/// Current log schema emitted by the guardian enclave.
+/// Schema-version-2 log messages emitted by the guardian enclave.
 /// Uses an enum discriminator for automatic domain separation between variants.
 // TODO(testnet-wipe): Collapse the V1/V2 compatibility layer into a single log
 // schema once existing testnet records no longer need to be read.
@@ -82,8 +83,7 @@ pub enum LogMessageV2 {
     Genesis(Box<GenesisLogMessage>),
 }
 
-/// The current normalized log-message shape exposed to writers and verified
-/// readers. Wire-version handling remains internal to [`VersionedLogMessage`].
+/// Writer-facing alias for the log-message schema emitted by guardians.
 pub type LogMessage = LogMessageV2;
 
 trait LogMessageSchema {
@@ -146,31 +146,6 @@ macro_rules! impl_log_message_schema {
 impl_log_message_schema!(LogMessageV1);
 impl_log_message_schema!(LogMessageV2);
 
-impl LogMessageV1 {
-    fn into_current(self) -> Result<LogMessage, GuardianError> {
-        Ok(match self {
-            LogMessageV1::Heartbeat(message) => LogMessage::Heartbeat(message),
-            LogMessageV1::Init(message) => LogMessage::Init(message),
-            LogMessageV1::Withdrawal(message) => LogMessage::Withdrawal(message),
-            LogMessageV1::Ceremony(message) => LogMessage::Ceremony(message),
-            LogMessageV1::KpShareState(message) => {
-                LogMessage::KpShareState(Box::new((*message).into_current()?))
-            }
-            LogMessageV1::CommitteeUpdate(message) => LogMessage::CommitteeUpdate(message),
-            LogMessageV1::Genesis(message) => LogMessage::Genesis(message),
-        })
-    }
-}
-
-impl LogMessageV2 {
-    pub fn into_init_log(self) -> Option<InitLogMessage> {
-        match self {
-            Self::Init(init_message) => Some(*init_message),
-            _ => None,
-        }
-    }
-}
-
 impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;
     pub const SCHEMA_VERSION_V2: u64 = 2;
@@ -208,13 +183,6 @@ impl VersionedLogMessage {
         match self {
             Self::V1(message) => message.object_key_pattern(session_id, timestamp_ms),
             Self::V2(message) => message.object_key_pattern(session_id, timestamp_ms),
-        }
-    }
-
-    pub fn into_current(self) -> Result<LogMessage, GuardianError> {
-        match self {
-            Self::V1(message) => message.into_current(),
-            Self::V2(message) => Ok(message),
         }
     }
 }

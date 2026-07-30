@@ -6,7 +6,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use std::path::Path;
 use tracing::info;
@@ -97,7 +96,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         "scraping latest ceremony/ + kp-shares/ logs (attestation-anchored)",
     );
     let state = reader
-        .read_latest_ceremony_state(BuildPolicy::Current)
+        .read_latest_ceremony_state_from_current_build()
         .await?
         .context("no ceremony logs found in guardian S3 bucket")?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;

@@ -4,7 +4,6 @@
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::ensure;
-use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GenesisState;
 use hashi_types::guardian::GuardianInfo;
@@ -74,9 +73,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "committee",
         "checking latest committee-update/genesis record before operator_init",
     );
-    let latest_committee = reader
-        .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?;
+    let latest_committee = reader.read_latest_committee().await?;
     let genesis_state = match (do_genesis, latest_committee) {
         (false, Some(committee)) => {
             info!(
@@ -150,7 +147,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
     let ceremony_state = reader
-        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
+        .read_latest_ceremony_state()
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
@@ -240,15 +237,12 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         session_id = %session_id,
         "verifying S3 init logs match the live guardian session",
     );
-    let verified_session = reader
-        .get_session_info(&session_id, BuildPolicy::Current)
-        .await?;
+    let verified_session = reader.get_current_session_info(&session_id).await?;
     ensure!(
-        verified_session.signing_pubkey == signing_pub_key,
+        verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    let oi_info = verified_session.info;
-    ensure_oi_info_matches_post_init(&oi_info, &post.info)?;
+    ensure_oi_info_matches_post_init(verified_session.info(), &post.info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,

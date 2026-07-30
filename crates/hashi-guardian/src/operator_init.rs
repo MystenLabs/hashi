@@ -8,7 +8,6 @@
 
 use crate::attestation::get_attestation;
 use crate::enclave::TemporaryInitState;
-use crate::s3_reader::BuildPolicy;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
@@ -64,7 +63,7 @@ impl OIWithdrawModeInstall {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
         let ceremony_state = reader
-            .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
+            .read_latest_ceremony_state()
             .await?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
@@ -271,12 +270,12 @@ mod tests {
         let attestation: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         assert!(matches!(
             attestation.message(),
-            VersionedLogMessage::V2(LogMessage::Init(message))
+            VersionedLogMessage::V2(LogMessageV2::Init(message))
                 if matches!(message.as_ref(), OIAttestationUnsigned { .. })
         ));
 
         let guardian_info: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Init(message)) = guardian_info.message() else {
+        let VersionedLogMessage::V2(LogMessageV2::Init(message)) = guardian_info.message() else {
             panic!("expected V2 init record");
         };
         let OIGuardianInfo(info) = message.as_ref() else {

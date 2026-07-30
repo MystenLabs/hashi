@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::guardian::log::S3_DIR_HEARTBEAT;
+use crate::guardian::log::S3_DIR_WITHDRAW;
 use crate::guardian::time_utils::UnixSeconds;
 use anyhow::Context;
 use std::convert::TryFrom;
@@ -42,6 +44,16 @@ impl S3HourScopedDirectory {
             day: datetime.day(),
             hour: datetime.hour(),
         }
+    }
+
+    /// Construct the withdrawal-log directory containing `t`.
+    pub fn withdraw(t: UnixSeconds) -> Self {
+        Self::new(S3_DIR_WITHDRAW, t)
+    }
+
+    /// Construct the heartbeat-log directory containing `t`.
+    pub fn heartbeat(t: UnixSeconds) -> Self {
+        Self::new(S3_DIR_HEARTBEAT, t)
     }
 
     pub fn next_dir(&self) -> Self {
