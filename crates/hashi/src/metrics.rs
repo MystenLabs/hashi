@@ -133,6 +133,10 @@ pub struct Metrics {
     pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
     /// Nonce batches abandoned because the on-chain certs never reached the floor
     pub mpc_nonce_floor_unreached_total: IntCounter,
+    /// Batch index of the most recently collected nonce batch.
+    pub mpc_nonce_batch_index: IntGauge,
+    /// Dealers admitted into that batch.
+    pub mpc_nonce_batch_dealers: IntGauge,
 
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
@@ -754,6 +758,18 @@ impl Metrics {
                 "hashi_mpc_nonce_floor_unreached_total",
                 "Nonce batches abandoned because the on-chain certified weight never \
                  reached the required floor",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_batch_index: register_int_gauge_with_registry!(
+                "hashi_mpc_nonce_batch_index",
+                "Batch index of the most recently collected nonce batch",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_batch_dealers: register_int_gauge_with_registry!(
+                "hashi_mpc_nonce_batch_dealers",
+                "Dealers admitted into the most recently collected nonce batch",
                 registry,
             )
             .unwrap(),

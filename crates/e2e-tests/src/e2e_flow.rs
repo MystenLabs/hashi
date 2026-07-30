@@ -727,6 +727,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_nonce_accumulation_window_open() -> Result<()> {
+        init_test_logging();
+        let mut networks = setup_test_networks(
+            avid_override(TestNetworksBuilder::new().with_nodes(4)).with_onchain_config(
+                "mpc_nonce_accumulation_window_ms",
+                hashi_types::move_types::ConfigValue::U64(2_000),
+            ),
+        )
+        .await?;
+        rotate_into_avid(&mut networks).await?;
+        
+        let deposit_amount_sats = 100_000u64;
+        let withdrawal_amount_sats = 30_000u64;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(&mut networks, &hashi, user_key, withdrawal_amount_sats).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
         let networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;

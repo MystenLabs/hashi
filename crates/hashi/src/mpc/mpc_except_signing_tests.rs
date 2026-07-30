@@ -12736,7 +12736,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         make_cert(2, &all),
     ];
 
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs);
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs, None);
     assert!(
         !certified.contains(&setup.address(3)),
         "cert one weight below the vote quorum must not be counted by sizing"
@@ -12758,7 +12758,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 
     let (_, foreign_keyed) = make_cert(0, &all);
     let rekeyed = vec![(setup.address(3), foreign_keyed)];
-    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed);
+    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed, None);
     assert_eq!(
         certified,
         HashSet::from([setup.address(0)]),
@@ -12768,12 +12768,66 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let (_, dup_a) = make_cert(0, &all);
     let (_, dup_b) = make_cert(0, &all);
     let duplicated = vec![(setup.address(0), dup_a), (setup.address(3), dup_b)];
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated);
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated, None);
     assert_eq!(certified, HashSet::from([setup.address(0)]));
     assert_eq!(
         weight,
         weight_of(&[0]),
         "a dealer served twice must not be double-counted"
+    );
+}
+
+#[test]
+fn test_avid_sizing_counts_past_the_floor() {
+    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let mgr = setup.create_manager(0);
+    let total = mgr.mpc_config.nodes.total_weight() as u32;
+    let floor = mgr.required_nonce_weight();
+
+    let make_cert = |dealer_idx: usize, timestamp_ms: u64| -> (Address, CertificateV1) {
+        let dealer_address = setup.address(dealer_idx);
+        let message = DealerMessagesHash {
+            dealer_address,
+            messages_hash: MessageHash::from([dealer_idx as u8 + 1; 32]),
+        };
+        let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+        for s in 0..4 {
+            let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+            aggregator.add_signature(sig).unwrap();
+        }
+        (
+            dealer_address,
+            CertificateV1::NonceGeneration {
+                batch_index: 0,
+                cert: aggregator.finish().unwrap(),
+                timestamp_ms,
+            },
+        )
+    };
+
+    assert!(
+        4 + 3 + 2 >= floor && floor > 4 + 3,
+        "weights must cross the floor at dealer 2 or this test proves nothing"
+    );
+    let certs = vec![
+        make_cert(0, 1_000),
+        make_cert(1, 1_000),
+        make_cert(2, 1_000),
+        make_cert(3, 5_000),
+    ];
+
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs, Some(5_000));
+    assert_eq!(
+        weight, total,
+        "sizing must count the whole admitted set, not stop once the floor is met"
+    );
+    assert_eq!(certified.len(), 4);
+
+    let (_, bounded) = mgr.avid_certified_nonce_dealers_from_certs(&certs, Some(1_000));
+    assert_eq!(
+        bounded,
+        total - 1,
+        "the cutoff must still bound admission past the floor"
     );
 }
 
@@ -14427,4 +14481,90 @@ async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
         matches!(outcome, WindowedNonceReceive::Closed),
         "an exhausted stream must close the window"
     );
+}
+
+// ===== TEMPORARY REVIEW PROBE — DELETE =====
+#[tokio::test]
+async fn zzz_probe_avid_sizing_vs_party_admission() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (s0, t0) = avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (s2, t2) = avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let (s1, t1) = avid_confirm_signatures(&setup, &mut managers, 1, batch_index, &mut rng);
+
+    let make = |target: &DealerMessagesHash, sigs: &[MemberSignature], take: usize, ts: u64| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs.iter().take(take) {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+            timestamp_ms: ts,
+        }
+    };
+    // CASE A: three honest full-weight certs, all inside a 2s window.
+    // CASE B: same, but dealer 1's Confirm cert is aggregated to only 5 of 6
+    // signers (weight 13 of 16, i.e. >= W-f = 12 but < W) — what a Byzantine
+    // dealer publishes by not waiting for the last confirmation.
+    for (label, thin) in [("A honest", false), ("B byzantine-thin", true)] {
+        let certs = vec![
+            (setup.address(0), make(&t0, &s0, 6, 1_000)),
+            (setup.address(2), make(&t2, &s2, 6, 1_000)),
+            (
+                setup.address(1),
+                make(&t1, &s1, if thin { 5 } else { 6 }, 1_500),
+            ),
+        ];
+        let mut mgrs = managers.clone();
+        let party = Arc::new(RwLock::new(mgrs.remove(&setup.address(3)).unwrap()));
+        party
+            .write()
+            .unwrap()
+            .mpc_config
+            .nonce_accumulation_window_ms = 2_000;
+        let cutoff = party
+            .read()
+            .unwrap()
+            .window_certified_nonce_dealers(&certs)
+            .1
+            .cutoff_ms();
+        let (_, sizing_weight) = party
+            .read()
+            .unwrap()
+            .avid_certified_nonce_dealers_from_certs(&certs, cutoff);
+        let mock_p2p = MockP2PChannel::new(mgrs, setup.address(3));
+        let mut tob = crate::communication::PrefetchedTobChannel::new(certs.clone());
+        let certified = MpcManager::run_as_avid_nonce_party(
+            &party,
+            batch_index,
+            &mock_p2p,
+            &mut tob,
+            cutoff,
+            &test_metrics(),
+        )
+        .await
+        .unwrap();
+        let party_weight: u32 = certified
+            .iter()
+            .map(|d| {
+                let m = party.read().unwrap();
+                let pid = m.committee.index_of(d).unwrap() as u16;
+                m.mpc_config.nodes.weight_of(pid).unwrap() as u32
+            })
+            .sum();
+        println!(
+            "PROBE[{label}] cutoff={cutoff:?} sizing_weight={sizing_weight} \
+             party_weight={party_weight} party_dealers={}",
+            certified.len()
+        );
+        assert_eq!(
+            sizing_weight, party_weight,
+            "[{label}] the live assert compares these two"
+        );
+    }
 }

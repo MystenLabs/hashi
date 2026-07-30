@@ -552,8 +552,12 @@ impl MpcService {
             })
             .collect();
         let certified_weight = match protocol {
-            NonceGenerationProtocol::Avid => avid_certified_nonce_weight(&mpc_manager, &canonical),
-            NonceGenerationProtocol::Vanilla => certified_nonce_weight(&mpc_manager, &canonical),
+            NonceGenerationProtocol::Avid => {
+                avid_certified_nonce_weight(&mpc_manager, &canonical, cutoff_ms)
+            }
+            NonceGenerationProtocol::Vanilla => {
+                pinned_certified_nonce_weight(&mpc_manager, &canonical, cutoff_ms)
+            }
         };
         let mut party_channel = PrefetchedTobChannel::new(canonical);
         let nonce_result = MpcManager::run_nonce_party_phase(
@@ -824,7 +828,11 @@ impl MpcService {
                     return Ok(None);
                 }
                 let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                avid_certified_nonce_weight(mpc_manager, &certs)
+                let cutoff_ms = {
+                    let mgr = mpc_manager.read().unwrap();
+                    mgr.nonce_collection_cutoff_ms(&certs)
+                };
+                avid_certified_nonce_weight(mpc_manager, &certs, cutoff_ms)
             }
         };
         if weight < floor {
@@ -1217,14 +1225,15 @@ impl MpcService {
                         ))
                     })
                     .collect();
-                // Sized from the per-kind quorum filter (#878), which needs the
-                // converted certs; the generic weight would count sub-quorum ones.
-                let expected_size =
-                    expected_from(avid_certified_nonce_weight(mpc_manager, &avid_certs))?;
                 let cutoff_ms = {
                     let mgr = mpc_manager.read().unwrap();
                     mgr.nonce_collection_cutoff_ms(&certs)
                 };
+                let expected_size = expected_from(avid_certified_nonce_weight(
+                    mpc_manager,
+                    &avid_certs,
+                    cutoff_ms,
+                ))?;
                 let mut prefetched = PrefetchedTobChannel::new(avid_certs);
                 let outputs = MpcManager::run_nonce_party_phase(
                     mpc_manager,
@@ -1840,14 +1849,28 @@ fn certified_nonce_weight<T: NonceCertTimestamp>(
         .weight()
 }
 
-fn avid_certified_nonce_weight(
+fn pinned_certified_nonce_weight<T: NonceCertTimestamp>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, CertificateV1)],
+    certs: &[(sui_sdk_types::Address, T)],
+    cutoff_ms: Option<u64>,
 ) -> u32 {
     mpc_manager
         .read()
         .unwrap()
-        .avid_certified_nonce_dealers_from_certs(certs)
+        .pinned_certified_nonce_dealers(certs, cutoff_ms)
+        .1
+        .weight()
+}
+
+fn avid_certified_nonce_weight(
+    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+    certs: &[(sui_sdk_types::Address, CertificateV1)],
+    cutoff_ms: Option<u64>,
+) -> u32 {
+    mpc_manager
+        .read()
+        .unwrap()
+        .avid_certified_nonce_dealers_from_certs(certs, cutoff_ms)
         .1
 }
 
