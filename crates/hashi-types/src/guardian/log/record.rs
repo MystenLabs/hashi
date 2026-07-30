@@ -10,7 +10,6 @@ use super::retention::S3ObjectLockPolicy;
 use super::schema::LogMessage;
 use super::schema::LogMessageV1;
 use super::schema::VersionedLogMessage;
-use crate::guardian::BuildPcrs;
 use crate::guardian::GuardianError::InvalidS3Log;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
@@ -42,7 +41,8 @@ pub struct LogEntry {
 }
 
 /// Write: `LogMessage` -> `LogRecord` -> JSON body.
-/// Read: actual S3 key + JSON body -> untrusted `LogRecord` -> `VerifiedLogRecord`.
+/// Read: actual S3 key + JSON body -> untrusted `LogRecord`; the reader layer
+/// authenticates it before exposing its contents.
 #[derive(Debug)]
 pub enum LogRecord {
     Signed(GuardianSigned<LogEntry>),
@@ -222,37 +222,6 @@ impl LogEntry {
         let timestamp_ms = self.timestamp_ms;
         let (session_id, message) = self.into_current()?;
         Ok((session_id, timestamp_ms, message))
-    }
-}
-
-/// A log record whose message signature and writing session's attestation/PCRs
-/// have both been verified. Its message is normalized to the current schema.
-/// If a future schema cannot be converted losslessly, this type should retain
-/// `VersionedLogMessage` and leave version acceptance to callers instead.
-#[derive(Debug)]
-pub struct VerifiedLogRecord {
-    pub object_key: String,
-    pub session_id: SessionID,
-    pub timestamp_ms: UnixMillis,
-    pub message: LogMessage,
-    pub build_pcrs: BuildPcrs,
-}
-
-impl VerifiedLogRecord {
-    pub fn new(
-        object_key: String,
-        session_id: SessionID,
-        timestamp_ms: UnixMillis,
-        message: LogMessage,
-        build_pcrs: BuildPcrs,
-    ) -> Self {
-        Self {
-            object_key,
-            session_id,
-            timestamp_ms,
-            message,
-            build_pcrs,
-        }
     }
 }
 

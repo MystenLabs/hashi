@@ -25,6 +25,7 @@
 //! read-after-write consistency to cover the old session's final writes.
 
 use super::GuardianReader;
+use super::VerifiedLogRecord;
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
@@ -32,7 +33,6 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;

@@ -3,6 +3,7 @@
 
 use super::heartbeat_cursor;
 use super::GuardianReader;
+use super::VerifiedLogRecord;
 use crate::HEARTBEAT_INTERVAL;
 use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
@@ -15,7 +16,6 @@ use hashi_types::guardian::GuardianError::PriorSessionHeartbeatStillRecent;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::VerifiedLogRecord;
 use std::collections::BTreeMap;
 use tracing::info;
 

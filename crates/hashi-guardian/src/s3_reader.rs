@@ -15,6 +15,7 @@ use crate::s3_client::GuardianS3Client;
 use crate::s3_client::HistoryCheck;
 use crate::s3_client::LockCheck;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::time_utils::UnixMillis;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
@@ -30,7 +31,6 @@ use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::VerifiedSessionInfo;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
@@ -43,6 +43,61 @@ use tracing::info;
 
 mod heartbeat_checks;
 mod limiter_recovery;
+
+/// A log record whose message signature and writing session's attestation/PCRs
+/// have both been verified. Its message is normalized to the current schema.
+/// If a future schema cannot be converted losslessly, this type should retain
+/// the versioned message and leave version acceptance to callers instead.
+#[derive(Debug)]
+pub struct VerifiedLogRecord {
+    object_key: String,
+    session_id: SessionID,
+    timestamp_ms: UnixMillis,
+    message: LogMessage,
+    build_pcrs: BuildPcrs,
+}
+
+impl VerifiedLogRecord {
+    fn new(
+        object_key: String,
+        session_id: SessionID,
+        timestamp_ms: UnixMillis,
+        message: LogMessage,
+        build_pcrs: BuildPcrs,
+    ) -> Self {
+        Self {
+            object_key,
+            session_id,
+            timestamp_ms,
+            message,
+            build_pcrs,
+        }
+    }
+
+    pub fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    pub fn session_id(&self) -> &SessionID {
+        &self.session_id
+    }
+
+    pub fn timestamp_ms(&self) -> UnixMillis {
+        self.timestamp_ms
+    }
+
+    pub fn message(&self) -> &LogMessage {
+        &self.message
+    }
+
+    pub fn build_pcrs(&self) -> &BuildPcrs {
+        &self.build_pcrs
+    }
+
+    pub fn into_message(self) -> LogMessage {
+        self.message
+    }
+}
 
 /// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
 /// retreat with [`S3HourScopedDirectory::next_dir`]/`prev_dir`, gate on
