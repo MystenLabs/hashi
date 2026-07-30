@@ -144,6 +144,7 @@ struct Inner {
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
     metrics: Option<Arc<crate::metrics::Metrics>>,
+    deposit_tracker: crate::deposit_tracker::DepositTracker,
     /// Set once after guardian bootstrap; advanced by the watcher.
     /// `LocalLimiter` carries its own `RwLock<LimiterState>`, so we just
     /// need set-once semantics for the slot itself.
@@ -241,6 +242,10 @@ impl OnchainState {
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Option<route::MirrorSeed>)> {
+        let deposit_tracker = metrics.as_ref().map_or_else(
+            crate::deposit_tracker::DepositTracker::new_uninstrumented,
+            |metrics| crate::deposit_tracker::DepositTracker::new(metrics.clone()),
+        );
         let mut client = crate::sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
         // The scrape client reads the full on-chain state (the largest
         // responses), so it needs the decode limit too — not just `committees`.
@@ -278,13 +283,15 @@ impl OnchainState {
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
-            metrics,
+            metrics: metrics.clone(),
+            deposit_tracker,
             local_limiter: OnceLock::new(),
             guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
         }
         .pipe(Arc::new)
         .pipe(Self);
 
+        state.reconcile_deposit_tracker();
         Ok((state, seed))
     }
 
@@ -483,6 +490,25 @@ impl OnchainState {
 
     pub(crate) fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
         self.0.metrics.as_ref()
+    }
+
+    pub(crate) fn deposit_tracker(&self) -> &crate::deposit_tracker::DepositTracker {
+        &self.0.deposit_tracker
+    }
+
+    fn reconcile_deposit_tracker(&self) {
+        let requests = {
+            let state = self.state();
+            state
+                .hashi
+                .bitcoin()
+                .deposit_queue
+                .requests()
+                .iter()
+                .map(|(id, request)| (*id, request.utxo.id.into()))
+                .collect::<Vec<_>>()
+        };
+        self.deposit_tracker().replace_requests(requests);
     }
 
     /// Called once after guardian bootstrap.
@@ -747,6 +773,18 @@ impl OnchainState {
             .requests()
             .values()
             .cloned()
+            .collect()
+    }
+
+    pub(crate) fn deposit_requests_by_ids(
+        &self,
+        deposit_ids: &HashSet<Address>,
+    ) -> Vec<types::DepositRequest> {
+        let state = self.state();
+        let requests = state.hashi().bitcoin().deposit_queue.requests();
+        deposit_ids
+            .iter()
+            .filter_map(|id| requests.get(id).cloned())
             .collect()
     }
 
