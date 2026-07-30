@@ -2593,4 +2593,288 @@ mod tests {
         info!("=== Large Withdrawal Stress Test Passed ===");
         Ok(())
     }
+
+    /// Stress-test withdrawal in drain mode: a batch at the absolute
+    /// request cap (298) funded by only a handful of UTXOs. This is the
+    /// testnet-backlog shape — a deep withdrawal queue against a shallow
+    /// UTXO pool — where the flow should spend the Sui commit object
+    /// budget on requests instead of consolidation inputs.
+    ///
+    /// The commit transaction at this shape fills the modeled
+    /// runtime-object budget exactly (12 fixed + 3 × 298 requests + 16
+    /// inputs = 922 modeled objects), so this test empirically validates
+    /// the cost model at its ceiling. The 298-address `request_ids` pure
+    /// argument (~9.5 KiB) also probes the 16 KiB pure-argument limit, and
+    /// the 298 approvals exercise the 200-per-PTB approval chunking.
+    ///
+    /// Test outline:
+    /// 1. Create 16 large deposits (the entire UTXO pool, matching the
+    ///    funding reserve the commit object budget leaves at the cap).
+    /// 2. Submit 298 withdrawal requests (two batched PTBs, then one
+    ///    single request to fill the batch).
+    /// 3. Assert the batch is picked with all 298 requests and the full
+    ///    16-input funding reserve.
+    /// 4. Assert commit, sign, and confirm stay under all Sui limits.
+    /// 5. Mine blocks, wait for confirmation, and run cleanup.
+    #[tokio::test]
+    async fn test_drain_mode_max_request_batch() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Drain Mode Max Batch Test ===");
+
+        let num_withdrawals: usize = hashi::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS;
+        let num_deposits: usize = 16;
+
+        // 24-hour batching delay: the batch fires only at capacity, not on
+        // a timer, so every request lands in one Bitcoin transaction.
+        let mut networks = avid_override(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_withdrawal_max_batch_size(num_withdrawals)
+                .with_withdrawal_batching_delay_ms(86_400_000),
+        )
+        .build()
+        .await?;
+        rotate_into_avid(&mut networks).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let hbtc_recipient = user_key.public_key().derive_address();
+
+        let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
+
+        // --- Create 16 large Bitcoin deposits ---
+        // 16 × 2,000,000 sats = 32,000,000 sats against 298 × 40,001 =
+        // 11,920,298 sats of withdrawals. Six largest-first inputs fund the
+        // batch, and low-fee consolidation sweeps the ten leftovers —
+        // exactly filling the 16-input funding reserve that the commit
+        // object budget leaves at the request cap.
+        let deposit_amount_sats = 2_000_000u64;
+        info!(
+            "Creating {} Bitcoin deposits of {} sats each...",
+            num_deposits, deposit_amount_sats
+        );
+
+        let mut btc_txids = Vec::with_capacity(num_deposits);
+        for _ in 0..num_deposits {
+            let txid = networks
+                .bitcoin_node
+                .send_to_address(&deposit_address, Amount::from_sat(deposit_amount_sats))?;
+            btc_txids.push(txid);
+        }
+
+        info!("Mining blocks for confirmation...");
+        networks.bitcoin_node.generate_blocks(10)?;
+
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone().into());
+
+        let deposits_data: Vec<(Address, u32, u64)> = btc_txids
+            .iter()
+            .map(|txid| {
+                let vout = lookup_vout(
+                    &networks,
+                    *txid,
+                    deposit_address.clone(),
+                    deposit_amount_sats,
+                )?;
+                Ok((txid_to_address(txid), vout as u32, deposit_amount_sats))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        executor
+            .execute_create_deposit_requests_multi(&deposits_data, Some(hbtc_recipient))
+            .await?;
+        info!("All {} deposit requests submitted on Sui", num_deposits);
+
+        // Mine blocks in the background so the leader's BTC-block-driven
+        // deposit processing loop keeps firing.
+        let _deposit_miner = BackgroundMiner::start(&networks.bitcoin_node);
+        info!("Waiting for {} deposit confirmations...", num_deposits);
+        let deposit_timeout = Duration::from_secs(300);
+        let deposit_start = std::time::Instant::now();
+        loop {
+            if deposit_start.elapsed() > deposit_timeout {
+                let remaining = hashi.onchain_state().deposit_requests().len();
+                return Err(anyhow!(
+                    "Timeout waiting for deposit confirmations: {} still pending after {:?}",
+                    remaining,
+                    deposit_timeout,
+                ));
+            }
+            let state = hashi.onchain_state();
+            if state.deposit_requests().is_empty() && state.active_utxos().len() >= num_deposits {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        info!("All deposits confirmed");
+        drop(_deposit_miner);
+
+        // --- Submit 298 withdrawal requests ---
+        // Mirror the CLI's bulk-submission shape: batched PTBs of up to 250
+        // requests (~3 commands each against the 1024-command cap), keeping
+        // the final request out so the batch cannot fill before this test
+        // subscribes for the picked event.
+        let withdrawal_amount_sats = 40_001u64;
+        info!(
+            "Submitting {} withdrawal requests of {} sats each...",
+            num_withdrawals, withdrawal_amount_sats
+        );
+        let mut remaining = num_withdrawals - 1;
+        while remaining > 0 {
+            let this_batch = remaining.min(250);
+            let btc_destination = networks.bitcoin_node.get_new_address()?;
+            let destination_bytes = extract_witness_program(&btc_destination)?;
+            executor
+                .execute_create_withdrawal_requests_batch(
+                    withdrawal_amount_sats,
+                    destination_bytes,
+                    this_batch,
+                )
+                .await?;
+            remaining -= this_batch;
+            info!(
+                "  Withdrawal requests submitted: {}/{}",
+                num_withdrawals - 1 - remaining,
+                num_withdrawals
+            );
+        }
+
+        // Wait for the batched withdrawal to be picked for processing. The
+        // 24-hour delay means it fires only at the configured capacity.
+        info!("Waiting for batched withdrawal to be picked...");
+        let mut picked_client = networks.sui_network.client.clone();
+        let picked_task = tokio::spawn(async move {
+            wait_for_batched_withdrawal_picked_with_effects(
+                &mut picked_client,
+                num_withdrawals,
+                Duration::from_secs(300),
+            )
+            .await
+        });
+
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+        info!("All {} withdrawal requests submitted", num_withdrawals);
+
+        let picked_with_effects = picked_task.await??;
+        assert_tx_size_under_sui_limit("commit_withdrawal_tx", picked_with_effects.tx_size_bytes);
+        assert_effects_size_under_sui_limit(
+            "commit_withdrawal_tx",
+            picked_with_effects.effects_size_bytes,
+        );
+        assert_changed_objects_under_sui_limit(
+            "commit_withdrawal_tx",
+            picked_with_effects.changed_objects,
+        );
+        assert_runtime_object_count_under_sui_limit(
+            "commit_withdrawal_tx",
+            picked_with_effects.changed_objects,
+            picked_with_effects.unchanged_loaded_runtime_objects,
+        );
+        let commit_runtime_objects = runtime_object_count(&picked_with_effects);
+        let picked = picked_with_effects.event;
+
+        info!(
+            withdrawal_txn_id = %picked.withdrawal_txn_id,
+            requests = %picked.request_ids.len(),
+            inputs = %picked.inputs.len(),
+            commit_runtime_objects,
+            "Batched withdrawal picked"
+        );
+
+        assert_eq!(
+            picked.request_ids.len(),
+            num_withdrawals,
+            "Expected all {} withdrawal requests to be batched",
+            num_withdrawals,
+        );
+
+        // The drain-mode property: the batch is output-heavy, not
+        // input-heavy. Funding needs six of the sixteen UTXOs and low-fee
+        // consolidation sweeps the rest, exactly filling the 16-input
+        // reserve the commit object budget leaves at the request cap.
+        assert_eq!(
+            picked.inputs.len(),
+            num_deposits,
+            "Expected drain mode to fund from (and sweep) the whole pool",
+        );
+
+        // Each request moves between the requests and processed ObjectBags
+        // at commit, so the commit must have rewritten at least one object
+        // per request — proof this test actually stressed the runtime
+        // object budget rather than trivially passing the limit asserts.
+        assert!(
+            picked_with_effects.changed_objects >= num_withdrawals,
+            "Expected at least {} changed objects at commit, got {}",
+            num_withdrawals,
+            picked_with_effects.changed_objects,
+        );
+
+        let signed_with_effects = wait_for_withdrawal_signed_with_effects(
+            &mut networks.sui_network.client,
+            picked.withdrawal_txn_id,
+            Duration::from_secs(300),
+        )
+        .await?;
+        assert_eq!(
+            signed_with_effects.event.signatures.len(),
+            picked.inputs.len(),
+            "Expected one signature per selected input"
+        );
+        assert_effects_size_under_sui_limit(
+            "sign_withdrawal",
+            signed_with_effects.effects_size_bytes,
+        );
+        assert_changed_objects_under_sui_limit(
+            "sign_withdrawal",
+            signed_with_effects.changed_objects,
+        );
+        assert_runtime_object_count_under_sui_limit(
+            "sign_withdrawal",
+            signed_with_effects.changed_objects,
+            signed_with_effects.unchanged_loaded_runtime_objects,
+        );
+
+        // Mine blocks and wait for the withdrawal to be confirmed, then
+        // check the confirm transaction against the same Sui limits — with
+        // 298 requests it is the second-largest transaction in the flow.
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        let confirmed_with_effects = wait_for_withdrawal_confirmed_with_effects(
+            &mut networks.sui_network.client,
+            picked.withdrawal_txn_id,
+            Duration::from_secs(600),
+        )
+        .await?;
+        assert_effects_size_under_sui_limit(
+            "confirm_withdrawal",
+            confirmed_with_effects.effects_size_bytes,
+        );
+        assert_changed_objects_under_sui_limit(
+            "confirm_withdrawal",
+            confirmed_with_effects.changed_objects,
+        );
+        assert_runtime_object_count_under_sui_limit(
+            "confirm_withdrawal",
+            confirmed_with_effects.changed_objects,
+            confirmed_with_effects.unchanged_loaded_runtime_objects,
+        );
+        let confirm_runtime_objects = runtime_object_count(&confirmed_with_effects);
+        info!(
+            commit_runtime_objects,
+            confirm_runtime_objects, "Compared drain-mode commit and confirm runtime object counts"
+        );
+        drop(miner);
+
+        // --- Run cleanup_spent_utxos to finalize on-chain bookkeeping ---
+        info!("Running cleanup_spent_utxos...");
+        let utxo_ids: Vec<_> = picked.inputs.iter().map(|u| u.id).collect();
+        executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
+        info!("cleanup_spent_utxos succeeded");
+
+        info!("=== Drain Mode Max Batch Test Passed ===");
+        Ok(())
+    }
 }
