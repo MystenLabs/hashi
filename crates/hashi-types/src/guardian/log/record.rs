@@ -32,19 +32,22 @@ use std::time::Duration;
 /// Field order defines the BCS signing format.
 #[derive(Debug, Serialize)]
 pub struct LogEntry {
+    /// Version of the serialized log schema.
     schema_version: u64,
+    /// Guardian session that wrote the entry.
     session_id: SessionID,
     /// Final S3 destination selected before signing. Readers must compare this
     /// intended key with the actual key returned by S3.
     object_key: String,
+    /// Versioned log payload.
     message: VersionedLogMessage,
-    /// Milliseconds since Unix epoch.
+    /// Entry creation time in milliseconds since the Unix epoch.
     timestamp_ms: UnixMillis,
 }
 
 /// Write: `LogMessage` -> `LogRecord` -> JSON body.
 /// Read: actual S3 key + JSON body -> untrusted `LogRecord`; the reader layer
-/// fully verifies it before exposing its contents.
+/// fully verifies it before exposing its contents (see `VerifiedLogRecord`).
 #[derive(Debug)]
 pub enum LogRecord {
     Signed(GuardianSigned<LogEntry>),
