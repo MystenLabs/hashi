@@ -204,7 +204,7 @@ impl LogEntry {
 
     /// Validate an unsigned OI-attestation entry. The Nitro attestation itself
     /// must be authenticated separately.
-    fn validate_unsigned(self) -> GuardianResult<Self> {
+    fn validate_unsigned(&self) -> GuardianResult<()> {
         if !self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
                 "expected unsigned log record but message requires a signature".into(),
@@ -225,7 +225,7 @@ impl LogEntry {
             unreachable!("is_allowed_unsigned only permits OIAttestationUnsigned");
         };
         self.validate_session_id(signing_public_key)?;
-        Ok(self)
+        Ok(())
     }
 
     /// Validate signed-log routing context.
@@ -301,7 +301,10 @@ impl LogRecord {
                     .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
                 Ok(signed.data)
             }
-            (Self::Unsigned(unsigned), None) => unsigned.validate_unsigned(),
+            (Self::Unsigned(unsigned), None) => {
+                unsigned.validate_unsigned()?;
+                Ok(unsigned)
+            }
             (Self::Unsigned(unsigned), Some(_)) if unsigned.message.is_allowed_unsigned() => Err(
                 InvalidS3Log("expected signed log record but message is unsigned".into()),
             ),
