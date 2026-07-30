@@ -15,6 +15,15 @@
 //! (`UpgradePolicy::Compatible` arm) for the authoritative implementation this
 //! mirrors.
 //!
+//! ## Hermetic: no network
+//!
+//! The "deployed package" side of the comparison is a **checked-in bytecode
+//! snapshot** (`tests/move_upgrade_snapshots/<network>/v<version>/`), NOT a
+//! live RPC fetch. CI must not depend on a network call, so the deployed
+//! package's compiled modules are committed to the repo. When a new version is
+//! deployed on chain, regenerate the snapshot — see
+//! `tests/move_upgrade_snapshots/README.md`.
+//!
 //! ## What runs where
 //!
 //! * [`synthetic_incompatible_change_is_rejected`] and
@@ -24,58 +33,27 @@
 //!   in every `cargo test` invocation, locally and in CI.
 //!
 //! * [`current_source_is_compatible_upgrade_of_deployed`] is the real gate. It
-//!   builds `packages/hashi`, resolves the **latest** deployed package from
-//!   chain, fetches its bytecode, and asserts the current source is a
-//!   compatible upgrade. It requires the `sui` binary (to build) and network
-//!   access to a fullnode. It does NOT skip: any missing tool / build failure /
-//!   network error fails the test — this is a required gate and must never
-//!   green by skipping.
-//!
-//! ## Resolving the "latest deployed package"
-//!
-//! The PACKAGE id changes on every upgrade, so it must not be hardcoded. The
-//! stable anchor is the Hashi shared OBJECT id, which never changes. From it we
-//! resolve the latest package like this:
-//!
-//! 1. `GetObject(hashi_object_id)` and read its `object_type` — a Move type tag
-//!    `0x<original-package>::hashi::Hashi`. The address segment is the type's
-//!    *defining* (original) package id, i.e. a member of the upgrade lineage.
-//! 2. `ListPackageVersions(<any lineage member>)` returns every
-//!    `(version, storage_id)` pair in the lineage; the max-version entry is the
-//!    latest deployed package id. This is the same `MovePackageService`
-//!    lineage query the node's on-chain scrape uses
-//!    (`crates/hashi/src/onchain/mod.rs::scrape_package_versions`).
-//! 3. `GetPackage(<latest id>)` yields that package's compiled modules.
-//!
-//! (The alternative canonical pointer is `Hashi.config.upgrade_cap.package`,
-//! but reading it requires BCS-deserializing the entire `Hashi` Move struct,
-//! whose layout can legitimately change in the very PR under test — which would
-//! turn a benign layout change into a spurious gate failure. The
-//! `ListPackageVersions` route reads no Move struct, so it is layout-agnostic
-//! and preferred here.)
+//!   builds `packages/hashi`, loads the checked-in snapshot of the deployed
+//!   package's bytecode, and asserts the current source is a compatible
+//!   upgrade. It requires only the `sui` binary (to build the current source) —
+//!   no network. It does NOT skip: any missing tool / build failure / IO error
+//!   fails the test — this is a required gate and must never green by skipping.
 //!
 //! ## Configuration (env vars)
 //!
-//! * `HASHI_COMPAT_RPC_URL` — fullnode gRPC URL. Defaults to Sui testnet.
-//! * `HASHI_COMPAT_HASHI_OBJECT_ID` — the stable Hashi shared object id.
-//!   Defaults to the live testnet object. The latest package is derived from
-//!   it (see above).
-//! * `HASHI_COMPAT_PACKAGE_ID` — optional escape hatch: check against this
-//!   exact package id and skip the object → lineage resolution. Unset by
-//!   default.
-//! * `HASHI_COMPAT_ENV` — Move build environment (`-e`). Defaults to `testnet`
-//!   so the build links the same framework dependency versions the deployed
-//!   package was built against.
+//! * `HASHI_COMPAT_SNAPSHOT_DIR` — directory of `<module>.mv` snapshot files to
+//!   check against. Defaults to
+//!   `<CARGO_MANIFEST_DIR>/tests/move_upgrade_snapshots/testnet/v1`.
 //! * `SUI_BINARY` — path to the `sui` CLI (default `sui`).
 //!
 //! ## Addressing
 //!
 //! A source build of an upgradeable package emits modules addressed at `0x0`,
 //! while the on-chain `module_map` (what both the validator's compat check and
-//! the RPC `GetPackage` see) is addressed at the package's runtime/original id.
-//! We rebase the built modules onto the on-chain address before comparing —
-//! exactly what the Sui adapter does via `substitute_package_id` right before
-//! `check_compatibility`.
+//! the snapshot bytecode carry) is addressed at the package's runtime/original
+//! id. We rebase the built modules onto the snapshot's address before
+//! comparing — exactly what the Sui adapter does via `substitute_package_id`
+//! right before `check_compatibility`.
 
 use std::path::PathBuf;
 
@@ -86,30 +64,13 @@ use move_binary_format::compatibility::Compatibility;
 use move_binary_format::normalized;
 use move_core_types::account_address::AccountAddress;
 
-/// Stable Hashi shared object on Sui **testnet**. Unlike the package id, this
-/// never changes across upgrades, so it's the anchor from which we resolve the
-/// latest deployed package (see module docs).
-const DEFAULT_TESTNET_HASHI_OBJECT_ID: &str =
-    "0x22c0ce66ce09df2dc88a31bd320d4177b766518b9b88010368cfbdcd724528f8";
-
-// TODO(mainnet): once Hashi is deployed to mainnet, add the mainnet Hashi
-// object id here and default (or add a matrix entry) to check against it as
-// well. Until then the gate only guards the testnet deployment.
-//
-// const DEFAULT_MAINNET_HASHI_OBJECT_ID: &str = "0x…";
-
-/// Default fullnode gRPC endpoint. `fullnode.testnet.sui.io` has been observed
-/// to have TLS issues from some local clients but works fine from CI runners;
-/// override with `HASHI_COMPAT_RPC_URL` if needed.
-const DEFAULT_RPC_URL: &str = "https://fullnode.testnet.sui.io:443";
-
-/// Default Move build environment (selects the `[env]`/published-at address).
-const DEFAULT_BUILD_ENV: &str = "testnet";
-
 /// Normalize a `CompiledModule` into the representation the compatibility
 /// checker consumes. `include_code = true` matches what the on-chain adapter
 /// uses (`check_compatibility(..)` passes `include code = true`).
-fn normalize(pool: &mut normalized::RcPool, module: &CompiledModule) -> normalized::Module<normalized::RcIdentifier> {
+fn normalize(
+    pool: &mut normalized::RcPool,
+    module: &CompiledModule,
+) -> normalized::Module<normalized::RcIdentifier> {
     normalized::Module::new(pool, module, /* include_code */ true)
 }
 
@@ -123,7 +84,7 @@ fn module_self_address(module: &CompiledModule) -> AccountAddress {
 ///
 /// A source build of an upgradeable package produces modules addressed at
 /// `0x0`. The on-chain `module_map` (what the validator's compat check reads,
-/// and what the RPC `GetPackage` returns) stores modules addressed at the
+/// and what the checked-in snapshot carries) stores modules addressed at the
 /// package's *runtime* / original id. The Sui adapter reconciles the two by
 /// calling `substitute_package_id(&mut modules, runtime_id)` on the incoming
 /// modules *before* running `check_compatibility`. We reproduce that exactly so
@@ -157,7 +118,10 @@ fn substitute_self_address(module: &mut CompiledModule, new_address: AccountAddr
 /// `Compatibility::upgrade_check().check(old, new)`. Adding brand-new modules
 /// is allowed under the `Compatible` policy. Returns a human-readable error
 /// describing the first incompatibility found.
-fn assert_compatible_upgrade(old_modules: &[CompiledModule], new_modules: &[CompiledModule]) -> Result<()> {
+fn assert_compatible_upgrade(
+    old_modules: &[CompiledModule],
+    new_modules: &[CompiledModule],
+) -> Result<()> {
     let pool = &mut normalized::RcPool::new();
 
     let old_normalized: std::collections::BTreeMap<String, _> = old_modules
@@ -201,8 +165,26 @@ fn assert_compatible_upgrade(old_modules: &[CompiledModule], new_modules: &[Comp
 /// Build `packages/hashi` from source and return its compiled modules.
 ///
 /// Reuses [`hashi::publish::build_package`], which shells out to
-/// `sui move build --dump-bytecode-as-base64`. Any failure (including a missing
-/// `sui` binary) is propagated — this is a required gate and must not skip.
+/// `sui move build --dump-bytecode-as-base64 --no-tree-shaking`. Any failure
+/// (including a missing `sui` binary) is propagated — this is a required gate
+/// and must not skip.
+///
+/// The build is **environment-agnostic**: `environment: None` is passed so
+/// modules are emitted with `0x0` self-addresses (which
+/// [`substitute_self_address`] later rebases onto the snapshot's address).
+/// Passing `-e testnet` requires a sui client config to resolve the env; with
+/// none present the CLI emits no JSON to stdout and the parse fails with
+/// `expected value at line 1 column 1`. An env-agnostic build emits valid JSON
+/// with `0x0`-addressed modules — exactly what this gate expects.
+///
+/// We DO pass a throwaway `--client.config`. Without a client config the CLI
+/// can try to create one and print an interactive `create one [Y/n]?` prompt —
+/// in non-interactive CI that prompt is written to *stdout*, so it would
+/// prefix the `--dump-bytecode-as-base64` JSON and break the parse. A minimal
+/// config (with a `testnet` env carrying its `chain_id`) skips the prompt and
+/// needs no network for chain-id resolution; `--no-tree-shaking` already avoids
+/// the other RPC call, so the build is offline apart from fetching the
+/// git-pinned framework deps.
 fn build_current_source() -> Result<Vec<CompiledModule>> {
     let package_path = workspace_package_path();
     anyhow::ensure!(
@@ -212,13 +194,19 @@ fn build_current_source() -> Result<Vec<CompiledModule>> {
     );
 
     let sui_binary = std::env::var("SUI_BINARY").unwrap_or_else(|_| "sui".to_string());
-    let build_env = std::env::var("HASHI_COMPAT_ENV").unwrap_or_else(|_| DEFAULT_BUILD_ENV.to_string());
 
+    // Throwaway client config so the CLI never prompts. `_config_dir` keeps the
+    // temp dir alive for the duration of the build.
+    let (_config_dir, client_config_path) =
+        write_throwaway_client_config().context("preparing throwaway sui client config")?;
+
+    // Build environment-agnostic: no `-e`, so modules come out at `0x0`. See the
+    // doc comment above for why `-e testnet` breaks the JSON parse here.
     let params = hashi::publish::BuildParams {
         sui_binary: std::path::Path::new(&sui_binary),
         package_path: &package_path,
-        client_config: None,
-        environment: Some(&build_env),
+        client_config: Some(&client_config_path),
+        environment: None,
     };
 
     let publish = hashi::publish::build_package(&params).with_context(|| {
@@ -231,153 +219,99 @@ fn build_current_source() -> Result<Vec<CompiledModule>> {
     deserialize_modules(&publish.modules).context("deserializing freshly-built modules")
 }
 
-/// Resolve the latest deployed package id and fetch its compiled modules from a
-/// Sui fullnode.
+/// Write a minimal, self-contained `sui` client config into a fresh temp dir
+/// and return `(temp_dir_guard, client_yaml_path)`.
 ///
-/// Unless the `HASHI_COMPAT_PACKAGE_ID` escape hatch is set, the latest package
-/// is resolved from the stable Hashi object id: read the object's type to get a
-/// lineage member, list all package versions in the lineage, and take the
-/// highest-version id (see module docs).
-async fn fetch_deployed_modules() -> Result<Vec<CompiledModule>> {
-    use sui_rpc::proto::sui::rpc::v2::GetPackageRequest;
+/// The config declares the `testnet`/`mainnet` envs (with their chain ids so no
+/// network round-trip is needed to resolve them) and points at an empty
+/// keystore. It exists purely to stop the CLI from prompting to create one;
+/// nothing in it is used to sign or reach the network for the build.
+fn write_throwaway_client_config() -> Result<(tempfile::TempDir, PathBuf)> {
+    let dir = tempfile::tempdir().context("creating temp dir for sui client config")?;
+    let keystore_path = dir.path().join("sui.keystore");
+    std::fs::write(&keystore_path, "[]").context("writing empty keystore")?;
 
-    let rpc_url = std::env::var("HASHI_COMPAT_RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_string());
-    let mut client = sui_rpc::Client::new(rpc_url.as_str())
-        .with_context(|| format!("connecting to fullnode at `{rpc_url}`"))?;
-
-    let latest_package_id = resolve_latest_package_id(&mut client, &rpc_url).await?;
-    eprintln!("resolved latest deployed package id: {latest_package_id}");
-
-    let response = client
-        .package_client()
-        .get_package(GetPackageRequest::new(&latest_package_id))
-        .await
-        .with_context(|| format!("GetPackage RPC for `{latest_package_id}` at `{rpc_url}` failed"))?
-        .into_inner();
-
-    let package = response
-        .package
-        .ok_or_else(|| anyhow::anyhow!("GetPackage response for `{latest_package_id}` had no package"))?;
-
-    anyhow::ensure!(
-        !package.modules.is_empty(),
-        "deployed package `{latest_package_id}` returned zero modules"
+    let client_yaml = dir.path().join("client.yaml");
+    let contents = format!(
+        "---\n\
+         keystore:\n\
+         \x20 File: {keystore}\n\
+         envs:\n\
+         \x20 - alias: testnet\n\
+         \x20   rpc: \"https://fullnode.testnet.sui.io:443\"\n\
+         \x20   ws: ~\n\
+         \x20   basic_auth: ~\n\
+         \x20   chain_id: 4c78adac\n\
+         \x20 - alias: mainnet\n\
+         \x20   rpc: \"https://fullnode.mainnet.sui.io:443\"\n\
+         \x20   ws: ~\n\
+         \x20   basic_auth: ~\n\
+         \x20   chain_id: 35834a8a\n\
+         active_env: testnet\n\
+         active_address: ~\n",
+        keystore = keystore_path.display()
     );
+    std::fs::write(&client_yaml, contents).context("writing client.yaml")?;
 
-    let raw: Vec<Vec<u8>> = package
-        .modules
-        .into_iter()
-        .map(|m| m.contents.map(|b| b.to_vec()).unwrap_or_default())
-        .collect();
-
-    deserialize_modules(&raw).context("deserializing on-chain modules")
+    Ok((dir, client_yaml))
 }
 
-/// Resolve the id of the latest deployed package in Hashi's upgrade lineage.
+/// Directory holding the checked-in bytecode snapshot of the deployed package.
 ///
-/// Precedence:
-/// 1. `HASHI_COMPAT_PACKAGE_ID` — if set, used verbatim (escape hatch).
-/// 2. Otherwise: `GetObject(hashi_object_id)` → parse its `object_type` for a
-///    lineage member → `ListPackageVersions` → max version.
-async fn resolve_latest_package_id(
-    client: &mut sui_rpc::Client,
-    rpc_url: &str,
-) -> Result<sui_sdk_types::Address> {
-    use sui_sdk_types::Address;
-
-    if let Ok(explicit) = std::env::var("HASHI_COMPAT_PACKAGE_ID") {
-        let id: Address = explicit
-            .parse()
-            .with_context(|| format!("parsing HASHI_COMPAT_PACKAGE_ID `{explicit}`"))?;
-        eprintln!("using HASHI_COMPAT_PACKAGE_ID escape hatch: {id}");
-        return Ok(id);
+/// Defaults to `<CARGO_MANIFEST_DIR>/tests/move_upgrade_snapshots/testnet/v1`;
+/// override with `HASHI_COMPAT_SNAPSHOT_DIR`.
+fn snapshot_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("HASHI_COMPAT_SNAPSHOT_DIR") {
+        return PathBuf::from(dir);
     }
-
-    let object_id_str = std::env::var("HASHI_COMPAT_HASHI_OBJECT_ID")
-        .unwrap_or_else(|_| DEFAULT_TESTNET_HASHI_OBJECT_ID.to_string());
-    let hashi_object_id: Address = object_id_str
-        .parse()
-        .with_context(|| format!("parsing Hashi object id `{object_id_str}`"))?;
-
-    let lineage_seed = lineage_seed_from_object(client, hashi_object_id, rpc_url).await?;
-    latest_package_in_lineage(client, lineage_seed, rpc_url).await
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("move_upgrade_snapshots")
+        .join("testnet")
+        .join("v1")
 }
 
-/// Read the Hashi object's `object_type` and extract the defining (original)
-/// package id — a valid member of the upgrade lineage.
-async fn lineage_seed_from_object(
-    client: &mut sui_rpc::Client,
-    hashi_object_id: sui_sdk_types::Address,
-    rpc_url: &str,
-) -> Result<sui_sdk_types::Address> {
-    use sui_rpc::field::FieldMask;
-    use sui_rpc::field::FieldMaskUtil;
-    use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
-    use sui_sdk_types::Address;
-
-    let response = client
-        .ledger_client()
-        .get_object(
-            GetObjectRequest::new(&hashi_object_id)
-                .with_read_mask(FieldMask::from_paths(["object_id", "object_type"])),
-        )
-        .await
-        .with_context(|| {
-            format!("GetObject for Hashi object `{hashi_object_id}` at `{rpc_url}` failed")
-        })?
-        .into_inner();
-
-    let object_type = response.object().object_type().to_string();
+/// Load and deserialize every `*.mv` file in the snapshot directory.
+///
+/// These are the raw compiled modules of the deployed package, addressed at the
+/// package's runtime/original id. This replaces the old network fetch: the
+/// snapshot IS the deployed package. Errors clearly if the directory is missing
+/// or contains no `.mv` files — a required gate must not silently pass with an
+/// empty "deployed" side.
+fn load_snapshot_modules() -> Result<Vec<CompiledModule>> {
+    let dir = snapshot_dir();
     anyhow::ensure!(
-        !object_type.is_empty(),
-        "GetObject for `{hashi_object_id}` returned an empty object_type (is this really the Hashi \
-         shared object?)"
+        dir.is_dir(),
+        "snapshot directory does not exist: {} (set HASHI_COMPAT_SNAPSHOT_DIR or regenerate the \
+         snapshot — see tests/move_upgrade_snapshots/README.md)",
+        dir.display()
     );
 
-    // A Move type tag is `<address>::<module>::<name>[<...>]`. The address is
-    // the type's defining (original) package id.
-    let addr_segment = object_type.split("::").next().unwrap_or_default();
-    let seed: Address = addr_segment.parse().with_context(|| {
-        format!("parsing package id out of object_type `{object_type}` for `{hashi_object_id}`")
-    })?;
-    Ok(seed)
-}
-
-/// Given any package id in a lineage, return the id of the highest-version
-/// package (the latest deployed one). Mirrors
-/// `crates/hashi/src/onchain/mod.rs::scrape_package_versions`.
-async fn latest_package_in_lineage(
-    client: &mut sui_rpc::Client,
-    lineage_member: sui_sdk_types::Address,
-    rpc_url: &str,
-) -> Result<sui_sdk_types::Address> {
-    use futures::TryStreamExt as _;
-    use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
-    use sui_sdk_types::Address;
-
-    let versions: Vec<(u64, Address)> = client
-        .list_package_versions(ListPackageVersionsRequest::new(&lineage_member).with_page_size(1000))
-        .map_err(anyhow::Error::from)
-        .and_then(|pv| async move {
-            let id: Address = pv
-                .package_id()
-                .parse()
-                .with_context(|| format!("parsing package id `{}`", pv.package_id()))?;
-            Ok((pv.version(), id))
-        })
-        .try_collect()
-        .await
-        .with_context(|| {
-            format!("ListPackageVersions for lineage member `{lineage_member}` at `{rpc_url}` failed")
-        })?;
-
-    versions
+    let mut mv_paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| format!("reading snapshot directory {}", dir.display()))?
+        .map(|entry| entry.map(|e| e.path()).map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?
         .into_iter()
-        .max_by_key(|(version, _)| *version)
-        .map(|(_, id)| id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("ListPackageVersions for `{lineage_member}` returned zero versions")
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("mv"))
+        .collect();
+    mv_paths.sort();
+
+    anyhow::ensure!(
+        !mv_paths.is_empty(),
+        "snapshot directory {} contains no `.mv` files (regenerate the snapshot — see \
+         tests/move_upgrade_snapshots/README.md)",
+        dir.display()
+    );
+
+    let raw: Vec<Vec<u8>> = mv_paths
+        .iter()
+        .map(|p| {
+            std::fs::read(p).with_context(|| format!("reading snapshot module {}", p.display()))
         })
+        .collect::<Result<Vec<_>>>()?;
+
+    deserialize_modules(&raw)
+        .with_context(|| format!("deserializing snapshot modules from {}", dir.display()))
 }
 
 /// Deserialize raw module bytecode into `CompiledModule`s.
@@ -404,42 +338,43 @@ fn workspace_package_path() -> PathBuf {
 // ───────────────────────────── the real gate ─────────────────────────────
 
 /// Assert the current `packages/hashi` source is a compatible upgrade of the
-/// latest deployed package. This is the CI gate. It never skips: a missing
-/// tool, build failure or network error fails the test.
-#[tokio::test]
-async fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
+/// deployed package captured in the checked-in snapshot. This is the CI gate.
+/// It never skips: a missing tool, build failure or IO error fails the test.
+/// Fully synchronous — there is no network call.
+#[test]
+fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
     let mut new_modules = build_current_source()?;
 
-    let old_modules = fetch_deployed_modules().await?;
+    let old_modules = load_snapshot_modules()?;
 
-    // The on-chain modules are addressed at the package's runtime/original id.
+    // The snapshot modules are addressed at the package's runtime/original id.
     // Rebase the freshly-built (0x0-addressed) modules to that same address so
     // the per-module comparison lines up — mirroring what the validator does
-    // before it runs the compat check. Deriving the target from the on-chain
-    // bytecode itself (rather than trusting an optional RPC field) matches
-    // `MovePackage::original_package_id`.
+    // before it runs the compat check. Deriving the target from the snapshot
+    // bytecode itself matches `MovePackage::original_package_id`.
     let runtime_address = module_self_address(
         old_modules
             .first()
-            .ok_or_else(|| anyhow::anyhow!("deployed package returned zero modules"))?,
+            .ok_or_else(|| anyhow::anyhow!("snapshot returned zero modules"))?,
     );
     anyhow::ensure!(
         runtime_address != AccountAddress::ZERO,
-        "deployed modules unexpectedly carry a 0x0 self-address"
+        "snapshot modules unexpectedly carry a 0x0 self-address"
     );
     for module in &mut new_modules {
         substitute_self_address(module, runtime_address)?;
     }
 
     eprintln!(
-        "checking compatibility against runtime address {runtime_address}: {} deployed module(s) vs \
+        "checking compatibility against runtime address {runtime_address}: {} snapshot module(s) vs \
          {} freshly-built module(s)",
         old_modules.len(),
         new_modules.len()
     );
 
-    assert_compatible_upgrade(&old_modules, &new_modules)
-        .context("current packages/hashi source is NOT a compatible upgrade of the deployed package")?;
+    assert_compatible_upgrade(&old_modules, &new_modules).context(
+        "current packages/hashi source is NOT a compatible upgrade of the deployed package",
+    )?;
 
     eprintln!("OK: current source is a compatible upgrade of the deployed package");
     Ok(())
@@ -460,7 +395,10 @@ fn synthetic_incompatible_change_is_rejected() {
 
     // New: same module but drop `Bar`'s field — a layout break.
     let mut new = basic_test_module();
-    assert!(!new.struct_defs.is_empty(), "test module should declare a struct");
+    assert!(
+        !new.struct_defs.is_empty(),
+        "test module should declare a struct"
+    );
     match &mut new.struct_defs[0].field_information {
         StructFieldInformation::Declared(fields) => {
             assert!(!fields.is_empty(), "struct should have a field to remove");

@@ -63,9 +63,10 @@ jobs:
       - run: ls -d ./*/ | xargs -I {} bash -c "sui move test --path '{}'"
 
   # Verifies the current packages/hashi source is a *compatible upgrade* of the
-  # latest package deployed on chain. See
-  # crates/hashi/tests/move_upgrade_compat.rs. Needs the `sui` CLI (to build the
-  # package) and network access to a fullnode (to fetch the deployed bytecode).
+  # deployed package. The deployed package's bytecode is a checked-in snapshot
+  # (crates/hashi/tests/move_upgrade_snapshots/), so this runs hermetically with
+  # NO network access — it needs only the `sui` CLI to build the current source.
+  # See crates/hashi/tests/move_upgrade_compat.rs.
   move-compat:
     name: Upgrade compatibility
     needs: detect
@@ -79,9 +80,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: sui --version; mvr --version
-      # Runs the on-chain gate plus the network-free machinery self-tests.
-      # SUI_BINARY / HASHI_COMPAT_* can be overridden here if the defaults
-      # (testnet fullnode + live testnet package id) ever need to change.
+      # Runs the snapshot-based gate plus the network-free machinery self-tests.
+      # SUI_BINARY / HASHI_COMPAT_SNAPSHOT_DIR can be overridden here if the
+      # defaults ever need to change.
       - name: Run upgrade compatibility check
         run: cargo test -p hashi --test move_upgrade_compat -- --nocapture
 

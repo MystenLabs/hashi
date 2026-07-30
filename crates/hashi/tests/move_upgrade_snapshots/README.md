@@ -1,0 +1,89 @@
+# Move upgrade-compatibility snapshots
+
+These directories hold the **compiled bytecode of the deployed Hashi Move
+package**, checked into the repo so the upgrade-compatibility CI gate runs
+**hermetically — with no network call**.
+
+The gate (`crates/hashi/tests/move_upgrade_compat.rs`,
+`current_source_is_compatible_upgrade_of_deployed`) builds the current
+`packages/hashi` source and asserts it is a *compatible upgrade* of the
+snapshot here — the same per-module check a Sui validator runs when it processes
+an `Upgrade` command under the default (`Compatible`) `UpgradeCap` policy. The
+snapshot IS the "deployed package" side of that comparison.
+
+## Layout
+
+```
+move_upgrade_snapshots/
+  <network>/
+    v<version>/
+      <module>.mv        # raw compiled module bytecode, one file per module,
+      ...                #   self-addressed at the package's runtime id
+      manifest.json      # metadata: network, version, package_id, module list
+  README.md
+```
+
+Currently only `testnet/v1/` exists. The test defaults to
+`testnet/v1`; override the directory with the `HASHI_COMPAT_SNAPSHOT_DIR`
+environment variable.
+
+> **TODO (mainnet):** once Hashi is deployed to mainnet, add a `mainnet/vN/`
+> snapshot and check the current source against it too (add a matrix entry / a
+> second assertion in the gate).
+
+## When to regenerate
+
+Regenerate whenever a **new package version is deployed on chain** (i.e. an
+`Upgrade` is executed). Create a new `v<N+1>/` directory for it (bump the
+version rather than overwriting, so the history of deployed bytecode is
+preserved), update `manifest.json`, and point the test's default at the new
+directory.
+
+## How to regenerate
+
+The `.mv` files are exactly the bytes in the deployed package's on-chain
+`moduleMap`. Fetch them with a single JSON-RPC `sui_getObject` call for the
+package object (`showBcs: true`), which returns `moduleMap` as a
+`name -> base64(bytecode)` map, then base64-decode each entry to `<name>.mv`.
+
+Copy-pasteable recipe (requires `curl`, `jq`, and `base64`):
+
+```bash
+# --- edit these two lines for the version you are capturing ---
+PACKAGE_ID="0xfcea10cadbb553c4874201584abf68771592678952efd957b2e82c010c7f4360"
+OUT_DIR="crates/hashi/tests/move_upgrade_snapshots/testnet/v1"
+RPC_URL="https://fullnode.testnet.sui.io:443"
+# --------------------------------------------------------------
+
+mkdir -p "$OUT_DIR"
+
+# Fetch the package object with its BCS-encoded module map.
+curl -s -X POST "$RPC_URL" \
+  -H 'Content-Type: application/json' \
+  -d "{
+        \"jsonrpc\": \"2.0\",
+        \"id\": 1,
+        \"method\": \"sui_getObject\",
+        \"params\": [\"$PACKAGE_ID\", { \"showBcs\": true }]
+      }" > /tmp/hashi_pkg.json
+
+# .result.data.bcs.moduleMap is { "<module>": "<base64 bytecode>", ... }.
+# Base64-decode each entry to <module>.mv.
+jq -r '.result.data.bcs.moduleMap | to_entries[] | "\(.key)\t\(.value)"' /tmp/hashi_pkg.json \
+| while IFS=$'\t' read -r name b64; do
+    printf '%s' "$b64" | base64 -d > "$OUT_DIR/$name.mv"
+    echo "wrote $OUT_DIR/$name.mv"
+  done
+```
+
+Then refresh `manifest.json` (network, version, `package_id`, `module_count`,
+and the module list) to match what you just wrote. Verify the capture is well
+formed by running the gate:
+
+```bash
+cargo test -p hashi --test move_upgrade_compat -- --nocapture
+```
+
+The test deserializes every `.mv` file with
+`CompiledModule::deserialize_with_defaults`, so a corrupt or truncated capture
+fails loudly.
