@@ -19,6 +19,7 @@ use hashi_types::committee::Committee;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -26,7 +27,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::communication::P2PChannel;
-use crate::communication::with_timeout_and_retry;
+use crate::communication::with_timeout_and_retry_budget;
 use crate::metrics::MPC_LABEL_SIGNING;
 use crate::metrics::Metrics;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -37,6 +38,21 @@ use crate::mpc::types::SigningResult;
 
 const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100);
 const PARTIAL_SIGS_COLLECTION_MAX_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Per-attempt timeout for one `get_partial_signatures` poll. Deliberately
+/// small: the collection loop in [`SigningManager::sign`] is itself the retry
+/// mechanism, so a slow peer costs at most one bounded probe per round instead
+/// of the default 10 x 30 s transport-retry budget.
+const PARTIAL_SIGS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Transport retries within one round's poll of a single peer (on top of the
+/// first attempt). Kept minimal for the same reason as the call timeout.
+const PARTIAL_SIGS_CALL_RETRIES: usize = 1;
+
+/// How long a peer whose poll hard-failed (connect/TLS/timeout) is skipped
+/// before being probed again. Bounds the cost of dead peers to one probe per
+/// cooldown window instead of one per round per concurrent signing task.
+const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
@@ -106,6 +122,46 @@ pub struct SigningManager {
     config: Arc<SigningEpochConfig>,
     state: RwLock<SigningPoolState>,
     refill_tx: Arc<watch::Sender<u32>>,
+    peer_cooldowns: PeerCooldowns,
+}
+
+/// Peers whose `get_partial_signatures` poll recently hard-failed
+/// (connect/TLS/timeout), and when each may be probed again.
+///
+/// Shared across all concurrent signing tasks of an epoch so a dead peer
+/// detected by one task is skipped by all of them instead of being
+/// rediscovered per task per round. A cooling peer is only excluded from
+/// polling; it stays in each input's `peers_remaining`, so it contributes
+/// again as soon as a post-cooldown probe succeeds.
+struct PeerCooldowns {
+    until: Mutex<HashMap<Address, Instant>>,
+}
+
+impl PeerCooldowns {
+    fn new() -> Self {
+        Self {
+            until: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_cooling(&self, peer: &Address, now: Instant) -> bool {
+        self.until
+            .lock()
+            .unwrap()
+            .get(peer)
+            .is_some_and(|&until| until > now)
+    }
+
+    fn record_failure(&self, peer: Address) {
+        self.until
+            .lock()
+            .unwrap()
+            .insert(peer, Instant::now() + PARTIAL_SIGS_PEER_COOLDOWN);
+    }
+
+    fn record_success(&self, peer: &Address) {
+        self.until.lock().unwrap().remove(peer);
+    }
 }
 
 fn presig_pool_fingerprint<'a>(nonces: impl Iterator<Item = &'a G>) -> String {
@@ -158,6 +214,7 @@ impl SigningManager {
                 next_batch: None,
             }),
             refill_tx,
+            peer_cooldowns: PeerCooldowns::new(),
         }
     }
 
@@ -225,6 +282,7 @@ impl SigningManager {
                 next_batch: None,
             }),
             refill_tx,
+            peer_cooldowns: PeerCooldowns::new(),
         })
     }
 
@@ -459,8 +517,15 @@ impl SigningManager {
                 }
                 break;
             }
-            let progressed =
-                collect_partial_sigs_from_peers(p2p_channel, &mut pending, threshold).await;
+            let progressed = collect_partial_sigs_from_peers(
+                p2p_channel,
+                &mut pending,
+                threshold,
+                deadline,
+                &self.peer_cooldowns,
+                metrics,
+            )
+            .await;
             if progressed {
                 backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
             } else {
@@ -748,15 +813,29 @@ async fn try_finalize_signature(
     }
 }
 
+/// Runs one poll round against the peers that still owe partial signatures.
+///
+/// The round is bounded twice over: each peer poll gets a small
+/// timeout-and-retry budget (the outer loop in [`SigningManager::sign`] is
+/// the real retry mechanism), and the round as a whole stops at `deadline`
+/// rather than draining slow peers' probes — otherwise one black-holed peer
+/// makes the deadline check in `sign` unreachable for its duration. Peers in
+/// cooldown are skipped for this round entirely.
 async fn collect_partial_sigs_from_peers(
     p2p_channel: &impl P2PChannel,
     pending: &mut [InputSigningState],
     threshold: u16,
+    deadline: Instant,
+    cooldowns: &PeerCooldowns,
+    metrics: &Metrics,
 ) -> bool {
+    let now = Instant::now();
     let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
     for st in pending.iter() {
         for peer in &st.peers_remaining {
-            peer_ids.entry(*peer).or_default().push(st.signing_id);
+            if !cooldowns.is_cooling(peer, now) {
+                peer_ids.entry(*peer).or_default().push(st.signing_id);
+            }
         }
     }
     if peer_ids.is_empty() {
@@ -767,9 +846,12 @@ async fn collect_partial_sigs_from_peers(
         .map(|(peer, signing_ids)| {
             let request = GetPartialSignaturesRequest { signing_ids };
             async move {
-                let result =
-                    with_timeout_and_retry(|| p2p_channel.get_partial_signatures(&peer, &request))
-                        .await;
+                let result = with_timeout_and_retry_budget(
+                    || p2p_channel.get_partial_signatures(&peer, &request),
+                    PARTIAL_SIGS_CALL_TIMEOUT,
+                    PARTIAL_SIGS_CALL_RETRIES,
+                )
+                .await;
                 (peer, result)
             }
         })
@@ -780,9 +862,22 @@ async fn collect_partial_sigs_from_peers(
         .map(|(i, st)| (st.signing_id, i))
         .collect();
     let mut progressed = false;
-    while let Some((peer, result)) = in_flight.next().await {
+    loop {
+        let (peer, result) = match tokio::time::timeout_at(deadline, in_flight.next()).await {
+            Ok(Some(item)) => item,
+            Ok(None) => break,
+            Err(_) => {
+                tracing::debug!(
+                    "Partial-signature poll round hit the signing deadline with {} peer(s) \
+                     still in flight",
+                    in_flight.len(),
+                );
+                break;
+            }
+        };
         match result {
             Ok(response) => {
+                cooldowns.record_success(&peer);
                 for (signing_id, sigs) in response.partial_sigs {
                     if let Some(&i) = index.get(&signing_id)
                         && pending[i].peers_remaining.remove(&peer)
@@ -799,7 +894,15 @@ async fn collect_partial_sigs_from_peers(
                 }
             }
             Err(e) => {
-                tracing::info!("Batched get_partial_signatures from {peer} failed: {e}");
+                cooldowns.record_failure(peer);
+                metrics
+                    .mpc_partial_sig_poll_failures_total
+                    .with_label_values(&[&peer.to_string()])
+                    .inc();
+                tracing::info!(
+                    "Batched get_partial_signatures from {peer} failed \
+                     (cooling down for {PARTIAL_SIGS_PEER_COOLDOWN:?}): {e}"
+                );
             }
         }
     }
@@ -1114,6 +1217,59 @@ mod tests {
                 })
                 .map(Ok)
                 .unwrap_or_else(|| Err(ChannelError::ClientNotFound(*party)))
+        }
+    }
+
+    /// Counts polls per peer; `fail` peers error, the rest return an empty
+    /// response (as a peer that has not signed yet would).
+    struct CountingP2PChannel {
+        fail: HashSet<Address>,
+        calls: Mutex<HashMap<Address, usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for CountingP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            _: &Address,
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            _: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            *self.calls.lock().unwrap().entry(*party).or_insert(0) += 1;
+            if self.fail.contains(party) {
+                Err(ChannelError::RequestFailed("down".into()))
+            } else {
+                Ok(GetPartialSignaturesResponse {
+                    partial_sigs: std::collections::BTreeMap::new(),
+                })
+            }
         }
     }
 
@@ -2053,6 +2209,116 @@ mod tests {
             "expected Timeout, got: {:?}",
             result.err()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_deadline_bounds_collection_round_with_hung_peers() {
+        // Below threshold (caller + 1 healthy peer < t = 3), the poll round is
+        // dominated by hung peers. The round must stop at the signing deadline
+        // instead of draining the hung peers' per-probe budgets, so the total
+        // time is the deadline, not PARTIAL_SIGS_CALL_TIMEOUT x attempts.
+        let setup = SigningTestSetup::new(7);
+        let message = b"hung-below-threshold";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let mut responses = HashMap::new();
+        responses.insert(test_address(1), all_sigs[1].clone());
+        let hanging: HashSet<Address> = [2usize, 3, 4, 5, 6].into_iter().map(test_address).collect();
+        let p2p = HangingP2PChannel { responses, hanging };
+
+        let deadline = Duration::from_secs(2);
+        let started = Instant::now();
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            deadline,
+            &test_metrics(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(SigningError::Timeout { .. })),
+            "expected Timeout, got: {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed < PARTIAL_SIGS_CALL_TIMEOUT,
+            "collection round was not bounded by the deadline: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_cools_down_failing_peer() {
+        // A peer whose poll hard-fails must not be re-polled every round for
+        // the duration of the cooldown, while healthy-but-empty peers keep
+        // being polled each round.
+        let setup = SigningTestSetup::new(4);
+        let message = b"cooldown";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let failing = test_address(1);
+        let p2p = CountingP2PChannel {
+            fail: [failing].into_iter().collect(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SigningError::Timeout { .. })),
+            "expected Timeout, got: {:?}",
+            result.err()
+        );
+
+        let calls = p2p.calls.lock().unwrap();
+        let failing_calls = calls.get(&failing).copied().unwrap_or(0);
+        let healthy_calls = calls.get(&test_address(2)).copied().unwrap_or(0);
+        // One round's attempts (first try + retries), then cooldown.
+        assert!(
+            failing_calls <= 1 + PARTIAL_SIGS_CALL_RETRIES,
+            "failing peer was polled {failing_calls} times despite the cooldown"
+        );
+        assert!(
+            healthy_calls > failing_calls,
+            "healthy peer ({healthy_calls} polls) should be polled across rounds, \
+             failing peer ({failing_calls} polls) should not"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_peer_cooldown_expires_and_clears_on_success() {
+        let cooldowns = PeerCooldowns::new();
+        let peer = test_address(1);
+
+        cooldowns.record_failure(peer);
+        assert!(cooldowns.is_cooling(&peer, Instant::now()));
+
+        tokio::time::advance(PARTIAL_SIGS_PEER_COOLDOWN + Duration::from_millis(1)).await;
+        assert!(!cooldowns.is_cooling(&peer, Instant::now()));
+
+        cooldowns.record_failure(peer);
+        cooldowns.record_success(&peer);
+        assert!(!cooldowns.is_cooling(&peer, Instant::now()));
     }
 
     #[test]

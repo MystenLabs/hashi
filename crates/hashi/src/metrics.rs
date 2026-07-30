@@ -118,6 +118,10 @@ pub struct Metrics {
 
     pub mpc_sign_duration_seconds: HistogramVec,
     pub mpc_sign_failures_total: IntCounterVec,
+    /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
+    /// Each failure also puts the peer in a short poll cooldown, so this is
+    /// the per-validator health signal for the MPC signing path.
+    pub mpc_partial_sig_poll_failures_total: IntCounterVec,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
     /// Ticks where no DB encryption key matched the current committee record
@@ -708,6 +712,13 @@ impl Metrics {
                 "hashi_mpc_sign_failures_total",
                 "Total MPC signing failures by reason",
                 &["reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_partial_sig_poll_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_partial_sig_poll_failures_total",
+                "Failed get_partial_signatures polls by peer (the peer is then cooled down)",
+                &["peer"],
                 registry,
             )
             .unwrap(),

@@ -40,7 +40,14 @@ use crate::utxo_pool::UtxoCandidate;
 use crate::utxo_pool::UtxoStatus;
 use thiserror::Error;
 
-const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for collecting and aggregating one batch of MPC input signatures
+/// in `mpc_sign_withdrawal_tx`. Poll rounds inside `SigningManager::sign` are
+/// bounded by this deadline (and per-peer probes are individually bounded),
+/// so it is a real upper bound, not advisory. It must stay comfortably below
+/// the leader's per-task timeout (`LEADER_TASK_TIMEOUT`, 60 s) so a signing
+/// member that exhausts the deadline still reports its partial results to the
+/// leader instead of the leader's whole chunk task timing out.
+const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
