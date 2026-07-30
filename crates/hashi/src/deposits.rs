@@ -152,18 +152,15 @@ impl Hashi {
         &self,
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
-        let outpoint = bitcoin::OutPoint {
-            txid: deposit_request.utxo.id.txid.into(),
-            vout: deposit_request.utxo.id.vout,
-        };
+        let outpoint = deposit_request.utxo.id.into();
         // Read the threshold live from on-chain state so governance
         // updates take effect for new deposits without a restart.
         let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
-        let confirmation = self
+        let check_result = self
             .btc_monitor()
             .confirm_deposit(outpoint, confirmation_threshold)
             .await;
-        let txout = match confirmation {
+        let txout = match check_result {
             Ok(DepositConfirmation::Confirmed(txout)) => txout,
             Ok(DepositConfirmation::NotFound) => {
                 return Err(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(

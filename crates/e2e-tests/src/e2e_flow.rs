@@ -227,6 +227,60 @@ mod tests {
         }
     }
 
+    fn tx_block_cache_misses(networks: &TestNetworks) -> Vec<u64> {
+        networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .map(|node| {
+                node.hashi()
+                    .metrics
+                    .deposit_lookup_cache_requests_total
+                    .with_label_values(&["tx_block", "miss"])
+                    .get()
+            })
+            .collect()
+    }
+
+    async fn wait_for_initial_tx_block_misses(
+        networks: &TestNetworks,
+        baseline: &[u64],
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let current = tx_block_cache_misses(networks);
+            assert_at_most_one_tx_block_miss_per_node(baseline, &current);
+            if current
+                .iter()
+                .zip(baseline)
+                .any(|(current, baseline)| current > baseline)
+            {
+                return Ok(());
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "no initial tx_block cache miss within {timeout:?}; last counts were \
+                     {current:?} (baseline {baseline:?})"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    fn assert_at_most_one_tx_block_miss_per_node(baseline: &[u64], current: &[u64]) {
+        assert_eq!(current.len(), baseline.len());
+        assert!(
+            current
+                .iter()
+                .zip(baseline)
+                .all(|(current, baseline)| *current <= *baseline + 1),
+            "a node repeated its initial tx_block lookup; counts were {current:?} \
+             (baseline {baseline:?})"
+        );
+    }
+
     fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
         let onchain_state = networks.hashi_network.nodes()[0].hashi().onchain_state();
         let deposit_request = onchain_state
@@ -444,6 +498,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_passive_bitcoin_deposit_discovery_uses_block_scan_cache() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Passive Bitcoin Deposit Discovery Test ===");
+
+        let networks = setup_test_networks(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_onchain_config(
+                    "bitcoin_deposit_time_delay_ms",
+                    hashi_types::move_types::ConfigValue::U64(60_000),
+                ),
+        )
+        .await?;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let hbtc_recipient = user_key.public_key().derive_address();
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
+        let amount_sats = 31_337u64;
+        let amount = Amount::from_sat(amount_sats);
+        let rpc = networks.bitcoin_node.rpc_client();
+
+        let miner_fee = Amount::from_sat(1_000);
+        let unspent = rpc
+            .list_unspent()?
+            .into_model()?
+            .0
+            .into_iter()
+            .find(|output| {
+                output.spendable
+                    && output
+                        .amount
+                        .to_unsigned()
+                        .is_ok_and(|value| value > amount + miner_fee)
+            })
+            .ok_or_else(|| anyhow!("wallet has no spendable output for deposit transaction"))?;
+        let input_amount = unspent.amount.to_unsigned()?;
+        let change_address = networks.bitcoin_node.get_new_address()?;
+        let raw_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::new(unspent.txid, unspent.vout),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::default(),
+            }],
+            output: vec![
+                bitcoin::TxOut {
+                    value: amount,
+                    script_pubkey: deposit_address.script_pubkey(),
+                },
+                bitcoin::TxOut {
+                    value: input_amount - amount - miner_fee,
+                    script_pubkey: change_address.script_pubkey(),
+                },
+            ],
+        };
+        let signed = rpc
+            .sign_raw_transaction_with_wallet(&raw_tx)?
+            .into_model()?;
+        if !signed.complete {
+            return Err(anyhow!(
+                "wallet did not completely sign deposit transaction: {:?}",
+                signed.errors
+            ));
+        }
+        let deposit_tx = signed.tx;
+        let txid = deposit_tx.compute_txid();
+        let mempool_accept = rpc
+            .test_mempool_accept(std::slice::from_ref(&deposit_tx))?
+            .into_model()?;
+        assert_eq!(mempool_accept.results.len(), 1);
+        assert!(
+            mempool_accept.results[0].allowed,
+            "signed deposit transaction should be valid; reject_reason={:?}",
+            mempool_accept.results[0].reject_reason
+        );
+        assert!(
+            rpc.get_mempool_entry(txid).is_err(),
+            "signed deposit transaction was broadcast before its request was created"
+        );
+        let vout = deposit_tx
+            .output
+            .iter()
+            .position(|output| {
+                output.value == amount && output.script_pubkey == deposit_address.script_pubkey()
+            })
+            .ok_or_else(|| anyhow!("signed transaction does not contain the deposit output"))?
+            as u32;
+
+        let baseline_misses = tx_block_cache_misses(&networks);
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.into());
+        let request_id = executor
+            .execute_create_deposit_request(
+                txid_to_address(&txid),
+                vout,
+                amount_sats,
+                Some(hbtc_recipient),
+            )
+            .await?;
+
+        wait_for_initial_tx_block_misses(&networks, &baseline_misses, Duration::from_secs(30))
+            .await?;
+        assert_deposit_request_unapproved(&networks, request_id);
+
+        let broadcast_txid = rpc.send_raw_transaction(&deposit_tx)?.txid()?;
+        assert_eq!(
+            broadcast_txid, txid,
+            "Bitcoin Core broadcast a different txid"
+        );
+        networks.bitcoin_node.generate_blocks(10)?;
+        wait_for_deposit_approval(&networks, request_id, Duration::from_secs(120)).await?;
+
+        let misses_after_scan = tx_block_cache_misses(&networks);
+        assert_at_most_one_tx_block_miss_per_node(&baseline_misses, &misses_after_scan);
+
+        info!("=== Passive Bitcoin Deposit Discovery Test Passed ===");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_stale_cert_deposit_reprocessed_after_epoch_change_without_btc_block() -> Result<()>
     {
         init_test_logging();
@@ -464,25 +640,15 @@ mod tests {
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
         let amount_sats = 42_000u64;
-        let unapproved_amount_sats = 43_000u64;
 
         info!("Sending Bitcoin to deposit address...");
         let txid = networks
             .bitcoin_node
             .send_to_address(&deposit_address, Amount::from_sat(amount_sats))?;
-        let unapproved_txid = networks
-            .bitcoin_node
-            .send_to_address(&deposit_address, Amount::from_sat(unapproved_amount_sats))?;
         networks.bitcoin_node.generate_blocks(10)?;
 
         info!("Creating deposit request on Sui...");
-        let vout = lookup_vout(&networks, txid, deposit_address.clone(), amount_sats)?;
-        let unapproved_vout = lookup_vout(
-            &networks,
-            unapproved_txid,
-            deposit_address,
-            unapproved_amount_sats,
-        )?;
+        let vout = lookup_vout(&networks, txid, deposit_address, amount_sats)?;
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
             .with_signer(user_key.clone().into());
         let request_id = executor
@@ -498,16 +664,6 @@ mod tests {
         // non-zero deposit delay prevents confirmation before rotation.
         networks.bitcoin_node.generate_blocks(1)?;
         wait_for_deposit_approval(&networks, request_id, Duration::from_secs(60)).await?;
-
-        let unapproved_request_id = executor
-            .execute_create_deposit_request(
-                txid_to_address(&unapproved_txid),
-                unapproved_vout as u32,
-                unapproved_amount_sats,
-                Some(hbtc_recipient),
-            )
-            .await?;
-        assert_deposit_request_unapproved(&networks, unapproved_request_id);
 
         let initial_epoch = networks.hashi_network.nodes()[0]
             .current_epoch()
@@ -534,7 +690,6 @@ mod tests {
             Duration::from_secs(180),
         )
         .await?;
-        assert_deposit_request_unapproved(&networks, unapproved_request_id);
 
         let hbtc_balance = get_hbtc_balance(
             &mut networks.sui_network.client,

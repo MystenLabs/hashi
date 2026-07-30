@@ -34,7 +34,7 @@ enum UnapprovedDepositReloadMode {
 }
 
 impl LeaderService {
-    pub(super) fn process_deposits_on_bitcoin_block(&mut self) {
+    pub(super) fn process_actionable_unapproved_deposits(&mut self) {
         self.reload_pending_unapproved_deposit_requests(UnapprovedDepositReloadMode::All);
         self.process_unapproved_deposit_requests();
     }
@@ -54,35 +54,42 @@ impl LeaderService {
     }
 
     fn reload_pending_unapproved_deposit_requests(&mut self, mode: UnapprovedDepositReloadMode) {
-        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        deposit_requests.sort_by_key(|r| r.created_timestamp_ms);
-        let deposit_ids: HashSet<Address> =
-            deposit_requests.iter().map(|request| request.id).collect();
+        let threshold = self.inner.onchain_state().bitcoin_confirmation_threshold();
+        let current_epoch = self.inner.onchain_state().epoch();
+        let deposit_tracker = self.inner.onchain_state().deposit_tracker().clone();
+        let deposit_ids = deposit_tracker.actionable_requests(threshold);
+        let deposit_requests = self
+            .inner
+            .onchain_state()
+            .deposit_requests_by_ids(&deposit_ids);
         self.inflight_deposits
-            .retain(|deposit_id| deposit_ids.contains(deposit_id));
+            .retain(|deposit_id| deposit_tracker.contains_request(deposit_id));
         self.never_retry_deposit_ids
-            .retain(|deposit_id| deposit_ids.contains(deposit_id));
+            .retain(|deposit_id| deposit_tracker.contains_request(deposit_id));
         self.inner
             .metrics
             .never_retry_deposit_ids
             .set(self.never_retry_deposit_ids.len() as i64);
 
-        let current_epoch = self.inner.onchain_state().epoch();
-        self.pending_unapproved_deposit_requests = deposit_requests
+        let candidates = deposit_requests
             .into_iter()
-            .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
-            .filter(|request| !self.inflight_deposits.contains(&request.id))
-            .filter(|request| match mode {
-                UnapprovedDepositReloadMode::All => request
-                    .approval_cert
-                    .as_ref()
-                    .is_none_or(|cert| cert.epoch != current_epoch),
-                UnapprovedDepositReloadMode::StaleEpochApprovalOnly => request
-                    .approval_cert
-                    .as_ref()
-                    .is_some_and(|cert| cert.epoch != current_epoch),
+            .map(|request| {
+                let outpoint = bitcoin::OutPoint {
+                    txid: request.utxo.id.txid.into(),
+                    vout: request.utxo.id.vout,
+                };
+                (outpoint, request)
             })
             .collect();
+        self.pending_unapproved_deposit_requests = select_deposit_requests_to_approve(
+            candidates,
+            &self.never_retry_deposit_ids,
+            current_epoch,
+            mode,
+        )
+        .into_iter()
+        .filter(|request| !self.inflight_deposits.contains(&request.id))
+        .collect();
         debug!(
             reload_mode = ?mode,
             pending_unapproved_deposits = self.pending_unapproved_deposit_requests.len(),
@@ -105,6 +112,7 @@ impl LeaderService {
             if self.inflight_deposits.contains(&deposit_id) {
                 continue;
             }
+
             let inner = self.inner.clone();
 
             self.inflight_deposits.insert(deposit_id);
@@ -230,6 +238,7 @@ impl LeaderService {
     ) {
         match result {
             Ok((deposit_id, result)) => {
+                let mut reload_after_failure = false;
                 self.inflight_deposits.remove(&deposit_id);
                 match result {
                     Ok(()) => {
@@ -252,10 +261,20 @@ impl LeaderService {
                                 .never_retry_deposit_ids
                                 .set(self.never_retry_deposit_ids.len() as i64);
                             warn!(deposit_id = %deposit_id, "Marking deposit as never retry: {err:#}");
+                            reload_after_failure = true;
                         }
                     },
                 }
-                self.process_unapproved_deposit_requests();
+                if self.is_leader {
+                    if reload_after_failure {
+                        self.reload_pending_unapproved_deposit_requests(
+                            UnapprovedDepositReloadMode::All,
+                        );
+                    }
+                    self.process_unapproved_deposit_requests();
+                } else {
+                    self.pending_unapproved_deposit_requests.clear();
+                }
             }
             Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(err) => error!("deposit task failed to join: {err}"),
@@ -316,16 +335,18 @@ impl LeaderService {
             state.hashi().config.paused()
                 || state.hashi().committees.pending_epoch_change().is_some()
         };
-        if !halt {
-            return false;
+        if halt {
+            self.stop_deposit_processing();
         }
+        halt
+    }
 
-        self.unapproved_deposit_tasks.abort_all();
-        self.approved_deposit_tasks.abort_all();
+    pub(super) fn stop_deposit_processing(&mut self) {
+        self.unapproved_deposit_tasks = JoinSet::new();
+        self.approved_deposit_tasks = JoinSet::new();
         self.pending_unapproved_deposit_requests.clear();
         self.inflight_deposits.clear();
         self.reset_approved_deposit_metrics();
-        true
     }
 
     async fn process_unapproved_deposit(
@@ -396,16 +417,16 @@ impl LeaderService {
             Ok(executor) => executor,
             Err(err) => return Err(UnapprovedDepositError::ExecutorInitFailed(err)),
         };
-        executor
+        let checkpoint = executor
             .execute_approve_deposit(&deposit_request, signed_message)
             .await
-            .inspect(|()| {
+            .inspect(|checkpoint| {
                 inner
                     .metrics
                     .sui_tx_submissions_total
                     .with_label_values(&["approve_deposit", "success"])
                     .inc();
-                info!("Successfully submitted deposit approval");
+                info!(checkpoint, "Successfully submitted deposit approval");
             })
             .inspect_err(|e| {
                 error!("Failed to submit deposit approval: {e}");
@@ -416,6 +437,10 @@ impl LeaderService {
                     .inc();
             })
             .map_err(UnapprovedDepositError::ApproveDepositFailed)?;
+        inner
+            .onchain_state()
+            .wait_until_checkpoint(checkpoint)
+            .await;
         Ok(())
     }
 
@@ -433,17 +458,16 @@ impl LeaderService {
             Ok(executor) => executor,
             Err(err) => return Err(ApprovedDepositError::ExecutorInitFailed(err)),
         };
-        executor
+        let checkpoint = executor
             .execute_confirm_deposit(deposit_request.id)
             .await
-            .inspect(|()| {
+            .inspect(|checkpoint| {
                 inner
                     .metrics
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_deposit", "success"])
                     .inc();
-                inner.metrics.deposits_confirmed_total.inc();
-                info!("Successfully submitted deposit confirmation");
+                info!(checkpoint, "Successfully submitted deposit confirmation");
             })
             .inspect_err(|e| {
                 error!("Failed to submit deposit confirmation: {e}");
@@ -454,6 +478,11 @@ impl LeaderService {
                     .inc();
             })
             .map_err(ApprovedDepositError::ConfirmDepositFailed)?;
+        inner
+            .onchain_state()
+            .wait_until_checkpoint(checkpoint)
+            .await;
+        inner.metrics.deposits_confirmed_total.inc();
         Ok(())
     }
 
@@ -478,7 +507,7 @@ impl LeaderService {
             })?;
 
         let response = rpc_client
-            .sign_deposit_confirmation(proto_request.clone())
+            .sign_deposit_confirmation(proto_request)
             .await
             .inspect_err(|e| {
                 error!(
@@ -521,6 +550,39 @@ impl LeaderService {
             .with_label_values(&["approved_deposit_confirmation"])
             .set(0);
     }
+}
+
+fn select_deposit_requests_to_approve(
+    mut candidates: Vec<(bitcoin::OutPoint, DepositRequest)>,
+    never_retry_deposit_ids: &HashSet<Address>,
+    current_epoch: u64,
+    mode: UnapprovedDepositReloadMode,
+) -> Vec<DepositRequest> {
+    let approval_epoch =
+        |request: &DepositRequest| request.approval_cert.as_ref().map(|cert| cert.epoch);
+    let approved_outpoints: HashSet<_> = candidates
+        .iter()
+        .filter(|(_, request)| approval_epoch(request) == Some(current_epoch))
+        .map(|(outpoint, _)| *outpoint)
+        .collect();
+    candidates.retain(|(outpoint, request)| {
+        let request_approval_epoch = approval_epoch(request);
+        !approved_outpoints.contains(outpoint)
+            && !never_retry_deposit_ids.contains(&request.id)
+            && match mode {
+                UnapprovedDepositReloadMode::All => request_approval_epoch != Some(current_epoch),
+                UnapprovedDepositReloadMode::StaleEpochApprovalOnly => {
+                    request_approval_epoch.is_some_and(|epoch| epoch != current_epoch)
+                }
+            }
+    });
+    candidates.sort_by_key(|(_, request)| (request.created_timestamp_ms, request.id));
+
+    let mut selected_outpoints = HashSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|(outpoint, request)| selected_outpoints.insert(outpoint).then_some(request))
+        .collect()
 }
 
 fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequest {
@@ -572,6 +634,7 @@ fn filter_deposit_confirmation_candidates(
 mod tests {
     use super::*;
     use crate::onchain::types::Utxo;
+    use hashi_types::move_types::CommitteeSignature;
     use sui_sdk_types::Digest;
 
     fn deposit_request(request_id: u8, utxo_id: u8) -> DepositRequest {
@@ -591,6 +654,13 @@ mod tests {
             approval_cert: None,
             approved_timestamp_ms: None,
             confirmed_timestamp_ms: None,
+        }
+    }
+
+    fn outpoint(request: &DepositRequest) -> bitcoin::OutPoint {
+        bitcoin::OutPoint {
+            txid: request.utxo.id.txid.into(),
+            vout: request.utxo.id.vout,
         }
     }
 
@@ -634,5 +704,74 @@ mod tests {
 
         assert_eq!(candidates, vec![earliest_approved]);
         assert_eq!(counts, (0, 2));
+    }
+
+    #[test]
+    fn selects_one_unapproved_candidate_per_outpoint_oldest_first() {
+        let mut selected_duplicate = deposit_request(1, 1);
+        selected_duplicate.created_timestamp_ms = 10;
+        let mut higher_id_duplicate = deposit_request(3, 1);
+        higher_id_duplicate.created_timestamp_ms = 10;
+        let mut distinct = deposit_request(2, 2);
+        distinct.created_timestamp_ms = 15;
+        let candidates = vec![
+            (outpoint(&higher_id_duplicate), higher_id_duplicate),
+            (outpoint(&distinct), distinct.clone()),
+            (outpoint(&selected_duplicate), selected_duplicate.clone()),
+        ];
+
+        let selected = select_deposit_requests_to_approve(
+            candidates,
+            &HashSet::new(),
+            0,
+            UnapprovedDepositReloadMode::All,
+        );
+
+        assert_eq!(selected, vec![selected_duplicate, distinct]);
+    }
+
+    #[test]
+    fn filters_never_retry_before_selecting_duplicate() {
+        let first = deposit_request(1, 1);
+        let second = deposit_request(2, 1);
+        let candidates = vec![
+            (outpoint(&first), first.clone()),
+            (outpoint(&second), second.clone()),
+        ];
+
+        let selected = select_deposit_requests_to_approve(
+            candidates,
+            &HashSet::from([first.id]),
+            0,
+            UnapprovedDepositReloadMode::All,
+        );
+
+        assert_eq!(selected, vec![second]);
+    }
+
+    #[test]
+    fn current_approval_blocks_other_requests_for_the_same_outpoint() {
+        let mut approved = deposit_request(1, 1);
+        approved.approval_cert = Some(CommitteeSignature {
+            epoch: 7,
+            signature: vec![],
+            signers_bitmap: vec![],
+        });
+        let duplicate = deposit_request(2, 1);
+        let distinct = deposit_request(3, 2);
+        let candidates = vec![
+            (outpoint(&approved), approved),
+            (outpoint(&duplicate), duplicate),
+            (outpoint(&distinct), distinct.clone()),
+        ];
+
+        let selected = select_deposit_requests_to_approve(
+            candidates,
+            &HashSet::new(),
+            7,
+            UnapprovedDepositReloadMode::All,
+        );
+
+        assert_eq!(selected, vec![distinct]);
     }
 }

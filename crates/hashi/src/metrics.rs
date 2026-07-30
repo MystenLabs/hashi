@@ -178,8 +178,10 @@ pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
 pub const MPC_LABEL_SIGNING: &str = "signing";
 
 pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
+    "unchecked",
     "not_found",
     "mempool",
+    "invalid_vout",
     "0",
     "1",
     "2",
@@ -554,8 +556,8 @@ impl Metrics {
             .unwrap(),
             deposit_request_confirmations: register_int_gauge_vec_with_registry!(
                 "hashi_deposit_request_confirmations",
-                "Pending deposit requests bucketed by their transaction status (and block confirmations) on Bitcoin. \
-                 The `status` label is one of: not_found, mempool, 0, 1, 2, 3, 4, 5, 6_plus.",
+                "Pending deposit outpoints bucketed by their transaction status (and block confirmations) on Bitcoin. \
+                 The `status` label is one of: unchecked, not_found, mempool, invalid_vout, 0, 1, 2, 3, 4, 5, 6_plus.",
                 &["status"],
                 registry,
             )

@@ -212,6 +212,13 @@ pub(super) enum Effect {
     /// version. Apply extends the version map itself (under the same
     /// state guard); this effect is the caller's signal to log.
     PackageUpgraded { package: Address, version: u64 },
+    /// An active deposit request was created or updated.
+    DepositRequestUpserted {
+        request_id: Address,
+        outpoint: bitcoin::OutPoint,
+    },
+    /// A deposit request left the active queue.
+    DepositRequestRemoved(Address),
     /// A withdrawal transaction transitioned to fully signed in this
     /// transaction (2-of-2 witness complete). Drives the local limiter
     /// and the pick-to-sign metric.
@@ -593,6 +600,10 @@ fn apply_write(
         Slot::DepositRequests => {
             decode::<move_types::DepositRequest>(contents, &id).map(|request| {
                 let request_id = request.id;
+                out.effects.push(Effect::DepositRequestUpserted {
+                    request_id,
+                    outpoint: request.utxo.id.into(),
+                });
                 hashi.deposit_queue.requests.insert(request_id, request);
                 TrackedKind::DepositRequest(request_id)
             })
@@ -764,6 +775,7 @@ fn retire(
         }
         TrackedKind::DepositRequest(id) => {
             hashi.deposit_queue.requests.remove(id);
+            effects.push(Effect::DepositRequestRemoved(*id));
         }
         TrackedKind::WithdrawalRequest(id) => {
             hashi.withdrawal_queue.requests.remove(id);
