@@ -179,7 +179,7 @@ impl GuardianReader {
 
         let mut out = Vec::with_capacity(all_logs.len());
         for log in all_logs {
-            out.push(self.cache.authenticate_record(&self.s3, log).await?);
+            out.push(self.cache.verify_record(&self.s3, log).await?);
         }
         Ok(out)
     }
@@ -228,7 +228,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.authenticate_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy(build_policy, &build_pcrs)?;
         let session_id = record.session_id;
@@ -308,7 +308,7 @@ impl GuardianReader {
             .s3
             .get_log_record_inner(key, LockCheck::Skipped, history_check)
             .await?;
-        let record = self.cache.authenticate_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::KpShareState(msg) = record.message else {
@@ -374,7 +374,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.authenticate_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
@@ -414,7 +414,7 @@ impl GuardianReader {
             )));
         }
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.authenticate_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::Genesis(msg) = record.message else {
@@ -461,8 +461,8 @@ impl GuardianSessionCache {
         Ok(&self.sessions[session_id])
     }
 
-    /// Authenticate `record` under its session's trusted signing key.
-    async fn authenticate_record(
+    /// Fully verify `record` under its session's attested signing key.
+    async fn verify_record(
         &mut self,
         s3: &GuardianS3Client,
         record: LogRecord,
