@@ -1028,11 +1028,12 @@ impl SigningManager {
                         break;
                     }
                 }
-                Err(ChannelError::Unavailable(e)) => {
-                    // The peer is up but not ready to serve yet (e.g. still
-                    // reconciling its signing manager after an epoch flip) —
-                    // common across much of the fleet right after reconfig.
-                    // Keep polling it instead of cooling it down.
+                Err(ChannelError::NotReady(e)) => {
+                    // The peer said explicitly that it is up but not ready to
+                    // serve yet (e.g. still reconciling its signing manager
+                    // after an epoch flip) — common across much of the fleet
+                    // right after reconfig. Keep polling it instead of
+                    // cooling it down.
                     tracing::debug!(
                         "Peer {peer} not ready for get_partial_signatures; will re-poll: {e}"
                     );
@@ -1449,7 +1450,7 @@ mod tests {
     /// response (as a peer that has not signed yet would).
     struct CountingP2PChannel {
         fail: HashSet<Address>,
-        unavailable: HashSet<Address>,
+        not_ready: HashSet<Address>,
         calls: Mutex<HashMap<Address, usize>>,
     }
 
@@ -1491,8 +1492,8 @@ mod tests {
             *self.calls.lock().unwrap().entry(*party).or_insert(0) += 1;
             if self.fail.contains(party) {
                 Err(ChannelError::RequestFailed("down".into()))
-            } else if self.unavailable.contains(party) {
-                Err(ChannelError::Unavailable("reconciling".into()))
+            } else if self.not_ready.contains(party) {
+                Err(ChannelError::NotReady("reconciling".into()))
             } else {
                 Ok(GetPartialSignaturesResponse {
                     partial_sigs: std::collections::BTreeMap::new(),
@@ -2467,7 +2468,7 @@ mod tests {
 
         let p2p = CountingP2PChannel {
             fail: HashSet::new(),
-            unavailable: HashSet::new(),
+            not_ready: HashSet::new(),
             calls: Mutex::new(HashMap::new()),
         };
         let mut pending = vec![test_input_state(
@@ -2805,7 +2806,7 @@ mod tests {
         let failing = test_address(1);
         let p2p = CountingP2PChannel {
             fail: [failing].into_iter().collect(),
-            unavailable: HashSet::new(),
+            not_ready: HashSet::new(),
             calls: Mutex::new(HashMap::new()),
         };
 
@@ -2843,9 +2844,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_sign_keeps_polling_unavailable_peers() {
-        // `Status::unavailable` means "up but not ready yet" (e.g. still
-        // reconciling after an epoch flip) — the peer must be re-polled
+    async fn test_sign_keeps_polling_not_ready_peers() {
+        // An explicit not-ready answer means "up but still reconciling"
+        // (e.g. right after an epoch flip) — the peer must be re-polled
         // every round, not cooled down.
         let setup = SigningTestSetup::new(4);
         let message = b"unavailable";
@@ -2856,7 +2857,7 @@ mod tests {
         let reconciling = test_address(1);
         let p2p = CountingP2PChannel {
             fail: HashSet::new(),
-            unavailable: [reconciling].into_iter().collect(),
+            not_ready: [reconciling].into_iter().collect(),
             calls: Mutex::new(HashMap::new()),
         };
 
@@ -2896,7 +2897,7 @@ mod tests {
 
         let p2p = CountingP2PChannel {
             fail: (1..4usize).map(test_address).collect(),
-            unavailable: HashSet::new(),
+            not_ready: HashSet::new(),
             calls: Mutex::new(HashMap::new()),
         };
 
