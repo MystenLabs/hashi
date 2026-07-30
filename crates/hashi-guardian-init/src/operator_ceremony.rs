@@ -17,7 +17,6 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
-use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
@@ -139,9 +138,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     let mut reader = GuardianReader::new(&guardian_s3, allowlist)
         .await
         .context("connect to guardian log bucket")?;
-    let verified_session = reader
-        .get_session_info(&session_id, BuildPolicy::Current)
-        .await?;
+    let verified_session = reader.get_current_session_info(&session_id).await?;
     let attested_signing_pub_key = verified_session.signing_pubkey();
     ensure!(
         attested_signing_pub_key == &signing_pub_key,
@@ -215,7 +212,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
     );
     let logged = reader
-        .read_latest_ceremony_state(BuildPolicy::Current)
+        .read_latest_ceremony_state_from_current_build()
         .await?
         .context("no ceremony logs found in guardian S3 bucket")?;
     logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;

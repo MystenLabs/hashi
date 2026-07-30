@@ -13,7 +13,8 @@ use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::VersionedLogMessage;
+use hashi_types::guardian::VersionedLogMessage::V1;
+use hashi_types::guardian::VersionedLogMessage::V2;
 
 /// A session's verified guardian info: the attestation-anchored signing key,
 /// the signed [`GuardianInfo`], and the build PCRs proven by attestation.
@@ -25,7 +26,7 @@ pub struct VerifiedSessionInfo {
 }
 
 impl VerifiedSessionInfo {
-    pub(super) async fn new(
+    pub(super) async fn read_from_s3(
         s3: &GuardianS3Client,
         session_id: &str,
         allowlist: &PcrAllowlist,
@@ -36,9 +37,8 @@ impl VerifiedSessionInfo {
         let attestation_record = s3.get_log_record(&att_key).await?;
         let attestation_message =
             match validate_into_entry(attestation_record, None)?.into_message() {
-                VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
-                VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
-                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                V1(LogMessageV1::Init(message)) | V2(LogMessageV2::Init(message)) => message,
+                V1(_) | V2(_) => {
                     return Err(InvalidS3Log(format!(
                         "expected OIAttestationUnsigned at key {att_key}"
                     )));
@@ -59,9 +59,8 @@ impl VerifiedSessionInfo {
         let info_record = s3.get_log_record(&info_key).await?;
         let info_message =
             match validate_into_entry(info_record, Some(&signing_pubkey))?.into_message() {
-                VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
-                VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
-                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                V1(LogMessageV1::Init(message)) | V2(LogMessageV2::Init(message)) => message,
+                V1(_) | V2(_) => {
                     return Err(InvalidS3Log(format!(
                         "expected OIGuardianInfo at key {info_key}"
                     )));
@@ -100,10 +99,6 @@ impl VerifiedSessionInfo {
 
     pub fn build_pcrs(&self) -> &BuildPcrs {
         &self.build_pcrs
-    }
-
-    pub fn into_info(self) -> GuardianInfo {
-        self.info
     }
 }
 

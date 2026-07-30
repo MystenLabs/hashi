@@ -35,7 +35,6 @@
 //!    enclave re-verifies every signature and binding.
 
 use anyhow::Context;
-use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
@@ -158,9 +157,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         session_id = %session_id,
         "fetching + verifying pinned standby session's signed GuardianInfo from S3",
     );
-    let verified_session = reader
-        .get_session_info(&session_id, BuildPolicy::Current)
-        .await?;
+    let verified_session = reader.get_current_session_info(&session_id).await?;
     let GuardianInfo {
         lifecycle,
         secret_sharing_instance,
@@ -261,7 +258,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
     let state = reader
-        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
+        .read_latest_ceremony_state()
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
@@ -310,9 +307,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
 
     // Require the explicit intent marker to match S3 state. For genesis, bind
     // the independently read on-chain committee into this KP's signed PI submission.
-    let latest_committee = reader
-        .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?;
+    let latest_committee = reader.read_latest_committee().await?;
     let expected_genesis_state_hash = match (do_genesis, latest_committee) {
         (false, Some(_)) => None,
         (true, None) => {
