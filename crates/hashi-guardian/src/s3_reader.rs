@@ -177,7 +177,7 @@ impl GuardianReader {
             .s3
             .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
             .await?;
-        let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
+        let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
@@ -330,7 +330,11 @@ impl GuardianReader {
             .s3
             .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
             .await?;
-        let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
+        let Some(key) = keys
+            .into_iter()
+            .filter(|key| !CommitteeUpdateLogMessage::is_failure_object_key(key))
+            .max()
+        else {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
@@ -349,9 +353,7 @@ impl GuardianReader {
         let committee = match *msg {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
             CommitteeUpdateLogMessage::Failure { .. } => {
-                return Err(InvalidS3Log(format!(
-                    "lex-last non-failure key resolved to a Failure log at {key}"
-                )));
+                unreachable!("a verified non-failure key cannot contain a Failure log")
             }
         };
         log_verified_read(&key, &session_id);
@@ -436,59 +438,5 @@ impl GuardianSessionCache {
         let session_id = record.session_id().clone();
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
         VerifiedLogRecord::new(record, session_info)
-    }
-}
-
-/// Pick the lex-greatest key, skipping any whose name starts with `<dir>/failure-`.
-/// Keys are zero-padded (ceremony `sharing_seq`, committee `epoch`), so the lex-max
-/// non-failure key is the latest successful entry.
-fn pick_latest_key(keys: Vec<String>, dir: &str) -> Option<String> {
-    let failure_prefix = format!("{dir}/failure-");
-    keys.into_iter()
-        .filter(|k| !k.starts_with(&failure_prefix))
-        .max()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn success_key(epoch: u64) -> String {
-        format!("{S3_DIR_COMMITTEE_UPDATE}/{epoch:020}-sess.json")
-    }
-    fn failure_key(epoch: u64) -> String {
-        format!("{S3_DIR_COMMITTEE_UPDATE}/failure-{epoch:020}-sess-abcd1234.json")
-    }
-
-    #[test]
-    fn pick_latest_key_none_when_empty() {
-        assert_eq!(pick_latest_key(vec![], S3_DIR_COMMITTEE_UPDATE), None);
-    }
-
-    #[test]
-    fn pick_latest_key_takes_lex_max() {
-        let keys = vec![success_key(3), success_key(7), success_key(5)];
-        assert_eq!(
-            pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE),
-            Some(success_key(7))
-        );
-    }
-
-    #[test]
-    fn pick_latest_key_skips_higher_failure() {
-        // A later-epoch failure (lex-greater than any success) must not win.
-        let keys = vec![success_key(5), failure_key(9)];
-        assert_eq!(
-            pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE),
-            Some(success_key(5))
-        );
-    }
-
-    #[test]
-    fn pick_latest_key_none_when_all_failures() {
-        assert_eq!(
-            pick_latest_key(vec![failure_key(9)], S3_DIR_COMMITTEE_UPDATE),
-            None
-        );
     }
 }
