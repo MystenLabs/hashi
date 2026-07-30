@@ -79,13 +79,15 @@ Hashi's Testnet deployment uses **Bitcoin Signet**, so a test deposit needs Sign
 The Signet faucets below are **third-party services, not operated or verified by the Hashi team**. Availability, rate limits, and URLs change without notice, and this page makes no guarantee that any of them work at the time you read it. Never send real BTC to a Signet faucet or a Signet address.
 :::
 
+Hashi's default deposit minimum is **30,000 sats** (see [`bitcoin_deposit_minimum`](config.mdx#bitcoin_deposit_minimum)). Keep this threshold in mind when choosing a faucet — some public faucets dispense well under 30,000 sats per request, so you might need to make several requests to the same faucet, or combine coins from more than one faucet, before you have enough for a deposit.
+
 Commonly used public faucets for the default Signet network include [signetfaucet.com](https://signetfaucet.com/) and its alternate at [alt.signetfaucet.com](https://alt.signetfaucet.com/). Confirm that a faucet serves **default Signet** before using it. Some communities run custom signets whose coins are not valid on the network Hashi's Testnet uses.
 
 :::info
 Your own Signet node cannot create spendable coins for you. A central authority signs Signet blocks, so a faucet is the normal way to get test BTC.
 :::
 
-Once you hold Signet BTC, run the deposit loop described above through the CLI. Global options attach to the first-level subcommand, so `-c` goes after `deposit` (see the [CLI reference](node-operator-runbook.mdx#61-global-options)):
+Once you hold at least 30,000 sats of Signet BTC, run the deposit loop described above through the CLI. Global options attach to the first-level subcommand, so `-c` goes after `deposit` (see the [CLI reference](node-operator-runbook.mdx#61-global-options)):
 
 ```bash
 # 1. Get the deposit address derived from your Sui address
