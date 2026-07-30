@@ -373,23 +373,30 @@ impl LeaderService {
     }
 
     fn is_current_leader(&self, checkpoint_height: u64) -> bool {
-        if self.inner.onchain_state().state().hashi().config.paused() {
+        Self::node_is_leader(&self.inner, checkpoint_height)
+    }
+
+    /// Whether this node is the leader for the given checkpoint. An
+    /// associated function (rather than a method) so long-running leader
+    /// tasks can re-check leadership mid-flight and stop driving work that
+    /// has rotated to another node.
+    pub(super) fn node_is_leader(inner: &Arc<Hashi>, checkpoint_height: u64) -> bool {
+        if inner.onchain_state().state().hashi().config.paused() {
             debug!("Bridge is paused, not acting as leader");
             return false;
         }
 
-        match self.inner.config.force_run_as_leader() {
+        match inner.config.force_run_as_leader() {
             ForceRunAsLeader::Always => return true,
             ForceRunAsLeader::Never => return false,
             ForceRunAsLeader::Default => (),
         }
 
-        let Some(committee) = self.inner.onchain_state().current_committee() else {
+        let Some(committee) = inner.onchain_state().current_committee() else {
             // TODO: do we need to do anything when bootstrapping? At genesis there is no committee.
             return false;
         };
-        let this_validator_address = self
-            .inner
+        let this_validator_address = inner
             .config
             .validator_address()
             .expect("No configured validator address");
