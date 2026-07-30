@@ -74,6 +74,37 @@ const CHUNK_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// task gives up and leaves resumption to a later checkpoint tick.
 const MAX_STALLED_CHUNK_ATTEMPTS: u32 = 3;
 
+/// Number of committee members asked for a chunk's MPC signatures up front.
+/// Any single synced member can serve the whole chunk — each response
+/// carries full aggregated signatures per input, and the leader keeps the
+/// first valid one — so asking the whole committee buys no redundancy and
+/// multiplies into an all-to-all partial-signature storm on the member side
+/// (every asked member polls every other member for partials).
+const MPC_SIGNING_FANOUT: usize = 3;
+
+/// How long the initial fan-out wave gets to cover the chunk before the
+/// request is hedged to the rest of the committee.
+const MPC_SIGNING_HEDGE_DELAY: Duration = Duration::from_secs(5);
+
+/// Splits `members` into the initial fan-out wave and the hedge reserve,
+/// rotated by `offset` so consecutive attempts spread the initial wave
+/// across the committee instead of repeatedly hitting the same (possibly
+/// unhealthy) prefix.
+fn fanout_waves<T: Clone>(members: &[T], offset: usize, fanout: usize) -> (Vec<T>, Vec<T>) {
+    if members.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let start = offset % members.len();
+    let rotated: Vec<T> = members[start..]
+        .iter()
+        .chain(&members[..start])
+        .cloned()
+        .collect();
+    let split = fanout.clamp(1, rotated.len());
+    let (first, reserve) = rotated.split_at(split);
+    (first.to_vec(), reserve.to_vec())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ChunkStep {
     /// The refreshed state shows fewer unsigned inputs; sign the next chunk
@@ -824,6 +855,11 @@ impl LeaderService {
     /// single bad/buggy member cannot poison the chunk's commit cert. Returns the
     /// (possibly partial) union, or `None` if not a single valid signature was
     /// collected (the caller's chunk loop retries).
+    ///
+    /// The request goes to a small rotated subset of the committee first
+    /// ([`MPC_SIGNING_FANOUT`]) and is hedged to the remaining members only
+    /// if the subset has not covered the chunk within
+    /// [`MPC_SIGNING_HEDGE_DELAY`] (or all its streams ended early).
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
@@ -832,11 +868,18 @@ impl LeaderService {
         signing_messages: &[[u8; 32]],
     ) -> Option<Vec<(u64, SchnorrSignature)>> {
         let withdrawal_txn_id = txn.id;
-        let mut sig_tasks = JoinSet::new();
-        for member in members {
+
+        // Rotate the initial wave by checkpoint height, so a retry attempt
+        // (or the next chunk) starts from a different subset instead of
+        // re-hitting an unhealthy one.
+        let offset = inner.onchain_state().latest_checkpoint_height() as usize;
+        let (first_wave, mut reserve) = fanout_waves(members, offset, MPC_SIGNING_FANOUT);
+
+        let mut sig_tasks: JoinSet<anyhow::Result<Vec<(u64, SchnorrSignature)>>> = JoinSet::new();
+        let spawn_member = |sig_tasks: &mut JoinSet<anyhow::Result<Vec<(u64, SchnorrSignature)>>>,
+                            member: CommitteeMember| {
             let inner = inner.clone();
             let expected_indices = expected_indices.to_vec();
-            let member = member.clone();
             sig_tasks.spawn(async move {
                 Self::request_withdrawal_tx_signature(
                     &inner,
@@ -846,6 +889,9 @@ impl LeaderService {
                 )
                 .await
             });
+        };
+        for member in first_wave {
+            spawn_member(&mut sig_tasks, member);
         }
 
         // Per-input verifying keys for the chunk, derived once. A missing key
@@ -866,7 +912,34 @@ impl LeaderService {
 
         let expected: BTreeSet<u64> = expected_indices.iter().copied().collect();
         let mut union: BTreeMap<u64, SchnorrSignature> = BTreeMap::new();
-        while let Some(result) = sig_tasks.join_next().await {
+        let hedge_deadline = tokio::time::Instant::now() + MPC_SIGNING_HEDGE_DELAY;
+        loop {
+            let next = if reserve.is_empty() {
+                sig_tasks.join_next().await
+            } else {
+                tokio::select! {
+                    result = sig_tasks.join_next() => result,
+                    _ = tokio::time::sleep_until(hedge_deadline) => None,
+                }
+            };
+            let Some(result) = next else {
+                if reserve.is_empty() {
+                    // All asked members answered (or failed) without covering
+                    // the chunk; commit whatever the union holds.
+                    break;
+                }
+                // The initial wave stalled or came up short; hedge to the
+                // rest of the committee.
+                info!(
+                    %withdrawal_txn_id,
+                    "Initial fan-out did not cover the chunk; hedging to {} more member(s)",
+                    reserve.len(),
+                );
+                for member in reserve.drain(..) {
+                    spawn_member(&mut sig_tasks, member);
+                }
+                continue;
+            };
             let candidates = match result {
                 Ok(Ok(sigs)) => sigs,
                 Ok(Err(e)) => {
@@ -1650,6 +1723,51 @@ mod tests {
             chunk_step_after_attempt(64, 64, MAX_STALLED_CHUNK_ATTEMPTS - 1),
             ChunkStep::GiveUp
         );
+    }
+
+    #[test]
+    fn fanout_waves_rotate_and_partition_the_committee() {
+        let members = vec![0, 1, 2, 3, 4];
+
+        let (first, reserve) = fanout_waves(&members, 0, 3);
+        assert_eq!(first, vec![0, 1, 2]);
+        assert_eq!(reserve, vec![3, 4]);
+
+        // The offset rotates the starting point and wraps around.
+        let (first, reserve) = fanout_waves(&members, 4, 3);
+        assert_eq!(first, vec![4, 0, 1]);
+        assert_eq!(reserve, vec![2, 3]);
+
+        // Offsets beyond the length wrap via modulo.
+        let (first, _) = fanout_waves(&members, 7, 3);
+        assert_eq!(first, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn fanout_waves_cover_every_member_exactly_once() {
+        let members = vec![0, 1, 2, 3, 4];
+        let (mut first, reserve) = fanout_waves(&members, 3, 2);
+        first.extend(reserve);
+        first.sort_unstable();
+        assert_eq!(first, members);
+    }
+
+    #[test]
+    fn fanout_waves_handle_small_committees_and_zero_fanout() {
+        // A committee smaller than the fan-out goes entirely into the first
+        // wave.
+        let (first, reserve) = fanout_waves(&[7, 8], 5, 3);
+        assert_eq!(first, vec![8, 7]);
+        assert!(reserve.is_empty());
+
+        // A zero fan-out still asks one member, so progress is possible.
+        let (first, reserve) = fanout_waves(&[1, 2, 3], 0, 0);
+        assert_eq!(first, vec![1]);
+        assert_eq!(reserve, vec![2, 3]);
+
+        let (first, reserve) = fanout_waves::<u8>(&[], 2, 3);
+        assert!(first.is_empty());
+        assert!(reserve.is_empty());
     }
 
     #[test]
