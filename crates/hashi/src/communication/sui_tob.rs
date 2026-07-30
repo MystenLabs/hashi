@@ -373,7 +373,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 }
 
-fn tob_wait_superseded(
+pub(crate) fn tob_wait_superseded(
     protocol_type: ProtocolType,
     channel_epoch: u64,
     onchain_epoch: u64,

@@ -1053,6 +1053,22 @@ impl MpcService {
     > {
         let floor_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
         loop {
+            let (onchain_epoch, pending) = {
+                let state = onchain_state.state();
+                let committees = &state.hashi().committees;
+                (committees.epoch(), committees.pending_epoch_change())
+            };
+            if crate::communication::sui_tob::tob_wait_superseded(
+                move_types::ProtocolType::NonceGeneration,
+                epoch,
+                onchain_epoch,
+                pending,
+            ) {
+                anyhow::bail!(
+                    "nonce cert wait for epoch {epoch} batch {batch_index} superseded \
+                     (onchain epoch {onchain_epoch}, pending epoch change {pending:?})"
+                );
+            }
             let certs = onchain_state
                 .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index))
                 .await?
