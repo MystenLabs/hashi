@@ -14,7 +14,6 @@ use hashi_types::guardian::GuardianError::CurrentSessionHeartbeatNotLive;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::PriorSessionHeartbeatStillRecent;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::SessionID;
@@ -162,6 +161,7 @@ mod tests {
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
+    use hashi_types::guardian::LogMessage;
 
     fn build_pcrs() -> BuildPcrs {
         BuildPcrs::new("current", vec![0])

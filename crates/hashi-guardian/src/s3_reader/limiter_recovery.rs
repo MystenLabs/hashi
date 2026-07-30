@@ -32,7 +32,6 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::VersionedLogMessage;
@@ -168,6 +167,7 @@ mod tests {
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSignedResponse;
+    use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
