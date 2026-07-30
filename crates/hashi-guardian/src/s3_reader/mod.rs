@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Verified reads of the guardian's S3 logs.
+//! Verified reads from the guardian's S3 logs.
 //!
 //! [`GuardianReader`] applies each log stream's S3 immutability policy, verifies
 //! records with their writing session's attestation-anchored key, and caches the
