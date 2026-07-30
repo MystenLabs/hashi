@@ -557,6 +557,7 @@ impl MpcService {
             move_types::ProtocolType::NonceGeneration,
             signer,
         )
+        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT)
         .with_stall_counters(
             self.inner
                 .metrics
@@ -676,10 +677,11 @@ impl MpcService {
                 error!(
                     "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
                      served certs size to {served_implies} (weight {served_weight}). The certs \
-                     are frozen, so a restart rebuilds this boundary at {served_implies}: if \
-                     this is the last recovered boundary the Phase-1/Phase-2 assert then fails \
-                     identically on every later tick, and otherwise it is not cross-checked at \
-                     all and silently shifts every later batch's start_index",
+                     are frozen, so a restart rebuilds this boundary at {served_implies}: from \
+                     the first boundary holding a pending presig index onward the \
+                     Phase-1/Phase-2 assert fails identically on every later tick, while \
+                     boundaries before it are skipped, uncross-checked, and silently shift \
+                     every later batch's start_index",
                     presignatures.len(),
                 );
             }

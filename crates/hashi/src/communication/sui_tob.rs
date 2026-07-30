@@ -26,6 +26,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const DEDUP_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const _: () = assert!(
+    DEDUP_READ_TIMEOUT.as_millis() < super::timeout_and_retry::CALL_TIMEOUT.as_millis(),
+    "publish runs inside with_timeout_and_retry, so a dedup bound at or above CALL_TIMEOUT \
+     never fires and the submit-anyway branch becomes dead code",
+);
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -447,19 +452,21 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 }
             }
             Ok(Err(e)) => tracing::warn!(
-                "{:?} certified_dealers fetch for epoch {} failed: {e}; \
+                "{:?} certified_dealers fetch for epoch {} batch {:?} failed: {e}; \
                  reporting {} dealers seen so far",
                 self.protocol_type,
                 self.epoch,
+                self.batch_index,
                 self.seen_dealers.len(),
             ),
             Err(_) => {
                 self.record_stall(false);
                 tracing::warn!(
-                    "{:?} certified_dealers fetch for epoch {} stalled >{:?}; \
+                    "{:?} certified_dealers fetch for epoch {} batch {:?} stalled >{:?}; \
                      reporting {} dealers seen so far",
                     self.protocol_type,
                     self.epoch,
+                    self.batch_index,
                     FETCH_STALL_TIMEOUT,
                     self.seen_dealers.len(),
                 );
