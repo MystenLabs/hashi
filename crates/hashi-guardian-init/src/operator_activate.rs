@@ -128,10 +128,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
     ensure!(
-        verified_session.signing_pubkey == signing_pub_key,
+        verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    verify_oi_info_matches_provisioned_standby(&verified_session.info, &pre_info)?;
+    verify_oi_info_matches_provisioned_standby(verified_session.info(), &pre_info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,

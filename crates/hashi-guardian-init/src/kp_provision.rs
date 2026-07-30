@@ -240,7 +240,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         enclave_current_committee_epoch.is_none(),
         "Guardian has current_committee_epoch => operator activation already ran"
     );
-    let oi_info = verified_session.info;
+    let oi_info = verified_session.into_info();
     ensure_oi_info_matches_post_init(&oi_info, &guardian_info)
         .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
     anyhow::ensure!(

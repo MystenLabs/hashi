@@ -118,11 +118,11 @@ pub async fn run(
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
     anyhow::ensure!(
-        verified_session.signing_pubkey == signing_pub_key,
+        verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     anyhow::ensure!(
-        verified_session.info.bucket_info.as_ref() == Some(endpoint_bucket_info),
+        verified_session.info().bucket_info.as_ref() == Some(endpoint_bucket_info),
         "guardian S3 session bucket info differs from live GuardianInfo"
     );
     let endpoint_btc_pubkey = endpoint_verified
