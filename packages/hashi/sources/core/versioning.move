@@ -38,8 +38,14 @@ public struct Versioning has store {
 // Constructor
 
 public(package) fun create(): Versioning {
+    let mut enabled_versions = vec_set::empty();
+    let mut version = 1;
+    while (version <= PACKAGE_VERSION) {
+        enabled_versions.insert(version);
+        version = version + 1;
+    };
     Versioning {
-        enabled_versions: vec_set::from_keys(vector[PACKAGE_VERSION]),
+        enabled_versions,
         upgrade_cap: option::none(),
     }
 }

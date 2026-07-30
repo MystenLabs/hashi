@@ -460,7 +460,13 @@ impl MpcService {
             move_types::ProtocolType::Dkg,
             signer,
         )
-        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT)
+        .with_stall_counter(
+            self.inner
+                .metrics
+                .mpc_tob_fetch_stalls_total
+                .with_label_values(&[MPC_LABEL_DKG]),
+        );
         let output = MpcManager::run_dkg(
             &mpc_manager,
             &p2p_channel,
@@ -501,6 +507,13 @@ impl MpcService {
             Some(batch_index),
             move_types::ProtocolType::NonceGeneration,
             signer,
+        )
+        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT)
+        .with_stall_counter(
+            self.inner
+                .metrics
+                .mpc_tob_fetch_stalls_total
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION]),
         );
         let metrics = &self.inner.metrics;
         let _timer = metrics
@@ -547,6 +560,12 @@ impl MpcService {
                 ))
             })
             .collect();
+        let served_weight = {
+            let mgr = mpc_manager.read().unwrap();
+            mgr.pinned_certified_nonce_dealers(&canonical, cutoff_ms)
+                .1
+                .weight()
+        };
         let mut party_channel = PrefetchedTobChannel::new(canonical);
         let nonce_result = MpcManager::run_nonce_party_phase(
             &mpc_manager,
@@ -593,6 +612,15 @@ impl MpcService {
         )
         .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
+        let served_implies = presig_count(served_weight as usize, params, batch_size_per_weight);
+        if presignatures.len() != served_implies {
+            metrics.mpc_nonce_size_mismatch_total.inc();
+            warn!(
+                "nonce batch {batch_index} for epoch {epoch}: built {} presigs, the served \
+                 cert list implies {served_implies} (served weight {served_weight})",
+                presignatures.len(),
+            );
+        }
         info!(
             "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
             presignatures.len(),
@@ -1123,6 +1151,22 @@ impl MpcService {
                     window.weight(),
                 )
             };
+            let (zero_stamps, stamped) =
+                certs.iter().fold((0usize, 0usize), |(z, n), (_, cert)| {
+                    if cert.timestamp_ms == 0 {
+                        (z + 1, n)
+                    } else {
+                        (z, n + 1)
+                    }
+                });
+            if zero_stamps > 0 && stamped > 0 {
+                metrics.mpc_nonce_mixed_stamp_batches_total.inc();
+                warn!(
+                    "nonce batch {batch_index} for epoch {epoch} mixes {zero_stamps} bare \
+                     and {stamped} stamped cert(s); the window decision depends on which \
+                     one crosses the floor"
+                );
+            }
             if weight > best_weight {
                 best_weight = weight;
                 wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
@@ -1606,7 +1650,13 @@ impl MpcService {
             move_types::ProtocolType::KeyRotation,
             signer,
         )
-        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT)
+        .with_stall_counter(
+            self.inner
+                .metrics
+                .mpc_tob_fetch_stalls_total
+                .with_label_values(&[MPC_LABEL_KEY_ROTATION]),
+        );
         let output = MpcManager::run_key_rotation(
             &mpc_manager,
             &previous_certs,

@@ -71,6 +71,15 @@ pub fn prepare_upgrade_package(
     let value_len = versioning_src[value_start..]
         .find(';')
         .ok_or_else(|| anyhow::anyhow!("PACKAGE_VERSION declaration is not terminated"))?;
+    let current: u64 = versioning_src[value_start..value_start + value_len]
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("PACKAGE_VERSION is not a u64 in {versioning_path:?}: {e}"))?;
+    anyhow::ensure!(
+        current != target_version,
+        "upgrade would declare PACKAGE_VERSION {current}, which the source already has: \
+         the Sui package counter and the Move constant are out of step"
+    );
     let patched = format!(
         "{}{}{}",
         &versioning_src[..value_start],

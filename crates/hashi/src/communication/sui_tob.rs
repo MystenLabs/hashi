@@ -55,6 +55,7 @@ pub struct SuiTobChannel {
     protocol_type: ProtocolType,
     signer: SimpleKeypair,
     idle_timeout: Option<Duration>,
+    stall_counter: Option<prometheus::IntCounter>,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
@@ -82,11 +83,17 @@ impl SuiTobChannel {
             protocol_type,
             signer,
             idle_timeout: None,
+            stall_counter: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
             pending_fetch: None,
             wait_started: None,
         }
+    }
+
+    pub fn with_stall_counter(mut self, counter: prometheus::IntCounter) -> Self {
+        self.stall_counter = Some(counter);
+        self
     }
 
     pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
@@ -278,6 +285,9 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 Err(_) => {
                     if let Some((fetch, _)) = self.pending_fetch.take() {
                         fetch.abort();
+                    }
+                    if let Some(counter) = &self.stall_counter {
+                        counter.inc();
                     }
                     tracing::warn!(
                         "{:?} TOB cert fetch for epoch {} stalled >{:?}; retrying",

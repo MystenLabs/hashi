@@ -798,6 +798,27 @@ fun test_disable_version_proposal() {
 }
 
 #[test]
+fun test_fresh_publish_enables_versions_below_current() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let disable_id = test_utils::create_disable_version_proposal(
+        &mut hashi,
+        VOTER1,
+        1,
+        &clock,
+        ctx,
+    );
+    hashi::disable_version::execute(&mut hashi, disable_id, &clock);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure(abort_code = hashi::versioning::EDisableCurrentVersion)]
 /// Test that disabling the current package version fails (anti-bricking protection)
 fun test_disable_current_version_fails() {

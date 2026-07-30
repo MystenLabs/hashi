@@ -1130,6 +1130,18 @@ impl MpcManager {
         self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window())
     }
 
+    /// Admission under a caller-pinned cutoff. Chain-derived only — see the note on
+    /// `avid_certified_nonce_dealers_from_certs` about why sizing must not read local
+    /// state.
+    pub(crate) fn pinned_certified_nonce_dealers<T: NonceCertTimestamp>(
+        &self,
+        certs: &[(Address, T)],
+        cutoff_ms: Option<u64>,
+    ) -> (HashSet<Address>, NonceCollectionWindow) {
+        let window = NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms);
+        self.certified_nonce_dealers_in_window(certs, window)
+    }
+
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
         &self,
         certs: &[(Address, T)],
@@ -1222,7 +1234,7 @@ impl MpcManager {
         }
         (certified, window.weight())
     }
-    
+
     pub(crate) async fn verified_nonce_certs<T>(
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
@@ -2095,6 +2107,24 @@ impl MpcManager {
             certified_dealers.insert(dealer);
         }
         if !window.floor_reached() {
+            if local_skips > 0 {
+                metrics.mpc_nonce_local_skip_batches_total.inc();
+                tracing::warn!(
+                    "nonce batch {batch_index} fell under the floor after {local_skips} \
+                     node-local skip(s): admitted {} of {} required; peers can admit \
+                     dealers this node could not",
+                    window.weight(),
+                    window.required_weight(),
+                );
+            } else {
+                metrics.mpc_nonce_window_closed_below_floor_total.inc();
+                tracing::warn!(
+                    "nonce batch {batch_index} closed on the window cutoff under the \
+                     floor: admitted {} of {} required",
+                    window.weight(),
+                    window.required_weight(),
+                );
+            }
             return Err(MpcError::NotEnoughParticipants {
                 expected: window.required_weight() as usize,
                 got: window.weight() as usize,
@@ -3556,12 +3586,25 @@ impl MpcManager {
             window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
         }
-        // A pinned-cutoff window starts in `Window`, so `record` never runs the
-        // floor-crossing branch and the loop can close on an over-cutoff stamp at
-        // any weight. The floor is a precondition of the presig weight range, so
-        // check it on this exit edge too — the `Exhausted` arm only covers the
-        // stream-ran-dry edge.
         if !window.floor_reached() {
+            if local_skips > 0 {
+                metrics.mpc_nonce_local_skip_batches_total.inc();
+                tracing::warn!(
+                    "nonce batch {batch_index} fell under the floor after {local_skips} \
+                     node-local skip(s): admitted {} of {} required; peers can admit \
+                     dealers this node could not",
+                    window.weight(),
+                    window.required_weight(),
+                );
+            } else {
+                metrics.mpc_nonce_window_closed_below_floor_total.inc();
+                tracing::warn!(
+                    "nonce batch {batch_index} closed on the window cutoff under the \
+                     floor: admitted {} of {} required",
+                    window.weight(),
+                    window.required_weight(),
+                );
+            }
             return Err(MpcError::NotEnoughParticipants {
                 expected: window.required_weight() as usize,
                 got: window.weight() as usize,

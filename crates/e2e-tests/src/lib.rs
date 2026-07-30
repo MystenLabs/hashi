@@ -137,10 +137,6 @@ pub struct TestNetworksBuilder {
 
 impl TestNetworksBuilder {
     pub fn new() -> Self {
-        // Default the deposit-confirmation delay and the nonce-accumulation
-        // window to 0 so tests don't wait through production-grade windows and
-        // collection stays floor-exact. Override via `with_onchain_config`;
-        // later entries win (applied in insertion order).
         let onchain_config_overrides = vec![
             (
                 "bitcoin_deposit_time_delay_ms".to_string(),

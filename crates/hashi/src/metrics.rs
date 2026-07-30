@@ -135,6 +135,10 @@ pub struct Metrics {
     pub mpc_nonce_floor_unreached_total: IntCounter,
     pub mpc_nonce_local_skip_batches_total: IntCounter,
     pub mpc_nonce_cutoff_unsettled_total: IntCounter,
+    pub mpc_nonce_window_closed_below_floor_total: IntCounter,
+    pub mpc_tob_fetch_stalls_total: IntCounterVec,
+    pub mpc_nonce_size_mismatch_total: IntCounter,
+    pub mpc_nonce_mixed_stamp_batches_total: IntCounter,
     pub mpc_nonce_read_side_clock_errors_total: IntCounter,
     /// Batch index of the most recent nonce batch this node accepted.
     pub mpc_nonce_batch_index: IntGauge,
@@ -723,6 +727,27 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_nonce_size_mismatch_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_size_mismatch_total",
+                "Live nonce batches whose built size differs from what the cert list this \
+                 node was served implies.",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_mixed_stamp_batches_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_mixed_stamp_batches_total",
+                "Nonce batches carrying both zero and non-zero cert timestamps.",
+                registry,
+            )
+            .unwrap(),
+            mpc_tob_fetch_stalls_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_tob_fetch_stalls_total",
+                "TOB certificate fetches abandoned and respawned after stalling, by \
+                 protocol.",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
             mpc_avid_rounds_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_avid_rounds_total",
                 "AVID nonce rounds consumed, by resolved certificate kind",
@@ -775,6 +800,13 @@ impl Metrics {
                 "hashi_mpc_nonce_cutoff_unsettled_total",
                 "Nonce batches abandoned because successive reads kept moving the \
                  accumulation window cutoff, so no snapshot could be confirmed",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_window_closed_below_floor_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_window_closed_below_floor_total",
+                "Nonce batches discarded because the accumulation window closed on the \
+                 cutoff while the admitted weight was still under the floor",
                 registry,
             )
             .unwrap(),
