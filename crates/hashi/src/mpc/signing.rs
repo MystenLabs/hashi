@@ -55,6 +55,13 @@ const PARTIAL_SIGS_CALL_RETRIES: usize = 1;
 /// cooldown window instead of one per round per concurrent signing task.
 const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(30);
 
+/// How long a bad-share blame lasts before the peer is polled again. Long
+/// enough that a genuinely bad peer costs one RS-recovery detour per window
+/// (re-blaming is cheap), short enough that a healed peer — e.g. one that
+/// was briefly running a divergent version — rejoins well before the epoch
+/// ends.
+const BAD_SHARE_BLAME_DURATION: Duration = Duration::from_secs(3600);
+
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
     /// Each presig is wrapped in `Option` so it can be taken exactly once,
@@ -124,15 +131,62 @@ pub struct SigningManager {
     state: RwLock<SigningPoolState>,
     refill_tx: Arc<watch::Sender<u32>>,
     peer_cooldowns: PeerCooldowns,
-    /// Peers that contributed a provably bad partial signature this epoch
-    /// (identified against the RS-recovered polynomial in
-    /// [`try_finalize_signature`]). Their partials are excluded from polling
-    /// and merging for the rest of the epoch: one bad share inside the first
-    /// `threshold` slots fails plain aggregation for every input, so a
-    /// misbehaving peer would otherwise force every signature through the
-    /// (more partials, more rounds) recovery path indefinitely. The set
-    /// resets on reconfig with the manager itself.
-    bad_share_peers: Mutex<HashSet<Address>>,
+    /// Peers that contributed a provably bad partial signature (identified
+    /// against the RS-recovered polynomial in [`try_finalize_signature`]).
+    /// Their partials are excluded from polling and merging while the blame
+    /// lasts: one bad share inside the first `threshold` slots fails plain
+    /// aggregation for every input, so a misbehaving peer would otherwise
+    /// force every signature through the (more partials, more rounds)
+    /// recovery path indefinitely. Blames expire after
+    /// [`BAD_SHARE_BLAME_DURATION`] so a healed peer rejoins without waiting
+    /// for reconfig, and everything resets with the per-epoch manager
+    /// itself.
+    bad_share_peers: BlamedPeers,
+}
+
+/// Peers currently excluded for contributing provably bad shares, and when
+/// each blame expires.
+struct BlamedPeers {
+    until: Mutex<HashMap<Address, Instant>>,
+}
+
+impl BlamedPeers {
+    fn new() -> Self {
+        Self {
+            until: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_blamed(&self, peer: &Address, now: Instant) -> bool {
+        self.until
+            .lock()
+            .unwrap()
+            .get(peer)
+            .is_some_and(|&until| until > now)
+    }
+
+    /// A snapshot of the currently blamed (unexpired) peers.
+    fn snapshot(&self, now: Instant) -> HashSet<Address> {
+        self.until
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&(_, &until)| until > now)
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
+    /// Blames `peers` for [`BAD_SHARE_BLAME_DURATION`], refreshing the
+    /// expiry of peers that are already blamed and pruning expired entries.
+    fn blame(&self, peers: &HashSet<Address>) {
+        let now = Instant::now();
+        let mut until = self.until.lock().unwrap();
+        until.retain(|_, expiry| *expiry > now);
+        let expiry = now + BAD_SHARE_BLAME_DURATION;
+        for peer in peers {
+            until.insert(*peer, expiry);
+        }
+    }
 }
 
 /// Peers whose `get_partial_signatures` poll recently hard-failed
@@ -225,7 +279,7 @@ impl SigningManager {
             }),
             refill_tx,
             peer_cooldowns: PeerCooldowns::new(),
-            bad_share_peers: Mutex::new(HashSet::new()),
+            bad_share_peers: BlamedPeers::new(),
         }
     }
 
@@ -294,7 +348,7 @@ impl SigningManager {
             }),
             refill_tx,
             peer_cooldowns: PeerCooldowns::new(),
-            bad_share_peers: Mutex::new(HashSet::new()),
+            bad_share_peers: BlamedPeers::new(),
         })
     }
 
@@ -449,7 +503,7 @@ impl SigningManager {
         // peer that stayed in `peers_remaining` would keep `peers_exhausted`
         // false forever, turning every unreachable-threshold failure into a
         // full deadline wait instead of a fast `TooManyInvalidSignatures`.
-        let blamed = self.bad_share_peers.lock().unwrap().clone();
+        let blamed = self.bad_share_peers.snapshot(Instant::now());
         let all_peers: HashSet<Address> = self
             .config
             .committee
@@ -872,10 +926,10 @@ impl SigningManager {
         let now = Instant::now();
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
         {
-            let bad_peers = self.bad_share_peers.lock().unwrap();
+            let blamed = self.bad_share_peers.snapshot(now);
             for st in pending.iter() {
                 for peer in &st.peers_remaining {
-                    if !bad_peers.contains(peer) && !self.peer_cooldowns.is_cooling(peer, now) {
+                    if !blamed.contains(peer) && !self.peer_cooldowns.is_cooling(peer, now) {
                         peer_ids.entry(*peer).or_default().push(st.signing_id);
                     }
                 }
@@ -922,7 +976,7 @@ impl SigningManager {
                 Ok(response) => {
                     // A concurrent signing task may have blamed this peer
                     // after the poll launched; its partials are not welcome.
-                    if self.bad_share_peers.lock().unwrap().contains(&peer) {
+                    if self.bad_share_peers.is_blamed(&peer, Instant::now()) {
                         continue;
                     }
                     self.peer_cooldowns.record_success(&peer);
@@ -1017,14 +1071,7 @@ impl SigningManager {
         if blamed.is_empty() {
             return;
         }
-        {
-            let mut bad_peers = self.bad_share_peers.lock().unwrap();
-            bad_peers.extend(blamed.iter().copied());
-            tracing::warn!(
-                "{} peer(s) now excluded for bad shares this epoch",
-                bad_peers.len()
-            );
-        }
+        self.bad_share_peers.blame(&blamed);
         for st in pending.iter_mut() {
             let scrub: HashSet<ShareIndex> = st
                 .contributors
@@ -2222,7 +2269,7 @@ mod tests {
         // Whether recovery ran depends on arrival order (the clean path wins
         // when the corrupt response is not among the first `threshold`
         // partials), but blame must never land on an honest peer.
-        let blamed = setup.managers[0].bad_share_peers.lock().unwrap().clone();
+        let blamed = setup.managers[0].bad_share_peers.snapshot(Instant::now());
         assert!(
             blamed.is_subset(&[test_address(1)].into_iter().collect()),
             "only the corrupting peer may be blamed, got: {blamed:?}"
@@ -2317,7 +2364,7 @@ mod tests {
 
         mgr.blame_bad_shares(&[share_index(2)], &done_contributors, &mut pending, &metrics);
 
-        assert!(mgr.bad_share_peers.lock().unwrap().contains(&bad_peer));
+        assert!(mgr.bad_share_peers.is_blamed(&bad_peer, Instant::now()));
         let st = &pending[0];
         // Both of the blamed peer's shares are scrubbed, not only the caught
         // one.
@@ -2354,12 +2401,8 @@ mod tests {
         let req_id = test_request_id();
         setup.prepare_all(message, &beacon, req_id, 0, Some(0));
 
-        {
-            let mut blamed = setup.managers[0].bad_share_peers.lock().unwrap();
-            for i in 1..4usize {
-                blamed.insert(test_address(i));
-            }
-        }
+        let all_peers: HashSet<Address> = (1..4usize).map(test_address).collect();
+        setup.managers[0].bad_share_peers.blame(&all_peers);
 
         let p2p = setup.mock_p2p_for(0);
         let started = Instant::now();
@@ -2395,7 +2438,7 @@ mod tests {
         let metrics = test_metrics();
         let blamed = test_address(1);
         let healthy = test_address(2);
-        mgr.bad_share_peers.lock().unwrap().insert(blamed);
+        mgr.bad_share_peers.blame(&[blamed].into_iter().collect());
 
         let p2p = CountingP2PChannel {
             fail: HashSet::new(),
@@ -2514,7 +2557,7 @@ mod tests {
 
         verify_schnorr(&setup.verifying_key, message, &sig);
         assert!(
-            setup.managers[0].bad_share_peers.lock().unwrap().is_empty(),
+            setup.managers[0].bad_share_peers.snapshot(Instant::now()).is_empty(),
             "a corrupt local share must not get any peer excluded"
         );
     }
@@ -2719,6 +2762,23 @@ mod tests {
             "healthy peer ({healthy_calls} polls) should be polled across rounds, \
              failing peer ({failing_calls} polls) should not"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_blame_expires() {
+        let blamed_peers = BlamedPeers::new();
+        let peer = test_address(1);
+
+        blamed_peers.blame(&[peer].into_iter().collect());
+        assert!(blamed_peers.is_blamed(&peer, Instant::now()));
+
+        tokio::time::advance(BAD_SHARE_BLAME_DURATION + Duration::from_millis(1)).await;
+        assert!(!blamed_peers.is_blamed(&peer, Instant::now()));
+        assert!(blamed_peers.snapshot(Instant::now()).is_empty());
+
+        // Re-blaming after expiry works and refreshes the entry.
+        blamed_peers.blame(&[peer].into_iter().collect());
+        assert!(blamed_peers.is_blamed(&peer, Instant::now()));
     }
 
     #[tokio::test(start_paused = true)]
