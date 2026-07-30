@@ -1165,7 +1165,10 @@ impl MpcManager {
             };
             let mgr = Arc::clone(mpc_manager);
             let verification = spawn_blocking(move || {
-                mgr.read().unwrap().committee.verify_signature(&dealer_cert)
+                mgr.read()
+                    .unwrap()
+                    .committee
+                    .verify_signature_any_weight(&dealer_cert)
             })
             .await;
             match verification {
@@ -1289,7 +1292,7 @@ impl MpcManager {
                 let cert = dkg_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature_any_weight(&cert)
                 })
                 .await;
                 drop(_timer);
@@ -1560,7 +1563,7 @@ impl MpcManager {
                 let cert = rotation_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature_any_weight(&cert)
                 })
                 .await;
                 drop(_timer);
@@ -1844,7 +1847,7 @@ impl MpcManager {
                 let cert = nonce_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature_any_weight(&cert)
                 })
                 .await;
                 drop(_timer);
@@ -2968,20 +2971,9 @@ impl MpcManager {
     }
 
     fn reduced_weight_of_cert(&self, cert: &DealerCertificate) -> MpcResult<u32> {
-        let signers = cert
-            .signers(&self.committee)
-            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
-        Ok(signers
-            .iter()
-            .filter_map(|addr| {
-                let party_id = self.committee.index_of(addr)? as u16;
-                self.mpc_config
-                    .nodes
-                    .weight_of(party_id)
-                    .ok()
-                    .map(|w| w as u32)
-            })
-            .sum())
+        cert.committee_signature()
+            .reduced_weight(&self.committee, &self.mpc_config.nodes)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
     }
 
     fn resolve_avid_cert_kind_locally(
@@ -3327,16 +3319,19 @@ impl MpcManager {
                 let result = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
                     mgr.committee
-                        .verify_signature(&cert)
-                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
-                    mgr.reduced_weight_of_cert(&cert)
+                        .verify_signature_and_reduced_weight(
+                            &cert,
+                            &mgr.mpc_config.nodes,
+                            vote_quorum_weight,
+                        )
+                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
                 })
                 .await;
                 drop(_timer);
                 match result {
                     Ok(weight) => weight,
                     Err(e) => {
-                        tracing::info!("Invalid nonce certificate from {:?}: {}", dealer, e);
+                        tracing::warn!("Rejected AVID nonce cert from {:?}: {}", dealer, e);
                         continue;
                     }
                 }

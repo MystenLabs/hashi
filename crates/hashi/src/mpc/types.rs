@@ -551,7 +551,7 @@ impl<P: Clone> Certificate for AvidCertificate<P> {
         // Constructors pin `payload` to `dealer_cert`, so the committee signature over the
         // dealer cert authenticates `payload` too.
         self.committee
-            .verify_signature(&self.dealer_cert)
+            .verify_signature_any_weight(&self.dealer_cert)
             .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
     }
 }
