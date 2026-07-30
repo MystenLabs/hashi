@@ -135,7 +135,6 @@ mod tests {
     use hashi_types::guardian::test_utils::mock_kp_certs_roster;
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
-    use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;

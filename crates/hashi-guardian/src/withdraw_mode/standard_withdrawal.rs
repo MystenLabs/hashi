@@ -174,7 +174,6 @@ mod tests {
     use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;

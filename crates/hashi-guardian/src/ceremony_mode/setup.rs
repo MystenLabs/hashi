@@ -97,7 +97,6 @@ mod tests {
     use crate::test_utils::decrypt_kp_shares;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use hashi_types::guardian::crypto::combine_shares;
-    use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;

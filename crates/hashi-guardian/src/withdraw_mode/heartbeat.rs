@@ -64,7 +64,6 @@ impl HeartbeatWriter {
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
-    use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
