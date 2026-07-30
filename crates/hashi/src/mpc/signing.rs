@@ -27,6 +27,7 @@ use sui_sdk_types::Address;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+use crate::communication::ChannelError;
 use crate::communication::P2PChannel;
 use crate::communication::with_timeout_and_retry_budget;
 use crate::metrics::MPC_LABEL_SIGNING;
@@ -53,7 +54,10 @@ const PARTIAL_SIGS_CALL_RETRIES: usize = 1;
 /// How long a peer whose poll hard-failed (connect/TLS/timeout) is skipped
 /// before being probed again. Bounds the cost of dead peers to one probe per
 /// cooldown window instead of one per round per concurrent signing task.
-const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(30);
+/// Deliberately well below the withdrawal signing deadline (30 s): peers
+/// cooled early in a call must become pollable again within that same call,
+/// or one bad round could black out the rest of it.
+const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(10);
 
 /// How long a bad-share blame lasts before the peer is polled again. Long
 /// enough that a genuinely bad peer costs one RS-recovery detour per window
@@ -916,12 +920,24 @@ impl SigningManager {
     ) -> bool {
         let threshold = self.config.threshold;
         let now = Instant::now();
+        let blamed = self.bad_share_peers.snapshot(now);
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
-        {
-            let blamed = self.bad_share_peers.snapshot(now);
+        for st in pending.iter() {
+            for peer in &st.peers_remaining {
+                if !blamed.contains(peer) && !self.peer_cooldowns.is_cooling(peer, now) {
+                    peer_ids.entry(*peer).or_default().push(st.signing_id);
+                }
+            }
+        }
+        if peer_ids.is_empty() {
+            // Every remaining peer is cooling. Poll them all anyway rather
+            // than sleeping the round away: cooldowns exist to shed load
+            // onto healthy peers, and right now there are none — without
+            // this, a fleet-wide blip (e.g. right after reconfig) blacks
+            // out signing for a whole cooldown window.
             for st in pending.iter() {
                 for peer in &st.peers_remaining {
-                    if !blamed.contains(peer) && !self.peer_cooldowns.is_cooling(peer, now) {
+                    if !blamed.contains(peer) {
                         peer_ids.entry(*peer).or_default().push(st.signing_id);
                     }
                 }
@@ -1011,6 +1027,15 @@ impl SigningManager {
                     {
                         break;
                     }
+                }
+                Err(ChannelError::Unavailable(e)) => {
+                    // The peer is up but not ready to serve yet (e.g. still
+                    // reconciling its signing manager after an epoch flip) —
+                    // common across much of the fleet right after reconfig.
+                    // Keep polling it instead of cooling it down.
+                    tracing::debug!(
+                        "Peer {peer} not ready for get_partial_signatures; will re-poll: {e}"
+                    );
                 }
                 Err(e) => {
                     self.peer_cooldowns.record_failure(peer);
@@ -1141,7 +1166,6 @@ fn aggregate_signatures_with_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::communication::ChannelError;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
     use crate::mpc::types::ComplaintResponse;
@@ -1427,6 +1451,7 @@ mod tests {
     /// response (as a peer that has not signed yet would).
     struct CountingP2PChannel {
         fail: HashSet<Address>,
+        unavailable: HashSet<Address>,
         calls: Mutex<HashMap<Address, usize>>,
     }
 
@@ -1468,6 +1493,8 @@ mod tests {
             *self.calls.lock().unwrap().entry(*party).or_insert(0) += 1;
             if self.fail.contains(party) {
                 Err(ChannelError::RequestFailed("down".into()))
+            } else if self.unavailable.contains(party) {
+                Err(ChannelError::Unavailable("reconciling".into()))
             } else {
                 Ok(GetPartialSignaturesResponse {
                     partial_sigs: std::collections::BTreeMap::new(),
@@ -2442,6 +2469,7 @@ mod tests {
 
         let p2p = CountingP2PChannel {
             fail: HashSet::new(),
+            unavailable: HashSet::new(),
             calls: Mutex::new(HashMap::new()),
         };
         let mut pending = vec![test_input_state(
@@ -2779,6 +2807,7 @@ mod tests {
         let failing = test_address(1);
         let p2p = CountingP2PChannel {
             fail: [failing].into_iter().collect(),
+            unavailable: HashSet::new(),
             calls: Mutex::new(HashMap::new()),
         };
 
@@ -2813,6 +2842,89 @@ mod tests {
             "healthy peer ({healthy_calls} polls) should be polled across rounds, \
              failing peer ({failing_calls} polls) should not"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_keeps_polling_unavailable_peers() {
+        // `Status::unavailable` means "up but not ready yet" (e.g. still
+        // reconciling after an epoch flip) — the peer must be re-polled
+        // every round, not cooled down.
+        let setup = SigningTestSetup::new(4);
+        let message = b"unavailable";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let reconciling = test_address(1);
+        let p2p = CountingP2PChannel {
+            fail: HashSet::new(),
+            unavailable: [reconciling].into_iter().collect(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let calls = p2p.calls.lock().unwrap();
+        let reconciling_calls = calls.get(&reconciling).copied().unwrap_or(0);
+        assert!(
+            reconciling_calls > 1 + PARTIAL_SIGS_CALL_RETRIES,
+            "an unavailable peer must keep being polled across rounds, \
+             got {reconciling_calls} poll(s)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_polls_cooling_peers_when_all_are_cooling() {
+        // When every remaining peer is cooling, the round must fall back to
+        // polling them all instead of sleeping the call away — otherwise a
+        // fleet-wide blip blacks out signing for a full cooldown window.
+        let setup = SigningTestSetup::new(4);
+        let message = b"all-cooling";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let p2p = CountingP2PChannel {
+            fail: (1..4usize).map(test_address).collect(),
+            unavailable: HashSet::new(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let calls = p2p.calls.lock().unwrap();
+        for i in 1..4usize {
+            let peer_calls = calls.get(&test_address(i)).copied().unwrap_or(0);
+            assert!(
+                peer_calls > 1 + PARTIAL_SIGS_CALL_RETRIES,
+                "peer {i} must be re-polled via the all-cooling fallback, \
+                 got {peer_calls} poll(s)"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -58,6 +58,16 @@ impl RpcP2PChannel {
     }
 }
 
+/// Preserves the one status distinction callers care about: `unavailable`
+/// means the peer is up but not ready yet (e.g. reconciling after an epoch
+/// change) and should be retried shortly rather than treated as failed.
+fn map_status(status: tonic::Status) -> ChannelError {
+    match status.code() {
+        tonic::Code::Unavailable => ChannelError::Unavailable(status.to_string()),
+        _ => ChannelError::RequestFailed(status.to_string()),
+    }
+}
+
 #[async_trait]
 impl P2PChannel for RpcP2PChannel {
     async fn send_messages(
@@ -71,7 +81,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .send_messages(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         SendMessagesResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -87,7 +97,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .retrieve_messages(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         RetrieveMessagesResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -103,7 +113,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .complain(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         ComplaintResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -119,7 +129,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .get_public_mpc_output(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         GetPublicMpcOutputResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -135,7 +145,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .get_partial_signatures(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         GetPartialSignaturesResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
