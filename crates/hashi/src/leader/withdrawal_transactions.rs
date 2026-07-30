@@ -70,35 +70,41 @@ fn next_signing_chunk(unsigned: &[u64], chunk_size: usize) -> Vec<u64> {
 /// "not found on-chain" — a few seconds of watcher lag, not a hard failure.
 const CHUNK_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Consecutive chunk attempts without on-chain progress before the signing
-/// task gives up and leaves resumption to a later checkpoint tick.
-const MAX_STALLED_CHUNK_ATTEMPTS: u32 = 3;
+/// How long the chunk loop may go without on-chain progress before the
+/// signing task gives up and leaves resumption to a later checkpoint tick.
+/// A wall-clock budget rather than an attempt count: attempts vary wildly
+/// in duration (a fast "not found on-chain" rejection fails in about a
+/// second, a timed-out attempt takes a minute), so a fixed number of
+/// attempts would mean anywhere from seconds to many minutes of tolerance.
+const CHUNK_PROGRESS_STALL_LIMIT: Duration = Duration::from_secs(90);
+
+/// Upper bound on one signing task's lifetime, progress or not. Committed
+/// chunks are durable and the next tick resumes from them, so exiting is
+/// cheap — and a bounded lifetime keeps one huge transaction from pinning
+/// the signing slot with ever-staler task state.
+const MAX_SIGNING_TASK_DURATION: Duration = Duration::from_secs(600);
 
 #[derive(Debug, PartialEq, Eq)]
 enum ChunkStep {
     /// The refreshed state shows fewer unsigned inputs; sign the next chunk
     /// immediately.
     NextChunk,
-    /// No progress yet; retry after [`CHUNK_RETRY_DELAY`].
+    /// No progress yet, but within the stall budget; retry after
+    /// [`CHUNK_RETRY_DELAY`].
     Retry,
     /// The stall budget is spent; fail the task and let a later tick resume
     /// from the durable chunks.
     GiveUp,
 }
 
-/// Decides how the chunk-signing loop proceeds after one attempt, given the
-/// unsigned-input counts before and after and the consecutive-stall count so
-/// far. Progress is measured on chain rather than by the attempt's own
-/// result: a "failed" attempt whose commit actually landed counts as
-/// progress, and a "successful" one whose write is not visible yet does not.
-fn chunk_step_after_attempt(
-    unsigned_before: usize,
-    unsigned_after: usize,
-    stalled_attempts: u32,
-) -> ChunkStep {
-    if unsigned_after < unsigned_before {
+/// Decides how the chunk-signing loop proceeds after one attempt. Progress
+/// is measured on chain rather than by the attempt's own result: a "failed"
+/// attempt whose commit actually landed counts as progress, and a
+/// "successful" one whose write is not visible yet does not.
+fn chunk_step_after_attempt(made_progress: bool, stalled_for: Duration) -> ChunkStep {
+    if made_progress {
         ChunkStep::NextChunk
-    } else if stalled_attempts + 1 < MAX_STALLED_CHUNK_ATTEMPTS {
+    } else if stalled_for < CHUNK_PROGRESS_STALL_LIMIT {
         ChunkStep::Retry
     } else {
         ChunkStep::GiveUp
@@ -610,8 +616,17 @@ impl LeaderService {
         members: &[CommitteeMember],
     ) -> anyhow::Result<()> {
         let txn_id = txn.id;
-        let mut stalled_attempts: u32 = 0;
+        let started = tokio::time::Instant::now();
+        let mut last_progress = started;
         loop {
+            if started.elapsed() >= MAX_SIGNING_TASK_DURATION {
+                info!(
+                    withdrawal_txn_id = %txn_id,
+                    "Signing task reached its lifetime bound ({MAX_SIGNING_TASK_DURATION:?}); \
+                     a later tick resumes from the committed chunks"
+                );
+                return Ok(());
+            }
             let checkpoint_height = inner.onchain_state().latest_checkpoint_height();
             if !super::LeaderService::node_is_leader(inner, checkpoint_height) {
                 info!(
@@ -663,17 +678,16 @@ impl LeaderService {
                 return Ok(());
             };
             let unsigned_after = refreshed.signing.unsigned_indices().len();
-            match chunk_step_after_attempt(unsigned.len(), unsigned_after, stalled_attempts) {
-                ChunkStep::NextChunk => stalled_attempts = 0,
+            let made_progress = unsigned_after < unsigned.len();
+            match chunk_step_after_attempt(made_progress, last_progress.elapsed()) {
+                ChunkStep::NextChunk => last_progress = tokio::time::Instant::now(),
                 ChunkStep::Retry => {
-                    stalled_attempts += 1;
                     tokio::time::sleep(CHUNK_RETRY_DELAY).await;
                 }
                 ChunkStep::GiveUp => anyhow::bail!(
-                    "no signing progress for withdrawal {txn_id} after {} attempts \
-                     ({unsigned_after} input(s) still unsigned); a later tick resumes \
-                     from the committed chunks",
-                    stalled_attempts + 1,
+                    "no signing progress for withdrawal {txn_id} in \
+                     {CHUNK_PROGRESS_STALL_LIMIT:?} ({unsigned_after} input(s) still \
+                     unsigned); a later tick resumes from the committed chunks",
                 ),
             }
             txn = refreshed;
@@ -1629,35 +1643,32 @@ mod tests {
     }
 
     #[test]
-    fn chunk_loop_continues_on_any_progress() {
-        // Progress resets the stall budget, even partial progress recorded by
-        // an attempt that itself reported failure.
-        assert_eq!(chunk_step_after_attempt(64, 32, 0), ChunkStep::NextChunk);
+    fn chunk_loop_continues_on_progress_regardless_of_staleness() {
+        // Progress resets the stall clock, even progress recorded by an
+        // attempt that itself reported failure and even at the edge of the
+        // stall budget.
         assert_eq!(
-            chunk_step_after_attempt(64, 63, MAX_STALLED_CHUNK_ATTEMPTS - 1),
+            chunk_step_after_attempt(true, Duration::ZERO),
+            ChunkStep::NextChunk
+        );
+        assert_eq!(
+            chunk_step_after_attempt(true, CHUNK_PROGRESS_STALL_LIMIT),
             ChunkStep::NextChunk
         );
     }
 
     #[test]
-    fn chunk_loop_retries_stalls_until_the_budget_is_spent() {
-        assert_eq!(chunk_step_after_attempt(64, 64, 0), ChunkStep::Retry);
+    fn chunk_loop_retries_stalls_until_the_time_budget_is_spent() {
         assert_eq!(
-            chunk_step_after_attempt(64, 64, MAX_STALLED_CHUNK_ATTEMPTS - 2),
+            chunk_step_after_attempt(false, Duration::ZERO),
             ChunkStep::Retry
         );
         assert_eq!(
-            chunk_step_after_attempt(64, 64, MAX_STALLED_CHUNK_ATTEMPTS - 1),
-            ChunkStep::GiveUp
+            chunk_step_after_attempt(false, CHUNK_PROGRESS_STALL_LIMIT - Duration::from_millis(1)),
+            ChunkStep::Retry
         );
-    }
-
-    #[test]
-    fn chunk_loop_never_treats_growth_as_progress() {
-        // The unsigned set cannot grow on-chain, but a defensive decision for
-        // it must not reset the stall budget.
         assert_eq!(
-            chunk_step_after_attempt(64, 65, MAX_STALLED_CHUNK_ATTEMPTS - 1),
+            chunk_step_after_attempt(false, CHUNK_PROGRESS_STALL_LIMIT),
             ChunkStep::GiveUp
         );
     }
