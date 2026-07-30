@@ -3,6 +3,7 @@
 
 use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
+use crate::btc_monitor::monitor::DepositConfirmation;
 use crate::leader::RetryPolicy;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
@@ -158,19 +159,41 @@ impl Hashi {
         // Read the threshold live from on-chain state so governance
         // updates take effect for new deposits without a restart.
         let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
-        let txout = self
+        let confirmation = self
             .btc_monitor()
             .confirm_deposit(outpoint, confirmation_threshold)
-            .await
-            .map_err(|e| match e {
-                DepositConfirmError::UtxoSpent { .. } => {
-                    self.metrics.deposits_rejected_utxo_spent.inc();
-                    UnapprovedDepositError::BitcoinUtxoSpent(anyhow!(e))
-                }
-                DepositConfirmError::Other(err) => {
-                    UnapprovedDepositError::BitcoinConfirmFailed(err)
-                }
-            })?;
+            .await;
+        let txout = match confirmation {
+            Ok(DepositConfirmation::Confirmed(txout)) => txout,
+            Ok(DepositConfirmation::NotFound) => {
+                return Err(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(
+                    "transaction {} was not found",
+                    outpoint.txid
+                )));
+            }
+            Ok(DepositConfirmation::InMempool) => {
+                return Err(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(
+                    "transaction {} is still in the mempool",
+                    outpoint.txid
+                )));
+            }
+            Ok(DepositConfirmation::InsufficientConfirmations { confirmations }) => {
+                return Err(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(
+                    "transaction {} has {confirmations}/{confirmation_threshold} confirmations",
+                    outpoint.txid
+                )));
+            }
+            Err(e @ DepositConfirmError::UtxoSpent { .. }) => {
+                self.metrics.deposits_rejected_utxo_spent.inc();
+                return Err(UnapprovedDepositError::BitcoinUtxoSpent(anyhow!(e)));
+            }
+            Err(e @ DepositConfirmError::InvalidVout { .. }) => {
+                return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(e)));
+            }
+            Err(DepositConfirmError::Other(err)) => {
+                return Err(UnapprovedDepositError::BitcoinConfirmFailed(err));
+            }
+        };
         if txout.value.to_sat() != deposit_request.utxo.amount {
             return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(
                 "Bitcoin deposit amount mismatch: got {}, onchain is {}",
@@ -371,6 +394,9 @@ pub enum UnapprovedDepositError {
     #[error("Failed to confirm Bitcoin deposit: {0}")]
     BitcoinConfirmFailed(#[source] anyhow::Error),
 
+    #[error("Bitcoin deposit is not yet confirmed: {0}")]
+    BitcoinNotConfirmed(#[source] anyhow::Error),
+
     #[error("Screener service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
@@ -415,6 +441,7 @@ impl UnapprovedDepositError {
     pub(crate) fn kind(&self) -> UnapprovedDepositErrorKind {
         match self {
             Self::BitcoinConfirmFailed(_)
+            | Self::BitcoinNotConfirmed(_)
             | Self::AmlServiceError(_)
             | Self::FailedQuorum { .. }
             | Self::CertificateBuildFailed(_)
