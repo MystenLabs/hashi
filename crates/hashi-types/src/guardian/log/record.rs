@@ -143,22 +143,7 @@ impl<'de> Deserialize<'de> for LogRecord {
 }
 
 impl LogEntry {
-    pub fn timestamp_ms(&self) -> UnixMillis {
-        self.timestamp_ms
-    }
-
-    /// Validate signed-log routing context without performing cryptography.
-    fn validate_signed(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
-        if self.message.is_allowed_unsigned() {
-            return Err(InvalidS3Log(
-                "expected signed log record but message is unsigned".into(),
-            ));
-        }
-        self.validate_object_key()?;
-        self.validate_session_id(signing_public_key)
-    }
-
-    pub fn into_current(self) -> GuardianResult<(SessionID, LogMessage)> {
+    fn into_current(self) -> GuardianResult<(SessionID, LogMessage)> {
         let message = self
             .message
             .into_current()
@@ -198,6 +183,7 @@ impl LogEntry {
         }
         Ok(())
     }
+
     /// Validate an unsigned OI-attestation entry. The Nitro attestation itself
     /// must be authenticated separately.
     fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
@@ -222,6 +208,17 @@ impl LogEntry {
         let timestamp_ms = self.timestamp_ms;
         let (session_id, message) = self.into_current()?;
         Ok((session_id, timestamp_ms, message))
+    }
+
+    /// Validate signed-log routing context.
+    fn validate_signed(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
+        if self.message.is_allowed_unsigned() {
+            return Err(InvalidS3Log(
+                "expected signed log record but message is unsigned".into(),
+            ));
+        }
+        self.validate_object_key()?;
+        self.validate_session_id(signing_public_key)
     }
 }
 
@@ -267,53 +264,58 @@ impl LogRecord {
         &self.data().message
     }
 
-    /// Validate a signed record under `signing_public_key` and normalize its
-    /// message to the current schema. The caller is responsible for establishing
-    /// that the signing key is authorized.
+    /// Validate a record and normalize its message to the current schema.
+    ///
+    /// Signed records require `Some(signing_public_key)`; the one permitted
+    /// unsigned record kind requires `None`. The caller is responsible for
+    /// establishing that a supplied signing key is authorized, or for
+    /// authenticating the Nitro attestation carried by an unsigned record.
     pub fn validate(
         self,
-        signing_public_key: &GuardianPubKey,
+        signing_public_key: Option<&GuardianPubKey>,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        let signed = self.into_signed()?;
-        let timestamp_ms = signed.data.timestamp_ms;
-        signed.data.validate_signed(signing_public_key)?;
-        let data = signed
-            .authenticate(signing_public_key)
-            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
-        let (session_id, message) = data.into_current()?;
-        Ok((session_id, timestamp_ms, message))
-    }
-
-    /// Validate the one permitted unsigned record kind and normalize its
-    /// message to the current schema. The embedded Nitro attestation must be
-    /// authenticated separately.
-    pub fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        self.into_unsigned()?.validate_unsigned()
+        match (self, signing_public_key) {
+            (Self::Signed(signed), Some(signing_public_key)) => {
+                let timestamp_ms = signed.data.timestamp_ms;
+                signed.data.validate_signed(signing_public_key)?;
+                let data = signed
+                    .authenticate(signing_public_key)
+                    .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
+                let (session_id, message) = data.into_current()?;
+                Ok((session_id, timestamp_ms, message))
+            }
+            (Self::Unsigned(unsigned), None) => unsigned.validate_unsigned(),
+            (Self::Unsigned(unsigned), Some(_)) if unsigned.message.is_allowed_unsigned() => Err(
+                InvalidS3Log("expected signed log record but message is unsigned".into()),
+            ),
+            (Self::Unsigned(_), Some(_)) => Err(InvalidS3Log("missing log signature".into())),
+            (Self::Signed(signed), None) if signed.data.message.is_allowed_unsigned() => Err(
+                InvalidS3Log("unsigned log record must not contain a signature".into()),
+            ),
+            (Self::Signed(_), None) => Err(InvalidS3Log(
+                "expected unsigned log record but message requires a signature".into(),
+            )),
+        }
     }
 
     pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
         policy.duration_for(self.data().message.log_type())
     }
 
-    pub fn into_signed(self) -> GuardianResult<GuardianSigned<LogEntry>> {
+    /// Extract and normalize a signed record without authenticating its
+    /// Guardian signature. This is only for callers that independently
+    /// authenticate the extracted payload.
+    pub fn into_current_unchecked(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         match self {
-            Self::Signed(signed) => Ok(signed),
+            Self::Signed(signed) => {
+                let timestamp_ms = signed.data.timestamp_ms;
+                let (session_id, message) = signed.into_data_unchecked().into_current()?;
+                Ok((session_id, timestamp_ms, message))
+            }
             Self::Unsigned(unsigned) if unsigned.message.is_allowed_unsigned() => Err(
                 InvalidS3Log("expected signed log record but message is unsigned".into()),
             ),
             Self::Unsigned(_) => Err(InvalidS3Log("missing log signature".into())),
-        }
-    }
-
-    pub fn into_unsigned(self) -> GuardianResult<LogEntry> {
-        match self {
-            Self::Unsigned(unsigned) => Ok(unsigned),
-            Self::Signed(signed) if signed.data.message.is_allowed_unsigned() => Err(InvalidS3Log(
-                "unsigned log record must not contain a signature".into(),
-            )),
-            Self::Signed(_) => Err(InvalidS3Log(
-                "expected unsigned log record but message requires a signature".into(),
-            )),
         }
     }
 
@@ -422,11 +424,11 @@ mod tests {
         record: LogRecord,
         signing_public_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        record.validate(signing_public_key)
+        record.validate(Some(signing_public_key))
     }
 
     fn validate_unsigned(record: LogRecord) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        record.validate_unsigned()
+        record.validate(None)
     }
 
     fn assert_writer_key_is_stable_and_verifies(log: LogRecord, signing_key: &GuardianSignKeyPair) {

@@ -637,7 +637,7 @@ impl GuardianS3Client {
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
         let attestation_record = self.get_log_record(&att_key).await?;
-        let (_, _, attestation_message) = attestation_record.validate_unsigned()?;
+        let (_, _, attestation_message) = attestation_record.validate(None)?;
         let (attestation, signing_pubkey) = attestation_message
             .into_init_log()
             .and_then(|x| match x {
@@ -654,7 +654,7 @@ impl GuardianS3Client {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = self.get_log_record(&info_key).await?;
-        let (_, _, info_message) = info_record.validate(&signing_pubkey)?;
+        let (_, _, info_message) = info_record.validate(Some(&signing_pubkey))?;
         let info = info_message
             .into_init_log()
             .and_then(|x| match x {
@@ -1022,7 +1022,7 @@ mod tests {
             .await
             .expect("the embedded key matches the actual S3 key");
         let error = record
-            .validate_unsigned()
+            .validate(None)
             .expect_err("the copied key must still fail canonical validation");
 
         assert!(
