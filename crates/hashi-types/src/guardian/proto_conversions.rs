@@ -1758,13 +1758,13 @@ mod tests {
         );
         assert_eq!(back.data.encrypted_share(), &encrypted_share);
         assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
-        back.authenticate().unwrap();
+        back.verify_signature().unwrap();
 
         let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
         let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
-            tampered.authenticate().is_err(),
+            tampered.verify_signature().is_err(),
             "signature must bind the expected guardian session"
         );
 
@@ -1772,7 +1772,7 @@ mod tests {
         tampered.expected_config_hash = Some(vec![8u8; 32].into());
         let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
-            tampered.authenticate().is_err(),
+            tampered.verify_signature().is_err(),
             "signature must bind the expected operator-init config hash"
         );
     }

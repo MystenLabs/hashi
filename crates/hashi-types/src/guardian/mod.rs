@@ -922,11 +922,8 @@ impl GetGuardianInfoResponse {
         &self,
         expected_build: &BuildPcrs,
     ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
-        let info = self
-            .signed_info
-            .clone()
-            .authenticate(&self.signing_pub_key)?
-            .into_response();
+        self.signed_info.verify_signature(&self.signing_pub_key)?;
+        let info = self.signed_info.data.clone().into_response();
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",

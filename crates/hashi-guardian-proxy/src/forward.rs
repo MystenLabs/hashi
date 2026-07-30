@@ -45,7 +45,7 @@ fn verify_provisioner_rotate_cert_signature(
     let signed_request = KpSigned::<ProvisionerRotateCertRequest>::try_from(request.clone())
         .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
     signed_request
-        .authenticate()
+        .verify_signature()
         .map_err(|error| Status::unauthenticated(error.to_string()))?;
     Ok(())
 }

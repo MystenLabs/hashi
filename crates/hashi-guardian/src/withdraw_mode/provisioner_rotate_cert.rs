@@ -27,9 +27,10 @@ pub async fn provisioner_rotate_cert(
     info!("/provisioner_rotate_cert - Received request.");
 
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
-    let request = signed_request
-        .authenticate()
+    signed_request
+        .verify_signature()
         .map_err(|error| Unauthenticated(error.to_string()))?;
+    let request = signed_request.data;
 
     enclave.require_fully_initialized()?;
 

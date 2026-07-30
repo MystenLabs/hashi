@@ -119,7 +119,8 @@ mod tests {
         let verification_key = &enclave.signing_pubkey();
         let (request, secret_keys) = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
-        let validated_resp = resp.authenticate(verification_key).unwrap().into_response();
+        resp.verify_signature(verification_key).unwrap();
+        let validated_resp = resp.data.into_response();
         assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
 
         // Response still carries the armored ciphertexts.

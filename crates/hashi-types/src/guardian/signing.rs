@@ -1,12 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The guardian-signed envelope and its intent-based domain separation.
+//! Guardian- and KP-signed envelopes with intent-based domain separation.
 //!
-//! `GuardianSigningIntentType` is a registry: each signable type maps to
-//! exactly one intent value, and `GuardianSigned::{sign,authenticate}` mix that
-//! value into the signed bytes so a signature over one type can never be
-//! replayed as another.
+//! [`GuardianSigned`] uses Ed25519 signatures produced by the Guardian, while
+//! [`KpSigned`] uses detached OpenPGP signatures produced by key provisioners.
+//! Both serialize a payload together with its signing intent so a signature for
+//! one payload type cannot be replayed as another.
 
 use super::CryptoVerificationError;
 use super::CryptoVerificationResult;
@@ -37,17 +37,17 @@ use std::path::Path;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardianSigningIntentType {
-    /// Intent for key-bound guardian log records.
+    /// Intent for LogEntry.
     LogMessage = 0,
-    /// Intent for SetupNewKeyResponse
+    /// Intent for SetupNewKeyResponse.
     SetupNewKeyResponse = 1,
-    /// Intent for StandardWithdrawalResponse
+    /// Intent for StandardWithdrawalResponse.
     StandardWithdrawalResponse = 2,
-    /// Intent for GuardianInfo
+    /// Intent for GuardianInfo.
     GuardianInfo = 3,
-    /// Intent for RotateKpsResponse
+    /// Intent for RotateKpsResponse.
     RotateKpsResponse = 4,
-    /// Intent for ProvisionerRotateCertResponse
+    /// Intent for ProvisionerRotateCertResponse.
     ProvisionerRotateCertResponse = 5,
 }
 
@@ -65,15 +65,46 @@ pub trait GuardianSigningIntent: Serialize {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KpSigningIntentType {
-    /// One KP's share submission to the provisioning relay.
-    ProvisionerInitRelaySubmission = 0,
-    /// One KP's request to replace one certificate wrapping its committed share.
+    /// Intent for SingleProvisionerInitRequest.
+    SingleProvisionerInitRequest = 0,
+    /// Intent for ProvisionerRotateCertRequest.
     ProvisionerRotateCertRequest = 1,
 }
 
 /// KP-signed payloads and their intent-based domain separation.
 pub trait KpSigningIntent: Serialize {
     const INTENT: KpSigningIntentType;
+}
+
+/// KP-signed wrapper - adds signer cert and detached OpenPGP signature to any
+/// KP-submitted request payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KpSigned<T> {
+    pub data: T,
+    pub signer_cert: PgpPublicCert,
+    pub signature: String,
+}
+
+/// A timestamped response produced by the Guardian.
+///
+/// The timestamp is response metadata rather than a property of every
+/// Guardian-signed payload. Wrapping this value in [`GuardianSigned`] keeps the
+/// timestamp authenticated.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GuardianResponse<T> {
+    pub response: T,
+    /// Milliseconds since Unix epoch.
+    pub timestamp_ms: UnixMillis,
+}
+
+/// A signed, timestamped response produced by the Guardian.
+pub type GuardianSignedResponse<T> = GuardianSigned<GuardianResponse<T>>;
+
+/// Guardian-signed wrapper - adds a signature to any signable payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GuardianSigned<T> {
+    pub data: T,
+    pub signature: GuardianSignature,
 }
 
 impl GuardianSigningIntent for LogEntry {
@@ -102,32 +133,11 @@ impl GuardianSigningIntent for ProvisionerRotateCertResponse {
 }
 
 impl KpSigningIntent for SingleProvisionerInitRequest {
-    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerInitRelaySubmission;
+    const INTENT: KpSigningIntentType = KpSigningIntentType::SingleProvisionerInitRequest;
 }
 
 impl KpSigningIntent for ProvisionerRotateCertRequest {
     const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateCertRequest;
-}
-
-/// KP-signed wrapper - adds signer cert and detached OpenPGP signature to any
-/// KP-submitted request payload.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct KpSigned<T> {
-    pub data: T,
-    pub signer_cert: PgpPublicCert,
-    pub signature: String,
-}
-
-/// A timestamped response produced by the Guardian.
-///
-/// The timestamp is response metadata rather than a property of every
-/// Guardian-signed payload. Wrapping this value in [`GuardianSigned`] keeps the
-/// timestamp authenticated.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct GuardianResponse<T> {
-    pub response: T,
-    /// Milliseconds since Unix epoch.
-    pub timestamp_ms: UnixMillis,
 }
 
 impl<T> GuardianResponse<T> {
@@ -145,16 +155,6 @@ impl<T> GuardianResponse<T> {
 
 impl<T: GuardianSigningIntent> GuardianSigningIntent for GuardianResponse<T> {
     const INTENT: GuardianSigningIntentType = T::INTENT;
-}
-
-/// A signed, timestamped response produced by the Guardian.
-pub type GuardianSignedResponse<T> = GuardianSigned<GuardianResponse<T>>;
-
-/// Guardian-signed wrapper - adds a signature to any signable payload.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct GuardianSigned<T> {
-    pub data: T,
-    pub signature: GuardianSignature,
 }
 
 impl<T> GuardianSigned<T> {
@@ -182,18 +182,6 @@ impl<T> GuardianSigned<T> {
         pub_key
             .verify(&self.signature, &Self::signed_bytes(&self.data))
             .map_err(|_| CryptoVerificationError::new("signature invalid"))
-    }
-
-    /// Authenticate the Guardian signer and extract the payload.
-    ///
-    /// The caller remains responsible for authorizing the signing key for the
-    /// requested operation and current state.
-    pub fn authenticate(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T>
-    where
-        T: GuardianSigningIntent,
-    {
-        self.verify_signature(pub_key)?;
-        Ok(self.data)
     }
 
     /// Move out the payload WITHOUT verifying the signature. The node uses this
@@ -239,15 +227,6 @@ impl<T: KpSigningIntent> KpSigned<T> {
             CryptoVerificationError::new(format!("KP signature verification failed: {e}"))
         })?;
         Ok(())
-    }
-
-    /// Authenticate the KP signer and extract the payload.
-    ///
-    /// The caller remains responsible for authorizing the signer fingerprint
-    /// for the requested operation and current state.
-    pub fn authenticate(self) -> CryptoVerificationResult<T> {
-        self.verify_signature()?;
-        Ok(self.data)
     }
 
     pub fn signer_fingerprint(&self) -> Fingerprint {

@@ -278,9 +278,10 @@ impl LogRecord {
             (Self::Signed(signed), Some(signing_public_key)) => {
                 let timestamp_ms = signed.data.timestamp_ms;
                 signed.data.validate_signed(signing_public_key)?;
-                let data = signed
-                    .authenticate(signing_public_key)
+                signed
+                    .verify_signature(signing_public_key)
                     .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
+                let data = signed.data;
                 let (session_id, message) = data.into_current()?;
                 Ok((session_id, timestamp_ms, message))
             }
