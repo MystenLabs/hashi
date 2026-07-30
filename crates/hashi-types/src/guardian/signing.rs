@@ -59,25 +59,6 @@ fn guardian_signing_bytes<T: GuardianSigningIntent>(data: &T, timestamp_ms: Unix
     bcs::to_bytes(&(T::INTENT, data, timestamp_ms)).expect("serialization should not fail")
 }
 
-pub(crate) fn sign_guardian_payload<T: GuardianSigningIntent>(
-    data: &T,
-    timestamp_ms: UnixMillis,
-    signing_key: &SigningKey,
-) -> GuardianSignature {
-    signing_key.sign(&guardian_signing_bytes(data, timestamp_ms))
-}
-
-pub(crate) fn verify_guardian_payload_signature<T: GuardianSigningIntent>(
-    data: &T,
-    timestamp_ms: UnixMillis,
-    signature: &GuardianSignature,
-    pub_key: &VerificationKey,
-) -> CryptoVerificationResult<()> {
-    pub_key
-        .verify(signature, &guardian_signing_bytes(data, timestamp_ms))
-        .map_err(|_| CryptoVerificationError::new("signature invalid"))
-}
-
 /// All possible KP signing intent types.
 ///
 /// These signatures are detached OpenPGP signatures produced by KPs, not
@@ -148,7 +129,7 @@ pub struct GuardianSigned<T> {
 impl<T: GuardianSigningIntent> GuardianSigned<T> {
     /// Sign a payload with intent-based domain separation.
     pub fn sign(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let signature = sign_guardian_payload(&data, timestamp_ms, signing_key);
+        let signature = signing_key.sign(&guardian_signing_bytes(&data, timestamp_ms));
         Self {
             data,
             timestamp_ms,
@@ -158,7 +139,12 @@ impl<T: GuardianSigningIntent> GuardianSigned<T> {
 
     /// Verify the Guardian signature without consuming the signed payload.
     pub fn verify_signature(&self, pub_key: &VerificationKey) -> CryptoVerificationResult<()> {
-        verify_guardian_payload_signature(&self.data, self.timestamp_ms, &self.signature, pub_key)
+        pub_key
+            .verify(
+                &self.signature,
+                &guardian_signing_bytes(&self.data, self.timestamp_ms),
+            )
+            .map_err(|_| CryptoVerificationError::new("signature invalid"))
     }
 
     /// Authenticate the Guardian signer and extract the payload.

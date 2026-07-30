@@ -637,7 +637,7 @@ impl GuardianS3Client {
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
         let attestation_record = self.get_log_record(&att_key).await?;
-        let (_, _, attestation_message) = attestation_record.validate_unsigned()?;
+        let (_, _, attestation_message) = attestation_record.into_unsigned()?.validate()?;
         let (attestation, signing_pubkey) = attestation_message
             .into_init_log()
             .and_then(|x| match x {
@@ -654,7 +654,13 @@ impl GuardianS3Client {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = self.get_log_record(&info_key).await?;
-        let (_, _, info_message) = info_record.validate_signed(&signing_pubkey)?;
+        let signed = info_record.into_signed()?;
+        let timestamp_ms = signed.timestamp_ms;
+        signed.data.validate(timestamp_ms, &signing_pubkey)?;
+        let data = signed
+            .authenticate(&signing_pubkey)
+            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
+        let (_, info_message) = data.into_current()?;
         let info = info_message
             .into_init_log()
             .and_then(|x| match x {
@@ -989,7 +995,7 @@ mod tests {
     async fn unsigned_log_replay_reaches_canonical_key_validation() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        let mut record = LogRecord::new_at_timestamp(
+        let record = LogRecord::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -998,8 +1004,9 @@ mod tests {
             &signing_key,
             1_700_000_000_000,
         );
-        record.object_key = "init/copied-attestation.json".to_string();
-        let body = serde_json::to_vec(&record).unwrap();
+        let mut record_json = serde_json::to_value(record).unwrap();
+        record_json["object_key"] = "init/copied-attestation.json".into();
+        let body = serde_json::to_vec(&record_json).unwrap();
         let get_copied = mock!(Client::get_object)
             .match_requests(|req| {
                 req.bucket() == Some("bucket") && req.key() == Some("init/copied-attestation.json")
@@ -1021,7 +1028,9 @@ mod tests {
             .await
             .expect("the embedded key matches the actual S3 key");
         let error = record
-            .validate_unsigned()
+            .into_unsigned()
+            .unwrap()
+            .validate()
             .expect_err("the copied key must still fail canonical validation");
 
         assert!(

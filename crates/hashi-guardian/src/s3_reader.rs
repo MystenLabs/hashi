@@ -124,7 +124,7 @@ impl GuardianReader {
 
         let mut out = Vec::with_capacity(all_logs.len());
         for log in all_logs {
-            out.push(self.cache.verify_record(&self.s3, log).await?);
+            out.push(self.cache.authenticate_record(&self.s3, log).await?);
         }
         Ok(out)
     }
@@ -173,7 +173,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.authenticate_record(&self.s3, record).await?;
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy(build_policy, &build_pcrs)?;
         let session_id = record.session_id;
@@ -253,7 +253,7 @@ impl GuardianReader {
             .s3
             .get_log_record_inner(key, LockCheck::Skipped, history_check)
             .await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.authenticate_record(&self.s3, record).await?;
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::KpShareState(msg) = record.message else {
@@ -319,7 +319,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.authenticate_record(&self.s3, record).await?;
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
@@ -359,7 +359,7 @@ impl GuardianReader {
             )));
         }
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.authenticate_record(&self.s3, record).await?;
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::Genesis(msg) = record.message else {
@@ -406,23 +406,30 @@ impl GuardianSessionCache {
         Ok(&self.sessions[session_id])
     }
 
-    /// Verify `record`'s signature under its session's trusted pubkey.
-    async fn verify_record(
+    /// Authenticate `record` under its session's trusted signing key.
+    async fn authenticate_record(
         &mut self,
         s3: &GuardianS3Client,
         record: LogRecord,
     ) -> GuardianResult<VerifiedLogRecord> {
-        let object_key = record.object_key.clone();
-        let session_id = record.session_id.clone();
+        let object_key = record.object_key().to_owned();
+        let session_id = record.session_id().clone();
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
-        let (session_id, timestamp_ms, message) =
-            record.validate_signed(&session_info.signing_pubkey)?;
+        let signing_pubkey = session_info.signing_pubkey;
+        let build_pcrs = session_info.build_pcrs.clone();
+        let signed = record.into_signed()?;
+        let timestamp_ms = signed.timestamp_ms;
+        signed.data.validate(timestamp_ms, &signing_pubkey)?;
+        let data = signed
+            .authenticate(&signing_pubkey)
+            .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
+        let (session_id, message) = data.into_current()?;
         Ok(VerifiedLogRecord::new(
             object_key,
             session_id,
             timestamp_ms,
             message,
-            session_info.build_pcrs.clone(),
+            build_pcrs,
         ))
     }
 }
