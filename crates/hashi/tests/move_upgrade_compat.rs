@@ -24,18 +24,45 @@
 //!   in every `cargo test` invocation, locally and in CI.
 //!
 //! * [`current_source_is_compatible_upgrade_of_deployed`] is the real gate. It
-//!   builds `packages/hashi` and fetches the live deployed package's bytecode
-//!   from a Sui fullnode, then asserts the current source is a compatible
-//!   upgrade. It needs (a) the `sui` binary on PATH / `SUI_BINARY`, and (b)
-//!   network access to a fullnode. It self-skips (prints and returns `Ok`)
-//!   when the build tool is missing so a purely offline `cargo test` doesn't
-//!   spuriously fail; in CI both prerequisites are present so it runs for real.
+//!   builds `packages/hashi`, resolves the **latest** deployed package from
+//!   chain, fetches its bytecode, and asserts the current source is a
+//!   compatible upgrade. It requires the `sui` binary (to build) and network
+//!   access to a fullnode. It does NOT skip: any missing tool / build failure /
+//!   network error fails the test — this is a required gate and must never
+//!   green by skipping.
+//!
+//! ## Resolving the "latest deployed package"
+//!
+//! The PACKAGE id changes on every upgrade, so it must not be hardcoded. The
+//! stable anchor is the Hashi shared OBJECT id, which never changes. From it we
+//! resolve the latest package like this:
+//!
+//! 1. `GetObject(hashi_object_id)` and read its `object_type` — a Move type tag
+//!    `0x<original-package>::hashi::Hashi`. The address segment is the type's
+//!    *defining* (original) package id, i.e. a member of the upgrade lineage.
+//! 2. `ListPackageVersions(<any lineage member>)` returns every
+//!    `(version, storage_id)` pair in the lineage; the max-version entry is the
+//!    latest deployed package id. This is the same `MovePackageService`
+//!    lineage query the node's on-chain scrape uses
+//!    (`crates/hashi/src/onchain/mod.rs::scrape_package_versions`).
+//! 3. `GetPackage(<latest id>)` yields that package's compiled modules.
+//!
+//! (The alternative canonical pointer is `Hashi.config.upgrade_cap.package`,
+//! but reading it requires BCS-deserializing the entire `Hashi` Move struct,
+//! whose layout can legitimately change in the very PR under test — which would
+//! turn a benign layout change into a spurious gate failure. The
+//! `ListPackageVersions` route reads no Move struct, so it is layout-agnostic
+//! and preferred here.)
 //!
 //! ## Configuration (env vars)
 //!
 //! * `HASHI_COMPAT_RPC_URL` — fullnode gRPC URL. Defaults to Sui testnet.
-//! * `HASHI_COMPAT_PACKAGE_ID` — deployed package id to check against.
-//!   Defaults to the live testnet package.
+//! * `HASHI_COMPAT_HASHI_OBJECT_ID` — the stable Hashi shared object id.
+//!   Defaults to the live testnet object. The latest package is derived from
+//!   it (see above).
+//! * `HASHI_COMPAT_PACKAGE_ID` — optional escape hatch: check against this
+//!   exact package id and skip the object → lineage resolution. Unset by
+//!   default.
 //! * `HASHI_COMPAT_ENV` — Move build environment (`-e`). Defaults to `testnet`
 //!   so the build links the same framework dependency versions the deployed
 //!   package was built against.
@@ -59,15 +86,17 @@ use move_binary_format::compatibility::Compatibility;
 use move_binary_format::normalized;
 use move_core_types::account_address::AccountAddress;
 
-/// Live Hashi package on Sui **testnet** (v1).
-const DEFAULT_TESTNET_PACKAGE_ID: &str =
-    "0xfcea10cadbb553c4874201584abf68771592678952efd957b2e82c010c7f4360";
+/// Stable Hashi shared object on Sui **testnet**. Unlike the package id, this
+/// never changes across upgrades, so it's the anchor from which we resolve the
+/// latest deployed package (see module docs).
+const DEFAULT_TESTNET_HASHI_OBJECT_ID: &str =
+    "0x22c0ce66ce09df2dc88a31bd320d4177b766518b9b88010368cfbdcd724528f8";
 
-// TODO(mainnet): once Hashi is deployed to mainnet, add the mainnet package id
-// here and default (or add a matrix entry) to check against it as well. Until
-// then the gate only guards the testnet deployment.
+// TODO(mainnet): once Hashi is deployed to mainnet, add the mainnet Hashi
+// object id here and default (or add a matrix entry) to check against it as
+// well. Until then the gate only guards the testnet deployment.
 //
-// const DEFAULT_MAINNET_PACKAGE_ID: &str = "0x…";
+// const DEFAULT_MAINNET_HASHI_OBJECT_ID: &str = "0x…";
 
 /// Default fullnode gRPC endpoint. `fullnode.testnet.sui.io` has been observed
 /// to have TLS issues from some local clients but works fine from CI runners;
@@ -172,10 +201,9 @@ fn assert_compatible_upgrade(old_modules: &[CompiledModule], new_modules: &[Comp
 /// Build `packages/hashi` from source and return its compiled modules.
 ///
 /// Reuses [`hashi::publish::build_package`], which shells out to
-/// `sui move build --dump-bytecode-as-base64`. Returns `Ok(None)` if the `sui`
-/// build tool is unavailable (so an offline `cargo test` can skip rather than
-/// fail); any other build error is propagated.
-fn build_current_source() -> Result<Option<Vec<CompiledModule>>> {
+/// `sui move build --dump-bytecode-as-base64`. Any failure (including a missing
+/// `sui` binary) is propagated — this is a required gate and must not skip.
+fn build_current_source() -> Result<Vec<CompiledModule>> {
     let package_path = workspace_package_path();
     anyhow::ensure!(
         package_path.exists(),
@@ -193,54 +221,47 @@ fn build_current_source() -> Result<Option<Vec<CompiledModule>>> {
         environment: Some(&build_env),
     };
 
-    let publish = match hashi::publish::build_package(&params) {
-        Ok(p) => p,
-        Err(e) => {
-            // Distinguish "tool missing" (skip) from a genuine build failure (fail).
-            if is_missing_tool(&e) {
-                eprintln!(
-                    "SKIP: `{sui_binary}` not found — cannot build the Move package. \
-                     Install the sui CLI to run the on-chain compatibility gate. ({e})"
-                );
-                return Ok(None);
-            }
-            return Err(e).context("building packages/hashi failed");
-        }
-    };
+    let publish = hashi::publish::build_package(&params).with_context(|| {
+        format!(
+            "building packages/hashi with `{sui_binary}` failed (is the sui CLI installed and on \
+             PATH / SUI_BINARY?)"
+        )
+    })?;
 
-    let modules = deserialize_modules(&publish.modules).context("deserializing freshly-built modules")?;
-    Ok(Some(modules))
+    deserialize_modules(&publish.modules).context("deserializing freshly-built modules")
 }
 
-/// Fetch the deployed package's compiled modules from a Sui fullnode.
+/// Resolve the latest deployed package id and fetch its compiled modules from a
+/// Sui fullnode.
+///
+/// Unless the `HASHI_COMPAT_PACKAGE_ID` escape hatch is set, the latest package
+/// is resolved from the stable Hashi object id: read the object's type to get a
+/// lineage member, list all package versions in the lineage, and take the
+/// highest-version id (see module docs).
 async fn fetch_deployed_modules() -> Result<Vec<CompiledModule>> {
     use sui_rpc::proto::sui::rpc::v2::GetPackageRequest;
-    use sui_sdk_types::Address;
 
     let rpc_url = std::env::var("HASHI_COMPAT_RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_string());
-    let package_id_str =
-        std::env::var("HASHI_COMPAT_PACKAGE_ID").unwrap_or_else(|_| DEFAULT_TESTNET_PACKAGE_ID.to_string());
-    let package_id: Address = package_id_str
-        .parse()
-        .with_context(|| format!("parsing package id `{package_id_str}`"))?;
-
     let mut client = sui_rpc::Client::new(rpc_url.as_str())
         .with_context(|| format!("connecting to fullnode at `{rpc_url}`"))?;
 
+    let latest_package_id = resolve_latest_package_id(&mut client, &rpc_url).await?;
+    eprintln!("resolved latest deployed package id: {latest_package_id}");
+
     let response = client
         .package_client()
-        .get_package(GetPackageRequest::new(&package_id))
+        .get_package(GetPackageRequest::new(&latest_package_id))
         .await
-        .with_context(|| format!("GetPackage RPC for `{package_id}` at `{rpc_url}` failed"))?
+        .with_context(|| format!("GetPackage RPC for `{latest_package_id}` at `{rpc_url}` failed"))?
         .into_inner();
 
     let package = response
         .package
-        .ok_or_else(|| anyhow::anyhow!("GetPackage response for `{package_id}` had no package"))?;
+        .ok_or_else(|| anyhow::anyhow!("GetPackage response for `{latest_package_id}` had no package"))?;
 
     anyhow::ensure!(
         !package.modules.is_empty(),
-        "deployed package `{package_id}` returned zero modules"
+        "deployed package `{latest_package_id}` returned zero modules"
     );
 
     let raw: Vec<Vec<u8>> = package
@@ -250,6 +271,113 @@ async fn fetch_deployed_modules() -> Result<Vec<CompiledModule>> {
         .collect();
 
     deserialize_modules(&raw).context("deserializing on-chain modules")
+}
+
+/// Resolve the id of the latest deployed package in Hashi's upgrade lineage.
+///
+/// Precedence:
+/// 1. `HASHI_COMPAT_PACKAGE_ID` — if set, used verbatim (escape hatch).
+/// 2. Otherwise: `GetObject(hashi_object_id)` → parse its `object_type` for a
+///    lineage member → `ListPackageVersions` → max version.
+async fn resolve_latest_package_id(
+    client: &mut sui_rpc::Client,
+    rpc_url: &str,
+) -> Result<sui_sdk_types::Address> {
+    use sui_sdk_types::Address;
+
+    if let Ok(explicit) = std::env::var("HASHI_COMPAT_PACKAGE_ID") {
+        let id: Address = explicit
+            .parse()
+            .with_context(|| format!("parsing HASHI_COMPAT_PACKAGE_ID `{explicit}`"))?;
+        eprintln!("using HASHI_COMPAT_PACKAGE_ID escape hatch: {id}");
+        return Ok(id);
+    }
+
+    let object_id_str = std::env::var("HASHI_COMPAT_HASHI_OBJECT_ID")
+        .unwrap_or_else(|_| DEFAULT_TESTNET_HASHI_OBJECT_ID.to_string());
+    let hashi_object_id: Address = object_id_str
+        .parse()
+        .with_context(|| format!("parsing Hashi object id `{object_id_str}`"))?;
+
+    let lineage_seed = lineage_seed_from_object(client, hashi_object_id, rpc_url).await?;
+    latest_package_in_lineage(client, lineage_seed, rpc_url).await
+}
+
+/// Read the Hashi object's `object_type` and extract the defining (original)
+/// package id — a valid member of the upgrade lineage.
+async fn lineage_seed_from_object(
+    client: &mut sui_rpc::Client,
+    hashi_object_id: sui_sdk_types::Address,
+    rpc_url: &str,
+) -> Result<sui_sdk_types::Address> {
+    use sui_rpc::field::FieldMask;
+    use sui_rpc::field::FieldMaskUtil;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+    use sui_sdk_types::Address;
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&hashi_object_id)
+                .with_read_mask(FieldMask::from_paths(["object_id", "object_type"])),
+        )
+        .await
+        .with_context(|| {
+            format!("GetObject for Hashi object `{hashi_object_id}` at `{rpc_url}` failed")
+        })?
+        .into_inner();
+
+    let object_type = response.object().object_type().to_string();
+    anyhow::ensure!(
+        !object_type.is_empty(),
+        "GetObject for `{hashi_object_id}` returned an empty object_type (is this really the Hashi \
+         shared object?)"
+    );
+
+    // A Move type tag is `<address>::<module>::<name>[<...>]`. The address is
+    // the type's defining (original) package id.
+    let addr_segment = object_type.split("::").next().unwrap_or_default();
+    let seed: Address = addr_segment.parse().with_context(|| {
+        format!("parsing package id out of object_type `{object_type}` for `{hashi_object_id}`")
+    })?;
+    Ok(seed)
+}
+
+/// Given any package id in a lineage, return the id of the highest-version
+/// package (the latest deployed one). Mirrors
+/// `crates/hashi/src/onchain/mod.rs::scrape_package_versions`.
+async fn latest_package_in_lineage(
+    client: &mut sui_rpc::Client,
+    lineage_member: sui_sdk_types::Address,
+    rpc_url: &str,
+) -> Result<sui_sdk_types::Address> {
+    use futures::TryStreamExt as _;
+    use sui_rpc::proto::sui::rpc::v2::ListPackageVersionsRequest;
+    use sui_sdk_types::Address;
+
+    let versions: Vec<(u64, Address)> = client
+        .list_package_versions(ListPackageVersionsRequest::new(&lineage_member).with_page_size(1000))
+        .map_err(anyhow::Error::from)
+        .and_then(|pv| async move {
+            let id: Address = pv
+                .package_id()
+                .parse()
+                .with_context(|| format!("parsing package id `{}`", pv.package_id()))?;
+            Ok((pv.version(), id))
+        })
+        .try_collect()
+        .await
+        .with_context(|| {
+            format!("ListPackageVersions for lineage member `{lineage_member}` at `{rpc_url}` failed")
+        })?;
+
+    versions
+        .into_iter()
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, id)| id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("ListPackageVersions for `{lineage_member}` returned zero versions")
+        })
 }
 
 /// Deserialize raw module bytecode into `CompiledModule`s.
@@ -273,26 +401,14 @@ fn workspace_package_path() -> PathBuf {
         .join("hashi")
 }
 
-/// Best-effort detection of a "sui binary not found" error so the on-chain
-/// test can self-skip when the build tool is absent (offline dev machine).
-fn is_missing_tool(e: &anyhow::Error) -> bool {
-    let msg = e.to_string().to_lowercase();
-    msg.contains("no such file or directory")
-        || msg.contains("cannot find")
-        || msg.contains("not found")
-        || msg.contains("program not found")
-}
-
 // ───────────────────────────── the real gate ─────────────────────────────
 
 /// Assert the current `packages/hashi` source is a compatible upgrade of the
-/// live deployed package. This is the CI gate.
+/// latest deployed package. This is the CI gate. It never skips: a missing
+/// tool, build failure or network error fails the test.
 #[tokio::test]
 async fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
-    let Some(mut new_modules) = build_current_source()? else {
-        // sui build tool unavailable → skip (see module docs). CI has it.
-        return Ok(());
-    };
+    let mut new_modules = build_current_source()?;
 
     let old_modules = fetch_deployed_modules().await?;
 
