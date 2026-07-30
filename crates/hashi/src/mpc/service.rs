@@ -30,6 +30,8 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_GENERATION;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
+use crate::metrics::STALL_OUTCOME_ABSORBED;
+use crate::metrics::STALL_OUTCOME_FAILED;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
@@ -331,7 +333,7 @@ impl MpcService {
                 self.inner
                     .metrics
                     .mpc_tob_fetch_stalls_total
-                    .with_label_values(&[protocol_label])
+                    .with_label_values(&[protocol_label, STALL_OUTCOME_FAILED])
                     .inc();
                 anyhow::bail!(
                     "{what} stalled >{:?}",
@@ -508,7 +510,7 @@ impl MpcService {
             self.inner
                 .metrics
                 .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_DKG]),
+                .with_label_values(&[MPC_LABEL_DKG, STALL_OUTCOME_ABSORBED]),
         );
         let output = MpcManager::run_dkg(
             &mpc_manager,
@@ -556,7 +558,7 @@ impl MpcService {
             self.inner
                 .metrics
                 .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION]),
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_ABSORBED]),
         );
         let metrics = &self.inner.metrics;
         let _timer = metrics
@@ -1214,7 +1216,7 @@ impl MpcService {
                 Err(_) => {
                     metrics
                         .mpc_tob_fetch_stalls_total
-                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_ABSORBED])
                         .inc();
                     warn!(
                         "nonce cert fetch for epoch {epoch} batch {batch_index} stalled \
@@ -1733,7 +1735,12 @@ impl MpcService {
             "run_key_rotation: target_epoch={target_epoch}, previous_epoch={previous_epoch}, \
              onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
         );
-        let previous_certs = fetch_key_generation_certificates(&onchain_state, previous_epoch)
+        let previous_certs = self
+            .bounded_cert_read(
+                MPC_LABEL_KEY_GENERATION,
+                &format!("rotation previous-epoch cert read for epoch {previous_epoch}"),
+                fetch_key_generation_certificates(&onchain_state, previous_epoch),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
@@ -1758,7 +1765,7 @@ impl MpcService {
             self.inner
                 .metrics
                 .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION]),
+                .with_label_values(&[MPC_LABEL_KEY_ROTATION, STALL_OUTCOME_ABSORBED]),
         );
         let output = MpcManager::run_key_rotation(
             &mpc_manager,

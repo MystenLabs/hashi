@@ -238,17 +238,32 @@ pub async fn fetch_key_generation_certificates(
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = match fetch_certificates(
-            &self.onchain_state,
-            self.epoch,
-            self.batch_index,
-            self.protocol_type,
+        let fetched = tokio::time::timeout(
+            FETCH_STALL_TIMEOUT,
+            fetch_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                self.protocol_type,
+            ),
         )
-        .await
-        {
-            Ok(existing) => existing,
-            Err(TobError::IncompleteRead(_) | TobError::UnorderedRead(_)) => Vec::new(),
-            Err(e) => return Err(ChannelError::from(e)),
+        .await;
+        let existing = match fetched {
+            Ok(Ok(existing)) => existing,
+            Ok(Err(TobError::IncompleteRead(_) | TobError::UnorderedRead(_))) => Vec::new(),
+            Ok(Err(e)) => return Err(ChannelError::from(e)),
+            Err(_) => {
+                if let Some(counter) = &self.stall_counter {
+                    counter.inc();
+                }
+                tracing::warn!(
+                    "{:?} dedup read for epoch {} stalled >{FETCH_STALL_TIMEOUT:?}; \
+                     submitting anyway",
+                    self.protocol_type,
+                    self.epoch,
+                );
+                Vec::new()
+            }
         };
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
@@ -404,14 +419,19 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 self.epoch,
                 self.seen_dealers.len(),
             ),
-            Err(_) => tracing::warn!(
-                "{:?} certified_dealers fetch for epoch {} stalled >{:?}; \
-                 reporting {} dealers seen so far",
-                self.protocol_type,
-                self.epoch,
-                FETCH_STALL_TIMEOUT,
-                self.seen_dealers.len(),
-            ),
+            Err(_) => {
+                if let Some(counter) = &self.stall_counter {
+                    counter.inc();
+                }
+                tracing::warn!(
+                    "{:?} certified_dealers fetch for epoch {} stalled >{:?}; \
+                     reporting {} dealers seen so far",
+                    self.protocol_type,
+                    self.epoch,
+                    FETCH_STALL_TIMEOUT,
+                    self.seen_dealers.len(),
+                );
+            }
         }
         self.seen_dealers.iter().copied().collect()
     }

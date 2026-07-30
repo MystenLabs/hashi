@@ -186,6 +186,9 @@ pub const MPC_LABEL_KEY_GENERATION: &str = "key_generation";
 pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
 pub const MPC_LABEL_SIGNING: &str = "signing";
 
+pub const STALL_OUTCOME_ABSORBED: &str = "absorbed";
+pub const STALL_OUTCOME_FAILED: &str = "failed";
+
 pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "not_found",
     "mempool",
@@ -740,9 +743,10 @@ impl Metrics {
             .unwrap(),
             mpc_tob_fetch_stalls_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_tob_fetch_stalls_total",
-                "TOB certificate fetches abandoned and respawned after stalling, by \
-                 protocol.",
-                &["protocol"],
+                "TOB certificate fetches abandoned after stalling, by protocol and by \
+                 whether the operation survived: `absorbed` retried or continued without \
+                 the read, `failed` aborted it (a recovery or reconfig gave up).",
+                &["protocol", "outcome"],
                 registry,
             )
             .unwrap(),
