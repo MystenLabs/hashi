@@ -21,6 +21,7 @@ use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 pub mod batch;
@@ -30,6 +31,7 @@ use crate::config::Config;
 use crate::errors::MonitorError;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
+use crate::rpc::sui::SuiEventsPoller;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -48,6 +50,7 @@ pub fn log_findings(source: &'static str, phase: &'static str, findings: &[Monit
         tracing::error!(
             source,
             phase,
+            category = %finding.category(),
             total = findings.len(),
             ?finding,
             "monitor finding"
@@ -67,11 +70,10 @@ pub struct AuditorCore {
     cfg: Config,
     // mutable
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
-    pending_deposits: HashMap<Txid, DepositStateMachine>,
+    pending_deposits: HashMap<(Txid, u32), DepositStateMachine>,
     guardian_poller: GuardianWithdrawalsPoller,
+    sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
-    // placeholder until we implement sui rpc
-    sui_cursor: UnixSeconds,
 }
 
 impl AuditorCore {
@@ -81,8 +83,8 @@ impl AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?,
+            sui_poller: SuiEventsPoller::new(&cfg.sui, cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
-            sui_cursor: cursors.sui,
         })
     }
 
@@ -109,12 +111,13 @@ impl AuditorCore {
     }
 
     fn ingest_deposit(&mut self, event: MonitorDepositEvent) -> Option<MonitorError> {
-        let txid = event.btc_txid;
-        match self.pending_deposits.entry(txid) {
+        let outpoint = (event.btc_txid, event.btc_vout);
+        match self.pending_deposits.entry(outpoint) {
             Entry::Occupied(entry) => {
                 if entry.get().hashi_deposit_event() != &event {
                     return Some(MonitorError::InvalidEventAdded(
-                        "duplicate deposit event for same txid with different contents".to_string(),
+                        "duplicate deposit event for same outpoint with different contents"
+                            .to_string(),
                     ));
                 }
             }
@@ -141,6 +144,42 @@ impl AuditorCore {
         &mut self,
         window: &impl AuditWindow,
     ) -> anyhow::Result<Vec<MonitorError>> {
+        self.btc_client.clear_confirmation_cache();
+        let withdrawal_count = self
+            .pending_withdrawals
+            .values()
+            .filter(|sm| {
+                sm.is_in_audit_window(window) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
+            })
+            .count();
+        let deposit_count = self
+            .pending_deposits
+            .values()
+            .filter(|sm| sm.expects_btc_event())
+            .count();
+        let unique_txids = self
+            .pending_withdrawals
+            .values()
+            .filter(|sm| {
+                sm.is_in_audit_window(window) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
+            })
+            .map(WithdrawalStateMachine::btc_txid)
+            .chain(
+                self.pending_deposits
+                    .values()
+                    .filter(|sm| sm.expects_btc_event())
+                    .map(DepositStateMachine::btc_txid),
+            )
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        tracing::info!(
+            withdrawal_count,
+            deposit_count,
+            unique_txids = unique_txids.len(),
+            "starting bitcoin confirmation lookups"
+        );
+        self.btc_client.prefetch_confirmations(&unique_txids)?;
         let mut errors = Vec::new();
         for sm in self.pending_withdrawals.values_mut() {
             if !sm.is_in_audit_window(window) {
@@ -207,15 +246,15 @@ impl AuditorCore {
         }
 
         let mut completed_deposits = Vec::new();
-        for (txid, sm) in &mut self.pending_deposits {
+        for ((txid, vout), sm) in &mut self.pending_deposits {
             if sm.is_valid() {
-                tracing::info!(%txid, "deposit is valid");
-                completed_deposits.push(*txid);
+                tracing::debug!(%txid, vout, "deposit is valid");
+                completed_deposits.push((*txid, *vout));
             }
         }
 
-        for txid in completed_deposits {
-            self.pending_deposits.remove(&txid);
+        for outpoint in completed_deposits {
+            self.pending_deposits.remove(&outpoint);
         }
     }
 
@@ -259,9 +298,8 @@ impl AuditorCore {
         self.guardian_poller.poll_one_hour().await
     }
 
-    pub async fn poll_sui(&mut self) -> anyhow::Result<PollOutcome> {
-        // TODO: Implement me
-        Ok(PollOutcome::CursorUnmoved)
+    pub async fn poll_sui(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
+        self.sui_poller.poll(up_to).await
     }
 
     fn get_cursors(&self) -> Cursors {
@@ -271,7 +309,7 @@ impl AuditorCore {
         }
     }
     fn get_sui_cursor(&self) -> UnixSeconds {
-        self.sui_cursor
+        self.sui_poller.cursor_seconds()
     }
 
     fn get_guardian_cursor(&self) -> UnixSeconds {

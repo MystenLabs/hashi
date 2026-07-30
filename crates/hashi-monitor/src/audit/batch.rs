@@ -126,7 +126,8 @@ impl BatchAuditor {
 
             let mut sui_cursor_moved = false;
             if should_poll_sui
-                && let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui().await?
+                && let PollOutcome::CursorAdvanced(events) =
+                    self.inner.poll_sui(self.audit_window.sui_end).await?
             {
                 self.ingest_batch(events);
                 sui_cursor_moved = true;
@@ -143,12 +144,14 @@ impl BatchAuditor {
             if !sui_cursor_moved && !guardian_cursor_moved {
                 stalled_iterations = stalled_iterations.saturating_add(1);
                 if stalled_iterations >= NUM_ITERATIONS_BEFORE_FAIL {
-                    tracing::warn!(
-                        "batch polling cursors did not advance fully (sui={}, guardian={})",
+                    anyhow::bail!(
+                        "batch polling cursors did not reach their targets \
+                         (sui={}/{}, guardian={}/{})",
                         self.inner.get_sui_cursor(),
-                        self.inner.get_guardian_cursor()
+                        self.audit_window.sui_end,
+                        self.inner.get_guardian_cursor(),
+                        self.audit_window.guardian_end,
                     );
-                    return Ok(());
                 }
             } else {
                 stalled_iterations = 0;

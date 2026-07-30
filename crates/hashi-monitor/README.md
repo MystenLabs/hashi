@@ -17,6 +17,13 @@ Audits the cross-system bridge flow on two parallel tracks.
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
 - **Successor existence**: for each non-terminal event, the configured next-event delay bound must hold.
 
+Findings are tagged as:
+- **liveness** when a successor is late or still missing after its deadline;
+- **safety** for a contradictory event or a predecessor observed after its successor;
+- **safety_candidate** when a predecessor is missing from the bounded polling
+  window. Reconcile older source history before promoting that candidate to a
+  definitive safety finding.
+
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.
 2. **Continuous**: long-running monitor that polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
@@ -52,20 +59,24 @@ next_event_delays:
 # Optional: clock skew tolerance (default: 300s)
 # clock_skew: 300
 
-guardian:
-  access_key: "AWS_ACCESS_KEY_ID"
-  secret_key: "AWS_SECRET_ACCESS_KEY"
-  session_token:
-  bucket_info:
-    bucket: "hashi-guardian-logs"
-    region: "us-east-1"
+guardian_s3:
+  bucket: "hashi-guardian-logs"
+  region: "us-east-1"
+  # Omit both keys to use the AWS default credential chain.
+  # access_key: "..."
+  # secret_key: "..."
   retention_environment: "testnet"
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  hashi_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
   rpc_url: "http://localhost:8332"
+  # A value such as env:BITCOIN_RPC_URL reads the endpoint from that variable.
+  # http_headers:
+  #   Origin: "https://example.com"
   rpc_auth:
     type: none
 ```
@@ -75,6 +86,13 @@ btc:
   - Domain model and withdrawal / deposit state-machine checks.
   - Batch and continuous auditor loops (cursor advancement, BTC fetch, violation detection, GC, progress watermarks).
   - Guardian S3 withdrawal log polling with attestation and signature verification.
-  - BTC confirmation lookup via Bitcoin Core RPC.
-- Not yet implemented:
-  - Sui event polling — `AuditorCore::poll_sui` is a stub that returns `CursorUnmoved`, so E1 (withdrawal) and the deposit pipeline currently see no Sui input.
+  - Checkpoint-bounded, resumable Sui polling for withdrawal and deposit events.
+  - BTC confirmation lookup via Bitcoin Core or hosted HTTP JSON-RPC.
+
+## Temporary testnet object-lock bypass
+
+Setting `HASHI_SKIP_S3_OBJECT_LOCK_CHECK` disables S3 object-lock metadata
+validation for the process. Signature, PCR, signed object-key, and S3 version
+history checks remain enabled. This escape hatch exists only for legacy testnet
+logs written before long-lived retention was configured and should be removed
+after the planned testnet wipe.

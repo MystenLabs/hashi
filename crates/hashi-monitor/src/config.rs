@@ -1,14 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::anyhow;
+use aws_credential_types::provider::ProvideCredentials;
 use corepc_client::client_sync::Auth;
 use hashi_types::guardian::PcrAllowlist;
+use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
+use hashi_types::guardian::S3RetentionEnvironment;
 use serde::Deserialize;
 
 use crate::domain::WithdrawalEventType;
@@ -23,7 +27,7 @@ pub struct Config {
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
-    pub guardian: S3Config,
+    pub guardian_s3: GuardianS3Config,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
     pub sui: SuiConfig,
@@ -39,16 +43,105 @@ pub struct NextEventDelays(Vec<(WithdrawalEventType, u64)>);
 pub struct SuiConfig {
     /// Sui RPC endpoint.
     pub rpc_url: String,
+
+    /// Currently deployed Hashi package.
+    pub package_id: String,
+
+    /// Shared Hashi object. Retained in monitor config so it matches the
+    /// canonical testnet deployment description even though event filtering
+    /// only needs the package ID.
+    pub hashi_object_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GuardianS3Config {
+    pub bucket: String,
+    pub region: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub retention_environment: S3RetentionEnvironment,
+}
+
+impl GuardianS3Config {
+    /// Resolve explicit credentials or, when both are omitted, use AWS's
+    /// default provider chain. This mirrors Guardian Init configuration.
+    pub async fn resolve(&self) -> anyhow::Result<S3Config> {
+        let access_key = self
+            .access_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        let secret_key = self
+            .secret_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+
+        let (access_key, secret_key, session_token) = match (access_key, secret_key) {
+            (Some(access_key), Some(secret_key)) => {
+                (access_key.to_string(), secret_key.to_string(), None)
+            }
+            (None, None) => {
+                let provider =
+                    aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                        .build()
+                        .await;
+                let credentials = provider
+                    .provide_credentials()
+                    .await
+                    .context("failed to resolve AWS credentials from the default provider chain")?;
+                (
+                    credentials.access_key_id().to_string(),
+                    credentials.secret_access_key().to_string(),
+                    credentials.session_token().map(ToOwned::to_owned),
+                )
+            }
+            _ => anyhow::bail!(
+                "guardian_s3 access_key and secret_key must either both be set or both be omitted"
+            ),
+        };
+
+        Ok(S3Config {
+            access_key,
+            secret_key,
+            session_token,
+            bucket_info: S3BucketInfo {
+                bucket: self.bucket.clone(),
+                region: self.region.clone(),
+            },
+            retention_environment: self.retention_environment,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct BtcConfig {
     /// Bitcoin Core RPC endpoint.
+    ///
+    /// Prefix with `env:` to read the URL from an environment variable, which
+    /// keeps provider API keys out of YAML.
     pub rpc_url: String,
 
     /// Bitcoin Core RPC auth.
     #[serde(default)]
     pub rpc_auth: BtcRpcAuth,
+
+    /// Optional HTTP headers for hosted JSON-RPC providers.
+    #[serde(default)]
+    pub http_headers: BTreeMap<String, String>,
+}
+
+impl BtcConfig {
+    pub fn resolve_rpc_url(&self) -> anyhow::Result<String> {
+        if let Some(variable) = self.rpc_url.strip_prefix("env:") {
+            anyhow::ensure!(
+                !variable.is_empty(),
+                "bitcoin rpc_url environment variable name is empty"
+            );
+            return std::env::var(variable).with_context(|| {
+                format!("bitcoin RPC environment variable {variable} is not set")
+            });
+        }
+        Ok(self.rpc_url.clone())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

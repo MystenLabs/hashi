@@ -82,15 +82,22 @@ impl ContinuousAuditor {
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
-        if let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui().await? {
-            self.ingest_batch(events);
+        let up_to = now_unix_seconds();
+        loop {
+            match self.inner.poll_sui(up_to).await? {
+                PollOutcome::CursorAdvanced(events) => self.ingest_batch(events),
+                PollOutcome::CursorUnmoved => break,
+            }
         }
         Ok(())
     }
 
     async fn tick_guardian(&mut self) -> anyhow::Result<()> {
-        if let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
-            self.ingest_batch(events);
+        loop {
+            match self.inner.poll_guardian().await? {
+                PollOutcome::CursorAdvanced(events) => self.ingest_batch(events),
+                PollOutcome::CursorUnmoved => break,
+            }
         }
         Ok(())
     }
@@ -122,6 +129,29 @@ impl ContinuousAuditor {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        if let Err(error) = self.tick_sui().await {
+            tracing::warn!(
+                source = "sui",
+                ?error,
+                "initial catch-up failed; continuing"
+            );
+        }
+        if let Err(error) = self.tick_guardian().await {
+            tracing::warn!(
+                source = "guardian",
+                ?error,
+                "initial catch-up failed; continuing"
+            );
+        }
+        if let Err(error) = self.tick_btc() {
+            tracing::warn!(
+                source = "btc",
+                ?error,
+                "initial catch-up failed; continuing"
+            );
+        }
+        self.tick_state_checks_and_gc();
+
         let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut btc_ticker = tokio::time::interval(POLL_INTERVAL);
@@ -132,7 +162,8 @@ impl ContinuousAuditor {
         btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Consume the immediate first tick and then run on a stable cadence.
+        // The initial catch-up above handled startup; consume each immediate
+        // interval tick so the next pass runs on the configured cadence.
         sui_ticker.tick().await;
         guardian_ticker.tick().await;
         btc_ticker.tick().await;

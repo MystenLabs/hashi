@@ -13,6 +13,7 @@ use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
+use crate::errors::EventRelation;
 use crate::errors::MonitorError;
 use crate::errors::MonitorError::*;
 use crate::rpc::btc::BtcRpcClient;
@@ -38,7 +39,7 @@ pub struct WithdrawalStateMachine {
     /// the set of non-zero events we have seen until now related to this withdrawal.
     seen_events: Vec<MonitorWithdrawalEvent>,
     /// an entry (e, t) in expected_events signals that we are expecting to hear e by time t
-    expected_events: Vec<(WithdrawalEventType, UnixSeconds)>,
+    expected_events: Vec<(WithdrawalEventType, UnixSeconds, EventRelation)>,
     /// last time at which we checked for a btc withdrawal tx
     btc_checked_at: Option<UnixSeconds>,
     /// immutable wid
@@ -84,7 +85,7 @@ impl WithdrawalStateMachine {
     pub fn expects(&self, event_type: WithdrawalEventType) -> bool {
         self.expected_events
             .iter()
-            .any(|(event, _)| *event == event_type)
+            .any(|(event, _, _)| *event == event_type)
     }
 
     /// Is the withdrawal valid? Put differently, has it passed all the checks?
@@ -137,14 +138,19 @@ impl WithdrawalStateMachine {
             return Err(InvalidEventAdded("invalid btc_txid".to_string()));
         }
 
-        // if neighbor is there, then we check that the gap between the two is as expected.
-        for (src, deadline) in self.expected_events.iter() {
+        // If a neighbor is already expected, record a timing finding but still
+        // ingest the event. The monitor must retain a late event so it can
+        // distinguish liveness from safety and continue validating the flow.
+        let mut timing_finding = None;
+        for (src, deadline, relation) in self.expected_events.iter() {
             if *src == new_event.event_type && *deadline < new_event.timestamp_secs {
-                return Err(EventOccurredAfterDeadline {
+                timing_finding = Some(EventOccurredAfterDeadline {
                     event: MonitorEvent::Withdrawal(new_event.clone()),
+                    relation: *relation,
                     deadline: *deadline,
                     occurred_at: new_event.timestamp_secs,
                 });
+                break;
             }
         }
 
@@ -153,8 +159,11 @@ impl WithdrawalStateMachine {
             && self.get(predecessor_event_type).is_none()
         {
             let predecessor_deadline = new_event.timestamp_secs + cfg.clock_skew;
-            self.expected_events
-                .push((predecessor_event_type, predecessor_deadline));
+            self.expected_events.push((
+                predecessor_event_type,
+                predecessor_deadline,
+                EventRelation::Predecessor,
+            ));
         }
         if let Some(successor_event_type) = new_event.event_type.successor()
             && self.get(successor_event_type).is_none()
@@ -163,16 +172,19 @@ impl WithdrawalStateMachine {
                 + cfg
                     .next_event_delay(new_event.event_type)
                     .expect("has a successor");
-            self.expected_events
-                .push((successor_event_type, successor_deadline));
+            self.expected_events.push((
+                successor_event_type,
+                successor_deadline,
+                EventRelation::Successor,
+            ));
         }
 
         // remove any previously stored expected events
         self.expected_events
-            .retain(|(src, _)| *src != new_event.event_type);
+            .retain(|(src, _, _)| *src != new_event.event_type);
         // add to seen events
         self.seen_events.push(new_event);
-        Ok(())
+        timing_finding.map_or(Ok(()), Err)
     }
 
     /// If expecting BTC confirmation, query BTC RPC and add the event if confirmed.
@@ -217,7 +229,7 @@ impl WithdrawalStateMachine {
     /// Callers must ensure is_in_audit_window() is true before calling this function.
     pub fn violations(&self, cursors: &Cursors) -> Vec<MonitorError> {
         let mut out = Vec::new();
-        for (event_type, deadline) in &self.expected_events {
+        for (event_type, deadline, relation) in &self.expected_events {
             let cursor = match event_type {
                 WithdrawalEventType::E3BtcConfirmed => match self.btc_checked_at {
                     Some(checked_at) => checked_at,
@@ -233,6 +245,7 @@ impl WithdrawalStateMachine {
             if *deadline <= cursor {
                 out.push(ExpectedEventMissing {
                     event_type: MonitorEventType::Withdrawal(*event_type),
+                    relation: *relation,
                     deadline: *deadline,
                     cursor,
                 });
@@ -302,6 +315,7 @@ impl DepositStateMachine {
                 let e_btc = MonitorDepositEvent {
                     event_type: DepositEventType::E1BtcConfirmed,
                     btc_txid,
+                    btc_vout: self.hashi_deposit_event.btc_vout,
                     timestamp_secs: block_time,
                 };
 
@@ -309,6 +323,7 @@ impl DepositStateMachine {
                 if deadline < block_time {
                     response = Some(EventOccurredAfterDeadline {
                         event: MonitorEvent::Deposit(e_btc.clone()),
+                        relation: EventRelation::Predecessor,
                         deadline,
                         occurred_at: block_time,
                     });
@@ -346,6 +361,7 @@ impl DepositStateMachine {
 
         vec![ExpectedEventMissing {
             event_type: MonitorEventType::Deposit(DepositEventType::E1BtcConfirmed),
+            relation: EventRelation::Predecessor,
             deadline,
             cursor,
         }]
@@ -354,13 +370,15 @@ impl DepositStateMachine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::BtcConfig;
     use crate::config::BtcRpcAuth;
+    use crate::config::GuardianS3Config;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use bitcoin::hashes::Hash as _;
-    use hashi_types::guardian::S3Config;
 
     struct TestWindow {
         start: UnixSeconds,
@@ -381,7 +399,13 @@ mod tests {
             ])
             .expect("valid intra-event delays"),
             clock_skew: 10,
-            guardian: S3Config::mock_for_testing(),
+            guardian_s3: GuardianS3Config {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                access_key: Some("access-key".to_string()),
+                secret_key: Some("secret-key".to_string()),
+                retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
+            },
             pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
                 hashi_types::guardian::BuildPcrs::new("", vec![]),
                 vec![],
@@ -389,10 +413,13 @@ mod tests {
             .expect("valid PCR allowlist"),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
+                package_id: format!("0x{}", "11".repeat(32)),
+                hashi_object_id: format!("0x{}", "22".repeat(32)),
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
                 rpc_auth: BtcRpcAuth::None,
+                http_headers: BTreeMap::new(),
             },
         }
     }
@@ -420,6 +447,7 @@ mod tests {
             event_type: DepositEventType::E2HashiDeposited,
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
+            btc_vout: 0,
         }
     }
 
@@ -481,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn add_event_rejects_event_past_deadline() {
+    fn add_event_records_event_past_deadline() {
         let cfg = cfg();
         let mut sm = WithdrawalStateMachine::new(
             event(WithdrawalEventType::E1HashiApproved, 4, 100, 4),
@@ -496,10 +524,14 @@ mod tests {
             err,
             EventOccurredAfterDeadline {
                 event: MonitorEvent::Withdrawal(event),
+                relation: EventRelation::Successor,
                 deadline: 200,
                 occurred_at: 201,
             }
         );
+        assert!(sm.get(WithdrawalEventType::E2GuardianApproved).is_some());
+        assert!(!sm.expects(WithdrawalEventType::E2GuardianApproved));
+        assert!(sm.expects(WithdrawalEventType::E3BtcConfirmed));
     }
 
     #[test]
@@ -525,6 +557,7 @@ mod tests {
             violations[0],
             ExpectedEventMissing {
                 event_type: MonitorEventType::Withdrawal(WithdrawalEventType::E2GuardianApproved),
+                relation: EventRelation::Successor,
                 deadline: 200,
                 cursor: 200,
             }
@@ -590,6 +623,7 @@ mod tests {
             violations[0],
             ExpectedEventMissing {
                 event_type: MonitorEventType::Deposit(DepositEventType::E1BtcConfirmed),
+                relation: EventRelation::Predecessor,
                 deadline: 110,
                 cursor: 110,
             }

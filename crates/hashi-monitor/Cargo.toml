@@ -5,16 +5,24 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
 bitcoin.workspace = true
-corepc-client.workspace = true
-jsonrpc.workspace = true
 clap.workspace = true
+corepc-client.workspace = true
+futures.workspace = true
+jsonrpc.workspace = true
 hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
+minreq.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
+sui-rpc.workspace = true
+sui-sdk-types.workspace = true
 tokio.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

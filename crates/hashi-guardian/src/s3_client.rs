@@ -10,6 +10,7 @@ use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::S3ObjectLockPolicy;
 use std::collections::BTreeSet;
+use std::sync::Once;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -34,6 +35,9 @@ use tracing::warn;
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 /// Delay between application-level retries of an immutable S3 log write.
 const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+/// Temporary testnet escape hatch while legacy seven-day locks remain in the bucket.
+const SKIP_S3_OBJECT_LOCK_CHECK_ENV: &str = "HASHI_SKIP_S3_OBJECT_LOCK_CHECK";
+static SKIP_S3_OBJECT_LOCK_CHECK_WARNING: Once = Once::new();
 
 #[derive(Clone)]
 pub struct GuardianS3Client {
@@ -583,6 +587,7 @@ impl GuardianS3Client {
             })?;
 
         if matches!(lock_check, LockCheck::Required)
+            && !skip_s3_object_lock_check()
             && !has_unexpired_compliance_lock(
                 response.object_lock_mode(),
                 response.object_lock_retain_until_date(),
@@ -685,6 +690,19 @@ fn has_unexpired_compliance_lock(
 ) -> bool {
     mode == Some(&ObjectLockMode::Compliance)
         && retain_until.is_some_and(|retain_until| *retain_until > DateTime::from(now))
+}
+
+fn skip_s3_object_lock_check() -> bool {
+    let skip = std::env::var_os(SKIP_S3_OBJECT_LOCK_CHECK_ENV).is_some();
+    if skip {
+        SKIP_S3_OBJECT_LOCK_CHECK_WARNING.call_once(|| {
+            warn!(
+                env = SKIP_S3_OBJECT_LOCK_CHECK_ENV,
+                "S3 object-lock validation is disabled for this process"
+            );
+        });
+    }
+    skip
 }
 
 #[cfg(test)]
