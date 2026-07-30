@@ -622,10 +622,12 @@ impl MpcService {
                 presig_count(served_weight as usize, params, batch_size_per_weight);
             if presignatures.len() != served_implies {
                 metrics.mpc_nonce_size_mismatch_total.inc();
-                warn!(
+                error!(
                     "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
-                     served certs size to {served_implies} (weight {served_weight}); a \
-                     restart would rebuild this boundary at the latter",
+                     served certs size to {served_implies} (weight {served_weight}). The \
+                     certs are frozen, so a restart rebuilds this boundary at the larger \
+                     size, the Phase-1/Phase-2 assert fails, and this node cannot recover \
+                     the batch on any later tick",
                     presignatures.len(),
                 );
             }

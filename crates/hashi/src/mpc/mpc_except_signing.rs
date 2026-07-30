@@ -1892,13 +1892,6 @@ impl MpcManager {
     ) -> MpcResult<WindowedNonceReceive> {
         let cert = match tob_channel.receive().await {
             Ok(cert) => cert,
-            // A finite set that runs dry before the floor never reached it on chain.
-            Err(ChannelError::Exhausted) if !window.floor_reached() => {
-                return Err(MpcError::NotEnoughParticipants {
-                    expected: window.required_weight() as usize,
-                    got: window.weight() as usize,
-                });
-            }
             Err(ChannelError::Exhausted) => return Ok(WindowedNonceReceive::Closed),
             Err(e) => return Err(MpcError::BroadcastError(e.to_string())),
         };

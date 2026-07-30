@@ -10938,6 +10938,38 @@ async fn test_nonce_window_live_collection_past_floor() {
         "closing on the cutoff below the floor must fail, got {:?}",
         closes_below_floor.map(|a| a.certified.len())
     );
+    let metrics = test_metrics();
+    let dry_below_floor = {
+        let test_manager = Arc::clone(&test_manager);
+        let mut tob = crate::communication::PrefetchedTobChannel::new(
+            stamped([1_000; 5]).into_iter().take(1).collect(),
+        );
+        MpcManager::run_as_nonce_party(
+            &test_manager,
+            batch_index,
+            &mock_p2p,
+            &mut tob,
+            None,
+            &metrics,
+        )
+        .await
+    };
+    assert!(
+        matches!(
+            dry_below_floor,
+            Err(MpcError::NotEnoughParticipants {
+                expected: 4,
+                got: 1
+            })
+        ),
+        "an exhausted stream below the floor must fail, got {:?}",
+        dry_below_floor.map(|a| a.certified.len())
+    );
+    assert_eq!(
+        metrics.mpc_nonce_window_closed_below_floor_total.get(),
+        1,
+        "the below-floor exit must be counted; erroring earlier skipped this"
+    );
 }
 
 #[tokio::test]
@@ -14583,9 +14615,12 @@ async fn exhausted_prefetched_stream_pre_floor_does_not_block() {
 
     let outcome = received
         .expect("receive_nonce_cert_in_window never returned on an exhausted replay stream");
+    // Closes rather than erroring: the caller's post-loop floor check owns the failure, so
+    // that it can attribute it to node-local skips and increment the right counter. Failing
+    // here bypassed both. Recovery still fails — see the party-loop test below.
     assert!(
-        outcome.is_err(),
-        "pre-floor exhaustion must fail recovery rather than report a usable outcome"
+        matches!(outcome, Ok(WindowedNonceReceive::Closed)),
+        "pre-floor exhaustion must close the window for the caller to judge"
     );
 }
 

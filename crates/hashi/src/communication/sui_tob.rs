@@ -230,14 +230,18 @@ pub async fn fetch_key_generation_certificates(
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = fetch_certificates(
+        let existing = match fetch_certificates(
             &self.onchain_state,
             self.epoch,
             self.batch_index,
             self.protocol_type,
         )
         .await
-        .map_err(ChannelError::from)?;
+        {
+            Ok(existing) => existing,
+            Err(TobError::IncompleteRead(_)) => Vec::new(),
+            Err(e) => return Err(ChannelError::from(e)),
+        };
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
         }

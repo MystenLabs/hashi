@@ -728,8 +728,9 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_size_mismatch_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_size_mismatch_total",
-                "Live nonce batches whose built size differs from what the cert list this \
-                 node was served implies.",
+                "AVID nonce batches whose built size differs from what the served cert list \
+                 implies. Not emitted on the vanilla path, where sizing and admission are \
+                 one walk and cannot differ — a zero there means unchecked, not clean",
                 registry,
             )
             .unwrap(),
