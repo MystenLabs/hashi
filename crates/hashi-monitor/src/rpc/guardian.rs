@@ -8,7 +8,6 @@ use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
-use hashi_guardian::s3_reader::withdraw_cursor;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::VersionedLogMessage;
@@ -77,7 +76,7 @@ impl GuardianWithdrawalsPoller {
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         Ok(Self {
             reader: GuardianReader::new(&config.guardian, config.pcr_allowlist()).await?,
-            cursor: withdraw_cursor(start),
+            cursor: S3HourScopedDirectory::withdraw(start),
         })
     }
 

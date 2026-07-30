@@ -1,12 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::heartbeat_cursor;
 use super::GuardianReader;
 use super::VerifiedLogRecord;
 use crate::HEARTBEAT_INTERVAL;
 use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
+use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -59,7 +59,7 @@ impl GuardianReader {
         // Read from the previous, current, and next hour-scoped prefixes to
         // cover clock-boundary cases and moderate clock skew.
         let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
-        let mut cursor = heartbeat_cursor(one_hour_ago);
+        let mut cursor = S3HourScopedDirectory::heartbeat(one_hour_ago);
         let mut logs = Vec::new();
         for _ in 0..3 {
             logs.extend(self.read_logs_in_dir(&cursor).await?);

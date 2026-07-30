@@ -89,6 +89,15 @@ impl VerifiedSessionInfo {
         })
     }
 
+    /// Verify a record with this session's attestation-anchored signing key.
+    pub(super) fn verify_record(&self, record: LogRecord) -> GuardianResult<VerifiedLogRecord> {
+        let entry = validate_into_entry(record, Some(&self.signing_pubkey))?;
+        Ok(VerifiedLogRecord {
+            entry,
+            build_pcrs: self.build_pcrs.clone(),
+        })
+    }
+
     pub fn signing_pubkey(&self) -> &GuardianPubKey {
         &self.signing_pubkey
     }
@@ -112,17 +121,6 @@ pub struct VerifiedLogRecord {
 }
 
 impl VerifiedLogRecord {
-    pub(super) fn new(
-        record: LogRecord,
-        session_info: &VerifiedSessionInfo,
-    ) -> GuardianResult<Self> {
-        let entry = validate_into_entry(record, Some(&session_info.signing_pubkey))?;
-        Ok(Self {
-            entry,
-            build_pcrs: session_info.build_pcrs.clone(),
-        })
-    }
-
     #[cfg(test)]
     pub(super) fn new_for_test(entry: LogEntry, build_pcrs: BuildPcrs) -> Self {
         Self { entry, build_pcrs }

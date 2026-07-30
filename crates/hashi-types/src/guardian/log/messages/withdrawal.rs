@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::ObjectKeyPattern;
-use super::super::S3_DIR_WITHDRAW;
 use crate::committee::CommitteeSignature;
 use crate::guardian::LimiterState;
 use crate::guardian::StandardWithdrawalRequestWire;
@@ -45,8 +44,7 @@ impl WithdrawalLogMessage {
         session_id: &str,
         timestamp_ms: UnixMillis,
     ) -> ObjectKeyPattern {
-        let directory =
-            S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms));
+        let directory = S3HourScopedDirectory::withdraw(unix_millis_to_seconds(timestamp_ms));
         match self {
             Self::Success { request_data, .. } => ObjectKeyPattern::Fixed(format!(
                 "{directory}success-{:020}-{session_id}-wid{}.json",

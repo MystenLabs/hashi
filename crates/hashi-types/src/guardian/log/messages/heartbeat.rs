@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::ObjectKeyPattern;
-use super::super::S3_DIR_HEARTBEAT;
 use crate::guardian::UnixMillis;
 use crate::guardian::s3_utils::S3HourScopedDirectory;
 use crate::guardian::unix_millis_to_seconds;
@@ -22,7 +21,7 @@ impl HeartbeatLogMessage {
     pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
         format!(
             "{}{session_id}-{:020}.json",
-            S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, unix_millis_to_seconds(timestamp_ms)),
+            S3HourScopedDirectory::heartbeat(unix_millis_to_seconds(timestamp_ms)),
             self.seq,
         )
     }
