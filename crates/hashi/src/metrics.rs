@@ -818,7 +818,7 @@ impl Metrics {
             )
             .unwrap(),
             mpc_nonce_batch_index: register_int_gauge_with_registry!(
-"hashi_mpc_nonce_batch_index",
+                "hashi_mpc_nonce_batch_index",
                 "Batch index of the most recent nonce batch this node accepted",
                 registry,
             )

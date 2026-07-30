@@ -12885,6 +12885,21 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         weight_of(&[0]),
         "a dealer served twice must not be double-counted"
     );
+
+    let (generic, window) = mgr.window_certified_nonce_dealers(&rekeyed);
+    assert_eq!(
+        generic,
+        HashSet::from([setup.address(0)]),
+        "the generic walk must key on the signed dealer"
+    );
+    assert_eq!(window.weight(), weight_of(&[0]));
+    let (generic, window) = mgr.window_certified_nonce_dealers(&duplicated);
+    assert_eq!(generic, HashSet::from([setup.address(0)]));
+    assert_eq!(
+        window.weight(),
+        weight_of(&[0]),
+        "one dealer under two table keys must count once in the generic walk"
+    );
 }
 
 #[test]

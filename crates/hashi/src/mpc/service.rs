@@ -60,6 +60,7 @@ const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
 const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const NONCE_WAIT_TOTAL_BUDGET: Duration = Duration::from_secs(600);
 const USE_LEGACY_PRESIG_DERIVATION: bool = false;
 /// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
 /// constant name (the `#[error]` abort code encodes a source line, so the
@@ -562,9 +563,13 @@ impl MpcService {
             .collect();
         let served_weight = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.pinned_certified_nonce_dealers(&canonical, cutoff_ms)
-                .1
-                .weight()
+            match mgr.mpc_config.nonce_generation_protocol {
+                NonceGenerationProtocol::Avid => Some(
+                    mgr.avid_certified_nonce_dealers_from_certs(&canonical, cutoff_ms)
+                        .1,
+                ),
+                NonceGenerationProtocol::Vanilla => None,
+            }
         };
         let mut party_channel = PrefetchedTobChannel::new(canonical);
         let nonce_result = MpcManager::run_nonce_party_phase(
@@ -612,14 +617,18 @@ impl MpcService {
         )
         .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
-        let served_implies = presig_count(served_weight as usize, params, batch_size_per_weight);
-        if presignatures.len() != served_implies {
-            metrics.mpc_nonce_size_mismatch_total.inc();
-            warn!(
-                "nonce batch {batch_index} for epoch {epoch}: built {} presigs, the served \
-                 cert list implies {served_implies} (served weight {served_weight})",
-                presignatures.len(),
-            );
+        if let Some(served_weight) = served_weight {
+            let served_implies =
+                presig_count(served_weight as usize, params, batch_size_per_weight);
+            if presignatures.len() != served_implies {
+                metrics.mpc_nonce_size_mismatch_total.inc();
+                warn!(
+                    "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
+                     served certs size to {served_implies} (weight {served_weight}); a \
+                     restart would rebuild this boundary at the latter",
+                    presignatures.len(),
+                );
+            }
         }
         info!(
             "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
@@ -1114,6 +1123,11 @@ impl MpcService {
         )>,
     > {
         let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
+        // Progress buys more time, but not without limit: re-anchoring on each new
+        // weight maximum otherwise scales the wait with committee size, and this whole
+        // function runs while `self.reconciling` is held. Past this ceiling, bail and
+        // let the caller retry rather than hold the lock.
+        let overall_deadline = tokio::time::Instant::now() + NONCE_WAIT_TOTAL_BUDGET;
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
         let mut mixed_stamps_reported = false;
@@ -1171,7 +1185,8 @@ impl MpcService {
             }
             if weight > best_weight {
                 best_weight = weight;
-                wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
+                wait_deadline = (tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT)
+                    .min(overall_deadline);
             }
             if wait_for_floor && !floor_reached {
                 if tokio::time::Instant::now() >= wait_deadline {
@@ -1205,7 +1220,8 @@ impl MpcService {
             if tokio::time::Instant::now() >= wait_deadline {
                 metrics.mpc_nonce_cutoff_unsettled_total.inc();
                 anyhow::bail!(
-                    "nonce cert cutoff never settled for epoch {epoch} batch {batch_index}                      (last confirmed {cutoff_confirmed:?}, now {cutoff_ms})"
+                    "nonce cert cutoff never settled for epoch {epoch} batch {batch_index} \
+                     (last confirmed {cutoff_confirmed:?}, now {cutoff_ms})"
                 );
             }
             if !read_side_past_cutoff(cutoff_ms).await {
@@ -1226,6 +1242,9 @@ impl MpcService {
                         "nonce window did not close for epoch {epoch} batch {batch_index}"
                     );
                 }
+            }
+            if cutoff_confirmed.is_some() {
+                tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
             }
             cutoff_confirmed = Some(cutoff_ms);
         }
@@ -1328,11 +1347,6 @@ impl MpcService {
                         outcome.local_skips,
                     );
                 }
-                let metrics = &self.inner.metrics;
-                metrics.mpc_nonce_batch_index.set(batch_index as i64);
-                metrics
-                    .mpc_nonce_batch_dealers
-                    .set(outcome.outputs.len() as i64);
                 (outcome.outputs, None)
             }
         };
@@ -1341,6 +1355,7 @@ impl MpcService {
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
             ));
         }
+        let dealer_count = outputs.len();
         let presignatures = Presignatures::new(
             outputs,
             batch_size_per_weight,
@@ -1356,6 +1371,9 @@ impl MpcService {
                 presignatures.len(),
             );
         }
+        let metrics = &self.inner.metrics;
+        metrics.mpc_nonce_batch_index.set(batch_index as i64);
+        metrics.mpc_nonce_batch_dealers.set(dealer_count as i64);
         Ok(presignatures)
     }
 

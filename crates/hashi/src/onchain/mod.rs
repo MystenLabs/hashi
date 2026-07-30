@@ -797,6 +797,9 @@ impl OnchainState {
         let mut current = Some(head);
         while let Some(dealer) = current {
             let Some(node) = nodes.remove(&dealer) else {
+                tracing::warn!(
+                    "cert table walk stopped early: {dealer} missing from the paginated read"
+                );
                 break;
             };
             entries.push((dealer, node.value));

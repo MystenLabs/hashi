@@ -1130,18 +1130,6 @@ impl MpcManager {
         self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window())
     }
 
-    /// Admission under a caller-pinned cutoff. Chain-derived only — see the note on
-    /// `avid_certified_nonce_dealers_from_certs` about why sizing must not read local
-    /// state.
-    pub(crate) fn pinned_certified_nonce_dealers<T: NonceCertTimestamp>(
-        &self,
-        certs: &[(Address, T)],
-        cutoff_ms: Option<u64>,
-    ) -> (HashSet<Address>, NonceCollectionWindow) {
-        let window = NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms);
-        self.certified_nonce_dealers_in_window(certs, window)
-    }
-
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
         &self,
         certs: &[(Address, T)],
@@ -5611,7 +5599,9 @@ impl MpcManager {
                         );
                         certs
                             .iter()
-                            .find(|(addr, _)| *addr == dealer_address)
+                            .find(|(_, cert)| {
+                                cert.submission.message.dealer_address == dealer_address
+                            })
                             .map(|(_, cert)| {
                                 let members = mgr.committee.members();
                                 cert.submission
@@ -5649,7 +5639,10 @@ impl MpcManager {
             .read()
             .unwrap()
             .window_certified_nonce_dealers(certs);
-        for (dealer, cert) in certs {
+        for (_table_dealer, cert) in certs {
+            // Same key domain as the walk that built `certified_dealers`: the signed
+            // dealer, not the attacker-chosen table key.
+            let dealer = &cert.submission.message.dealer_address;
             if !certified_dealers.contains(dealer) {
                 continue;
             }
