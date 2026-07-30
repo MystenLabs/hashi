@@ -83,21 +83,15 @@ impl ContinuousAuditor {
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
         let up_to = now_unix_seconds();
-        loop {
-            match self.inner.poll_sui(up_to).await? {
-                PollOutcome::CursorAdvanced(events) => self.ingest_batch(events),
-                PollOutcome::CursorUnmoved => break,
-            }
+        while let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui(up_to).await? {
+            self.ingest_batch(events);
         }
         Ok(())
     }
 
     async fn tick_guardian(&mut self) -> anyhow::Result<()> {
-        loop {
-            match self.inner.poll_guardian().await? {
-                PollOutcome::CursorAdvanced(events) => self.ingest_batch(events),
-                PollOutcome::CursorUnmoved => break,
-            }
+        while let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
+            self.ingest_batch(events);
         }
         Ok(())
     }
