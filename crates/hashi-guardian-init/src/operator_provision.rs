@@ -247,8 +247,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    let oi_info = verified_session.into_info();
-    ensure_oi_info_matches_post_init(&oi_info, &post.info)?;
+    ensure_oi_info_matches_post_init(verified_session.info(), &post.info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,
