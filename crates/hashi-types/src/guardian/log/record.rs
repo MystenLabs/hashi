@@ -266,9 +266,13 @@ impl LogRecord {
 
     /// Validate a record and normalize its message to the current schema.
     ///
+    /// Validation checks record-local invariants and verifies a signed record
+    /// against the caller-supplied key. It does not establish that the key
+    /// belongs to an attested, approved guardian; the S3 reader's
+    /// `verify_record` performs that complete verification.
+    ///
     /// Signed records require `Some(signing_public_key)`; the one permitted
     /// unsigned record kind requires `None`. The caller is responsible for
-    /// establishing that a supplied signing key is authorized, or for
     /// authenticating the Nitro attestation carried by an unsigned record.
     pub fn validate(
         self,
