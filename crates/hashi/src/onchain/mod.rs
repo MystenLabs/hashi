@@ -367,6 +367,21 @@ impl OnchainState {
         self.0.client.clone()
     }
 
+    pub async fn read_side_checkpoint_timestamp_ms(&self) -> Result<u64> {
+        let info = self
+            .0
+            .client
+            .clone()
+            .ledger_client()
+            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        let ts = info
+            .timestamp
+            .ok_or_else(|| anyhow!("service info carried no timestamp"))?;
+        Ok(ts.seconds as u64 * 1_000 + u64::from(ts.nanos.max(0) as u32) / 1_000_000)
+    }
+
     /// Returns the latest package id (highest version).
     pub fn package_id(&self) -> Option<Address> {
         self.state().package_versions.latest_id()

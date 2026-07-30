@@ -1112,12 +1112,17 @@ impl MpcService {
                 tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
                 continue;
             }
+            let read_side_past_cutoff = |cutoff_ms: u64| async move {
+                onchain_state
+                    .read_side_checkpoint_timestamp_ms()
+                    .await
+                    .is_ok_and(|ts| ts > cutoff_ms)
+            };
             match cutoff_ms {
-                Some(cutoff_ms) if onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms => {
+                Some(cutoff_ms) if !read_side_past_cutoff(cutoff_ms).await => {
                     let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
                     let wait = async {
-                        while onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms {
-                            // `latest_checkpoint_timestamp_ms` only advances once per checkpoint (~200 ms).
+                        while !read_side_past_cutoff(cutoff_ms).await {
                             tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
                         }
                     };
