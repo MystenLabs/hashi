@@ -38,7 +38,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuardianSigningIntentType {
     /// Intent for LogEntry.
-    LogMessage = 0,
+    LogEntry = 0,
     /// Intent for SetupNewKeyResponse.
     SetupNewKeyResponse = 1,
     /// Intent for StandardWithdrawalResponse.
@@ -108,7 +108,7 @@ pub struct GuardianSigned<T> {
 }
 
 impl GuardianSigningIntent for LogEntry {
-    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogMessage;
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogEntry;
 }
 
 impl GuardianSigningIntent for SetupNewKeyResponse {

@@ -223,7 +223,7 @@ impl crate::intent::IntentMessage for StandardWithdrawalRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::GuardianWithdrawalRequest;
 }
 
-/// `EnclaveSigned<T>`
+/// `GuardianSignedResponse<StandardWithdrawalResponse>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StandardWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
@@ -251,7 +251,7 @@ pub struct SetupNewKeyRequest {
     params: SecretSharingParams,
 }
 
-/// `EnclaveSigned<T>`
+/// `GuardianSignedResponse<SetupNewKeyResponse>`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: KPEncryptedSharesRoster,
@@ -282,7 +282,8 @@ pub struct RotateKpsState {
     new_params: SecretSharingParams,
 }
 
-/// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
+/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
+/// shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
     pub encrypted_shares: KPEncryptedSharesRoster,
