@@ -27,11 +27,6 @@ pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
 }
 
-/// The `versioning::PACKAGE_VERSION` at which the stamped nonce-cert path becomes available on-chain.
-///
-/// Never raise past the deployed version, and match it by exact membership: `enable_version`
-/// accepts undeployed versions, so anything looser switches the stamped ABI on too early.
-pub const STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION: u64 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;

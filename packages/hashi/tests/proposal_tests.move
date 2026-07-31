@@ -38,7 +38,7 @@ fun add_pending_committee_for_testing(hashi: &mut hashi::hashi::Hashi, epoch: u6
     let pending_committee = committee::new_committee(
         epoch,
         members,
-        mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
+        mpc_config::new_for_testing(3334, 800, 3333, 0),
     );
     hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee);
 }
@@ -746,11 +746,11 @@ fun test_enable_version_proposal() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Create enable version proposal for version 3 (not enabled by default)
+    // Create enable version proposal for version 2
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        3,
+        2,
         &clock,
         ctx,
     );
@@ -772,48 +772,27 @@ fun test_disable_version_proposal() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // First enable version 3 (not the current version)
+    // First enable version 2
     let enable_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        3,
+        2,
         &clock,
         ctx,
     );
     hashi::enable_version::execute(&mut hashi, enable_id, &clock);
 
-    // Now disable version 3 (not the current version)
+    // Now disable version 2 (not the current version)
     let disable_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        3,
+        2,
         &clock,
         ctx,
     );
     hashi::disable_version::execute(&mut hashi, disable_id, &clock);
 
     // Clean up
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_fresh_publish_enables_versions_below_current() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    let disable_id = test_utils::create_disable_version_proposal(
-        &mut hashi,
-        VOTER1,
-        1,
-        &clock,
-        ctx,
-    );
-    hashi::disable_version::execute(&mut hashi, disable_id, &clock);
-
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
@@ -828,11 +807,11 @@ fun test_disable_current_version_fails() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Try to disable version 2 (current version) - should fail
+    // Try to disable version 1 (current version) - should fail
     let proposal_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        2, // current package version
+        1, // current package version
         &clock,
         ctx,
     );
@@ -853,11 +832,11 @@ fun test_enable_already_enabled_version_fails() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Try to enable version 2 (already enabled by default) - should fail
+    // Try to enable version 1 (already enabled by default) - should fail
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        2, // already enabled
+        1, // already enabled
         &clock,
         ctx,
     );

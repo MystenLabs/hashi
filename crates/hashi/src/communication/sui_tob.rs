@@ -24,13 +24,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
-const DEDUP_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const _: () = assert!(
-    DEDUP_READ_TIMEOUT.as_millis() < super::timeout_and_retry::CALL_TIMEOUT.as_millis(),
-    "publish runs inside with_timeout_and_retry, so a dedup bound at or above CALL_TIMEOUT \
-     never fires and the submit-anyway branch becomes dead code",
-);
+const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -42,12 +36,6 @@ pub enum TobError {
 
     #[error("Invalid state: {0}")]
     InvalidState(String),
-
-    #[error("incomplete cert table read: {0}")]
-    IncompleteRead(String),
-
-    #[error("unordered cert table read: {0}")]
-    UnorderedRead(String),
 }
 
 impl From<TobError> for ChannelError {
@@ -67,17 +55,11 @@ pub struct SuiTobChannel {
     protocol_type: ProtocolType,
     signer: SimpleKeypair,
     idle_timeout: Option<Duration>,
-    stall_counter: Option<prometheus::IntCounter>,
-    stall_failed_counter: Option<prometheus::IntCounter>,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
     pending_certs: VecDeque<CertificateV1>,
-    pending_fetch: Option<(PendingFetch, tokio::time::Instant)>,
-    wait_started: Option<tokio::time::Instant>,
 }
-
-type PendingFetch = tokio::task::JoinHandle<Result<Vec<(Address, CertificateV1)>, TobError>>;
 
 impl SuiTobChannel {
     pub fn new(
@@ -96,33 +78,8 @@ impl SuiTobChannel {
             protocol_type,
             signer,
             idle_timeout: None,
-            stall_counter: None,
-            stall_failed_counter: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
-            pending_fetch: None,
-            wait_started: None,
-        }
-    }
-
-    pub fn with_stall_counters(
-        mut self,
-        absorbed: prometheus::IntCounter,
-        failed: prometheus::IntCounter,
-    ) -> Self {
-        self.stall_counter = Some(absorbed);
-        self.stall_failed_counter = Some(failed);
-        self
-    }
-
-    fn record_stall(&self, terminal: bool) {
-        let counter = if terminal {
-            &self.stall_failed_counter
-        } else {
-            &self.stall_counter
-        };
-        if let Some(counter) = counter {
-            counter.inc();
         }
     }
 
@@ -138,30 +95,6 @@ impl SuiTobChannel {
             self.hashi_ids,
         )
         .with_timeout(TX_CONFIRMATION_TIMEOUT)
-        .with_stamped_nonce_certs(self.onchain_state.supports_stamped_nonce_certs())
-    }
-}
-
-impl Drop for SuiTobChannel {
-    fn drop(&mut self) {
-        if let Some((fetch, _)) = &self.pending_fetch {
-            fetch.abort();
-        }
-    }
-}
-
-fn tob_fetch_error(e: anyhow::Error) -> TobError {
-    if e.downcast_ref::<crate::onchain::IncompleteCertTableRead>()
-        .is_some()
-    {
-        TobError::IncompleteRead(e.to_string())
-    } else if e
-        .downcast_ref::<crate::onchain::UnorderedCertTableRead>()
-        .is_some()
-    {
-        TobError::UnorderedRead(e.to_string())
-    } else {
-        TobError::RpcError(e.to_string())
     }
 }
 
@@ -171,47 +104,18 @@ pub async fn fetch_certificates(
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    let raw: Vec<(Address, hashi_types::move_types::DealerSubmissionV1, u64)> = if protocol_type
-        == ProtocolType::NonceGeneration
-        && onchain_state.supports_stamped_nonce_certs()
-    {
-        let Some(certs) = onchain_state
-            .fetch_stamped_certs(epoch, batch_index, protocol_type)
-            .await
-            .map_err(tob_fetch_error)?
-        else {
-            return Ok(vec![]);
-        };
-        certs
-            .into_iter()
-            .map(|(dealer, stamped)| (dealer, stamped.submission, stamped.timestamp_ms))
-            .collect()
-    } else {
-        let Some(certs) = onchain_state
-            .fetch_certs(epoch, batch_index, protocol_type)
-            .await
-            .map_err(tob_fetch_error)?
-        else {
-            return Ok(vec![]);
-        };
-        certs
-            .into_iter()
-            .map(|(dealer, submission)| (dealer, submission, 0u64))
-            .collect()
+    let Some(raw_certs) = onchain_state
+        .fetch_certs(epoch, batch_index, protocol_type)
+        .await
+        .map_err(|e| TobError::RpcError(e.to_string()))?
+    else {
+        return Ok(vec![]);
     };
-    let mut certificates = Vec::with_capacity(raw.len());
-    for (dealer, submission, timestamp_ms) in raw {
-        let inner_cert = match DealerMessagesHash::from_onchain_cert(&submission, epoch) {
-            Ok(inner_cert) => inner_cert,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping malformed {protocol_type:?} dealer cert from {dealer} for epoch \
-                     {epoch} batch {batch_index:?}: {e}"
-                );
-                continue;
-            }
-        };
-        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert, timestamp_ms);
+    let mut certificates = Vec::with_capacity(raw_certs.len());
+    for (dealer, cert) in raw_certs {
+        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch)
+            .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
+        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert);
         certificates.push((dealer, cert));
     }
     Ok(certificates)
@@ -241,7 +145,9 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        self.certs.pop_front().ok_or(ChannelError::Exhausted)
+        self.certs
+            .pop_front()
+            .ok_or_else(|| ChannelError::Other("replayed certificate stream exhausted".into()))
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
@@ -265,40 +171,14 @@ pub async fn fetch_key_generation_certificates(
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let fetched = tokio::time::timeout(
-            DEDUP_READ_TIMEOUT,
-            fetch_certificates(
-                &self.onchain_state,
-                self.epoch,
-                self.batch_index,
-                self.protocol_type,
-            ),
+        let existing = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
         )
-        .await;
-        let existing = match fetched {
-            Ok(Ok(existing)) => existing,
-            Ok(Err(e @ (TobError::IncompleteRead(_) | TobError::UnorderedRead(_)))) => {
-                tracing::warn!(
-                    "{:?} dedup read for epoch {} batch {:?} unusable ({e}); submitting anyway",
-                    self.protocol_type,
-                    self.epoch,
-                    self.batch_index,
-                );
-                Vec::new()
-            }
-            Ok(Err(e)) => return Err(ChannelError::from(e)),
-            Err(_) => {
-                self.record_stall(false);
-                tracing::warn!(
-                    "{:?} dedup read for epoch {} batch {:?} stalled >{DEDUP_READ_TIMEOUT:?}; \
-                     submitting anyway",
-                    self.protocol_type,
-                    self.epoch,
-                    self.batch_index,
-                );
-                Vec::new()
-            }
-        };
+        .await
+        .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
         }
@@ -311,68 +191,27 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        let wait_started = *self
-            .wait_started
-            .get_or_insert_with(tokio::time::Instant::now);
+        let wait_started = tokio::time::Instant::now();
         loop {
             if let Some(cert) = self.pending_certs.pop_front() {
-                self.wait_started = None;
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let fetched = {
-                if self.pending_fetch.is_none() {
-                    let onchain_state = self.onchain_state.clone();
-                    let (epoch, batch_index, protocol_type) =
-                        (self.epoch, self.batch_index, self.protocol_type);
-                    self.pending_fetch = Some((
-                        tokio::spawn(async move {
-                            fetch_certificates(&onchain_state, epoch, batch_index, protocol_type)
-                                .await
-                        }),
-                        tokio::time::Instant::now(),
-                    ));
-                }
-                let (fetch, started) = self.pending_fetch.as_mut().expect("just populated");
-                let remaining = FETCH_STALL_TIMEOUT.saturating_sub(started.elapsed());
-                tokio::time::timeout(remaining, fetch).await
-            };
-            let mut stalled = false;
-            let all_certs = match fetched {
-                Ok(Ok(result)) => {
-                    self.pending_fetch = None;
-                    match result {
-                        Ok(certs) => certs,
-                        Err(TobError::IncompleteRead(msg)) => {
-                            tracing::debug!(
-                                "{:?} TOB cert read for epoch {} raced an insert ({msg}); \
-                                 retrying",
-                                self.protocol_type,
-                                self.epoch,
-                            );
-                            Vec::new()
-                        }
-                        Err(e) => {
-                            self.wait_started = None;
-                            return Err(ChannelError::from(e));
-                        }
-                    }
-                }
-                Ok(Err(join_err)) => {
-                    self.pending_fetch = None;
-                    self.wait_started = None;
-                    return Err(ChannelError::Other(format!(
-                        "{:?} TOB cert fetch task failed for epoch {}: {join_err}",
-                        self.protocol_type, self.epoch,
-                    )));
-                }
+            let all_certs = match tokio::time::timeout(
+                FETCH_STALL_TIMEOUT,
+                fetch_certificates(
+                    &self.onchain_state,
+                    self.epoch,
+                    self.batch_index,
+                    self.protocol_type,
+                ),
+            )
+            .await
+            {
+                Ok(result) => result.map_err(ChannelError::from)?,
                 Err(_) => {
-                    if let Some((fetch, _)) = self.pending_fetch.take() {
-                        fetch.abort();
-                    }
-                    stalled = true;
                     tracing::warn!(
-                        "{:?} TOB cert fetch for epoch {} stalled >{:?}",
+                        "{:?} TOB cert fetch for epoch {} stalled >{:?}; retrying",
                         self.protocol_type,
                         self.epoch,
                         FETCH_STALL_TIMEOUT,
@@ -393,16 +232,12 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                     (committees.epoch(), committees.pending_epoch_change())
                 };
                 if tob_wait_superseded(self.protocol_type, self.epoch, onchain_epoch, pending) {
-                    if stalled {
-                        self.record_stall(false);
-                    }
                     tracing::info!(
                         "aborting {:?} TOB wait for epoch {}: superseded (onchain epoch \
                          {onchain_epoch}, pending epoch change {pending:?})",
                         self.protocol_type,
                         self.epoch,
                     );
-                    self.wait_started = None;
                     return Err(ChannelError::Superseded(format!(
                         "{:?} TOB wait for epoch {} (onchain epoch {onchain_epoch}, \
                          pending epoch change {pending:?})",
@@ -412,9 +247,6 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 if let Some(idle_timeout) = self.idle_timeout
                     && wait_started.elapsed() >= idle_timeout
                 {
-                    if stalled {
-                        self.record_stall(true);
-                    }
                     tracing::info!(
                         "aborting {:?} TOB wait for epoch {}: no certificate in {:?} \
                          ({} dealers seen)",
@@ -423,19 +255,15 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                         idle_timeout,
                         self.seen_dealers.len(),
                     );
-                    self.wait_started = None;
                     return Err(ChannelError::Timeout);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
-            }
-            if stalled {
-                self.record_stall(false);
             }
         }
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        match tokio::time::timeout(
+        if let Ok(Ok(all_certs)) = tokio::time::timeout(
             FETCH_STALL_TIMEOUT,
             fetch_certificates(
                 &self.onchain_state,
@@ -446,40 +274,18 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         )
         .await
         {
-            Ok(Ok(all_certs)) => {
-                for (dealer, cert) in all_certs {
-                    if !self.seen_dealers.contains(&dealer) {
-                        self.seen_dealers.insert(dealer);
-                        self.pending_certs.push_back(cert);
-                    }
+            for (dealer, cert) in all_certs {
+                if !self.seen_dealers.contains(&dealer) {
+                    self.seen_dealers.insert(dealer);
+                    self.pending_certs.push_back(cert);
                 }
-            }
-            Ok(Err(e)) => tracing::warn!(
-                "{:?} certified_dealers fetch for epoch {} batch {:?} failed: {e}; \
-                 reporting {} dealers seen so far",
-                self.protocol_type,
-                self.epoch,
-                self.batch_index,
-                self.seen_dealers.len(),
-            ),
-            Err(_) => {
-                self.record_stall(false);
-                tracing::warn!(
-                    "{:?} certified_dealers fetch for epoch {} batch {:?} stalled >{:?}; \
-                     reporting {} dealers seen so far",
-                    self.protocol_type,
-                    self.epoch,
-                    self.batch_index,
-                    FETCH_STALL_TIMEOUT,
-                    self.seen_dealers.len(),
-                );
             }
         }
         self.seen_dealers.iter().copied().collect()
     }
 }
 
-pub(crate) fn tob_wait_superseded(
+fn tob_wait_superseded(
     protocol_type: ProtocolType,
     channel_epoch: u64,
     onchain_epoch: u64,
@@ -499,58 +305,6 @@ pub(crate) fn tob_wait_superseded(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn raced_cert_reads_classify_as_retryable() {
-        use crate::onchain::IncompleteCertTableRead;
-
-        let raced: anyhow::Error = IncompleteCertTableRead {
-            dealer: Address::ZERO,
-        }
-        .into();
-        assert!(
-            matches!(super::tob_fetch_error(raced), TobError::IncompleteRead(_)),
-            "a raced cert-table read must stay distinguishable from an RPC failure"
-        );
-
-        let wrapped = anyhow::Error::from(IncompleteCertTableRead {
-            dealer: Address::ZERO,
-        })
-        .context("fetching stamped certs");
-        assert!(matches!(
-            super::tob_fetch_error(wrapped),
-            TobError::IncompleteRead(_)
-        ));
-
-        assert!(
-            matches!(
-                super::tob_fetch_error(anyhow::anyhow!("connection reset")),
-                TobError::RpcError(_)
-            ),
-            "a genuine RPC failure must not be swallowed as retryable"
-        );
-
-        use crate::onchain::UnorderedCertTableRead;
-        let unordered = || UnorderedCertTableRead {
-            earlier: Address::ZERO,
-            earlier_ms: 5_000,
-            later: Address::ZERO,
-            later_ms: 1_000,
-        };
-        assert!(
-            matches!(
-                super::tob_fetch_error(unordered().into()),
-                TobError::UnorderedRead(_)
-            ),
-            "an unordered read must stay distinguishable: publish tolerates it, the window \
-             walks must not"
-        );
-        assert!(matches!(
-            super::tob_fetch_error(
-                anyhow::Error::from(unordered()).context("fetching stamped certs")
-            ),
-            TobError::UnorderedRead(_)
-        ));
-    }
     use super::*;
 
     #[test]
@@ -573,36 +327,5 @@ mod tests {
             assert!(tob_wait_superseded(p, 6, 5, None));
             assert!(tob_wait_superseded(p, 6, 5, Some(7)));
         }
-    }
-
-    #[tokio::test]
-    async fn tokio_joinhandle_survives_cancelled_awaits() {
-        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let started = std::sync::Arc::clone(&polls);
-        let mut fetch: tokio::task::JoinHandle<usize> = tokio::spawn(async move {
-            started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            42
-        });
-
-        for _ in 0..3 {
-            assert!(
-                tokio::time::timeout(Duration::from_millis(20), &mut fetch)
-                    .await
-                    .is_err(),
-                "expected the short poll to elapse"
-            );
-        }
-
-        let out = tokio::time::timeout(Duration::from_millis(500), &mut fetch)
-            .await
-            .expect("fetch must still be progressing, not restarted")
-            .expect("task must not have been cancelled by the dropped awaits");
-        assert_eq!(out, 42);
-        assert_eq!(
-            polls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the fetch must have run once, not restarted per poll"
-        );
     }
 }

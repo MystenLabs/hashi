@@ -195,7 +195,6 @@ impl Committee {
                 mpc_weight_reduction_allowed_delta,
                 mpc_max_faulty_in_basis_points,
                 mpc_nonce_generation_protocol,
-                0,
             ),
         )
     }
@@ -253,10 +252,6 @@ impl Committee {
 
     pub fn mpc_nonce_generation_protocol(&self) -> u16 {
         self.config.mpc_nonce_generation_protocol()
-    }
-
-    pub fn mpc_nonce_accumulation_window_ms(&self) -> u64 {
-        self.config.mpc_nonce_accumulation_window_ms()
     }
 
     fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {

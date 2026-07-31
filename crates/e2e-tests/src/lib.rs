@@ -137,16 +137,14 @@ pub struct TestNetworksBuilder {
 
 impl TestNetworksBuilder {
     pub fn new() -> Self {
-        let onchain_config_overrides = vec![
-            (
-                "bitcoin_deposit_time_delay_ms".to_string(),
-                hashi_types::move_types::ConfigValue::U64(0),
-            ),
-            (
-                "mpc_nonce_accumulation_window_ms".to_string(),
-                hashi_types::move_types::ConfigValue::U64(0),
-            ),
-        ];
+        // E2e tests skip the deposit-confirmation delay by default so they
+        // don't have to wait through the production-grade window. Tests that
+        // need a non-zero delay can override via `with_onchain_config`; later
+        // entries win because overrides are applied in insertion order.
+        let onchain_config_overrides = vec![(
+            "bitcoin_deposit_time_delay_ms".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        )];
         Self {
             sui_builder: SuiNetworkBuilder::default(),
             hashi_builder: HashiNetworkBuilder::new(),
@@ -2499,11 +2497,11 @@ mod tests {
              derivation (c = {consumed}); it implies output weight {w_out}"
         );
         let gate = w_total - f;
-        let floor_w_out = w_node * gate.div_ceil(w_node);
-        assert!(
-            (floor_w_out..=w_total).contains(&w_out),
-            "pool of {pool_size} implies output weight {w_out}, outside the admissible \
-             range {floor_w_out}..={w_total} (W-f gate {gate}, node weight {w_node})"
+        let expected_w_out = w_node * gate.div_ceil(w_node);
+        assert_eq!(
+            w_out, expected_w_out,
+            "pool of {pool_size} implies output weight {w_out}, but collecting to \
+             the W-f gate ({gate}) rounds to {expected_w_out}"
         );
     }
 

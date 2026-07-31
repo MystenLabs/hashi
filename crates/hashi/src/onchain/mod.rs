@@ -116,65 +116,6 @@ struct Inner {
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "incomplete cert table read: {dealer} is referenced by the linked list but absent from \
-     the paginated fields"
-)]
-pub struct IncompleteCertTableRead {
-    pub dealer: Address,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "cert table is not timestamp-ordered: {later} stamped {later_ms} follows {earlier} \
-     stamped {earlier_ms}"
-)]
-pub struct UnorderedCertTableRead {
-    pub earlier: Address,
-    pub earlier_ms: u64,
-    pub later: Address,
-    pub later_ms: u64,
-}
-
-fn walk_cert_table<V>(
-    head: Address,
-    mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>,
-) -> Result<Vec<(Address, V)>> {
-    let mut entries = Vec::with_capacity(nodes.len());
-    let mut current = Some(head);
-    while let Some(dealer) = current {
-        let Some(node) = nodes.remove(&dealer) else {
-            return Err(IncompleteCertTableRead { dealer }.into());
-        };
-        entries.push((dealer, node.value));
-        current = node.next;
-    }
-    Ok(entries)
-}
-
-fn ensure_timestamp_ordered(
-    certs: &[(Address, move_types::StampedDealerSubmissionV1)],
-) -> Result<()> {
-    if let Some(bad) = certs
-        .windows(2)
-        .find(|w| w[1].1.timestamp_ms < w[0].1.timestamp_ms)
-    {
-        return Err(UnorderedCertTableRead {
-            earlier: bad[0].0,
-            earlier_ms: bad[0].1.timestamp_ms,
-            later: bad[1].0,
-            later_ms: bad[1].1.timestamp_ms,
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn stamped_certs_supported(enabled_versions: &std::collections::BTreeSet<u64>) -> bool {
-    enabled_versions.contains(&crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
-}
-
 #[derive(Debug)]
 pub struct State {
     package_versions: move_types::PackageVersions,
@@ -424,21 +365,6 @@ impl OnchainState {
 
     pub fn client(&self) -> Client {
         self.0.client.clone()
-    }
-
-    pub async fn read_side_checkpoint_timestamp_ms(&self) -> Result<u64> {
-        let info = self
-            .0
-            .client
-            .clone()
-            .ledger_client()
-            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
-            .await?
-            .into_inner();
-        let ts = info
-            .timestamp
-            .ok_or_else(|| anyhow!("service info carried no timestamp"))?;
-        Ok(ts.seconds as u64 * 1_000 + u64::from(ts.nanos.max(0) as u32) / 1_000_000)
     }
 
     /// Returns the latest package id (highest version).
@@ -772,28 +698,15 @@ impl OnchainState {
             .map(|c| c.mpc_service_client())
     }
 
+    /// Fetches the EpochCertsV1 for the given key from on-chain.
+    /// Returns None if no certs exist for this key.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
-    pub async fn fetch_certs(
+    pub async fn fetch_epoch_certs(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        let Some(epoch_certs) = self
-            .fetch_epoch_certs_bucket::<move_types::EpochCertsV1>(epoch, batch_index, protocol_type)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(self.fetch_cert_table(&epoch_certs.certs).await?))
-    }
-
-    async fn fetch_epoch_certs_bucket<T: serde::de::DeserializeOwned>(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<move_types::EpochCertsV1>> {
         let tob_id = self.tob_id();
         let key = TobKey {
             epoch,
@@ -817,28 +730,42 @@ impl OnchainState {
             .pipe(Box::pin);
         while let Some(field) = stream.try_next().await? {
             if field.name().value() == key_bcs.as_slice() {
-                return Ok(Some(field.value().deserialize()?));
+                let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
+                return Ok(Some(epoch_certs));
             }
         }
         Ok(None)
     }
 
-    async fn fetch_cert_table<V: serde::de::DeserializeOwned>(
+    /// Fetches all raw certificates for the given `(epoch, batch_index, protocol_type)`
+    /// bucket from on-chain; caller is responsible for conversion.
+    pub async fn fetch_certs(
         &self,
-        table: &move_types::LinkedTable<Address>,
-    ) -> Result<Vec<(Address, V)>> {
-        let Some(head) = table.head else {
-            return Ok(vec![]);
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        let epoch_certs = match self
+            .fetch_epoch_certs(epoch, batch_index, protocol_type)
+            .await?
+        {
+            Some(certs) => certs,
+            None => return Ok(None),
         };
-        let mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>> =
-            std::collections::HashMap::new();
+        let Some(head) = epoch_certs.certs.head else {
+            return Ok(Some(vec![]));
+        };
+        let mut nodes: std::collections::HashMap<
+            Address,
+            move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>,
+        > = std::collections::HashMap::new();
         let mut stream = self
             .0
             .client
             .clone()
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(table.id)
+                    .with_parent(epoch_certs.certs.id)
                     .with_page_size(SCRAPE_PAGE_SIZE)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -851,69 +778,17 @@ impl OnchainState {
             let node = field.value().deserialize()?;
             nodes.insert(dealer, node);
         }
-        walk_cert_table(head, nodes)
-    }
-
-    pub async fn fetch_stamped_certs(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
-        let Some(epoch_certs) = self
-            .fetch_epoch_certs_bucket::<move_types::StampedEpochCertsV1>(
-                epoch,
-                batch_index,
-                protocol_type,
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let certs = self.fetch_cert_table(&epoch_certs.certs).await?;
-        ensure_timestamp_ordered(&certs)?;
-        Ok(Some(certs))
-    }
-
-    pub fn supports_stamped_nonce_certs(&self) -> bool {
-        stamped_certs_supported(&self.state().hashi().config.enabled_versions)
-    }
-
-    pub async fn fetch_nonce_certs_stamped_or_bare(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
-        if self.supports_stamped_nonce_certs() {
-            self.fetch_stamped_certs(
-                epoch,
-                batch_index,
-                move_types::ProtocolType::NonceGeneration,
-            )
-            .await
-        } else {
-            let bare = self
-                .fetch_certs(
-                    epoch,
-                    batch_index,
-                    move_types::ProtocolType::NonceGeneration,
-                )
-                .await?;
-            Ok(bare.map(|certs| {
-                certs
-                    .into_iter()
-                    .map(|(dealer, submission)| {
-                        (
-                            dealer,
-                            move_types::StampedDealerSubmissionV1 {
-                                submission,
-                                timestamp_ms: 0,
-                            },
-                        )
-                    })
-                    .collect()
-            }))
+        // Traverse in insertion order following LinkedTable's linked list
+        let mut certificates = Vec::with_capacity(nodes.len());
+        let mut current = Some(head);
+        while let Some(dealer) = current {
+            let Some(node) = nodes.remove(&dealer) else {
+                break;
+            };
+            certificates.push((dealer, node.value));
+            current = node.next;
         }
+        Ok(Some(certificates))
     }
 }
 
@@ -1882,19 +1757,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn pre_enabled_version_does_not_switch_on_the_stamped_abi() {
-        use std::collections::BTreeSet;
-        let set = |v: &[u64]| v.iter().copied().collect::<BTreeSet<u64>>();
-
-        assert!(!stamped_certs_supported(&set(&[1])), "v1 only");
-        assert!(stamped_certs_supported(&set(&[1, 2])), "fresh v2 publish");
-        assert!(
-            !stamped_certs_supported(&set(&[1, 3])),
-            "pre-enabling an undeployed version must not switch on the stamped ABI"
-        );
-    }
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::KeyPair;
     use fastcrypto::traits::ToFromBytes;
@@ -1985,131 +1847,5 @@ mod tests {
         let mut expected = [0u8; 48];
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());
-    }
-
-    #[test]
-    fn stamped_dealer_submission_bcs_round_trips_with_timestamp() {
-        use move_types::CommitteeSignature;
-        use move_types::DealerMessagesHashV1;
-        use move_types::DealerSubmissionV1;
-        use move_types::LinkedTableNode;
-        use move_types::StampedDealerSubmissionV1;
-        let dealer = Address::new([7u8; 32]);
-        let node: LinkedTableNode<Address, StampedDealerSubmissionV1> = LinkedTableNode {
-            prev: None,
-            next: Some(dealer),
-            value: StampedDealerSubmissionV1 {
-                submission: DealerSubmissionV1 {
-                    message: DealerMessagesHashV1 {
-                        dealer_address: dealer,
-                        messages_hash: vec![1, 2, 3],
-                    },
-                    signature: CommitteeSignature {
-                        epoch: 9,
-                        signature: vec![0xaa],
-                        signers_bitmap: vec![0x01],
-                    },
-                },
-                timestamp_ms: 123_456,
-            },
-        };
-        let bytes = bcs::to_bytes(&node).unwrap();
-        let decoded: LinkedTableNode<Address, StampedDealerSubmissionV1> =
-            bcs::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.value.timestamp_ms, 123_456);
-        assert_eq!(decoded.value.submission.message.dealer_address, dealer);
-        assert_eq!(decoded.next, Some(dealer));
-    }
-
-    fn stamped(
-        dealer: Address,
-        next: Option<Address>,
-        timestamp_ms: u64,
-    ) -> move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1> {
-        move_types::LinkedTableNode {
-            prev: None,
-            next,
-            value: move_types::StampedDealerSubmissionV1 {
-                submission: move_types::DealerSubmissionV1 {
-                    message: move_types::DealerMessagesHashV1 {
-                        dealer_address: dealer,
-                        messages_hash: vec![],
-                    },
-                    signature: move_types::CommitteeSignature {
-                        epoch: 1,
-                        signature: vec![],
-                        signers_bitmap: vec![],
-                    },
-                },
-                timestamp_ms,
-            },
-        }
-    }
-
-    #[test]
-    fn dangling_link_fails_the_read_instead_of_returning_a_short_prefix() {
-        let (a, b, c) = (
-            Address::new([1u8; 32]),
-            Address::new([2u8; 32]),
-            Address::new([3u8; 32]),
-        );
-        let full = |missing: Option<Address>| {
-            [(c, Some(a)), (a, Some(b)), (b, None)]
-                .into_iter()
-                .filter(|(d, _)| Some(*d) != missing)
-                .map(|(d, next)| (d, stamped(d, next, 10)))
-                .collect::<std::collections::HashMap<_, _>>()
-        };
-
-        let walked = walk_cert_table(c, full(None)).expect("complete table walks");
-        assert_eq!(
-            walked.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
-            vec![c, a, b],
-            "the walk must follow next pointers, not map iteration or address order"
-        );
-
-        let headless = walk_cert_table(c, full(Some(c))).expect_err("absent head must fail");
-        assert_eq!(
-            headless
-                .downcast_ref::<IncompleteCertTableRead>()
-                .expect("absent head is a raced read, not an empty table")
-                .dealer,
-            c,
-        );
-
-        let err = walk_cert_table(c, full(Some(a))).expect_err("dangling link must fail");
-        assert_eq!(
-            err.downcast_ref::<IncompleteCertTableRead>()
-                .expect("typed so pollers can retry it and sizing can treat it as fatal")
-                .dealer,
-            a,
-            "the error must name the absent node, not the head or the tail"
-        );
-    }
-
-    #[test]
-    fn timestamp_ordering_rejects_only_a_decreasing_pair() {
-        let d = |n: u8| Address::new([n; 32]);
-        let list = |stamps: &[u64]| {
-            stamps
-                .iter()
-                .enumerate()
-                .map(|(i, ms)| (d(i as u8), stamped(d(i as u8), None, *ms).value))
-                .collect::<Vec<_>>()
-        };
-
-        ensure_timestamp_ordered(&list(&[])).expect("empty");
-        ensure_timestamp_ordered(&list(&[5])).expect("single");
-        ensure_timestamp_ordered(&list(&[10, 10, 10])).expect("equal stamps are ordered");
-        ensure_timestamp_ordered(&list(&[1, 10, 10, 20])).expect("non-decreasing");
-
-        let err =
-            ensure_timestamp_ordered(&list(&[1, 20, 10])).expect_err("a decreasing pair must fail");
-        let unordered = err
-            .downcast_ref::<UnorderedCertTableRead>()
-            .expect("typed so publish can tolerate it while the window walks cannot");
-        assert_eq!((unordered.earlier_ms, unordered.later_ms), (20, 10));
-        // The addresses must track their stamps, or the message names the wrong dealer.
-        assert_eq!((unordered.earlier, unordered.later), (d(1), d(2)));
     }
 }
