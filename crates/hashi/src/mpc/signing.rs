@@ -236,6 +236,16 @@ impl PeerCooldowns {
     fn record_success(&self, peer: &Address) {
         self.until.lock().unwrap().remove(peer);
     }
+
+    /// The earliest moment any of `peers` comes off cooldown, if one is
+    /// cooling.
+    fn earliest_expiry<'a>(&self, peers: impl IntoIterator<Item = &'a Address>) -> Option<Instant> {
+        let until = self.until.lock().unwrap();
+        peers
+            .into_iter()
+            .filter_map(|peer| until.get(peer).copied())
+            .min()
+    }
 }
 
 fn presig_pool_fingerprint<'a>(nonces: impl Iterator<Item = &'a G>) -> String {
@@ -559,7 +569,6 @@ impl SigningManager {
             .with_label_values(&[MPC_LABEL_SIGNING])
             .start_timer();
         let mut backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
-        let mut session_has_responses = false;
         while !pending.is_empty() {
             let mut i = 0;
             while i < pending.len() {
@@ -615,16 +624,9 @@ impl SigningManager {
                 }
                 break;
             }
-            let (progressed, got_response) = self
-                .collect_partial_sigs_from_peers(
-                    p2p_channel,
-                    &mut pending,
-                    deadline,
-                    session_has_responses,
-                    metrics,
-                )
+            let progressed = self
+                .collect_partial_sigs_from_peers(p2p_channel, &mut pending, deadline, metrics)
                 .await;
-            session_has_responses |= got_response;
             if progressed {
                 backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
             } else {
@@ -936,18 +938,14 @@ impl SigningManager {
     /// its duration. Peers in cooldown or blamed for bad shares are skipped
     /// for the round entirely.
     ///
-    /// Returns `(progressed, got_response)`: whether any new partials were
-    /// merged, and whether any peer answered successfully at all. The caller
-    /// feeds the latter back as `session_has_responses`, which confines the
-    /// all-cooling fallback below to the fleet-wide-blip case.
+    /// Returns whether any new partials were merged.
     async fn collect_partial_sigs_from_peers(
         &self,
         p2p_channel: &impl P2PChannel,
         pending: &mut [InputSigningState],
         deadline: Instant,
-        session_has_responses: bool,
         metrics: &Metrics,
-    ) -> (bool, bool) {
+    ) -> bool {
         let now = Instant::now();
         let blamed = self.bad_share_peers.snapshot(now);
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
@@ -964,21 +962,17 @@ impl SigningManager {
                 }
             }
         }
-        if peer_ids.is_empty() && !session_has_responses {
-            // Every remaining peer is cooling and nobody has answered this
-            // session at all — the fleet-wide-blip signature (e.g. right
-            // after reconfig). Poll everyone anyway rather than blacking out
-            // the call for a whole cooldown window. Once the session has
-            // heard from any peer, cooling stragglers instead wait out
-            // their cooldown, which re-permits them within the deadline.
-            for st in pending.iter() {
-                for peer in &st.peers_remaining {
-                    peer_ids.entry(*peer).or_default().push(st.signing_id);
-                }
-            }
-        }
         if peer_ids.is_empty() {
-            return (false, false);
+            // Every remaining peer is cooling from a hard failure (explicit
+            // not-ready answers are never cooled). Storming a struggling
+            // fleet with more polls helps nobody: sleep until the first
+            // cooldown lapses (clamped to the deadline) and let the next
+            // round retry at cooldown cadence.
+            let remaining = pending.iter().flat_map(|st| st.peers_remaining.iter());
+            if let Some(expiry) = self.peer_cooldowns.earliest_expiry(remaining) {
+                let _ = tokio::time::timeout_at(deadline, tokio::time::sleep_until(expiry)).await;
+            }
+            return false;
         }
         let mut in_flight: FuturesUnordered<_> = peer_ids
             .into_iter()
@@ -1001,7 +995,6 @@ impl SigningManager {
             .map(|(i, st)| (st.signing_id, i))
             .collect();
         let mut progressed = false;
-        let mut got_response = false;
         loop {
             let (peer, result) = match tokio::time::timeout_at(deadline, in_flight.next()).await {
                 Ok(Some(item)) => item,
@@ -1017,7 +1010,6 @@ impl SigningManager {
             };
             match result {
                 Ok(response) => {
-                    got_response = true;
                     // A concurrent signing task may have blamed this peer
                     // after the poll launched; its partials are not welcome.
                     if self.bad_share_peers.is_blamed(&peer, Instant::now()) {
@@ -1084,7 +1076,7 @@ impl SigningManager {
                 }
             }
         }
-        (progressed, got_response)
+        progressed
     }
 
     /// Excludes the peers that own provably bad shares (ownership is
@@ -2569,7 +2561,7 @@ mod tests {
         )];
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, false, &metrics)
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
             .await;
 
         let calls = p2p.calls.lock().unwrap();
@@ -2628,7 +2620,7 @@ mod tests {
         }];
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, false, &metrics)
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
             .await;
 
         assert!(
@@ -2672,7 +2664,7 @@ mod tests {
         )];
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, false, &metrics)
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
             .await;
 
         let st = &pending[0];
@@ -3040,10 +3032,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_sign_polls_cooling_peers_when_all_are_cooling() {
-        // When every remaining peer is cooling, the round must fall back to
-        // polling them all instead of sleeping the call away — otherwise a
-        // fleet-wide blip blacks out signing for a full cooldown window.
+    async fn test_sign_waits_out_cooldowns_instead_of_storming_a_down_fleet() {
+        // With every peer hard-failing and the deadline shorter than the
+        // cooldown, each peer gets exactly one round of polls; the call then
+        // sleeps rather than re-polling the down fleet every backoff cycle.
         let setup = SigningTestSetup::new(4);
         let message = b"all-cooling";
         let beacon = S::zero();
@@ -3064,7 +3056,48 @@ mod tests {
             0,
             &beacon,
             None,
-            Duration::from_secs(5),
+            PARTIAL_SIGS_PEER_COOLDOWN / 2,
+            &test_metrics(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let calls = p2p.calls.lock().unwrap();
+        for i in 1..4usize {
+            let peer_calls = calls.get(&test_address(i)).copied().unwrap_or(0);
+            assert_eq!(
+                peer_calls,
+                1 + PARTIAL_SIGS_CALL_RETRIES,
+                "peer {i} must be polled exactly one round, not stormed"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_retries_cooled_peers_once_their_cooldown_lapses() {
+        // With a deadline longer than the cooldown, the call sleeps to the
+        // cooldown expiry and then re-polls the fleet at cooldown cadence.
+        let setup = SigningTestSetup::new(4);
+        let message = b"cooldown-cadence";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let p2p = CountingP2PChannel {
+            fail: (1..4usize).map(test_address).collect(),
+            not_ready: HashSet::new(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            PARTIAL_SIGS_PEER_COOLDOWN * 2 + Duration::from_secs(1),
             &test_metrics(),
         )
         .await;
@@ -3075,55 +3108,10 @@ mod tests {
             let peer_calls = calls.get(&test_address(i)).copied().unwrap_or(0);
             assert!(
                 peer_calls > 1 + PARTIAL_SIGS_CALL_RETRIES,
-                "peer {i} must be re-polled via the all-cooling fallback, \
+                "peer {i} must be re-polled after its cooldown lapsed, \
                  got {peer_calls} poll(s)"
             );
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_all_cooling_fallback_is_confined_to_zero_response_sessions() {
-        // Once a session has heard from any peer, a round whose eligible set
-        // is empty (only cooling stragglers remain) must NOT override the
-        // cooldowns; before any response, it must.
-        let setup = SigningTestSetup::new(4);
-        let mgr = &setup.managers[0];
-        let metrics = test_metrics();
-        let straggler = test_address(1);
-        mgr.peer_cooldowns.record_failure(straggler);
-
-        let p2p = CountingP2PChannel {
-            fail: HashSet::new(),
-            not_ready: HashSet::new(),
-            calls: Mutex::new(HashMap::new()),
-        };
-        let deadline = Instant::now() + Duration::from_secs(5);
-
-        // Tail case: the session has responses; the cooling straggler is
-        // left alone.
-        let mut pending = vec![test_input_state(test_request_id(), vec![], vec![straggler])];
-        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, true, &metrics)
-            .await;
-        assert_eq!(
-            p2p.calls.lock().unwrap().get(&straggler),
-            None,
-            "a cooling straggler must not be re-polled once the session has responses"
-        );
-
-        // Blip case: no responses yet; the fallback polls it anyway.
-        let mut pending = vec![test_input_state(test_request_id(), vec![], vec![straggler])];
-        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, false, &metrics)
-            .await;
-        assert!(
-            p2p.calls
-                .lock()
-                .unwrap()
-                .get(&straggler)
-                .copied()
-                .unwrap_or(0)
-                >= 1,
-            "with zero responses this session, the fallback must poll cooling peers"
-        );
     }
 
     #[tokio::test(start_paused = true)]
