@@ -10,6 +10,7 @@
 
 use anyhow::Result;
 use e2e_tests::TestNetworksBuilder;
+use e2e_tests::snapshot;
 use e2e_tests::test_helpers::create_deposit_and_wait;
 use e2e_tests::test_helpers::get_hbtc_balance;
 use e2e_tests::test_helpers::init_test_logging;
@@ -219,5 +220,104 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     info!("v1 entry point correctly rejected");
 
     info!("=== UPGRADE TEST PASSED ===");
+    Ok(())
+}
+
+/// The real "deployed bytecode → current source" upgrade test.
+///
+/// Bootstraps the local net by publishing the checked-in **bytecode snapshot**
+/// of the deployed testnet package as v1 (via
+/// [`TestNetworksBuilder::with_v1_from_snapshot`]), then runs the ordinary
+/// governance-gated upgrade flow ([`upgrade_flow::execute_full_upgrade`]) to
+/// upgrade it to the current `packages/hashi` source. This proves — end to
+/// end, against a running Sui net — that the deployed bytecode can actually be
+/// upgraded to what's in the tree today, a strictly stronger claim than the
+/// static compatibility gate (which only normalizes-and-diffs the modules).
+///
+/// Asserts:
+/// - v1 publishes from the snapshot and forms a committee (DKG completes).
+/// - the governance upgrade to current source succeeds (effects success).
+/// - the new package id differs from v1's.
+/// - all nodes' watchers pick up the new package version.
+/// - a v2-only module (`upgrade_canary::version`) is callable post-upgrade.
+#[tokio::test]
+async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
+    init_test_logging();
+
+    // v1 = the checked-in deployed bytecode snapshot, NOT a source build.
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .with_v1_from_snapshot(snapshot::default_snapshot_dir())
+        .build()
+        .await?;
+
+    let hashi_ids = networks.hashi_network.ids();
+    info!("snapshot-published v1 package ID: {}", hashi_ids.package_id);
+
+    // Committee must be formed (DKG done) before the upgrade proposal can be
+    // voted through at the required 100% quorum.
+    networks.hashi_network.nodes()[0]
+        .wait_for_mpc_key(Duration::from_secs(120))
+        .await?;
+
+    // ── Upgrade the deployed bytecode to the current source ─────────────
+    let new_package_id = upgrade_flow::execute_full_upgrade(&mut networks).await?;
+    info!("upgraded snapshot v1 -> current source: new package {new_package_id}");
+    assert_ne!(
+        new_package_id, hashi_ids.package_id,
+        "upgrade should mint a new package id"
+    );
+
+    // ── All nodes' watchers must pick up the new package version ─────────
+    info!("waiting for all nodes to detect the new package version...");
+    let wait_start = std::time::Instant::now();
+    let max_wait = Duration::from_secs(30);
+    loop {
+        let all_updated = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .all(|node| node.hashi().onchain_state().package_id() == Some(new_package_id));
+        if all_updated {
+            break;
+        }
+        if wait_start.elapsed() > max_wait {
+            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+                let latest = node.hashi().onchain_state().package_id();
+                info!("node {i}: package_id={latest:?}");
+            }
+            anyhow::bail!("timeout: not all nodes detected the new package version");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // ── v2-only canary module must be callable post-upgrade ─────────────
+    //
+    // `execute_full_upgrade` adds an `upgrade_canary` module to the patched
+    // source; being callable proves the new code (not just a new object id)
+    // is live on the upgraded package.
+    info!("calling v2-only upgrade_canary::version()...");
+    let user_key = networks.sui_network.user_keys.first().unwrap();
+    let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+    let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+        .with_signer(user_key.clone().into());
+
+    let mut builder = TransactionBuilder::new();
+    builder.move_call(
+        Function::new(
+            new_package_id,
+            Identifier::from_static("upgrade_canary"),
+            Identifier::from_static("version"),
+        ),
+        vec![],
+    );
+    let canary_resp = executor.execute(builder).await?;
+    assert!(
+        canary_resp.transaction().effects().status().success(),
+        "v2-only canary module should be callable after upgrading the deployed bytecode"
+    );
+    info!("v2 canary module call succeeded");
+
+    info!("=== SNAPSHOT UPGRADE TEST PASSED ===");
     Ok(())
 }
