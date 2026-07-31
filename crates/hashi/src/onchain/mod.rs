@@ -78,6 +78,7 @@ mod mirror;
 mod route;
 pub mod types;
 pub mod version;
+mod versioned_decode;
 mod watcher;
 
 fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::mpc::EncryptionGroupElement> {
@@ -885,11 +886,26 @@ impl OnchainState {
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
                         DynamicField::path_builder().value().finish(),
+                        DynamicField::path_builder().value_type(),
                     ])),
             )
             .pipe(Box::pin);
         while let Some(field) = stream.try_next().await? {
             if field.name().value() == key_bcs.as_slice() {
+                // Decode by the layout the chain reports (self-describing),
+                // rather than assuming `EpochCertsV1`. The bucket structs are
+                // BCS-identical, but a stamped bucket implies stamped node
+                // values this build cannot decode — so fail cleanly here
+                // instead of misparsing the linked-table nodes downstream.
+                let value_type = versioned_decode::field_value_type(&field)?;
+                match versioned_decode::TobCertLayout::from_struct_tag(&value_type)? {
+                    versioned_decode::TobCertLayout::Bare => {}
+                    versioned_decode::TobCertLayout::Stamped => anyhow::bail!(
+                        "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses \
+                         the stamped cert layout, which this binary does not support — upgrade \
+                         required"
+                    ),
+                }
                 let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
                 return Ok(Some(epoch_certs));
             }
