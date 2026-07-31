@@ -20,7 +20,7 @@ pub use interfaces::ChannelResult;
 pub use interfaces::OrderedBroadcastChannel;
 pub use interfaces::P2PChannel;
 pub use sui_tob::PrefetchedTobChannel;
-pub use sui_tob::SuiTobChannel;
+pub use sui_tob::SuiTobSessionChannel;
 pub use sui_tob::fetch_certificates;
 pub use sui_tob::fetch_key_generation_certificates;
 pub use timeout_and_retry::send_each;

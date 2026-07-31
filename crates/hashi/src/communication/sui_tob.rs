@@ -47,7 +47,7 @@ impl From<TobError> for ChannelError {
     }
 }
 
-pub struct SuiTobChannel {
+pub struct SuiTobSessionChannel {
     hashi_ids: HashiIds,
     onchain_state: OnchainState,
     epoch: u64,
@@ -61,7 +61,7 @@ pub struct SuiTobChannel {
     pending_certs: VecDeque<CertificateV1>,
 }
 
-impl SuiTobChannel {
+impl SuiTobSessionChannel {
     pub fn new(
         hashi_ids: HashiIds,
         onchain_state: OnchainState,
@@ -168,7 +168,7 @@ pub async fn fetch_key_generation_certificates(
 }
 
 #[async_trait]
-impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
+impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
         let existing = fetch_certificates(
