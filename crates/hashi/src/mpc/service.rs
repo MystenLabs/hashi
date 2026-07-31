@@ -1338,8 +1338,8 @@ impl MpcService {
                     warn!(
                         "fetch_final_nonce_certs: read side never observed past window cutoff \
                          {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?} \
-                         (stalled chain clock or unresponsive clock RPC); failing recovery to \
-                         retry on the next tick"
+                         (stalled chain clock, lagging read-side fullnode, or unresponsive clock \
+                         RPC); failing this batch"
                     );
                     anyhow::bail!(
                         "nonce window did not close for epoch {epoch} batch {batch_index}"

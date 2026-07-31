@@ -780,8 +780,11 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_window_cutoff_unreached_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_window_cutoff_unreached_total",
-                "Nonce batches abandoned because the read side's checkpoint clock never \
-                 passed the accumulation window cutoff",
+                "Nonce batches abandoned because the read side was never observed past the \
+                 accumulation window cutoff. Does not distinguish a stalled chain clock from \
+                 an unresponsive clock RPC: inside the wait loop the outer deadline fires \
+                 first, so a hung read lands here rather than in \
+                 hashi_mpc_nonce_read_side_clock_errors_total",
                 registry,
             )
             .unwrap(),
@@ -825,8 +828,11 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_read_side_clock_errors_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_read_side_clock_errors_total",
-                "Failed reads of the read-side checkpoint clock while waiting out an \
-                 accumulation window; distinguishes a broken RPC from a stalled clock",
+                "Read-side checkpoint clock reads that failed while waiting out an accumulation \
+                 window. Catches errors, and a hang only on the first probe; a hang inside the \
+                 wait loop is cut short by the shorter outer deadline and lands in \
+                 hashi_mpc_nonce_window_cutoff_unreached_total instead, so a zero here does not \
+                 rule out a broken clock RPC",
                 registry,
             )
             .unwrap(),

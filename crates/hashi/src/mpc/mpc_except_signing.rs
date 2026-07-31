@@ -5643,8 +5643,6 @@ impl MpcManager {
             .unwrap()
             .window_certified_nonce_dealers(certs);
         for (_table_dealer, cert) in certs {
-            // Same key domain as the walk that built `certified_dealers`: the signed
-            // dealer, not the attacker-chosen table key.
             let dealer = &cert.submission.message.dealer_address;
             if !certified_dealers.contains(dealer) {
                 continue;

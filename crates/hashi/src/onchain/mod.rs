@@ -2054,26 +2054,36 @@ mod tests {
             Address::new([3u8; 32]),
         );
         let full = |missing: Option<Address>| {
-            [(a, Some(b)), (b, Some(c)), (c, None)]
+            [(c, Some(a)), (a, Some(b)), (b, None)]
                 .into_iter()
                 .filter(|(d, _)| Some(*d) != missing)
                 .map(|(d, next)| (d, stamped(d, next, 10)))
                 .collect::<std::collections::HashMap<_, _>>()
         };
 
-        let walked = walk_cert_table(a, full(None)).expect("complete table walks");
+        let walked = walk_cert_table(c, full(None)).expect("complete table walks");
         assert_eq!(
             walked.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
-            vec![a, b, c],
-            "the walk must follow next pointers, not map iteration order"
+            vec![c, a, b],
+            "the walk must follow next pointers, not map iteration or address order"
         );
 
-        let err = walk_cert_table(a, full(Some(b))).expect_err("dangling link must fail");
+        let headless = walk_cert_table(c, full(Some(c))).expect_err("absent head must fail");
+        assert_eq!(
+            headless
+                .downcast_ref::<IncompleteCertTableRead>()
+                .expect("absent head is a raced read, not an empty table")
+                .dealer,
+            c,
+        );
+
+        let err = walk_cert_table(c, full(Some(a))).expect_err("dangling link must fail");
         assert_eq!(
             err.downcast_ref::<IncompleteCertTableRead>()
                 .expect("typed so pollers can retry it and sizing can treat it as fatal")
                 .dealer,
-            b,
+            a,
+            "the error must name the absent node, not the head or the tail"
         );
     }
 
@@ -2099,5 +2109,7 @@ mod tests {
             .downcast_ref::<UnorderedCertTableRead>()
             .expect("typed so publish can tolerate it while the window walks cannot");
         assert_eq!((unordered.earlier_ms, unordered.later_ms), (20, 10));
+        // The addresses must track their stamps, or the message names the wrong dealer.
+        assert_eq!((unordered.earlier, unordered.later), (d(1), d(2)));
     }
 }

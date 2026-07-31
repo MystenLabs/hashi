@@ -10863,8 +10863,6 @@ async fn test_nonce_window_live_collection_past_floor() {
         let test_manager = Arc::clone(&test_manager);
         let mock_p2p = &mock_p2p;
         async move {
-            // Production decides the cutoff once over the canonical list and hands it
-            // to the party phase; do the same here rather than let the loop derive it.
             let cutoff_ms = test_manager
                 .read()
                 .unwrap()
@@ -12673,10 +12671,6 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         HashSet::from([dealer_addr, second_dealer_addr]),
         "the floor takes both dealers, so neither alone can satisfy it"
     );
-    // The thin cert is rejected by the kind's weight gate, which every node
-    // applies to the same cert bytes — so peers reject it too and the smaller
-    // batch is still agreed. Counting this as a local skip would make a
-    // Byzantine dealer able to wedge the fleet by publishing Confirm at W-f.
     assert_eq!(
         admission.local_skips, 0,
         "a deterministic weight-gate rejection is not a node-local skip"
@@ -12696,10 +12690,6 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     );
 }
 
-/// The counterpart to the thin-cert case: a dealer skipped because *this node*
-/// could neither resolve the cert kind locally nor pull it from a peer. Peers
-/// with the same cert do admit that dealer, so the batch this node would build
-/// is not the batch the epoch produced, and the caller must discard it.
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() {
     let mut rng = rand::thread_rng();
@@ -12724,8 +12714,6 @@ async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() 
         }
     };
 
-    // Nobody ever dealt for node 4, so no node holds messages matching this
-    // hash: local resolution misses and the peer pull finds nothing either.
     let unresolvable_target = DealerMessagesHash {
         dealer_address: setup.address(4),
         messages_hash: MessageHash::from([9u8; 32]),
@@ -12736,8 +12724,7 @@ async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() 
 
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    // Ordered before the two dealers that reach the floor, so the phase still
-    // returns Ok and the skip is observable rather than masked by an error.
+
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
         make_cert(&unresolvable_target, &unresolvable_sigs),
         make_cert(&confirm_target, &sigs),
