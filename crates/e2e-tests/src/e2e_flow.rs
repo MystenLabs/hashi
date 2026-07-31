@@ -29,12 +29,14 @@ mod tests {
 
     use crate::test_helpers::BackgroundMiner;
     use crate::test_helpers::create_deposit_and_wait;
+    use crate::test_helpers::extract_witness_program;
     use crate::test_helpers::get_hbtc_balance;
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
+    use crate::test_helpers::wait_for_withdrawal_confirmation;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -238,87 +240,6 @@ mod tests {
             deposit_request.approval_cert.is_none(),
             "brand-new deposit should not be approved by epoch-change stale-cert processing"
         );
-    }
-
-    async fn wait_for_withdrawal_confirmation(
-        sui_client: &mut sui_rpc::Client,
-        timeout: Duration,
-    ) -> Result<WithdrawalConfirmed> {
-        info!("Waiting for withdrawal confirmation...");
-
-        let start = std::time::Instant::now();
-        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
-            .transactions()
-            .events()
-            .events()
-            .contents()
-            .finish()]);
-        let mut subscription = sui_client
-            .subscription_client()
-            .subscribe_checkpoints(
-                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
-            )
-            .await?
-            .into_inner();
-
-        while let Some(item) = subscription.next().await {
-            if start.elapsed() > timeout {
-                return Err(anyhow!(
-                    "Timeout waiting for withdrawal confirmation after {:?}",
-                    timeout
-                ));
-            }
-
-            let checkpoint = match item {
-                Ok(checkpoint) => checkpoint,
-                Err(e) => {
-                    debug!("Error in checkpoint stream: {}", e);
-                    continue;
-                }
-            };
-
-            debug!(
-                "Received checkpoint {}, checking for WithdrawalConfirmed...",
-                checkpoint.cursor()
-            );
-
-            for txn in checkpoint.checkpoint().transactions() {
-                for event in txn.events().events() {
-                    let event_type = event.contents().name();
-
-                    if event_type.contains("WithdrawalConfirmed") {
-                        match WithdrawalConfirmed::from_bcs(event.contents().value()) {
-                            Ok(event_data) => {
-                                info!(
-                                    withdrawal_txn_id = %event_data.withdrawal_txn_id,
-                                    txid = %event_data.txid,
-                                    "Withdrawal confirmed!"
-                                );
-                                return Ok(event_data);
-                            }
-                            Err(e) => {
-                                debug!("Failed to parse WithdrawalConfirmed: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
-    }
-
-    fn extract_witness_program(address: &BitcoinAddress) -> Result<Vec<u8>> {
-        let script = address.script_pubkey();
-        let bytes = script.as_bytes();
-        match bytes {
-            [0x00, 0x14, rest @ ..] if rest.len() == 20 => Ok(rest.to_vec()),
-            [0x51, 0x20, rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
-            _ => Err(anyhow!(
-                "Unsupported script pubkey for withdrawal: {script}"
-            )),
-        }
     }
 
     /// Wait for a withdrawal transaction to be confirmed on the Bitcoin chain.

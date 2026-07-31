@@ -16,6 +16,7 @@ use futures::StreamExt;
 use hashi::sui_tx_executor::SuiTxExecutor;
 use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::move_types::DepositConfirmed;
+use hashi_types::move_types::WithdrawalConfirmed;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -196,6 +197,133 @@ pub async fn create_deposit_and_wait(
     info!("Deposit confirmed on Sui");
 
     Ok(hbtc_recipient)
+}
+
+/// Extract the witness program (the bytes after the segwit version +
+/// push-length prefix) from a P2WPKH (`0x00 0x14 …20`) or P2TR
+/// (`0x51 0x20 …32`) address. This is the destination form the withdrawal
+/// entry function expects.
+pub fn extract_witness_program(address: &BitcoinAddress) -> Result<Vec<u8>> {
+    let script = address.script_pubkey();
+    let bytes = script.as_bytes();
+    match bytes {
+        [0x00, 0x14, rest @ ..] if rest.len() == 20 => Ok(rest.to_vec()),
+        [0x51, 0x20, rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
+        _ => Err(anyhow!(
+            "Unsupported script pubkey for withdrawal: {script}"
+        )),
+    }
+}
+
+/// Subscribe to checkpoints and return the first `WithdrawalConfirmed` event,
+/// or error on timeout. Confirmation is the terminal on-chain milestone of a
+/// withdrawal: it fires only after the committee has generated presignatures,
+/// threshold-signed the BTC transaction, the guardian co-signed, and the leader
+/// observed the mined tx — so waiting on it exercises the whole signing path.
+pub async fn wait_for_withdrawal_confirmation(
+    sui_client: &mut sui_rpc::Client,
+    timeout: Duration,
+) -> Result<WithdrawalConfirmed> {
+    info!("Waiting for withdrawal confirmation...");
+
+    let start = std::time::Instant::now();
+    let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
+        .transactions()
+        .events()
+        .events()
+        .contents()
+        .finish()]);
+    let mut subscription = sui_client
+        .subscription_client()
+        .subscribe_checkpoints(
+            SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+        )
+        .await?
+        .into_inner();
+
+    while let Some(item) = subscription.next().await {
+        if start.elapsed() > timeout {
+            return Err(anyhow!(
+                "Timeout waiting for withdrawal confirmation after {:?}",
+                timeout
+            ));
+        }
+
+        let checkpoint = match item {
+            Ok(checkpoint) => checkpoint,
+            Err(e) => {
+                debug!("Error in checkpoint stream: {}", e);
+                continue;
+            }
+        };
+
+        debug!(
+            "Received checkpoint {}, checking for WithdrawalConfirmed...",
+            checkpoint.cursor()
+        );
+
+        for txn in checkpoint.checkpoint().transactions() {
+            for event in txn.events().events() {
+                let event_type = event.contents().name();
+
+                if event_type.contains("WithdrawalConfirmed") {
+                    match WithdrawalConfirmed::from_bcs(event.contents().value()) {
+                        Ok(event_data) => {
+                            info!(
+                                withdrawal_txn_id = %event_data.withdrawal_txn_id,
+                                txid = %event_data.txid,
+                                "Withdrawal confirmed!"
+                            );
+                            return Ok(event_data);
+                        }
+                        Err(e) => {
+                            debug!("Failed to parse WithdrawalConfirmed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    Err(anyhow!("Checkpoint subscription ended unexpectedly"))
+}
+
+/// Request a withdrawal of `amount_sats` to a fresh regtest address and wait
+/// for it to be confirmed on Sui, returning the `WithdrawalConfirmed` event.
+///
+/// Mirrors [`create_deposit_and_wait`] for the withdrawal side: it drives the
+/// full presignature-generation + threshold-signing path, mining Bitcoin blocks
+/// in the background so the signed transaction confirms and the leader reports
+/// `WithdrawalConfirmed`.
+pub async fn create_withdrawal_and_wait(
+    networks: &mut TestNetworks,
+    amount_sats: u64,
+) -> Result<WithdrawalConfirmed> {
+    let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+    let user_key = networks.sui_network.user_keys.first().unwrap();
+    let btc_destination = networks.bitcoin_node.get_new_address()?;
+    let destination_bytes = extract_witness_program(&btc_destination)?;
+    info!("Requesting withdrawal of {amount_sats} sats to {btc_destination}");
+
+    let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+        .with_signer(user_key.clone().into());
+    let withdrawal_request_id = executor
+        .execute_create_withdrawal_request(amount_sats, destination_bytes)
+        .await?;
+    info!("Withdrawal request created: {withdrawal_request_id}");
+
+    // Mine in the background so the signed BTC transaction confirms and the
+    // leader's block-driven loop reports the withdrawal on Sui.
+    let _miner = BackgroundMiner::start(&networks.bitcoin_node);
+    let confirmed = wait_for_withdrawal_confirmation(
+        &mut networks.sui_network.client,
+        Duration::from_secs(300),
+    )
+    .await?;
+    info!("Withdrawal confirmed on Sui");
+
+    Ok(confirmed)
 }
 
 /// Wait until every node's object mirror shows the spent withdrawal
