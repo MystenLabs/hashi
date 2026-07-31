@@ -546,6 +546,7 @@ impl SigningManager {
                     public_nonce,
                     derivation_address: input.derivation_address,
                     partials,
+                    required: threshold as usize,
                     peers_remaining: all_peers.clone(),
                 }),
                 Err(e) => {
@@ -578,7 +579,14 @@ impl SigningManager {
                 };
                 match try_finalize_signature(&params, &st.partials, peers_exhausted, metrics).await
                 {
-                    FinalizeOutcome::NeedMore => i += 1,
+                    FinalizeOutcome::NeedMore => {
+                        // The attempt failed with the shares in hand; demand
+                        // at least one more before the next round may
+                        // early-exit.
+                        let st = &mut pending[i];
+                        st.required = st.required.max(st.partials.len() + 1);
+                        i += 1;
+                    }
                     FinalizeOutcome::Done(sig, bad_indices) => {
                         let st = pending.swap_remove(i);
                         let _ = result_tx.send((st.signing_id, Ok(sig)));
@@ -819,6 +827,14 @@ struct InputSigningState {
     public_nonce: G,
     derivation_address: Option<DerivationAddress>,
     partials: Vec<Eval<S>>,
+    /// Minimum number of partials before a poll round may early-exit for
+    /// this input. Starts at the signing threshold; every failed
+    /// aggregation attempt raises it to one past the count that just
+    /// failed. Without this, a round entered after a failed attempt is
+    /// already at threshold, so the first response — even an empty one —
+    /// would break the round and cancel the slower peers whose shares RS
+    /// recovery actually needs.
+    required: usize,
     /// Peers not yet merged for this input
     peers_remaining: HashSet<Address>,
 }
@@ -932,7 +948,6 @@ impl SigningManager {
         session_has_responses: bool,
         metrics: &Metrics,
     ) -> (bool, bool) {
-        let threshold = self.config.threshold;
         let now = Instant::now();
         let blamed = self.bad_share_peers.snapshot(now);
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
@@ -1042,10 +1057,7 @@ impl SigningManager {
                             }
                         }
                     }
-                    if pending
-                        .iter()
-                        .all(|st| st.partials.len() >= threshold as usize)
-                    {
+                    if pending.iter().all(|st| st.partials.len() >= st.required) {
                         break;
                     }
                 }
@@ -1520,6 +1532,61 @@ mod tests {
                     partial_sigs: std::collections::BTreeMap::new(),
                 })
             }
+        }
+    }
+
+    /// Canned responses with a per-peer artificial delay, for
+    /// ordering-sensitive tests under a paused clock.
+    struct DelayedP2PChannel {
+        responses: HashMap<Address, (Duration, Vec<Eval<S>>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for DelayedP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            _: &Address,
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            let Some((delay, evals)) = self.responses.get(party) else {
+                return Err(ChannelError::ClientNotFound(*party));
+            };
+            tokio::time::sleep(*delay).await;
+            Ok(GetPartialSignaturesResponse {
+                partial_sigs: request
+                    .signing_ids
+                    .iter()
+                    .map(|id| (*id, evals.clone()))
+                    .collect(),
+            })
         }
     }
 
@@ -2387,6 +2454,9 @@ mod tests {
             public_nonce: G::generator(),
             derivation_address: None,
             partials,
+            // Helper-driven collect tests exercise full rounds; the
+            // early-exit is covered by dedicated tests.
+            required: usize::MAX,
             peers_remaining: peers_remaining.into_iter().collect(),
         }
     }
@@ -2513,6 +2583,62 @@ mod tests {
             "a blamed peer must be removed from peers_remaining"
         );
         assert!(pending[0].peers_remaining.contains(&healthy));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_round_does_not_exit_below_the_required_share_count() {
+        // After a failed aggregation the input needs more than threshold
+        // shares. A fast (empty) response must not break the round at the
+        // stale threshold and cancel the slower peer carrying the extra
+        // share RS recovery needs.
+        let setup = SigningTestSetup::new(7);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let fast_empty = test_address(3);
+        // Owns share 5 in the mock setup (member i owns share i + 1).
+        let slow_useful = test_address(4);
+        let mut rng = StdRng::seed_from_u64(99);
+
+        let responses = HashMap::from([
+            (fast_empty, (Duration::ZERO, Vec::new())),
+            (
+                slow_useful,
+                (
+                    Duration::from_millis(200),
+                    vec![eval_at(5, S::rand(&mut rng))],
+                ),
+            ),
+        ]);
+        let p2p = DelayedP2PChannel { responses };
+
+        let mut pending = vec![InputSigningState {
+            signing_id: test_request_id(),
+            message: b"m".to_vec(),
+            public_nonce: G::generator(),
+            derivation_address: None,
+            partials: vec![
+                eval_at(1, S::zero()),
+                eval_at(2, S::zero()),
+                eval_at(3, S::zero()),
+            ],
+            // Threshold (3) shares are in hand but aggregation failed once,
+            // so one more share is required before the round may early-exit.
+            required: 4,
+            peers_remaining: [fast_empty, slow_useful].into_iter().collect(),
+        }];
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, false, &metrics)
+            .await;
+
+        assert!(
+            pending[0]
+                .partials
+                .iter()
+                .any(|e| e.index == share_index(5)),
+            "the slow peer's share must be merged; a fast empty response \
+             must not end the round at the stale threshold"
+        );
     }
 
     #[tokio::test]
