@@ -26,3 +26,4 @@ pub use sui_tob::fetch_key_generation_certificates;
 pub use timeout_and_retry::send_each;
 pub use timeout_and_retry::send_to_many;
 pub use timeout_and_retry::with_timeout_and_retry;
+pub use timeout_and_retry::with_timeout_and_retry_budget;

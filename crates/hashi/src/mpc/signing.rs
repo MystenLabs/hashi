@@ -13,20 +13,23 @@ use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
 use fastcrypto_tbls::threshold_schnorr::signing::finalize_schnorr_signature;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
+use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Committee;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Duration;
 use sui_sdk_types::Address;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+use crate::communication::ChannelError;
 use crate::communication::P2PChannel;
-use crate::communication::with_timeout_and_retry;
+use crate::communication::with_timeout_and_retry_budget;
 use crate::metrics::MPC_LABEL_SIGNING;
 use crate::metrics::Metrics;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -37,6 +40,31 @@ use crate::mpc::types::SigningResult;
 
 const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100);
 const PARTIAL_SIGS_COLLECTION_MAX_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Per-attempt timeout for one `get_partial_signatures` poll. Deliberately
+/// small: the collection loop in [`SigningManager::sign`] is itself the retry
+/// mechanism, so a slow peer costs at most one bounded probe per round instead
+/// of the default 10 x 30 s transport-retry budget.
+const PARTIAL_SIGS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Transport retries within one round's poll of a single peer (on top of the
+/// first attempt). Kept minimal for the same reason as the call timeout.
+const PARTIAL_SIGS_CALL_RETRIES: usize = 1;
+
+/// How long a peer whose poll hard-failed (connect/TLS/timeout) is skipped
+/// before being probed again. Bounds the cost of dead peers to one probe per
+/// cooldown window instead of one per round per concurrent signing task.
+/// Deliberately well below the withdrawal signing deadline (30 s): peers
+/// cooled early in a call must become pollable again within that same call,
+/// or one bad round could black out the rest of it.
+const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// How long a bad-share blame lasts before the peer is polled again. Long
+/// enough that a genuinely bad peer costs one RS-recovery detour per window
+/// (re-blaming is cheap), short enough that a healed peer — e.g. one that
+/// was briefly running a divergent version — rejoins well before the epoch
+/// ends.
+const BAD_SHARE_BLAME_DURATION: Duration = Duration::from_secs(3600);
 
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
@@ -73,6 +101,12 @@ struct SigningEpochConfig {
     threshold: u16,
     key_shares: avss::SharesForNode,
     verifying_key: G,
+    /// Authoritative owner of each reduced-domain share index (from the
+    /// epoch's reduced `Nodes`; see `MpcManager::share_owners_for_epoch`).
+    /// Merging accepts a partial signature for an index only from its
+    /// owner, and blame attribution reads the same map, so a peer can
+    /// neither poison nor take credit for another peer's shares.
+    share_owners: HashMap<ShareIndex, Address>,
     refill_divisor: usize,
 }
 
@@ -106,6 +140,112 @@ pub struct SigningManager {
     config: Arc<SigningEpochConfig>,
     state: RwLock<SigningPoolState>,
     refill_tx: Arc<watch::Sender<u32>>,
+    peer_cooldowns: PeerCooldowns,
+    /// Peers that contributed a provably bad partial signature (identified
+    /// against the RS-recovered polynomial in [`try_finalize_signature`]).
+    /// Their partials are excluded from polling and merging while the blame
+    /// lasts: one bad share inside the first `threshold` slots fails plain
+    /// aggregation for every input, so a misbehaving peer would otherwise
+    /// force every signature through the (more partials, more rounds)
+    /// recovery path indefinitely. Blames expire after
+    /// [`BAD_SHARE_BLAME_DURATION`] so a healed peer rejoins without waiting
+    /// for reconfig, and everything resets with the per-epoch manager
+    /// itself.
+    bad_share_peers: BlamedPeers,
+}
+
+/// Peers currently excluded for contributing provably bad shares, and when
+/// each blame expires.
+struct BlamedPeers {
+    until: Mutex<HashMap<Address, Instant>>,
+}
+
+impl BlamedPeers {
+    fn new() -> Self {
+        Self {
+            until: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_blamed(&self, peer: &Address, now: Instant) -> bool {
+        self.until
+            .lock()
+            .unwrap()
+            .get(peer)
+            .is_some_and(|&until| until > now)
+    }
+
+    /// A snapshot of the currently blamed (unexpired) peers.
+    fn snapshot(&self, now: Instant) -> HashSet<Address> {
+        self.until
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&(_, &until)| until > now)
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
+    /// Blames `peers` for [`BAD_SHARE_BLAME_DURATION`], refreshing the
+    /// expiry of peers that are already blamed and pruning expired entries.
+    fn blame(&self, peers: &HashSet<Address>) {
+        let now = Instant::now();
+        let mut until = self.until.lock().unwrap();
+        until.retain(|_, expiry| *expiry > now);
+        let expiry = now + BAD_SHARE_BLAME_DURATION;
+        for peer in peers {
+            until.insert(*peer, expiry);
+        }
+    }
+}
+
+/// Peers whose `get_partial_signatures` poll recently hard-failed
+/// (connect/TLS/timeout), and when each may be probed again.
+///
+/// Shared across all concurrent signing tasks of an epoch so a dead peer
+/// detected by one task is skipped by all of them instead of being
+/// rediscovered per task per round. A cooling peer is only excluded from
+/// polling; it stays in each input's `peers_remaining`, so it contributes
+/// again as soon as a post-cooldown probe succeeds.
+struct PeerCooldowns {
+    until: Mutex<HashMap<Address, Instant>>,
+}
+
+impl PeerCooldowns {
+    fn new() -> Self {
+        Self {
+            until: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_cooling(&self, peer: &Address, now: Instant) -> bool {
+        self.until
+            .lock()
+            .unwrap()
+            .get(peer)
+            .is_some_and(|&until| until > now)
+    }
+
+    fn record_failure(&self, peer: Address) {
+        self.until
+            .lock()
+            .unwrap()
+            .insert(peer, Instant::now() + PARTIAL_SIGS_PEER_COOLDOWN);
+    }
+
+    fn record_success(&self, peer: &Address) {
+        self.until.lock().unwrap().remove(peer);
+    }
+
+    /// The earliest moment any of `peers` comes off cooldown, if one is
+    /// cooling.
+    fn earliest_expiry<'a>(&self, peers: impl IntoIterator<Item = &'a Address>) -> Option<Instant> {
+        let until = self.until.lock().unwrap();
+        peers
+            .into_iter()
+            .filter_map(|peer| until.get(peer).copied())
+            .min()
+    }
 }
 
 fn presig_pool_fingerprint<'a>(nonces: impl Iterator<Item = &'a G>) -> String {
@@ -125,6 +265,7 @@ impl SigningManager {
         threshold: u16,
         key_shares: avss::SharesForNode,
         verifying_key: G,
+        share_owners: HashMap<ShareIndex, Address>,
         presignatures: Presignatures,
         batch_index: u32,
         batch_start_index: u64,
@@ -150,6 +291,7 @@ impl SigningManager {
                 threshold,
                 key_shares,
                 verifying_key,
+                share_owners,
                 refill_divisor,
             }),
             state: RwLock::new(SigningPoolState {
@@ -158,6 +300,8 @@ impl SigningManager {
                 next_batch: None,
             }),
             refill_tx,
+            peer_cooldowns: PeerCooldowns::new(),
+            bad_share_peers: BlamedPeers::new(),
         }
     }
 
@@ -168,6 +312,7 @@ impl SigningManager {
         threshold: u16,
         key_shares: avss::SharesForNode,
         verifying_key: G,
+        share_owners: HashMap<ShareIndex, Address>,
         retained: Vec<(Presignatures, u32, u64)>,
         num_consumed: u64,
         pending: &HashSet<u64>,
@@ -217,6 +362,7 @@ impl SigningManager {
                 threshold,
                 key_shares,
                 verifying_key,
+                share_owners,
                 refill_divisor,
             }),
             state: RwLock::new(SigningPoolState {
@@ -225,6 +371,8 @@ impl SigningManager {
                 next_batch: None,
             }),
             refill_tx,
+            peer_cooldowns: PeerCooldowns::new(),
+            bad_share_peers: BlamedPeers::new(),
         })
     }
 
@@ -374,13 +522,19 @@ impl SigningManager {
         let threshold = self.config.threshold;
         let verifying_key = self.config.verifying_key;
         let self_address = self.config.address;
+        // Peers already blamed for bad shares are left out of the session's
+        // peer set entirely (not merely skipped when polling): an excluded
+        // peer that stayed in `peers_remaining` would keep `peers_exhausted`
+        // false forever, turning every unreachable-threshold failure into a
+        // full deadline wait instead of a fast `TooManyInvalidSignatures`.
+        let blamed = self.bad_share_peers.snapshot(Instant::now());
         let all_peers: HashSet<Address> = self
             .config
             .committee
             .members()
             .iter()
             .map(|m| m.validator_address())
-            .filter(|addr| *addr != self_address)
+            .filter(|addr| *addr != self_address && !blamed.contains(addr))
             .collect();
         let deadline = Instant::now() + timeout;
         let mut pending: Vec<InputSigningState> = Vec::with_capacity(inputs.len());
@@ -402,6 +556,7 @@ impl SigningManager {
                     public_nonce,
                     derivation_address: input.derivation_address,
                     partials,
+                    required: threshold as usize,
                     peers_remaining: all_peers.clone(),
                 }),
                 Err(e) => {
@@ -433,10 +588,20 @@ impl SigningManager {
                 };
                 match try_finalize_signature(&params, &st.partials, peers_exhausted, metrics).await
                 {
-                    FinalizeOutcome::NeedMore => i += 1,
-                    FinalizeOutcome::Done(sig) => {
+                    FinalizeOutcome::NeedMore => {
+                        // The attempt failed with the shares in hand; demand
+                        // at least one more before the next round may
+                        // early-exit.
+                        let st = &mut pending[i];
+                        st.required = st.required.max(st.partials.len() + 1);
+                        i += 1;
+                    }
+                    FinalizeOutcome::Done(sig, bad_indices) => {
                         let st = pending.swap_remove(i);
                         let _ = result_tx.send((st.signing_id, Ok(sig)));
+                        if !bad_indices.is_empty() {
+                            self.blame_bad_shares(&bad_indices, &mut pending, metrics);
+                        }
                     }
                     FinalizeOutcome::Failed(e) => {
                         let st = pending.swap_remove(i);
@@ -459,8 +624,9 @@ impl SigningManager {
                 }
                 break;
             }
-            let progressed =
-                collect_partial_sigs_from_peers(p2p_channel, &mut pending, threshold).await;
+            let progressed = self
+                .collect_partial_sigs_from_peers(p2p_channel, &mut pending, deadline, metrics)
+                .await;
             if progressed {
                 backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
             } else {
@@ -663,12 +829,24 @@ struct InputSigningState {
     public_nonce: G,
     derivation_address: Option<DerivationAddress>,
     partials: Vec<Eval<S>>,
+    /// Minimum number of partials before a poll round may early-exit for
+    /// this input. Starts at the signing threshold; every failed
+    /// aggregation attempt raises it to one past the count that just
+    /// failed. Without this, a round entered after a failed attempt is
+    /// already at threshold, so the first response — even an empty one —
+    /// would break the round and cancel the slower peers whose shares RS
+    /// recovery actually needs.
+    required: usize,
     /// Peers not yet merged for this input
     peers_remaining: HashSet<Address>,
 }
 
 enum FinalizeOutcome {
-    Done(SchnorrSignature),
+    /// Aggregation succeeded. The second field carries the share indices the
+    /// RS-recovery path proved bad (empty on the clean path), so the caller
+    /// can blame the contributing peers and scrub their partials from the
+    /// other pending inputs.
+    Done(SchnorrSignature, Vec<ShareIndex>),
     NeedMore,
     Failed(SigningError),
 }
@@ -716,7 +894,7 @@ async fn try_finalize_signature(
     })
     .await;
     match agg {
-        Ok(sig) => return FinalizeOutcome::Done(sig),
+        Ok(sig) => return FinalizeOutcome::Done(sig, Vec::new()),
         Err(FastCryptoError::InvalidSignature) => {} // fall through to RS recovery
         Err(e) => return FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string())),
     }
@@ -742,68 +920,227 @@ async fn try_finalize_signature(
     })
     .await;
     match recovered {
-        Ok(sig) => FinalizeOutcome::Done(sig),
+        Ok((sig, bad_indices)) => FinalizeOutcome::Done(sig, bad_indices),
         Err(FastCryptoError::TooManyErrors(_)) => need_more_or_fail(partials.len()),
         Err(e) => FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string())),
     }
 }
 
-async fn collect_partial_sigs_from_peers(
-    p2p_channel: &impl P2PChannel,
-    pending: &mut [InputSigningState],
-    threshold: u16,
-) -> bool {
-    let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
-    for st in pending.iter() {
-        for peer in &st.peers_remaining {
-            peer_ids.entry(*peer).or_default().push(st.signing_id);
-        }
-    }
-    if peer_ids.is_empty() {
-        return false;
-    }
-    let mut in_flight: FuturesUnordered<_> = peer_ids
-        .into_iter()
-        .map(|(peer, signing_ids)| {
-            let request = GetPartialSignaturesRequest { signing_ids };
-            async move {
-                let result =
-                    with_timeout_and_retry(|| p2p_channel.get_partial_signatures(&peer, &request))
-                        .await;
-                (peer, result)
-            }
-        })
-        .collect();
-    let index: HashMap<Address, usize> = pending
-        .iter()
-        .enumerate()
-        .map(|(i, st)| (st.signing_id, i))
-        .collect();
-    let mut progressed = false;
-    while let Some((peer, result)) = in_flight.next().await {
-        match result {
-            Ok(response) => {
-                for (signing_id, sigs) in response.partial_sigs {
-                    if let Some(&i) = index.get(&signing_id)
-                        && pending[i].peers_remaining.remove(&peer)
-                    {
-                        pending[i].partials.extend(sigs);
-                        progressed = true;
-                    }
+impl SigningManager {
+    /// Runs one poll round against the peers that still owe partial
+    /// signatures.
+    ///
+    /// The round is bounded twice over: each peer poll gets a small
+    /// timeout-and-retry budget (the outer loop in [`SigningManager::sign`]
+    /// is the real retry mechanism), and the round as a whole stops at
+    /// `deadline` rather than draining slow peers' probes — otherwise one
+    /// black-holed peer makes the deadline check in `sign` unreachable for
+    /// its duration. Peers in cooldown or blamed for bad shares are skipped
+    /// for the round entirely.
+    ///
+    /// Returns whether any new partials were merged.
+    async fn collect_partial_sigs_from_peers(
+        &self,
+        p2p_channel: &impl P2PChannel,
+        pending: &mut [InputSigningState],
+        deadline: Instant,
+        metrics: &Metrics,
+    ) -> bool {
+        let now = Instant::now();
+        let blamed = self.bad_share_peers.snapshot(now);
+        let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
+        for st in pending.iter_mut() {
+            // Drop blamed peers from the not-yet-merged set (not merely from
+            // this round's poll list): they can never contribute again, and
+            // a session already in flight when another task blamed them
+            // would otherwise never see `peers_exhausted` and would wait out
+            // the deadline instead of fast-failing.
+            st.peers_remaining.retain(|peer| !blamed.contains(peer));
+            for peer in &st.peers_remaining {
+                if !self.peer_cooldowns.is_cooling(peer, now) {
+                    peer_ids.entry(*peer).or_default().push(st.signing_id);
                 }
-                if pending
-                    .iter()
-                    .all(|st| st.partials.len() >= threshold as usize)
-                {
+            }
+        }
+        if peer_ids.is_empty() {
+            // Every remaining peer is cooling from a hard failure (explicit
+            // not-ready answers are never cooled). Storming a struggling
+            // fleet with more polls helps nobody: sleep until the first
+            // cooldown lapses (clamped to the deadline) and let the next
+            // round retry at cooldown cadence.
+            let remaining = pending.iter().flat_map(|st| st.peers_remaining.iter());
+            if let Some(expiry) = self.peer_cooldowns.earliest_expiry(remaining) {
+                let _ = tokio::time::timeout_at(deadline, tokio::time::sleep_until(expiry)).await;
+            }
+            return false;
+        }
+        let mut in_flight: FuturesUnordered<_> = peer_ids
+            .into_iter()
+            .map(|(peer, signing_ids)| {
+                let request = GetPartialSignaturesRequest { signing_ids };
+                async move {
+                    let result = with_timeout_and_retry_budget(
+                        || p2p_channel.get_partial_signatures(&peer, &request),
+                        PARTIAL_SIGS_CALL_TIMEOUT,
+                        PARTIAL_SIGS_CALL_RETRIES,
+                    )
+                    .await;
+                    (peer, result)
+                }
+            })
+            .collect();
+        let index: HashMap<Address, usize> = pending
+            .iter()
+            .enumerate()
+            .map(|(i, st)| (st.signing_id, i))
+            .collect();
+        let mut progressed = false;
+        loop {
+            let (peer, result) = match tokio::time::timeout_at(deadline, in_flight.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::debug!(
+                        "Partial-signature poll round hit the signing deadline with {} peer(s) \
+                         still in flight",
+                        in_flight.len(),
+                    );
                     break;
                 }
+            };
+            match result {
+                Ok(response) => {
+                    // A concurrent signing task may have blamed this peer
+                    // after the poll launched; its partials are not welcome.
+                    if self.bad_share_peers.is_blamed(&peer, Instant::now()) {
+                        continue;
+                    }
+                    self.peer_cooldowns.record_success(&peer);
+                    for (signing_id, sigs) in response.partial_sigs {
+                        if let Some(&i) = index.get(&signing_id)
+                            && pending[i].peers_remaining.remove(&peer)
+                        {
+                            let st = &mut pending[i];
+                            for eval in sigs {
+                                // Only the index's owner may supply its
+                                // value. A peer squatting other peers'
+                                // indices could otherwise push the pool's
+                                // error count past RS capacity, and since
+                                // blame runs only on successful recovery,
+                                // such a flooder would stall every chunk
+                                // without ever being identified.
+                                if self.config.share_owners.get(&eval.index) != Some(&peer) {
+                                    tracing::warn!(
+                                        "Dropping partial signature from {peer} for share \
+                                         index {} it does not own",
+                                        eval.index,
+                                    );
+                                    continue;
+                                }
+                                // A duplicate index would fail aggregation
+                                // outright (`aggregate_signatures` rejects
+                                // duplicates), so keep the first value even
+                                // if the owner sends an index twice.
+                                if st.partials.iter().any(|e| e.index == eval.index) {
+                                    continue;
+                                }
+                                st.partials.push(eval);
+                                progressed = true;
+                            }
+                        }
+                    }
+                    if pending.iter().all(|st| st.partials.len() >= st.required) {
+                        break;
+                    }
+                }
+                Err(ChannelError::NotReady(e)) => {
+                    // The peer said explicitly that it is up but not ready to
+                    // serve yet (e.g. still reconciling its signing manager
+                    // after an epoch flip) — common across much of the fleet
+                    // right after reconfig. Keep polling it instead of
+                    // cooling it down.
+                    tracing::debug!(
+                        "Peer {peer} not ready for get_partial_signatures; will re-poll: {e}"
+                    );
+                }
+                Err(e) => {
+                    self.peer_cooldowns.record_failure(peer);
+                    metrics
+                        .mpc_partial_sig_poll_failures_total
+                        .with_label_values(&[&peer.to_string()])
+                        .inc();
+                    tracing::info!(
+                        "Batched get_partial_signatures from {peer} failed \
+                         (cooling down for {PARTIAL_SIGS_PEER_COOLDOWN:?}): {e}"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::info!("Batched get_partial_signatures from {peer} failed: {e}");
+        }
+        progressed
+    }
+
+    /// Excludes the peers that own provably bad shares (ownership is
+    /// authoritative — merging only ever accepts an index's value from its
+    /// owner in `SigningEpochConfig::share_owners`), and scrubs *all* of
+    /// their shares from the still-pending inputs: once one share from a
+    /// peer is proven bad, its other shares are not trusted either, and
+    /// removing them returns the remaining aggregations to the clean
+    /// first-`threshold`-shares path instead of paying the RS recovery
+    /// detour (more partials, more rounds) per input.
+    fn blame_bad_shares(
+        &self,
+        bad_indices: &[ShareIndex],
+        pending: &mut [InputSigningState],
+        metrics: &Metrics,
+    ) {
+        let self_address = self.config.address;
+        let share_owners = &self.config.share_owners;
+        let mut blamed: HashSet<Address> = HashSet::new();
+        for idx in bad_indices {
+            match share_owners.get(idx) {
+                Some(peer) if *peer == self_address => {
+                    // Locally generated shares failing verification points at
+                    // local state corruption, not a peer to exclude.
+                    tracing::error!(
+                        "Locally generated partial signature at share index {idx} is bad; \
+                         local presig/key state may be corrupt"
+                    );
+                }
+                Some(peer) => {
+                    blamed.insert(*peer);
+                    metrics
+                        .mpc_bad_partial_sigs_total
+                        .with_label_values(&[&peer.to_string()])
+                        .inc();
+                    tracing::warn!(
+                        "Peer {peer} owns a provably bad partial signature \
+                         (share index {idx}); excluding its shares"
+                    );
+                }
+                // Unreachable in practice: merging rejects unowned indices
+                // and local shares are self-owned.
+                None => tracing::warn!("RS recovery corrected a bad share at unowned index {idx}"),
+            }
+        }
+        if blamed.is_empty() {
+            return;
+        }
+        self.bad_share_peers.blame(&blamed);
+        let scrub: HashSet<ShareIndex> = share_owners
+            .iter()
+            .filter(|(_, owner)| blamed.contains(*owner))
+            .map(|(idx, _)| *idx)
+            .collect();
+        for st in pending.iter_mut() {
+            st.partials.retain(|eval| !scrub.contains(&eval.index));
+            // Drop blamed peers from the not-yet-merged set too, so inputs
+            // that can no longer reach threshold fail fast as
+            // TooManyInvalidSignatures instead of waiting out the deadline.
+            for peer in &blamed {
+                st.peers_remaining.remove(peer);
             }
         }
     }
-    progressed
 }
 
 struct AggregationParams<'a> {
@@ -815,6 +1152,13 @@ struct AggregationParams<'a> {
     derivation_address: Option<&'a DerivationAddress>,
 }
 
+/// Recovers the signing scalar from `partial_signatures` via Reed-Solomon
+/// error correction and finalizes the signature. On success, also returns the
+/// share indices whose contributed values disagree with the recovered
+/// message polynomial: since the polynomial is verified end-to-end (the
+/// finalized signature must verify against the group verifying key), a
+/// mismatch at an index proves that share's contribution was bad, which is
+/// what lets the caller blame the peer that sent it.
 fn aggregate_signatures_with_recovery(
     message: &[u8],
     public_presig: &G,
@@ -823,26 +1167,29 @@ fn aggregate_signatures_with_recovery(
     threshold: u16,
     verifying_key: &G,
     derivation_address: Option<&DerivationAddress>,
-) -> Result<SchnorrSignature, FastCryptoError> {
+) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
     let indices: Vec<_> = partial_signatures.iter().map(|e| e.index).collect();
     let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
-    let s = RSDecoder::new(indices, threshold as usize)
-        .compute_message_polynomial(&values)?
-        .c0();
-    finalize_schnorr_signature(
+    let poly = RSDecoder::new(indices, threshold as usize).compute_message_polynomial(&values)?;
+    let sig = finalize_schnorr_signature(
         message,
         public_presig,
         beacon_value,
-        s,
+        poly.c0(),
         verifying_key,
         derivation_address,
-    )
+    )?;
+    let bad_indices = partial_signatures
+        .iter()
+        .filter(|e| poly.eval(e.index).value != e.value)
+        .map(|e| e.index)
+        .collect();
+    Ok((sig, bad_indices))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::communication::ChannelError;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
     use crate::mpc::types::ComplaintResponse;
@@ -880,6 +1227,13 @@ mod tests {
 
     fn test_address(i: usize) -> Address {
         Address::new([i as u8; 32])
+    }
+
+    /// Ownership map matching the mock setup: member `i` owns share `i + 1`.
+    fn test_share_owners(n: u16) -> HashMap<ShareIndex, Address> {
+        (0..n as usize)
+            .map(|i| (ShareIndex::new(i as u16 + 1).unwrap(), test_address(i)))
+            .collect()
     }
 
     fn test_request_id() -> Address {
@@ -1117,6 +1471,117 @@ mod tests {
         }
     }
 
+    /// Counts polls per peer; `fail` peers error, the rest return an empty
+    /// response (as a peer that has not signed yet would).
+    struct CountingP2PChannel {
+        fail: HashSet<Address>,
+        not_ready: HashSet<Address>,
+        calls: Mutex<HashMap<Address, usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for CountingP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            _: &Address,
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            _: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            *self.calls.lock().unwrap().entry(*party).or_insert(0) += 1;
+            if self.fail.contains(party) {
+                Err(ChannelError::RequestFailed("down".into()))
+            } else if self.not_ready.contains(party) {
+                Err(ChannelError::NotReady("reconciling".into()))
+            } else {
+                Ok(GetPartialSignaturesResponse {
+                    partial_sigs: std::collections::BTreeMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Canned responses with a per-peer artificial delay, for
+    /// ordering-sensitive tests under a paused clock.
+    struct DelayedP2PChannel {
+        responses: HashMap<Address, (Duration, Vec<Eval<S>>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for DelayedP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            _: &Address,
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            let Some((delay, evals)) = self.responses.get(party) else {
+                return Err(ChannelError::ClientNotFound(*party));
+            };
+            tokio::time::sleep(*delay).await;
+            Ok(GetPartialSignaturesResponse {
+                partial_sigs: request
+                    .signing_ids
+                    .iter()
+                    .map(|id| (*id, evals.clone()))
+                    .collect(),
+            })
+        }
+    }
+
     struct SigningTestSetup {
         managers: Vec<Arc<SigningManager>>,
         verifying_key: G,
@@ -1210,6 +1675,7 @@ mod tests {
                         t,
                         key_shares,
                         vk,
+                        test_share_owners(n),
                         presignatures,
                         0, // batch_index
                         0, // batch_start_index
@@ -1565,6 +2031,7 @@ mod tests {
                 shares: vec![sk_shares[0].clone()],
             },
             vk,
+            test_share_owners(4),
             vec![(new_batch(), 0, 0), (new_batch(), 1, size0)],
             num_consumed,
             &pending,
@@ -1606,6 +2073,7 @@ mod tests {
                 shares: vec![sk_shares[0].clone()],
             },
             vk,
+            test_share_owners(4),
             vec![(new_batch(), 1, size0)], // batch 0 dropped
             num_consumed,
             &pending, // pending {3} lives in the dropped batch 0
@@ -1916,6 +2384,15 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
+
+        // Whether recovery ran depends on arrival order (the clean path wins
+        // when the corrupt response is not among the first `threshold`
+        // partials), but blame must never land on an honest peer.
+        let blamed = setup.managers[0].bad_share_peers.snapshot(Instant::now());
+        assert!(
+            blamed.is_subset(&[test_address(1)].into_iter().collect()),
+            "only the corrupting peer may be blamed, got: {blamed:?}"
+        );
     }
 
     #[tokio::test]
@@ -1945,6 +2422,368 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    fn share_index(i: u16) -> ShareIndex {
+        ShareIndex::new(i).unwrap()
+    }
+
+    fn eval_at(i: u16, value: S) -> Eval<S> {
+        Eval {
+            index: share_index(i),
+            value,
+        }
+    }
+
+    fn test_input_state(
+        signing_id: Address,
+        partials: Vec<Eval<S>>,
+        peers_remaining: Vec<Address>,
+    ) -> InputSigningState {
+        InputSigningState {
+            signing_id,
+            message: b"m".to_vec(),
+            public_nonce: G::generator(),
+            derivation_address: None,
+            partials,
+            // Helper-driven collect tests exercise full rounds; the
+            // early-exit is covered by dedicated tests.
+            required: usize::MAX,
+            peers_remaining: peers_remaining.into_iter().collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blame_bad_shares_excludes_owner_and_scrubs_pending() {
+        // In the mock setup member i owns share i + 1, so a bad share 2 is
+        // authoritatively peer 1's fault.
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let bad_peer = test_address(1);
+        let other_peer = test_address(3);
+
+        // A still-pending input holds the blamed peer's share (2) and two
+        // other members' shares (3 and 4).
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![
+                eval_at(2, S::zero()),
+                eval_at(3, S::zero()),
+                eval_at(4, S::zero()),
+            ],
+            vec![bad_peer, other_peer],
+        )];
+
+        mgr.blame_bad_shares(&[share_index(2)], &mut pending, &metrics);
+
+        assert!(mgr.bad_share_peers.is_blamed(&bad_peer, Instant::now()));
+        let st = &pending[0];
+        // The blamed peer's share is scrubbed; other owners' shares stay.
+        assert_eq!(
+            st.partials
+                .iter()
+                .map(|e| e.index.get())
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert!(!st.peers_remaining.contains(&bad_peer));
+        assert!(st.peers_remaining.contains(&other_peer));
+        assert_eq!(
+            metrics
+                .mpc_bad_partial_sigs_total
+                .with_label_values(&[&bad_peer.to_string()])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_fast_fails_when_blamed_peers_make_threshold_unreachable() {
+        // Blamed peers must be excluded from the session's peer set up
+        // front: if they merely stayed unpollable inside `peers_remaining`,
+        // exhaustion would never trigger and this sign would burn the whole
+        // deadline before failing with Timeout instead of failing fast.
+        let setup = SigningTestSetup::new(4);
+        let message = b"blamed-fast-fail";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let all_peers: HashSet<Address> = (1..4usize).map(test_address).collect();
+        setup.managers[0].bad_share_peers.blame(&all_peers);
+
+        let p2p = setup.mock_p2p_for(0);
+        let started = Instant::now();
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(SigningError::TooManyInvalidSignatures { .. })),
+            "expected fast TooManyInvalidSignatures, got: {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fast-fail should not wait out the deadline: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_skips_blamed_peers() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let blamed = test_address(1);
+        let healthy = test_address(2);
+        mgr.bad_share_peers.blame(&[blamed].into_iter().collect());
+
+        let p2p = CountingP2PChannel {
+            fail: HashSet::new(),
+            not_ready: HashSet::new(),
+            calls: Mutex::new(HashMap::new()),
+        };
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![],
+            vec![blamed, healthy],
+        )];
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let calls = p2p.calls.lock().unwrap();
+        assert_eq!(calls.get(&blamed), None, "a blamed peer must not be polled");
+        assert_eq!(calls.get(&healthy), Some(&1));
+        drop(calls);
+        // The blamed peer must also leave the in-flight session's remaining
+        // set, so an unreachable threshold still trips peers_exhausted.
+        assert!(
+            !pending[0].peers_remaining.contains(&blamed),
+            "a blamed peer must be removed from peers_remaining"
+        );
+        assert!(pending[0].peers_remaining.contains(&healthy));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_round_does_not_exit_below_the_required_share_count() {
+        // After a failed aggregation the input needs more than threshold
+        // shares. A fast (empty) response must not break the round at the
+        // stale threshold and cancel the slower peer carrying the extra
+        // share RS recovery needs.
+        let setup = SigningTestSetup::new(7);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let fast_empty = test_address(3);
+        // Owns share 5 in the mock setup (member i owns share i + 1).
+        let slow_useful = test_address(4);
+        let mut rng = StdRng::seed_from_u64(99);
+
+        let responses = HashMap::from([
+            (fast_empty, (Duration::ZERO, Vec::new())),
+            (
+                slow_useful,
+                (
+                    Duration::from_millis(200),
+                    vec![eval_at(5, S::rand(&mut rng))],
+                ),
+            ),
+        ]);
+        let p2p = DelayedP2PChannel { responses };
+
+        let mut pending = vec![InputSigningState {
+            signing_id: test_request_id(),
+            message: b"m".to_vec(),
+            public_nonce: G::generator(),
+            derivation_address: None,
+            partials: vec![
+                eval_at(1, S::zero()),
+                eval_at(2, S::zero()),
+                eval_at(3, S::zero()),
+            ],
+            // Threshold (3) shares are in hand but aggregation failed once,
+            // so one more share is required before the round may early-exit.
+            required: 4,
+            peers_remaining: [fast_empty, slow_useful].into_iter().collect(),
+        }];
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        assert!(
+            pending[0]
+                .partials
+                .iter()
+                .any(|e| e.index == share_index(5)),
+            "the slow peer's share must be merged; a fast empty response \
+             must not end the round at the stale threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_drops_evals_for_shares_the_peer_does_not_own() {
+        // A garbage-flooding peer answers with values for every index. Only
+        // the value for its own share (member 1 owns share 2) may enter the
+        // pool: accepted squats would push the pool's error count past RS
+        // capacity, and a recovery that never succeeds never blames anyone.
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let flooder = test_address(1);
+        let mut rng = StdRng::seed_from_u64(4242);
+
+        let responses = HashMap::from([(
+            flooder,
+            Ok(vec![
+                eval_at(1, S::rand(&mut rng)), // caller's share
+                eval_at(2, S::rand(&mut rng)), // flooder's own share
+                eval_at(3, S::rand(&mut rng)), // another member's share
+                eval_at(4, S::rand(&mut rng)), // another member's share
+                eval_at(9, S::rand(&mut rng)), // nonexistent share
+            ]),
+        )]);
+        let p2p = CannedP2PChannel { responses };
+
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![eval_at(1, S::zero())],
+            vec![flooder],
+        )];
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let st = &pending[0];
+        let mut indices: Vec<u16> = st.partials.iter().map(|e| e.index.get()).collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            vec![1, 2],
+            "only the local share and the flooder's own share may be in the pool"
+        );
+        let share_1_values: Vec<&S> = st
+            .partials
+            .iter()
+            .filter(|e| e.index == share_index(1))
+            .map(|e| &e.value)
+            .collect();
+        assert_eq!(
+            share_1_values,
+            vec![&S::zero()],
+            "the local value for share 1 must be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_succeeds_and_blames_despite_a_garbage_flooder() {
+        // End-to-end regression for the flooding attack: one peer answers
+        // with garbage for every share index. Ownership filtering caps the
+        // damage at the flooder's own share, so signing must still succeed,
+        // and only the flooder may end up blamed (whether blame runs depends
+        // on whether the clean path or RS recovery finishes the input).
+        let setup = SigningTestSetup::new(4);
+        let message = b"garbage-flood";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        let mut rng = StdRng::seed_from_u64(1717);
+
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let flood: Vec<Eval<S>> = (1..=4u16).map(|i| eval_at(i, S::rand(&mut rng))).collect();
+        let mut responses = HashMap::new();
+        responses.insert(test_address(1), Ok(flood));
+        responses.insert(test_address(2), Ok(all_sigs[2].clone()));
+        responses.insert(test_address(3), Ok(all_sigs[3].clone()));
+        let p2p = CannedP2PChannel { responses };
+
+        let metrics = test_metrics();
+        let sig = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &metrics,
+        )
+        .await
+        .expect("a single flooder must not block signing");
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+        let blamed = setup.managers[0].bad_share_peers.snapshot(Instant::now());
+        assert!(
+            blamed.is_subset(&[test_address(1)].into_iter().collect()),
+            "only the flooder may be blamed, got: {blamed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_recovers_from_corrupt_local_share_without_blaming_peers() {
+        // Corrupt the caller's own cached partial: local shares fill the
+        // first aggregation slots, so the clean path always fails and the RS
+        // recovery path runs deterministically. Recovery must identify the
+        // local share and blame no peer.
+        let setup = SigningTestSetup::new(7);
+        let message = b"self-corrupt";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        let mut rng = StdRng::seed_from_u64(31337);
+
+        let (public_nonce, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, None);
+        let mut corrupted = all_sigs[0].clone();
+        corrupted[0].value = S::rand(&mut rng);
+        setup.managers[0]
+            .state
+            .write()
+            .unwrap()
+            .partial_signing_outputs
+            .insert(
+                req_id,
+                PartialSigningOutput {
+                    public_nonce,
+                    partial_sigs: corrupted,
+                },
+            );
+
+        let p2p = setup.mock_p2p_for(0);
+        let metrics = test_metrics();
+        let sig = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &metrics,
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+        assert!(
+            setup.managers[0]
+                .bad_share_peers
+                .snapshot(Instant::now())
+                .is_empty(),
+            "a corrupt local share must not get any peer excluded"
+        );
     }
 
     #[tokio::test]
@@ -2055,15 +2894,269 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_deadline_bounds_collection_round_with_hung_peers() {
+        // Below threshold (caller + 1 healthy peer < t = 3), the poll round is
+        // dominated by hung peers. The round must stop at the signing deadline
+        // instead of draining the hung peers' per-probe budgets, so the total
+        // time is the deadline, not PARTIAL_SIGS_CALL_TIMEOUT x attempts.
+        let setup = SigningTestSetup::new(7);
+        let message = b"hung-below-threshold";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let mut responses = HashMap::new();
+        responses.insert(test_address(1), all_sigs[1].clone());
+        let hanging: HashSet<Address> =
+            [2usize, 3, 4, 5, 6].into_iter().map(test_address).collect();
+        let p2p = HangingP2PChannel { responses, hanging };
+
+        let deadline = Duration::from_secs(2);
+        let started = Instant::now();
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            deadline,
+            &test_metrics(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(SigningError::Timeout { .. })),
+            "expected Timeout, got: {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed < PARTIAL_SIGS_CALL_TIMEOUT,
+            "collection round was not bounded by the deadline: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_cools_down_failing_peer() {
+        // A peer whose poll hard-fails must not be re-polled every round for
+        // the duration of the cooldown, while healthy-but-empty peers keep
+        // being polled each round.
+        let setup = SigningTestSetup::new(4);
+        let message = b"cooldown";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let failing = test_address(1);
+        let p2p = CountingP2PChannel {
+            fail: [failing].into_iter().collect(),
+            not_ready: HashSet::new(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(SigningError::Timeout { .. })),
+            "expected Timeout, got: {:?}",
+            result.err()
+        );
+
+        let calls = p2p.calls.lock().unwrap();
+        let failing_calls = calls.get(&failing).copied().unwrap_or(0);
+        let healthy_calls = calls.get(&test_address(2)).copied().unwrap_or(0);
+        // One round's attempts (first try + retries), then cooldown.
+        assert!(
+            failing_calls <= 1 + PARTIAL_SIGS_CALL_RETRIES,
+            "failing peer was polled {failing_calls} times despite the cooldown"
+        );
+        assert!(
+            healthy_calls > failing_calls,
+            "healthy peer ({healthy_calls} polls) should be polled across rounds, \
+             failing peer ({failing_calls} polls) should not"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_keeps_polling_not_ready_peers() {
+        // An explicit not-ready answer means "up but still reconciling"
+        // (e.g. right after an epoch flip) — the peer must be re-polled
+        // every round, not cooled down.
+        let setup = SigningTestSetup::new(4);
+        let message = b"unavailable";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let reconciling = test_address(1);
+        let p2p = CountingP2PChannel {
+            fail: HashSet::new(),
+            not_ready: [reconciling].into_iter().collect(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let calls = p2p.calls.lock().unwrap();
+        let reconciling_calls = calls.get(&reconciling).copied().unwrap_or(0);
+        assert!(
+            reconciling_calls > 1 + PARTIAL_SIGS_CALL_RETRIES,
+            "an unavailable peer must keep being polled across rounds, \
+             got {reconciling_calls} poll(s)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_waits_out_cooldowns_instead_of_storming_a_down_fleet() {
+        // With every peer hard-failing and the deadline shorter than the
+        // cooldown, each peer gets exactly one round of polls; the call then
+        // sleeps rather than re-polling the down fleet every backoff cycle.
+        let setup = SigningTestSetup::new(4);
+        let message = b"all-cooling";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let p2p = CountingP2PChannel {
+            fail: (1..4usize).map(test_address).collect(),
+            not_ready: HashSet::new(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            PARTIAL_SIGS_PEER_COOLDOWN / 2,
+            &test_metrics(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let calls = p2p.calls.lock().unwrap();
+        for i in 1..4usize {
+            let peer_calls = calls.get(&test_address(i)).copied().unwrap_or(0);
+            assert_eq!(
+                peer_calls,
+                1 + PARTIAL_SIGS_CALL_RETRIES,
+                "peer {i} must be polled exactly one round, not stormed"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sign_retries_cooled_peers_once_their_cooldown_lapses() {
+        // With a deadline longer than the cooldown, the call sleeps to the
+        // cooldown expiry and then re-polls the fleet at cooldown cadence.
+        let setup = SigningTestSetup::new(4);
+        let message = b"cooldown-cadence";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let p2p = CountingP2PChannel {
+            fail: (1..4usize).map(test_address).collect(),
+            not_ready: HashSet::new(),
+            calls: Mutex::new(HashMap::new()),
+        };
+
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            PARTIAL_SIGS_PEER_COOLDOWN * 2 + Duration::from_secs(1),
+            &test_metrics(),
+        )
+        .await;
+        assert!(result.is_err());
+
+        let calls = p2p.calls.lock().unwrap();
+        for i in 1..4usize {
+            let peer_calls = calls.get(&test_address(i)).copied().unwrap_or(0);
+            assert!(
+                peer_calls > 1 + PARTIAL_SIGS_CALL_RETRIES,
+                "peer {i} must be re-polled after its cooldown lapsed, \
+                 got {peer_calls} poll(s)"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_blame_expires() {
+        let blamed_peers = BlamedPeers::new();
+        let peer = test_address(1);
+
+        blamed_peers.blame(&[peer].into_iter().collect());
+        assert!(blamed_peers.is_blamed(&peer, Instant::now()));
+
+        tokio::time::advance(BAD_SHARE_BLAME_DURATION + Duration::from_millis(1)).await;
+        assert!(!blamed_peers.is_blamed(&peer, Instant::now()));
+        assert!(blamed_peers.snapshot(Instant::now()).is_empty());
+
+        // Re-blaming after expiry works and refreshes the entry.
+        blamed_peers.blame(&[peer].into_iter().collect());
+        assert!(blamed_peers.is_blamed(&peer, Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_peer_cooldown_expires_and_clears_on_success() {
+        let cooldowns = PeerCooldowns::new();
+        let peer = test_address(1);
+
+        cooldowns.record_failure(peer);
+        assert!(cooldowns.is_cooling(&peer, Instant::now()));
+
+        tokio::time::advance(PARTIAL_SIGS_PEER_COOLDOWN + Duration::from_millis(1)).await;
+        assert!(!cooldowns.is_cooling(&peer, Instant::now()));
+
+        cooldowns.record_failure(peer);
+        cooldowns.record_success(&peer);
+        assert!(!cooldowns.is_cooling(&peer, Instant::now()));
+    }
+
     #[test]
     fn test_aggregate_with_recovery_correctable() {
-        // t=3, 5 sigs with 1 corrupted → RS corrects.
+        // t=3, 5 sigs with 1 corrupted → RS corrects and names the bad index.
         let message = b"rs-test";
         let mut data = build_aggregate_test_data(123, message);
 
         data.partial_sigs[0].value = S::rand(&mut data.rng);
+        let corrupted_index = data.partial_sigs[0].index;
 
-        let sig = aggregate_signatures_with_recovery(
+        let (sig, bad_indices) = aggregate_signatures_with_recovery(
             message,
             &data.public_nonce,
             &data.beacon,
@@ -2075,6 +3168,11 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&data.vk, message, &sig);
+        assert_eq!(
+            bad_indices,
+            vec![corrupted_index],
+            "recovery must identify exactly the corrupted share index"
+        );
     }
 
     #[test]
