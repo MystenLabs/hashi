@@ -678,10 +678,10 @@ impl MpcService {
                     "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
                      served certs size to {served_implies} (weight {served_weight}). The certs \
                      are frozen, so a restart rebuilds this boundary at {served_implies}: from \
-                     the first boundary holding a pending presig index onward the \
-                     Phase-1/Phase-2 assert fails identically on every later tick, while \
-                     boundaries before it are skipped, uncross-checked, and silently shift \
-                     every later batch's start_index",
+                     the first boundary holding a pending presig index — or the last boundary \
+                     when none is pending — onward, the Phase-1/Phase-2 assert fails \
+                     identically on every later tick, while boundaries before it are skipped, \
+                     uncross-checked, and silently shift every later batch's start_index",
                     presignatures.len(),
                 );
             }
@@ -1336,9 +1336,10 @@ impl MpcService {
                 if tokio::time::timeout(deadline, wait).await.is_err() {
                     metrics.mpc_nonce_window_cutoff_unreached_total.inc();
                     warn!(
-                        "fetch_final_nonce_certs: checkpoint clock stalled below window cutoff \
-                         {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?}; \
-                         failing recovery to retry on the next tick"
+                        "fetch_final_nonce_certs: read side never observed past window cutoff \
+                         {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?} \
+                         (stalled chain clock or unresponsive clock RPC); failing recovery to \
+                         retry on the next tick"
                     );
                     anyhow::bail!(
                         "nonce window did not close for epoch {epoch} batch {batch_index}"

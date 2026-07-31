@@ -137,8 +137,40 @@ pub struct UnorderedCertTableRead {
     pub later_ms: u64,
 }
 
-/// Exact membership, not `any(>=)`: `enable_version` accepts undeployed versions, so a
-/// looser test lets a pre-enabled v3 switch the stamped ABI on against a v1 package.
+fn walk_cert_table<V>(
+    head: Address,
+    mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>,
+) -> Result<Vec<(Address, V)>> {
+    let mut entries = Vec::with_capacity(nodes.len());
+    let mut current = Some(head);
+    while let Some(dealer) = current {
+        let Some(node) = nodes.remove(&dealer) else {
+            return Err(IncompleteCertTableRead { dealer }.into());
+        };
+        entries.push((dealer, node.value));
+        current = node.next;
+    }
+    Ok(entries)
+}
+
+fn ensure_timestamp_ordered(
+    certs: &[(Address, move_types::StampedDealerSubmissionV1)],
+) -> Result<()> {
+    if let Some(bad) = certs
+        .windows(2)
+        .find(|w| w[1].1.timestamp_ms < w[0].1.timestamp_ms)
+    {
+        return Err(UnorderedCertTableRead {
+            earlier: bad[0].0,
+            earlier_ms: bad[0].1.timestamp_ms,
+            later: bad[1].0,
+            later_ms: bad[1].1.timestamp_ms,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn stamped_certs_supported(enabled_versions: &std::collections::BTreeSet<u64>) -> bool {
     enabled_versions.contains(&crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
 }
@@ -819,17 +851,7 @@ impl OnchainState {
             let node = field.value().deserialize()?;
             nodes.insert(dealer, node);
         }
-        // Traverse in insertion order following LinkedTable's linked list
-        let mut entries = Vec::with_capacity(nodes.len());
-        let mut current = Some(head);
-        while let Some(dealer) = current {
-            let Some(node) = nodes.remove(&dealer) else {
-                return Err(IncompleteCertTableRead { dealer }.into());
-            };
-            entries.push((dealer, node.value));
-            current = node.next;
-        }
-        Ok(entries)
+        walk_cert_table(head, nodes)
     }
 
     pub async fn fetch_stamped_certs(
@@ -849,21 +871,7 @@ impl OnchainState {
             return Ok(None);
         };
         let certs = self.fetch_cert_table(&epoch_certs.certs).await?;
-        if let Some(bad) =
-            certs
-                .windows(2)
-                .find(|w: &&[(Address, move_types::StampedDealerSubmissionV1)]| {
-                    w[1].1.timestamp_ms < w[0].1.timestamp_ms
-                })
-        {
-            return Err(UnorderedCertTableRead {
-                earlier: bad[0].0,
-                earlier_ms: bad[0].1.timestamp_ms,
-                later: bad[1].0,
-                later_ms: bad[1].1.timestamp_ms,
-            }
-            .into());
-        }
+        ensure_timestamp_ordered(&certs)?;
         Ok(Some(certs))
     }
 
@@ -2011,5 +2019,85 @@ mod tests {
         assert_eq!(decoded.value.timestamp_ms, 123_456);
         assert_eq!(decoded.value.submission.message.dealer_address, dealer);
         assert_eq!(decoded.next, Some(dealer));
+    }
+
+    fn stamped(
+        dealer: Address,
+        next: Option<Address>,
+        timestamp_ms: u64,
+    ) -> move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1> {
+        move_types::LinkedTableNode {
+            prev: None,
+            next,
+            value: move_types::StampedDealerSubmissionV1 {
+                submission: move_types::DealerSubmissionV1 {
+                    message: move_types::DealerMessagesHashV1 {
+                        dealer_address: dealer,
+                        messages_hash: vec![],
+                    },
+                    signature: move_types::CommitteeSignature {
+                        epoch: 1,
+                        signature: vec![],
+                        signers_bitmap: vec![],
+                    },
+                },
+                timestamp_ms,
+            },
+        }
+    }
+
+    #[test]
+    fn dangling_link_fails_the_read_instead_of_returning_a_short_prefix() {
+        let (a, b, c) = (
+            Address::new([1u8; 32]),
+            Address::new([2u8; 32]),
+            Address::new([3u8; 32]),
+        );
+        let full = |missing: Option<Address>| {
+            [(a, Some(b)), (b, Some(c)), (c, None)]
+                .into_iter()
+                .filter(|(d, _)| Some(*d) != missing)
+                .map(|(d, next)| (d, stamped(d, next, 10)))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
+        let walked = walk_cert_table(a, full(None)).expect("complete table walks");
+        assert_eq!(
+            walked.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
+            vec![a, b, c],
+            "the walk must follow next pointers, not map iteration order"
+        );
+
+        let err = walk_cert_table(a, full(Some(b))).expect_err("dangling link must fail");
+        assert_eq!(
+            err.downcast_ref::<IncompleteCertTableRead>()
+                .expect("typed so pollers can retry it and sizing can treat it as fatal")
+                .dealer,
+            b,
+        );
+    }
+
+    #[test]
+    fn timestamp_ordering_rejects_only_a_decreasing_pair() {
+        let d = |n: u8| Address::new([n; 32]);
+        let list = |stamps: &[u64]| {
+            stamps
+                .iter()
+                .enumerate()
+                .map(|(i, ms)| (d(i as u8), stamped(d(i as u8), None, *ms).value))
+                .collect::<Vec<_>>()
+        };
+
+        ensure_timestamp_ordered(&list(&[])).expect("empty");
+        ensure_timestamp_ordered(&list(&[5])).expect("single");
+        ensure_timestamp_ordered(&list(&[10, 10, 10])).expect("equal stamps are ordered");
+        ensure_timestamp_ordered(&list(&[1, 10, 10, 20])).expect("non-decreasing");
+
+        let err =
+            ensure_timestamp_ordered(&list(&[1, 20, 10])).expect_err("a decreasing pair must fail");
+        let unordered = err
+            .downcast_ref::<UnorderedCertTableRead>()
+            .expect("typed so publish can tolerate it while the window walks cannot");
+        assert_eq!((unordered.earlier_ms, unordered.later_ms), (20, 10));
     }
 }

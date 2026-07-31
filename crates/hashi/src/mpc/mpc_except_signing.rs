@@ -1237,7 +1237,9 @@ impl MpcManager {
             let dealer_cert = match cert.to_dealer_certificate(epoch) {
                 Ok(dealer_cert) => dealer_cert,
                 Err(e) => {
-                    tracing::info!("recovery: dropping malformed nonce cert from {dealer:?}: {e}");
+                    tracing::info!(
+                        "dropping malformed nonce cert from {dealer:?} for epoch {epoch}: {e}"
+                    );
                     continue;
                 }
             };
@@ -1259,7 +1261,8 @@ impl MpcManager {
                     verified.push((dealer, cert));
                 }
                 Err(e) => tracing::info!(
-                    "recovery: dropping nonce cert with invalid signature from {dealer:?}: {e}"
+                    "dropping nonce cert with invalid signature from {dealer:?} for epoch \
+                     {epoch}: {e}"
                 ),
             }
         }

@@ -204,7 +204,10 @@ pub async fn fetch_certificates(
         let inner_cert = match DealerMessagesHash::from_onchain_cert(&submission, epoch) {
             Ok(inner_cert) => inner_cert,
             Err(e) => {
-                tracing::warn!("Skipping malformed dealer cert from {dealer}: {e}");
+                tracing::warn!(
+                    "Skipping malformed {protocol_type:?} dealer cert from {dealer} for epoch \
+                     {epoch} batch {batch_index:?}: {e}"
+                );
                 continue;
             }
         };
