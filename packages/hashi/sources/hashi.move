@@ -223,6 +223,18 @@ public(package) fun epoch_certs(
     self.tob.borrow_mut(key)
 }
 
+public(package) fun epoch_certs_stamped(
+    self: &mut Hashi,
+    key: hashi::tob::TobKey,
+    ctx: &mut TxContext,
+): &mut hashi::tob::StampedEpochCertsV1 {
+    let epoch = key.epoch();
+    if (!self.tob.contains(key)) {
+        self.tob.add(key, hashi::tob::create_stamped(epoch, key.protocol_type(), ctx));
+    };
+    self.tob.borrow_mut(key)
+}
+
 public(package) fun num_consumed_presigs(self: &Hashi): u64 {
     self.num_consumed_presigs
 }
@@ -274,6 +286,14 @@ public(package) fun epoch_certs_ref(
     self: &Hashi,
     key: hashi::tob::TobKey,
 ): &hashi::tob::EpochCertsV1 {
+    self.tob.borrow(key)
+}
+
+#[test_only]
+public(package) fun epoch_certs_stamped_ref(
+    self: &Hashi,
+    key: hashi::tob::TobKey,
+): &hashi::tob::StampedEpochCertsV1 {
     self.tob.borrow(key)
 }
 

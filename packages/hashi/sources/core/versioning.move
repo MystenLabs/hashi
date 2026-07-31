@@ -14,7 +14,7 @@ use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{
 
 // ~~~~~~~ Constants ~~~~~~~
 
-const PACKAGE_VERSION: u64 = 1;
+const PACKAGE_VERSION: u64 = 2;
 
 // ~~~~~~~ Errors ~~~~~~~
 
@@ -38,8 +38,14 @@ public struct Versioning has store {
 // Constructor
 
 public(package) fun create(): Versioning {
+    let mut enabled_versions = vec_set::empty();
+    let mut version = 1;
+    while (version <= PACKAGE_VERSION) {
+        enabled_versions.insert(version);
+        version = version + 1;
+    };
     Versioning {
-        enabled_versions: vec_set::from_keys(vector[PACKAGE_VERSION]),
+        enabled_versions,
         upgrade_cap: option::none(),
     }
 }

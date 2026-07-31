@@ -1,8 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Core types for the DKG protocol
-
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::error::FastCryptoResult;
 use fastcrypto::hash::Blake2b256;
@@ -27,6 +25,7 @@ use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DealerSubmissionV1;
+use hashi_types::move_types::StampedDealerSubmissionV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -114,6 +113,7 @@ pub struct MpcConfig {
     /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
+    pub nonce_accumulation_window_ms: u64,
 }
 
 impl MpcConfig {
@@ -123,6 +123,7 @@ impl MpcConfig {
         threshold: u16,
         max_faulty: u16,
         nonce_generation_protocol: NonceGenerationProtocol,
+        nonce_accumulation_window_ms: u64,
     ) -> Self {
         Self {
             epoch,
@@ -130,6 +131,104 @@ impl MpcConfig {
             threshold,
             max_faulty,
             nonce_generation_protocol,
+            nonce_accumulation_window_ms,
+        }
+    }
+}
+
+pub struct NonceCollectionWindow {
+    required_weight: u32,
+    window_ms: u64,
+    weight: u32,
+    state: NonceCollectionState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NonceCollectionState {
+    Floor,
+    Window { cutoff_ms: u64 },
+    Closed { cutoff_ms: Option<u64> },
+}
+
+pub struct NonceCertAdmission {
+    timestamp_ms: u64,
+}
+
+impl NonceCollectionWindow {
+    pub fn new(required_weight: u32, window_ms: u64) -> Self {
+        Self {
+            required_weight,
+            window_ms,
+            weight: 0,
+            state: NonceCollectionState::Floor,
+        }
+    }
+
+    pub fn with_cutoff(required_weight: u32, cutoff_ms: Option<u64>) -> Self {
+        let Some(cutoff_ms) = cutoff_ms else {
+            return Self::new(required_weight, 0);
+        };
+        Self {
+            required_weight,
+            window_ms: 0,
+            weight: 0,
+            state: NonceCollectionState::Window { cutoff_ms },
+        }
+    }
+
+    pub fn closed(&self) -> bool {
+        matches!(self.state, NonceCollectionState::Closed { .. })
+    }
+
+    pub fn floor_reached(&self) -> bool {
+        self.weight >= self.required_weight
+    }
+
+    pub fn weight(&self) -> u32 {
+        self.weight
+    }
+
+    pub fn required_weight(&self) -> u32 {
+        self.required_weight
+    }
+
+    pub fn cutoff_ms(&self) -> Option<u64> {
+        match self.state {
+            NonceCollectionState::Window { cutoff_ms } => Some(cutoff_ms),
+            NonceCollectionState::Closed { cutoff_ms } => cutoff_ms,
+            NonceCollectionState::Floor => None,
+        }
+    }
+
+    pub fn try_admit(&mut self, timestamp_ms: u64) -> Option<NonceCertAdmission> {
+        match self.state {
+            NonceCollectionState::Floor => Some(NonceCertAdmission { timestamp_ms }),
+            NonceCollectionState::Window { cutoff_ms } => {
+                if timestamp_ms > cutoff_ms {
+                    self.state = NonceCollectionState::Closed {
+                        cutoff_ms: Some(cutoff_ms),
+                    };
+                    None
+                } else {
+                    Some(NonceCertAdmission { timestamp_ms })
+                }
+            }
+            NonceCollectionState::Closed { .. } => None,
+        }
+    }
+
+    pub fn record(&mut self, admission: NonceCertAdmission, reduced_weight: u32) {
+        self.weight += reduced_weight;
+        if matches!(self.state, NonceCollectionState::Floor) && self.weight >= self.required_weight
+        {
+            // A zero crossing stamp marks the bare (pre-stamped-package) cert path.
+            self.state = if self.window_ms == 0 || admission.timestamp_ms == 0 {
+                NonceCollectionState::Closed { cutoff_ms: None }
+            } else {
+                NonceCollectionState::Window {
+                    cutoff_ms: admission.timestamp_ms.saturating_add(self.window_ms),
+                }
+            };
         }
     }
 }
@@ -413,6 +512,46 @@ impl NonceCertToVerify for CertificateV1 {
     }
 }
 
+impl NonceCertToVerify for StampedDealerSubmissionV1 {
+    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate> {
+        self.submission.to_dealer_certificate(epoch)
+    }
+}
+
+pub(crate) trait NonceCertTimestamp {
+    fn nonce_timestamp_ms(&self) -> u64;
+
+    fn signed_dealer(&self, epoch: u64) -> Option<Address>;
+}
+
+impl NonceCertTimestamp for StampedDealerSubmissionV1 {
+    fn nonce_timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    fn signed_dealer(&self, epoch: u64) -> Option<Address> {
+        self.to_dealer_certificate(epoch)
+            .ok()
+            .map(|cert| cert.message().dealer_address)
+    }
+}
+
+impl NonceCertTimestamp for CertificateV1 {
+    fn nonce_timestamp_ms(&self) -> u64 {
+        match self {
+            CertificateV1::NonceGeneration { timestamp_ms, .. } => *timestamp_ms,
+            _ => 0,
+        }
+    }
+
+    fn signed_dealer(&self, _epoch: u64) -> Option<Address> {
+        match self {
+            CertificateV1::NonceGeneration { cert, .. } => Some(cert.message().dealer_address),
+            _ => None,
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum CertificateV1 {
@@ -421,6 +560,7 @@ pub enum CertificateV1 {
     NonceGeneration {
         batch_index: u32,
         cert: DealerCertificate,
+        timestamp_ms: u64,
     },
 }
 
@@ -429,6 +569,7 @@ impl CertificateV1 {
         protocol_type: hashi_types::move_types::ProtocolType,
         batch_index: Option<u32>,
         cert: DealerCertificate,
+        timestamp_ms: u64,
     ) -> Self {
         match protocol_type {
             hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
@@ -437,6 +578,7 @@ impl CertificateV1 {
                 CertificateV1::NonceGeneration {
                     batch_index: batch_index.expect("batch_index required for NonceGeneration"),
                     cert,
+                    timestamp_ms,
                 }
             }
         }
@@ -1228,5 +1370,118 @@ mod tests {
             NonceGenerationProtocol::default(),
             NonceGenerationProtocol::Vanilla
         );
+    }
+
+    #[test]
+    fn nonce_collection_window_zero_is_floor_rule_verbatim() {
+        let mut window = NonceCollectionWindow::new(10, 0);
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 6);
+        assert!(!window.closed());
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 4);
+        assert!(window.closed());
+        assert_eq!(window.cutoff_ms(), None);
+        assert!(window.try_admit(100).is_none());
+    }
+
+    #[test]
+    fn nonce_collection_window_zero_crossing_stamp_forces_floor_only() {
+        let mut window = NonceCollectionWindow::new(10, 700);
+        let admission = window.try_admit(0).unwrap();
+        window.record(admission, 6);
+        assert!(!window.closed());
+        let admission = window.try_admit(0).unwrap();
+        window.record(admission, 4);
+        assert!(window.closed());
+        assert_eq!(window.cutoff_ms(), None);
+        assert!(window.try_admit(0).is_none());
+    }
+
+    #[test]
+    fn nonce_collection_window_admits_through_cutoff_and_closes_after() {
+        let mut window = NonceCollectionWindow::new(10, 700);
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 6);
+        let admission = window.try_admit(200).unwrap();
+        window.record(admission, 4);
+        assert!(!window.closed());
+        assert_eq!(window.cutoff_ms(), Some(900));
+        let admission = window.try_admit(900).unwrap();
+        window.record(admission, 3);
+        assert!(window.try_admit(901).is_none());
+        assert!(window.closed());
+        assert_eq!(window.cutoff_ms(), Some(900));
+        assert!(window.floor_reached());
+        assert!(window.try_admit(500).is_none());
+    }
+
+    #[test]
+    fn nonce_collection_window_cutoff_uses_crossing_stamp_not_later_ones() {
+        let mut window = NonceCollectionWindow::new(5, 700);
+        let admission = window.try_admit(1_000).unwrap();
+        window.record(admission, 5);
+        assert_eq!(window.cutoff_ms(), Some(1_700));
+        let admission = window.try_admit(1_600).unwrap();
+        window.record(admission, 2);
+        assert_eq!(window.cutoff_ms(), Some(1_700));
+    }
+
+    #[test]
+    fn nonce_collection_window_unrecorded_admission_leaves_state_unchanged() {
+        let mut window = NonceCollectionWindow::new(10, 700);
+        assert!(window.try_admit(100).is_some());
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 6);
+        assert!(!window.floor_reached());
+        assert_eq!(window.weight(), 6);
+    }
+
+    fn party_loop_cutoff(
+        stamps: &[u64],
+        weight_each: u32,
+        required_weight: u32,
+        window_ms: u64,
+        skip: &[usize],
+    ) -> Option<u64> {
+        let decided = {
+            let mut gate = NonceCollectionWindow::new(required_weight, window_ms);
+            for &ts in stamps {
+                let Some(admission) = gate.try_admit(ts) else {
+                    break;
+                };
+                gate.record(admission, weight_each);
+            }
+            gate.cutoff_ms()
+        };
+        let mut window = NonceCollectionWindow::with_cutoff(required_weight, decided);
+        for (i, &ts) in stamps.iter().enumerate() {
+            if window.closed() {
+                break;
+            }
+            let Some(admission) = window.try_admit(ts) else {
+                break;
+            };
+            if skip.contains(&i) {
+                continue;
+            }
+            window.record(admission, weight_each);
+        }
+        window.cutoff_ms()
+    }
+
+    #[test]
+    fn cutoff_must_not_depend_on_locally_unconsumable_certs() {
+        let stamps = [1_000u64, 1_000, 1_000, 1_000, 1_800];
+        let baseline = party_loop_cutoff(&stamps, 1, 4, 700, &[]);
+        for skipped in 0..stamps.len() {
+            assert_eq!(
+                party_loop_cutoff(&stamps, 1, 4, 700, &[skipped]),
+                baseline,
+                "skipping cert {skipped} moved the cutoff from {baseline:?}; the cutoff \
+                 must be a function of the on-chain cert list, not of which certs this \
+                 node could process"
+            );
+        }
     }
 }

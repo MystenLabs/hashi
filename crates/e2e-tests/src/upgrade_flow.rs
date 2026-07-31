@@ -31,11 +31,15 @@ use crate::sui_network::sui_binary;
 /// Prepare an upgrade package by copying the deployed source and patching it.
 ///
 /// 1. Copies `<test_dir>/packages/hashi` to `<test_dir>/packages/hashi-upgrade`
-/// 2. Bumps `PACKAGE_VERSION` from 1 to 2 in `versioning.move`
+/// 2. Sets `PACKAGE_VERSION` to `target_version` in `versioning.move`
 /// 3. Sets `published-at` in `Move.toml` to the original package ID
 ///
 /// Returns the path to the patched package directory.
-pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) -> Result<PathBuf> {
+pub fn prepare_upgrade_package(
+    test_dir: &Path,
+    original_package_id: Address,
+    target_version: u64,
+) -> Result<PathBuf> {
     let src = test_dir.join("packages/hashi");
     let dst = test_dir.join("packages/hashi-upgrade");
 
@@ -55,16 +59,32 @@ pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) ->
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Patch versioning.move: bump PACKAGE_VERSION from 1 to 2
     let versioning_path = dst.join("sources/core/versioning.move");
     let versioning_src = std::fs::read_to_string(&versioning_path)?;
-    let patched = versioning_src.replace(
-        "const PACKAGE_VERSION: u64 = 1;",
-        "const PACKAGE_VERSION: u64 = 2;",
-    );
+    const VERSION_PREFIX: &str = "const PACKAGE_VERSION: u64 = ";
+    let value_start = versioning_src
+        .find(VERSION_PREFIX)
+        .map(|i| i + VERSION_PREFIX.len())
+        .ok_or_else(|| {
+            anyhow::anyhow!("PACKAGE_VERSION declaration not found in {versioning_path:?}")
+        })?;
+    let value_len = versioning_src[value_start..]
+        .find(';')
+        .ok_or_else(|| anyhow::anyhow!("PACKAGE_VERSION declaration is not terminated"))?;
+    let current: u64 = versioning_src[value_start..value_start + value_len]
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("PACKAGE_VERSION is not a u64 in {versioning_path:?}: {e}"))?;
     anyhow::ensure!(
-        patched != versioning_src,
-        "PACKAGE_VERSION replacement failed — pattern not found in versioning.move"
+        current != target_version,
+        "upgrade would declare PACKAGE_VERSION {current}, which the source already has: \
+         the Sui package counter and the Move constant are out of step"
+    );
+    let patched = format!(
+        "{}{}{}",
+        &versioning_src[..value_start],
+        target_version,
+        &versioning_src[value_start + value_len..]
     );
     std::fs::write(&versioning_path, patched)?;
 
@@ -113,7 +133,15 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
 
     // 1. Prepare the upgrade package (copy + patch)
     let test_dir = networks.dir();
-    let upgrade_path = prepare_upgrade_package(test_dir, hashi_ids.package_id)?;
+    let current_version = nodes[0]
+        .hashi()
+        .onchain_state()
+        .state()
+        .package_versions()
+        .latest_version()
+        .ok_or_else(|| anyhow::anyhow!("onchain state has no package versions yet"))?;
+    let upgrade_path =
+        prepare_upgrade_package(test_dir, hashi_ids.package_id, current_version + 1)?;
 
     let client_config_path = test_dir.join("sui/client.yaml");
     let client_config = client_config_path
@@ -122,13 +150,6 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
 
     // 2. Build the upgrade
     tracing::info!("building upgrade package from {}", upgrade_path.display());
-    let current_version = nodes[0]
-        .hashi()
-        .onchain_state()
-        .state()
-        .package_versions()
-        .latest_version()
-        .ok_or_else(|| anyhow::anyhow!("onchain state has no package versions yet"))?;
     let (compiled, digest) = build_upgrade_package(
         sui_binary(),
         &upgrade_path,
