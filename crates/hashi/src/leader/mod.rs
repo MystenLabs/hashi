@@ -382,9 +382,24 @@ impl LeaderService {
     /// tasks can re-check leadership mid-flight and stop driving work that
     /// has rotated to another node.
     pub(super) fn node_is_leader(inner: &Arc<Hashi>, checkpoint_height: u64) -> bool {
-        if inner.onchain_state().state().hashi().config.paused() {
-            debug!("Bridge is paused, not acting as leader");
-            return false;
+        match inner.onchain_state().autonomous_halt_reason() {
+            None => {}
+            Some(crate::onchain::HaltReason::Paused) => {
+                debug!("Bridge is paused, not acting as leader");
+                return false;
+            }
+            Some(crate::onchain::HaltReason::BinaryUnsupported {
+                supported_max,
+                live_max,
+            }) => {
+                warn!(
+                    supported_max,
+                    live_max,
+                    "binary supports no live on-chain package version; not acting as leader — \
+                     upgrade required"
+                );
+                return false;
+            }
         }
 
         match inner.config.force_run_as_leader() {

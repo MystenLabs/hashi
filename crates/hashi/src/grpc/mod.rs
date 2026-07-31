@@ -191,6 +191,19 @@ async fn health() -> impl axum::response::IntoResponse {
 
 async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
     let onchain_state = hashi.onchain_state();
+    // If the chain has moved past what this binary supports, report not-ready so
+    // operators/orchestration surface it — the node has halted autonomous work
+    // (see leader gate) and needs a binary upgrade. Details are in the
+    // `hashi_package_version_unsupported` metric and the leader log.
+    if matches!(
+        onchain_state.autonomous_halt_reason(),
+        Some(crate::onchain::HaltReason::BinaryUnsupported { .. })
+    ) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "binary does not support the enabled on-chain package version(s) — upgrade required",
+        );
+    }
     let epoch = onchain_state.epoch();
     // Treat genesis (no committee formed yet) as ready so OrderedReady can bring
     // up the rest of the StatefulSet to register keys and run the initial DKG.

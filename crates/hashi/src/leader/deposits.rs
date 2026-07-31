@@ -310,10 +310,13 @@ impl LeaderService {
     }
 
     fn check_halt_deposit_processing(&mut self) -> bool {
-        // Evaluate both predicates from one consistent state snapshot.
+        // Evaluate all predicates from one consistent state snapshot.
         let halt = {
             let state = self.inner.onchain_state().state();
             state.hashi().config.paused()
+                || state
+                    .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+                    .must_halt()
                 || state.hashi().committees.pending_epoch_change().is_some()
         };
         if !halt {
