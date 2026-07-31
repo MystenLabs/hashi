@@ -616,6 +616,14 @@ impl LeaderService {
         members: &[CommitteeMember],
     ) -> anyhow::Result<()> {
         let txn_id = txn.id;
+        // Pin the epoch this task was launched under. `txn` is refreshed
+        // every iteration, so comparing the current epoch against the
+        // refreshed txn.signing.epoch would race: after an epoch flip,
+        // another node's presig reallocation updates both sides of that
+        // comparison while `members` still holds the old committee. Any
+        // deviation from the pinned epoch exits; the next tick re-derives
+        // members and everything else from fresh state.
+        let task_epoch = txn.signing.epoch;
         let started = tokio::time::Instant::now();
         let mut last_progress = started;
         loop {
@@ -635,10 +643,11 @@ impl LeaderService {
                 );
                 return Ok(());
             }
-            if inner.onchain_state().epoch() != txn.signing.epoch {
+            if inner.onchain_state().epoch() != task_epoch || txn.signing.epoch != task_epoch {
                 info!(
                     withdrawal_txn_id = %txn_id,
-                    "Epoch changed mid-signing; presigs will be reallocated on a later tick"
+                    task_epoch,
+                    "Epoch changed mid-signing; a later tick continues with fresh state"
                 );
                 return Ok(());
             }
