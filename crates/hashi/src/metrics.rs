@@ -127,6 +127,8 @@ pub struct Metrics {
     /// index. A blamed peer is excluded from partial-signature polling for
     /// the rest of the epoch.
     pub mpc_bad_partial_sigs_total: IntCounterVec,
+    /// Reader-side rejections of certificates read from TOB.
+    pub mpc_certs_rejected_total: IntCounterVec,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
     /// Ticks where no DB encryption key matched the current committee record
@@ -745,6 +747,13 @@ impl Metrics {
             mpc_avid_complaints_recovered_total: register_int_counter_with_registry!(
                 "hashi_mpc_avid_complaints_recovered_total",
                 "AVID nonce shares recovered via the complaint protocol",
+                registry,
+            )
+            .unwrap(),
+            mpc_certs_rejected_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_certs_rejected_total",
+                "Reader-side rejections of TOB certificates; per-cert multiplier varies by node, excludes peer-driven blame refusals",
+                &["protocol", "reason"],
                 registry,
             )
             .unwrap(),

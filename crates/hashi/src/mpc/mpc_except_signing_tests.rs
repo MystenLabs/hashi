@@ -14,6 +14,7 @@ use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::RotationMessages;
+use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::types::MemberInfo;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
@@ -359,6 +360,45 @@ fn create_test_certificate(
         .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 
+/// Peer signatures over `dealer`'s rotation messages, from whichever of
+/// `signer_indices` are present in `managers`. Rotation certs need `t + f`
+/// reduced weight to pass the reader-side check, which a dealer plus one peer
+/// generally cannot reach.
+fn rotation_peer_signatures(
+    setup: &TestSetup,
+    managers: &mut HashMap<Address, MpcManager>,
+    dealer: Address,
+    messages: &Messages,
+    epoch: u64,
+    signer_indices: &[usize],
+) -> Vec<MemberSignature> {
+    let mut signatures = Vec::new();
+    for &index in signer_indices {
+        let signer_addr = setup.address(index);
+        if signer_addr == dealer {
+            continue;
+        }
+        let Some(signer) = managers.get_mut(&signer_addr) else {
+            continue;
+        };
+        let signer_prev = signer.previous_output.clone().unwrap();
+        // Empty rotation messages are deliberately left unregistered: some
+        // tests assert on the filter that excludes such dealers.
+        if let Messages::Rotation(msgs) = messages
+            && !msgs.is_empty()
+        {
+            signer
+                .current_rotation_messages
+                .insert(dealer, msgs.clone());
+        }
+        let signature = signer
+            .try_sign_rotation_messages(&signer_prev, dealer, messages)
+            .unwrap();
+        signatures.push(MemberSignature::new(epoch, signer_addr, signature));
+    }
+    signatures
+}
+
 fn create_rotation_test_certificate(
     committee: &Committee,
     rotation_messages: &Messages,
@@ -490,8 +530,9 @@ struct MockOrderedBroadcastChannel {
     certificates: std::sync::Mutex<std::collections::VecDeque<CertificateV1>>,
     published: std::sync::Mutex<Vec<CertificateV1>>,
     /// Override for certified_dealers().
-    /// If set, returns these addresses instead of extracting from certificates.
-    override_certified_dealers: Option<Vec<Address>>,
+    /// If set, returns these dealer/certificate pairs instead of extracting
+    /// them from `certificates`.
+    override_certified_dealers: Option<Vec<(Address, CertificateV1)>>,
     /// If set, publish() will fail with this error message.
     fail_on_publish: Option<String>,
 }
@@ -506,7 +547,7 @@ impl MockOrderedBroadcastChannel {
         }
     }
 
-    fn with_override_certified_dealers(mut self, dealers: Vec<Address>) -> Self {
+    fn with_override_certified_dealers(mut self, dealers: Vec<(Address, CertificateV1)>) -> Self {
         self.override_certified_dealers = Some(dealers);
         self
     }
@@ -551,7 +592,7 @@ impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
             })
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
         if let Some(ref dealers) = self.override_certified_dealers {
             return dealers.clone();
         }
@@ -559,7 +600,7 @@ impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
             .lock()
             .unwrap()
             .iter()
-            .map(|c| c.dealer_address())
+            .map(|c| (c.dealer_address(), c.clone()))
             .collect()
     }
 }
@@ -880,7 +921,7 @@ impl OrderedBroadcastChannel<CertificateV1> for FailingOrderedBroadcastChannel {
         }
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
         vec![]
     }
 }
@@ -1933,6 +1974,8 @@ struct RunTestSetup {
     test_manager: Arc<RwLock<MpcManager>>,
     mock_p2p: MockP2PChannel,
     certificates: Vec<CertificateV1>,
+    setup: TestSetup,
+    dealer_messages: Vec<Messages>,
 }
 
 fn setup_run_test() -> RunTestSetup {
@@ -1987,6 +2030,8 @@ fn setup_run_test() -> RunTestSetup {
         test_manager,
         mock_p2p,
         certificates,
+        setup,
+        dealer_messages,
     }
 }
 
@@ -2757,28 +2802,33 @@ fn create_weight_based_test_certificate(
 
     let config = setup.dkg_config();
     let committee = setup.committee();
-    let mut aggregator =
-        hashi_types::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
+    let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message.clone());
 
-    // Add signatures from validators until we meet the required weight
-    let dkg_required = config.threshold;
-    let mut weight_sum = 0u16;
+    let dkg_required = config.threshold as u32 + config.max_faulty as u32;
+    let mut weight_sum = 0u32;
 
     for i in 0..setup.num_validators() {
         let signer_addr = setup.address(i);
         let signature = setup.signing_keys[i].sign(setup.epoch(), signer_addr, &dkg_message);
         aggregator.add_signature(signature).unwrap();
-        weight_sum += config
-            .nodes
-            .iter()
-            .find(|n| n.id == i as u16)
-            .map(|n| n.weight)
-            .unwrap_or(1);
+        weight_sum += u32::from(
+            config
+                .nodes
+                .iter()
+                .find(|n| n.id == i as u16)
+                .map(|n| n.weight)
+                .unwrap_or(1),
+        );
 
         if weight_sum >= dkg_required {
             break;
         }
     }
+    assert!(
+        weight_sum >= dkg_required,
+        "fixture cannot reach the quorum readers require ({weight_sum} < {dkg_required}); \
+         the cert would be rejected with no explanation"
+    );
 
     CertificateV1::Dkg(aggregator.finish().unwrap())
 }
@@ -5852,8 +5902,15 @@ impl RotationTestSetup {
         }
     }
 
-    fn certificates(&self) -> Vec<CertificateV1> {
-        self.certificates.values().cloned().collect()
+    /// Reconstruction takes only verified certificates; these tests exercise
+    /// reconstruction itself, so they bypass the predicate rather than build
+    /// quorum-weight certs.
+    fn certificates(&self) -> Vec<VerifiedCertificateV1> {
+        self.certificates
+            .values()
+            .cloned()
+            .map(VerifiedCertificateV1::new_unchecked)
+            .collect()
     }
 
     /// Returns the subset of dealer addresses that `reconstruct_previous_dkg_output`
@@ -6349,10 +6406,13 @@ async fn test_run_key_rotation() {
             (rotation_messages, own_sig, epoch, prev_output)
         };
 
-        // Now get signature from validator 1
-        let other_validator_idx = 1; // validator 1, weight=2
-        let other_addr = rotation_setup.setup.address(other_validator_idx);
-        let other_sig = {
+        // Sign with enough peers to clear the t+f quorum the reader-side check
+        // enforces — the dealer's own weight of 1 is far below it. This is
+        // about who signs, not which share indices the dealer covers, which is
+        // what the test is exercising.
+        let mut signatures = vec![MemberSignature::new(epoch, addr, own_sig)];
+        for other_validator_idx in [1, 2, 4] {
+            let other_addr = rotation_setup.setup.address(other_validator_idx);
             let other_manager = other_managers.get_mut(&other_addr).unwrap();
             let other_prev_output = other_manager.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = rotation_messages {
@@ -6360,19 +6420,17 @@ async fn test_run_key_rotation() {
                     .current_rotation_messages
                     .insert(addr, msgs.clone());
             }
-            other_manager
+            let other_sig = other_manager
                 .try_sign_rotation_messages(&other_prev_output, addr, &rotation_messages)
-                .unwrap()
-        };
+                .unwrap();
+            signatures.push(MemberSignature::new(epoch, other_addr, other_sig));
+        }
 
-        // Create certificate with signatures from validator 3 (own) and validator 1
-        let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
-        let other_member_sig = MemberSignature::new(epoch, other_addr, other_sig);
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &rotation_messages,
             addr,
-            vec![own_member_sig, other_member_sig],
+            signatures,
         )
         .unwrap();
         rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -6490,26 +6548,28 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 (rotation_messages, own_sig, manager.mpc_config.epoch)
             };
 
-            // Get a second signature from validator 1
-            let signer_addr = rotation_setup.setup.address(1);
-            let signer_sig = {
+            let mut signatures = vec![MemberSignature::new(epoch, addr, own_sig)];
+            for signer_idx in [1, 2, 3, 4] {
+                let signer_addr = rotation_setup.setup.address(signer_idx);
+                if signer_addr == addr {
+                    continue;
+                }
                 let signer = other_managers.get_mut(&signer_addr).unwrap();
                 let signer_prev = signer.previous_output.clone().unwrap();
                 if let Messages::Rotation(ref msgs) = rotation_messages {
                     signer.current_rotation_messages.insert(addr, msgs.clone());
                 }
-                signer
+                let signer_sig = signer
                     .try_sign_rotation_messages(&signer_prev, addr, &rotation_messages)
-                    .unwrap()
-            };
+                    .unwrap();
+                signatures.push(MemberSignature::new(epoch, signer_addr, signer_sig));
+            }
 
-            let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
-            let signer_member_sig = MemberSignature::new(epoch, signer_addr, signer_sig);
             let cert = create_rotation_test_certificate(
                 rotation_setup.setup.committee(),
                 &rotation_messages,
                 addr,
-                vec![own_member_sig, signer_member_sig],
+                signatures,
             )
             .unwrap();
             rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -6582,28 +6642,30 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
                 .unwrap();
             (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
-        let v2_signer_addr = rotation_setup.setup.address(3);
-        let v2_signer_sig = {
-            let signer = other_managers.get_mut(&v2_signer_addr).unwrap();
-            let signer_prev = signer.previous_output.clone().unwrap();
-            signer
-                .try_sign_rotation_messages(
-                    &signer_prev,
-                    validator_2_addr,
-                    &empty_rotation_messages,
-                )
-                .unwrap()
-        };
+        let mut v2_signatures = vec![MemberSignature::new(epoch, validator_2_addr, v2_own_sig)];
+        v2_signatures.extend(rotation_peer_signatures(
+            &rotation_setup.setup,
+            &mut other_managers,
+            validator_2_addr,
+            &empty_rotation_messages,
+            epoch,
+            &[1, 2, 3, 4],
+        ));
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &empty_rotation_messages,
             validator_2_addr,
-            vec![
-                MemberSignature::new(epoch, validator_2_addr, v2_own_sig),
-                MemberSignature::new(epoch, v2_signer_addr, v2_signer_sig),
-            ],
+            v2_signatures,
         )
         .unwrap();
+        assert!(
+            rotation_setup
+                .setup
+                .create_manager(0)
+                .verify_certificate(CertificateV1::Rotation(cert.clone()))
+                .is_ok(),
+            "fixture precondition: validator 2's cert must verify"
+        );
         rotation_certificates.push(CertificateV1::Rotation(cert));
 
         // Validator 1: valid rotation messages (weight=2).
@@ -6620,27 +6682,20 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
                 .unwrap();
             (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
-        let v1_signer_addr = rotation_setup.setup.address(3);
-        let v1_signer_sig = {
-            let signer = other_managers.get_mut(&v1_signer_addr).unwrap();
-            let signer_prev = signer.previous_output.clone().unwrap();
-            if let Messages::Rotation(ref msgs) = v1_rotation_messages {
-                signer
-                    .current_rotation_messages
-                    .insert(validator_1_addr, msgs.clone());
-            }
-            signer
-                .try_sign_rotation_messages(&signer_prev, validator_1_addr, &v1_rotation_messages)
-                .unwrap()
-        };
+        let mut v1_signatures = vec![MemberSignature::new(epoch, validator_1_addr, v1_own_sig)];
+        v1_signatures.extend(rotation_peer_signatures(
+            &rotation_setup.setup,
+            &mut other_managers,
+            validator_1_addr,
+            &v1_rotation_messages,
+            epoch,
+            &[1, 2, 3, 4],
+        ));
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &v1_rotation_messages,
             validator_1_addr,
-            vec![
-                MemberSignature::new(epoch, validator_1_addr, v1_own_sig),
-                MemberSignature::new(epoch, v1_signer_addr, v1_signer_sig),
-            ],
+            v1_signatures,
         )
         .unwrap();
         rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -6771,30 +6826,42 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             epoch = manager.mpc_config.epoch;
         }
 
-        let addr_1 = rotation_setup.setup.address(1);
-        let signer_sig = {
-            let signer = other_managers.get_mut(&addr_1).unwrap();
+        let mut signatures = vec![MemberSignature::new(epoch, addr_2, own_sig)];
+        for signer_idx in [1, 2, 3, 4] {
+            let signer_addr = rotation_setup.setup.address(signer_idx);
+            if signer_addr == addr_2 {
+                continue;
+            }
+            let signer = other_managers.get_mut(&signer_addr).unwrap();
             let signer_prev = signer.previous_output.clone().unwrap();
-            if let Messages::Rotation(ref msgs) = correct_messages {
+            if let Messages::Rotation(msgs) = &correct_messages {
                 signer
                     .current_rotation_messages
                     .insert(addr_2, msgs.clone());
             }
-            signer
+            let signature = signer
                 .try_sign_rotation_messages(&signer_prev, addr_2, &correct_messages)
-                .unwrap()
-        };
+                .unwrap();
+            signatures.push(MemberSignature::new(epoch, signer_addr, signature));
+        }
 
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &correct_messages,
             addr_2,
-            vec![
-                MemberSignature::new(epoch, addr_2, own_sig),
-                MemberSignature::new(epoch, addr_1, signer_sig),
-            ],
+            signatures,
         )
         .unwrap();
+        // Precondition: this cert must clear the reader-side check, so the
+        // hash mismatch below is what drives the retrieval, not a rejection.
+        assert!(
+            rotation_setup
+                .setup
+                .create_manager(0)
+                .verify_certificate(CertificateV1::Rotation(cert.clone()))
+                .is_ok(),
+            "fixture precondition: validator 2's cert must verify"
+        );
         rotation_certificates.push(CertificateV1::Rotation(cert));
         correct_rotation_msgs.insert(addr_2, correct_messages);
     }
@@ -6816,28 +6883,30 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
 
-        let addr_1 = rotation_setup.setup.address(1);
-        let signer_sig = {
-            let signer = other_managers.get_mut(&addr_1).unwrap();
+        let mut signatures = vec![MemberSignature::new(epoch, addr_3, own_sig)];
+        for signer_idx in [1, 2, 3, 4] {
+            let signer_addr = rotation_setup.setup.address(signer_idx);
+            if signer_addr == addr_3 {
+                continue;
+            }
+            let signer = other_managers.get_mut(&signer_addr).unwrap();
             let signer_prev = signer.previous_output.clone().unwrap();
-            if let Messages::Rotation(ref msgs) = rotation_messages {
+            if let Messages::Rotation(msgs) = &rotation_messages {
                 signer
                     .current_rotation_messages
                     .insert(addr_3, msgs.clone());
             }
-            signer
+            let signature = signer
                 .try_sign_rotation_messages(&signer_prev, addr_3, &rotation_messages)
-                .unwrap()
-        };
+                .unwrap();
+            signatures.push(MemberSignature::new(epoch, signer_addr, signature));
+        }
 
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &rotation_messages,
             addr_3,
-            vec![
-                MemberSignature::new(epoch, addr_3, own_sig),
-                MemberSignature::new(epoch, addr_1, signer_sig),
-            ],
+            signatures,
         )
         .unwrap();
         rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -7322,7 +7391,9 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
             vec![mem_sig0, mem_sig1],
         )
         .unwrap();
-        rotation_certs.push(CertificateV1::Rotation(cert));
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
     }
 
     // Create test manager (validator 2) with EMPTY store.
@@ -8560,7 +8631,9 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
             })
             .collect();
         let cert = create_test_certificate(committee, msg, dealer_addr, sigs).unwrap();
-        certificates.push(CertificateV1::Dkg(cert));
+        certificates.push(VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+            cert,
+        )));
     }
 
     // Set up CommitteeSet for reconstruction: epoch=100 is "previous",
@@ -8694,7 +8767,9 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
             })
             .collect();
         let cert = create_test_certificate(committee, msg, dealer_addr, sigs).unwrap();
-        certificates.push(CertificateV1::Dkg(cert));
+        certificates.push(VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+            cert,
+        )));
     }
 
     let target_epoch = epoch + 1;
@@ -8823,7 +8898,7 @@ fn test_recover_current_dkg() {
         .public_key;
 
     let committee = setup.committee();
-    let certificates: Vec<CertificateV1> = dealer_messages
+    let certificates: Vec<VerifiedCertificateV1> = dealer_messages
         .iter()
         .enumerate()
         .map(|(i, msg)| {
@@ -8841,7 +8916,9 @@ fn test_recover_current_dkg() {
                     )
                 })
                 .collect();
-            CertificateV1::Dkg(create_test_certificate(committee, msg, dealer_addr, sigs).unwrap())
+            VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+                create_test_certificate(committee, msg, dealer_addr, sigs).unwrap(),
+            ))
         })
         .collect();
 
@@ -8976,7 +9053,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         .collect();
 
     let committee = setup.committee();
-    let certificates: Vec<CertificateV1> = dealer_messages
+    let certificates: Vec<VerifiedCertificateV1> = dealer_messages
         .iter()
         .enumerate()
         .map(|(i, msg)| {
@@ -8994,7 +9071,9 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
                     )
                 })
                 .collect();
-            CertificateV1::Dkg(create_test_certificate(committee, msg, dealer_addr, sigs).unwrap())
+            VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+                create_test_certificate(committee, msg, dealer_addr, sigs).unwrap(),
+            ))
         })
         .collect();
 
@@ -9189,7 +9268,9 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             ],
         )
         .unwrap();
-        rotation_certificates.push(CertificateV1::Rotation(cert));
+        rotation_certificates.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
         rotation_messages_by_dealer.push((dealer_addr, rotation_messages));
     }
 
@@ -9396,7 +9477,9 @@ fn test_recover_current_rotation() {
             ],
         )
         .unwrap();
-        rotation_certificates.push(CertificateV1::Rotation(cert));
+        rotation_certificates.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
         rotation_messages_by_dealer.push((dealer_addr, msgs));
     }
 
@@ -9650,7 +9733,9 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         matches!(
             MpcManager::reconstruct_current_rotation_output(
                 &mgr,
-                &[CertificateV1::Rotation(cert)],
+                &[VerifiedCertificateV1::new_unchecked(
+                    CertificateV1::Rotation(cert)
+                )],
                 &[],
                 &[0u8; 33]
             ),
@@ -12372,7 +12457,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let mgr = setup.create_manager(0);
     let batch_index = 3u32;
     let total = mgr.mpc_config.nodes.total_weight() as u32;
-    let vote_quorum = total - mgr.mpc_config.max_faulty as u32;
+    let vote_quorum =
+        MpcManager::avid_vote_quorum(&mgr.mpc_config.nodes, mgr.mpc_config.max_faulty);
 
     let weight_of = |signers: &[usize]| -> u32 {
         signers
@@ -13254,6 +13340,38 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         matches!(result, Err(MpcError::InvalidMessage { .. })),
         "AVID complaint must be rejected in a vanilla epoch: {result:?}"
     );
+
+    let (blame_vote, _) = confirmers[0]
+        .avid_held_echoes
+        .get(&(batch_index, dealer_addr))
+        .unwrap()
+        .clone();
+    let blame_target = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: hash_avid_vote(&blame_vote),
+    };
+    let mut thin = BlsSignatureAggregator::new(setup.committee(), blame_target.clone());
+    thin.add_signature(setup.signing_keys[0].sign(setup.epoch(), setup.address(0), &blame_target))
+        .unwrap();
+    let blame_request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: thin.finish().unwrap(),
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = confirmers[1].handle_complain_request(victim, &blame_request);
+    assert!(
+        matches!(result, Err(MpcError::InvalidCertificate(_))),
+        "a blame complaint carrying a sub-quorum vote cert must be refused: {result:?}"
+    );
 }
 
 #[test]
@@ -14054,4 +14172,480 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
              not current-1; got {epoch}",
         );
     }
+}
+
+#[test]
+fn party_rejects_a_self_signed_cert() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let dealer_manager = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
+    let self_signature = setup.signing_keys[0].sign(
+        setup.epoch(),
+        dealer,
+        &DealerMessagesHash {
+            dealer_address: dealer,
+            messages_hash: compute_messages_hash(&messages),
+        },
+    );
+    let self_signed = CertificateV1::Dkg(
+        create_test_certificate(setup.committee(), &messages, dealer, vec![self_signature])
+            .unwrap(),
+    );
+
+    let party = setup.create_manager(1);
+    let quorum = party.key_generation_cert_quorum(setup.epoch()).unwrap();
+    assert_eq!(
+        quorum,
+        party.mpc_config.threshold as u32 + party.mpc_config.max_faulty as u32,
+        "key-generation certs are gated at t+f, the quorum dealers form them at"
+    );
+    assert!(
+        quorum > 1,
+        "the fixture must have a quorum a lone dealer cannot reach"
+    );
+    let err = party
+        .verify_certificate(self_signed)
+        .expect_err("a lone signer is below t + f");
+    assert!(
+        matches!(err, MpcError::InvalidCertificate(_)),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn cert_verification_context_rejects_unknown_epochs() {
+    let setup = TestSetup::new(4);
+    let party = setup.create_manager(1);
+    let epoch = setup.epoch();
+    assert!(party.cert_verification_context(epoch).is_ok());
+    assert!(party.cert_verification_context(epoch - 1).is_ok());
+    assert!(
+        party.cert_verification_context(epoch - 2).is_err(),
+        "an epoch below previous must not be treated as previous"
+    );
+    assert!(party.cert_verification_context(epoch + 1).is_err());
+}
+
+#[test]
+fn previous_epoch_certs_verify_against_previous_parameters() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash: compute_messages_hash(&messages),
+    };
+    let prev_epoch = setup.epoch() - 1;
+    let prev_committee = setup
+        .committee_set
+        .committees()
+        .get(&prev_epoch)
+        .expect("TestSetup installs a previous committee")
+        .clone();
+
+    let party = setup.create_manager(1);
+    let quorum = CertificateV1::Dkg(
+        create_test_certificate(
+            &prev_committee,
+            &messages,
+            dealer,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(prev_epoch, setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        quorum.epoch(),
+        prev_epoch,
+        "fixture must actually exercise the previous-epoch arm"
+    );
+    party
+        .verify_certificate(quorum)
+        .expect("a previous-epoch quorum cert must verify against the previous committee");
+
+    let single = CertificateV1::Dkg(
+        create_test_certificate(
+            &prev_committee,
+            &messages,
+            dealer,
+            vec![setup.signing_keys[0].sign(prev_epoch, setup.address(0), &target)],
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        party.certificate_rejection_reason(&single),
+        "weight",
+        "and the previous epoch's quorum must still be enforced on that arm"
+    );
+}
+
+#[test]
+fn dealer_skip_weight_ignores_unverifiable_certs() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let dealer_manager = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash: compute_messages_hash(&messages),
+    };
+
+    let self_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            vec![setup.signing_keys[0].sign(setup.epoch(), dealer, &target)],
+        )
+        .unwrap(),
+    );
+    let quorum_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let party = setup.create_manager(1);
+    let (weights, rejected) = party.verified_dealer_weight(&[(dealer, self_signed)]);
+    assert!(
+        weights.is_empty(),
+        "a self-signed cert must contribute no weight to the skip decision"
+    );
+    assert_eq!(
+        rejected,
+        [("dkg", "weight")],
+        "and be reported as a weight failure, not a signature one"
+    );
+    let (weights, rejected) = party.verified_dealer_weight(&[(dealer, quorum_signed)]);
+    assert_eq!(
+        weights.len(),
+        1,
+        "a properly certified dealer must still count"
+    );
+    assert!(rejected.is_empty(), "and must not be reported as rejected");
+}
+
+#[tokio::test]
+async fn self_signed_certs_do_not_suppress_the_dealer_phase() {
+    let setup = setup_run_test();
+    let threshold = setup.test_manager.read().unwrap().mpc_config.threshold;
+
+    let mut self_signed = Vec::new();
+    let mut unverified_weight = 0u16;
+    for (idx, messages) in setup.dealer_messages.iter().enumerate() {
+        let dealer_idx = idx + 1;
+        let dealer = setup.setup.address(dealer_idx);
+        let target = DealerMessagesHash {
+            dealer_address: dealer,
+            messages_hash: compute_messages_hash(messages),
+        };
+        let own = setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
+        let cert =
+            create_test_certificate(setup.setup.committee(), messages, dealer, vec![own]).unwrap();
+        self_signed.push((dealer, CertificateV1::Dkg(cert)));
+        let party_id = setup.setup.committee().index_of(&dealer).unwrap() as u16;
+        unverified_weight += setup
+            .test_manager
+            .read()
+            .unwrap()
+            .mpc_config
+            .nodes
+            .weight_of(party_id)
+            .unwrap();
+        if unverified_weight >= threshold {
+            break;
+        }
+    }
+    assert!(
+        unverified_weight >= threshold,
+        "fixture must be able to fake a skip: {unverified_weight} < {threshold}"
+    );
+
+    let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates)
+        .with_override_certified_dealers(self_signed);
+
+    MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        mock_tob.published_count() > 0,
+        "self-signed certs must not convince the node to skip its dealer phase"
+    );
+}
+
+#[tokio::test]
+async fn party_phase_rejects_a_sub_quorum_cert() {
+    let setup = setup_run_test();
+
+    let sub_quorum: Vec<CertificateV1> = setup
+        .dealer_messages
+        .iter()
+        .enumerate()
+        .map(|(idx, messages)| {
+            let dealer_idx = idx + 1;
+            let dealer = setup.setup.address(dealer_idx);
+            let target = DealerMessagesHash {
+                dealer_address: dealer,
+                messages_hash: compute_messages_hash(messages),
+            };
+            let own =
+                setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
+            CertificateV1::Dkg(
+                create_test_certificate(setup.setup.committee(), messages, dealer, vec![own])
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        !sub_quorum.is_empty(),
+        "fixture must feed the party phase something to reject"
+    );
+
+    let mut mock_tob =
+        MockOrderedBroadcastChannel::new(sub_quorum).with_override_certified_dealers(vec![]);
+    let metrics = test_metrics();
+
+    let result = MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a party must not complete DKG on certificates no dealer could have published"
+    );
+    assert!(
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[MPC_LABEL_DKG, "weight"])
+            .get()
+            >= 1,
+        "and must refuse them on weight, not merely fail to reach the threshold"
+    );
+}
+
+#[tokio::test]
+async fn recovery_drops_certs_the_live_path_would_reject() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let dealer_manager = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash: compute_messages_hash(&messages),
+    };
+
+    let self_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            vec![setup.signing_keys[0].sign(setup.epoch(), dealer, &target)],
+        )
+        .unwrap(),
+    );
+    let quorum_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let mgr = Arc::new(RwLock::new(setup.create_manager(1)));
+    let verified = crate::mpc::service::verify_fetched_certificates(
+        &mgr,
+        vec![self_signed, quorum_signed],
+        &test_metrics(),
+    )
+    .await;
+
+    assert_eq!(
+        verified.len(),
+        1,
+        "recovery must keep only the quorum-signed cert"
+    );
+    assert!(matches!(verified[0].inner(), CertificateV1::Dkg(_)));
+}
+
+#[test]
+fn formation_and_acceptance_quorums_agree() {
+    let setup = TestSetup::new(5);
+    let mut rng = rand::thread_rng();
+    let mut dealer = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer.create_dealer_message(&mut rng));
+    let signature = dealer
+        .try_sign_dkg_message(setup.address(0), &messages)
+        .unwrap();
+
+    let formation = dealer
+        .build_dealer_flow_data(messages, signature)
+        .required_reduced_weight;
+    let acceptance = dealer.key_generation_cert_quorum(setup.epoch()).unwrap();
+    assert_eq!(
+        formation, acceptance,
+        "a dealer forming below the reader's quorum is excluded permanently"
+    );
+
+    let party = setup.create_manager(1);
+    assert_eq!(
+        party.nonce_cert_quorum(setup.epoch()).unwrap(),
+        acceptance,
+        "vanilla nonce certs are formed through the same dealer flow"
+    );
+}
+
+#[test]
+fn reduced_weights_are_stable_for_a_fixed_committee() {
+    const ALLOWED_DELTA: u16 = 1000;
+    let setup = TestSetup::new(4);
+    let stakes: [u64; 4] = [1000, 2500, 3000, 3500];
+    let members: Vec<_> = setup
+        .committee()
+        .members()
+        .iter()
+        .zip(stakes)
+        .map(|(m, stake)| {
+            CommitteeMember::new(
+                m.validator_address(),
+                m.public_key().clone(),
+                m.encryption_public_key().clone(),
+                stake,
+            )
+        })
+        .collect();
+    let weighted = Committee::new(
+        members,
+        setup.epoch(),
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0, // Vanilla
+    );
+
+    let (nodes, threshold, max_faulty) = build_reduced_nodes(
+        &weighted,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        ALLOWED_DELTA,
+        TEST_WEIGHT_DIVISOR,
+        TEST_CHAIN_ID,
+    )
+    .unwrap();
+
+    let weights: Vec<u16> = nodes.iter().map(|n| n.weight).collect();
+    assert_eq!(
+        weights,
+        vec![24, 60, 73, 85],
+        "per-node reduced weights moved"
+    );
+    assert_eq!(nodes.total_weight(), 242, "W moved");
+    assert_eq!(threshold, 82, "t moved");
+    assert_eq!(max_faulty, 49, "f moved");
+    assert!(
+        u32::from(threshold) + u32::from(max_faulty) <= u32::from(nodes.total_weight()),
+        "t + f must stay within W or no certificate can ever be formed"
+    );
+}
+
+#[test]
+fn an_inverted_faulty_bound_yields_an_unreachable_quorum() {
+    assert_eq!(MpcManager::fail_closed_sub(10, 3), 7);
+    assert_eq!(MpcManager::fail_closed_sub(10, 9), 1);
+    assert_eq!(
+        MpcManager::fail_closed_sub(10, 10),
+        u32::MAX,
+        "f == w must not yield a zero quorum"
+    );
+    assert_eq!(
+        MpcManager::fail_closed_sub(1, 1),
+        u32::MAX,
+        "weight-1 committee"
+    );
+    assert_eq!(MpcManager::fail_closed_sub(10, 11), u32::MAX);
+}
+
+#[test]
+fn a_dealer_outside_the_committee_does_not_self_quarantine() {
+    let setup = TestSetup::new(4);
+    let party = setup.create_manager(1);
+    let outsider = Address::new([200u8; 32]);
+    assert!(
+        party.committee.index_of(&outsider).is_none(),
+        "fixture must actually be outside the committee"
+    );
+
+    let err = MpcManager::certified_dealer_party_id(&party.committee, &outsider)
+        .expect_err("an out-of-committee dealer must not resolve to a party id");
+    assert!(
+        !matches!(
+            MpcManager::classify_reconstruction(Err(err)),
+            Err(MpcOutputRecoveryOutcome::Suspicious(_))
+        ),
+        "a certificate naming a dealer outside the committee must not self-quarantine the node"
+    );
+}
+
+#[test]
+fn departing_rotation_dealer_is_verified_not_rejected() {
+    let setup = TestSetup::new(4);
+    let party = setup.create_manager(1);
+    let mut rng = rand::thread_rng();
+
+    let departed = Address::new([200u8; 32]);
+    let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: departed,
+        messages_hash: compute_messages_hash(&messages),
+    };
+    let cert = CertificateV1::Rotation(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            departed,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let (verified, rejected) = party.verified_dealer_weight(&[(departed, cert)]);
+    assert!(
+        verified.contains_key(&departed),
+        "a quorum-signed cert must stay verified even when its dealer has no current weight"
+    );
+    assert_eq!(
+        verified[&departed], 0,
+        "and contribute no weight, rather than being dropped"
+    );
+    assert!(
+        rejected.is_empty(),
+        "and must not reach the metric that exists to surface Byzantine self-certification"
+    );
 }

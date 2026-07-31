@@ -424,6 +424,14 @@ pub enum CertificateV1 {
 }
 
 impl CertificateV1 {
+    pub(crate) fn protocol_label(&self) -> &'static str {
+        match self {
+            CertificateV1::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
+            CertificateV1::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
+            CertificateV1::NonceGeneration { .. } => crate::metrics::MPC_LABEL_NONCE_GENERATION,
+        }
+    }
+
     pub fn new(
         protocol_type: hashi_types::move_types::ProtocolType,
         batch_index: Option<u32>,
@@ -516,6 +524,19 @@ impl CertificateV1 {
                 batch_index: *batch_index,
             },
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedCertificateV1(CertificateV1);
+
+impl VerifiedCertificateV1 {
+    pub(crate) fn new_unchecked(cert: CertificateV1) -> Self {
+        Self(cert)
+    }
+
+    pub fn inner(&self) -> &CertificateV1 {
+        &self.0
     }
 }
 
@@ -678,7 +699,7 @@ pub struct DealerFlowData {
     pub recipients: Vec<Address>,
     pub messages_hash: DealerMessagesHash,
     pub my_signature: MemberSignature,
-    pub required_reduced_weight: u16,
+    pub required_reduced_weight: u32,
     pub committee: Committee,
     pub nodes: Nodes<EncryptionGroupElement>,
 }

@@ -29,14 +29,17 @@ use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
+use crate::metrics::Metrics;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
+use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
+use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
@@ -355,6 +358,7 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for DKG recovery"))?;
+        let certs = verify_fetched_certificates(&mpc_manager, certs, &self.inner.metrics).await;
         match MpcManager::reconstruct_current_dkg_output(&mpc_manager, &certs, onchain_mpc_key) {
             MpcOutputRecoveryOutcome::Recovered(output) => {
                 info!(
@@ -411,6 +415,10 @@ impl MpcService {
                 .into_iter()
                 .map(|(_, cert)| cert)
                 .collect();
+        let current_certs =
+            verify_fetched_certificates(&mpc_manager, current_certs, &self.inner.metrics).await;
+        let previous_certs =
+            verify_fetched_certificates(&mpc_manager, previous_certs, &self.inner.metrics).await;
         match MpcManager::reconstruct_current_rotation_output(
             &mpc_manager,
             &current_certs,
@@ -775,7 +783,13 @@ impl MpcService {
                 else {
                     return Ok(None);
                 };
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let certs = MpcManager::verified_nonce_certs(
+                    mpc_manager,
+                    epoch,
+                    certs,
+                    &self.inner.metrics,
+                )
+                .await;
                 certified_nonce_weight(mpc_manager, &certs)
             }
             NonceGenerationProtocol::Avid => {
@@ -789,7 +803,13 @@ impl MpcService {
                 if certs.is_empty() {
                     return Ok(None);
                 }
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let certs = MpcManager::verified_nonce_certs(
+                    mpc_manager,
+                    epoch,
+                    certs,
+                    &self.inner.metrics,
+                )
+                .await;
                 avid_certified_nonce_weight(mpc_manager, &certs)
             }
         };
@@ -1066,7 +1086,13 @@ impl MpcService {
                             "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
                         )
                     })?;
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let certs = MpcManager::verified_nonce_certs(
+                    mpc_manager,
+                    epoch,
+                    certs,
+                    &self.inner.metrics,
+                )
+                .await;
                 let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
                 let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
                     mpc_manager,
@@ -1091,7 +1117,13 @@ impl MpcService {
                         "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
                     ));
                 }
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let certs = MpcManager::verified_nonce_certs(
+                    mpc_manager,
+                    epoch,
+                    certs,
+                    &self.inner.metrics,
+                )
+                .await;
                 let expected_size =
                     expected_from(avid_certified_nonce_weight(mpc_manager, &certs))?;
                 let mut prefetched = PrefetchedTobChannel::new(certs);
@@ -1408,8 +1440,11 @@ impl MpcService {
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
+        let fetched = previous_certs.len();
+        let previous_certs =
+            verify_fetched_certificates(&mpc_manager, previous_certs, &self.inner.metrics).await;
         info!(
-            "run_key_rotation: fetched {} certs for previous_epoch={previous_epoch}",
+            "run_key_rotation: {} of {fetched} certs verified for previous_epoch={previous_epoch}",
             previous_certs.len(),
         );
         let signer = self.inner.config.operator_private_key()?;
@@ -1694,6 +1729,41 @@ pub(crate) fn presig_count(
 ) -> usize {
     let consumed = params.t as usize - 1;
     total_weight.saturating_sub(consumed) * batch_size_per_weight as usize
+}
+
+pub(crate) async fn verify_fetched_certificates(
+    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+    certs: Vec<CertificateV1>,
+    metrics: &Metrics,
+) -> Vec<VerifiedCertificateV1> {
+    let mgr = Arc::clone(mpc_manager);
+    let (verified, rejected) = spawn_blocking(move || {
+        let mgr = mgr.read().unwrap();
+        let mut verified = Vec::with_capacity(certs.len());
+        let mut rejected: Vec<(&'static str, &'static str)> = Vec::new();
+        for cert in certs {
+            let label = cert.protocol_label();
+            match mgr.verify_certificate(cert.clone()) {
+                Ok(cert) => verified.push(cert),
+                Err(e) => {
+                    warn!(
+                        "dropping unverifiable TOB certificate from {:?}: {e}",
+                        cert.dealer_address()
+                    );
+                    rejected.push((label, mgr.certificate_rejection_reason(&cert)));
+                }
+            }
+        }
+        (verified, rejected)
+    })
+    .await;
+    for (protocol, reason) in rejected {
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[protocol, reason])
+            .inc();
+    }
+    verified
 }
 
 fn certified_nonce_weight<T>(
