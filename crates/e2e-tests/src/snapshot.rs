@@ -175,7 +175,7 @@ pub fn load_snapshot_publish(snapshot_dir: &Path) -> Result<sui_sdk_types::Publi
 }
 
 /// Publish the bytecode snapshot at `snapshot_dir` as a fresh package, driven
-/// by `private_key`. Mirrors [`crate::publish`] but sources the modules from a
+/// by `private_key`. Mirrors the `publish` module but sources the modules from a
 /// checked-in bytecode snapshot instead of a source build.
 ///
 /// Like the source-build path, the `UpgradeCap` is transferred to the sender
