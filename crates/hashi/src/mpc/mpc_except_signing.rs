@@ -479,22 +479,25 @@ impl MpcManager {
                 "AVID retrieval serves the current epoch only".into(),
             ));
         }
-        let common = self.get_avid_round_common(batch_index, &request.dealer);
-        let (avid_vote, echo) = match &self.get_avid_held_echoes(batch_index, &request.dealer) {
-            Some((vote, echoes)) => {
-                let echo = echoes.iter().find_map(|(addr, msg)| {
-                    (*addr == requester).then(|| match msg {
-                        Messages::NonceGenerationAvid(AvidNonceMessage {
-                            kind: AvidNonceMessageKind::Echo { echo, .. },
-                            ..
-                        }) => echo.clone(),
-                        _ => unreachable!("held echoes are echo messages"),
-                    })
-                });
-                (Some(vote.clone()), echo)
-            }
-            None => (None, None),
-        };
+        let common = self
+            .get_avid_round_state(batch_index, &request.dealer)?
+            .map(|state| state.common);
+        let (avid_vote, echo) =
+            match &self.try_get_avid_held_echoes(batch_index, &request.dealer)? {
+                Some((vote, echoes)) => {
+                    let echo = echoes.iter().find_map(|(addr, msg)| {
+                        (*addr == requester).then(|| match msg {
+                            Messages::NonceGenerationAvid(AvidNonceMessage {
+                                kind: AvidNonceMessageKind::Echo { echo, .. },
+                                ..
+                            }) => echo.clone(),
+                            _ => unreachable!("held echoes are echo messages"),
+                        })
+                    });
+                    (Some(vote.clone()), echo)
+                }
+                None => (None, None),
+            };
         if common.is_none() && avid_vote.is_none() && echo.is_none() {
             return Err(MpcError::NotFound(format!(
                 "no AVID round state for dealer {:?}",
@@ -2077,15 +2080,19 @@ impl MpcManager {
         Ok(())
     }
 
-    fn get_avid_held_echoes(&self, batch_index: u32, dealer: &Address) -> Option<HeldAvidEchoes> {
+    fn try_get_avid_held_echoes(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<Option<HeldAvidEchoes>> {
         self.avid_held_echoes
             .get(&(batch_index, *dealer))
             .cloned()
-            .or_else(|| {
+            .map(|echoes| Ok(Some(echoes)))
+            .unwrap_or_else(|| {
                 self.public_messages_store
                     .get_avid_held_echoes(self.mpc_config.epoch, batch_index, dealer)
-                    .ok()
-                    .flatten()
+                    .map_err(|e| MpcError::StorageError(e.to_string()))
             })
     }
 
@@ -2441,7 +2448,8 @@ impl MpcManager {
         confirm_cert: DealerCertificate,
     ) -> MpcResult<AvidEchoAndVote> {
         let own_common = self
-            .get_avid_round_common(batch_index, &dealer)
+            .get_avid_round_state(batch_index, &dealer)?
+            .map(|state| state.common)
             .ok_or_else(|| {
                 MpcError::NotReady("no verified common message for this AVID round".into())
             })?;
@@ -2554,7 +2562,7 @@ impl MpcManager {
                 vote_cert,
             } => {
                 let (held_vote, _) = self
-                    .get_avid_held_echoes(batch_index, &request.dealer)
+                    .try_get_avid_held_echoes(batch_index, &request.dealer)?
                     .ok_or_else(|| {
                         MpcError::NotFound("no held vote for the complained round".into())
                     })?;
@@ -2619,17 +2627,6 @@ impl MpcManager {
         Ok(())
     }
 
-    fn get_avid_round_common(
-        &self,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> Option<batch_avss_avid::AvssCommonMessage> {
-        self.get_avid_round_state(batch_index, dealer)
-            .ok()
-            .flatten()
-            .map(|s| s.common)
-    }
-
     fn get_avid_round_state(
         &self,
         batch_index: u32,
@@ -2683,8 +2680,8 @@ impl MpcManager {
         let batch_index = message.batch_index;
         match &message.kind {
             AvidNonceMessageKind::Optimistic(msg) => {
-                if let Some(common) = self.get_avid_round_common(batch_index, &sender)
-                    && common.hash() != msg.common.hash()
+                if let Some(state) = self.get_avid_round_state(batch_index, &sender)?
+                    && state.common.hash() != msg.common.hash()
                 {
                     return Err(MpcError::InvalidMessage {
                         sender,
@@ -2698,7 +2695,8 @@ impl MpcManager {
                 confirm_cert,
             } => {
                 let common = self
-                    .get_avid_round_common(batch_index, &sender)
+                    .get_avid_round_state(batch_index, &sender)?
+                    .map(|state| state.common)
                     .ok_or_else(|| {
                         MpcError::NotReady("no verified common message for this AVID round".into())
                     })?;
@@ -2710,7 +2708,7 @@ impl MpcManager {
                     confirm_cert.clone(),
                 )?;
                 let vote_hash = hash_avid_vote(&avid_vote);
-                if let Some((held_vote, _)) = self.get_avid_held_echoes(batch_index, &sender)
+                if let Some((held_vote, _)) = self.try_get_avid_held_echoes(batch_index, &sender)?
                     && hash_avid_vote(&held_vote) != vote_hash
                 {
                     return Err(MpcError::InvalidMessage {
@@ -2982,12 +2980,18 @@ impl MpcManager {
         dealer: &Address,
         digest: &MessageHash,
     ) -> Option<CertKind> {
-        if let Some(common) = self.get_avid_round_common(batch_index, dealer)
-            && MessageHash::from(common.hash().digest) == *digest
+        if let Some(state) = self
+            .get_avid_round_state(batch_index, dealer)
+            .ok()
+            .flatten()
+            && MessageHash::from(state.common.hash().digest) == *digest
         {
             return Some(CertKind::AvssVote);
         }
-        if let Some((vote, _)) = self.get_avid_held_echoes(batch_index, dealer)
+        if let Some((vote, _)) = self
+            .try_get_avid_held_echoes(batch_index, dealer)
+            .ok()
+            .flatten()
             && hash_avid_vote(&vote) == *digest
         {
             return Some(CertKind::AvidVote);
@@ -5834,6 +5838,10 @@ impl MpcManager {
         }
         let epoch = self.mpc_config.epoch;
         let stored = match protocol_type {
+            // Only the nonce generation arm can be reached today: `MpcManager::new`
+            // rehydrates the dkg and rotation maps via `load_stored_messages`, so
+            // the in-memory probe above always hits for them. Kept so the guard
+            // stays correct on its own rather than by way of startup ordering.
             ProtocolTypeIndicator::Dkg => self
                 .public_messages_store
                 .get_dealer_message(epoch, dealer)
@@ -5846,7 +5854,10 @@ impl MpcManager {
                 .map(Messages::Rotation),
             ProtocolTypeIndicator::NonceGeneration => {
                 let Some(batch_index) = batch_index else {
-                    return Ok(None);
+                    return Err(MpcError::InvalidMessage {
+                        sender: *dealer,
+                        reason: "nonce generation messages must carry a batch index".to_string(),
+                    });
                 };
                 self.public_messages_store
                     .get_nonce_message(epoch, batch_index, dealer)
