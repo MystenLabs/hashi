@@ -360,7 +360,7 @@ impl MpcManager {
             _ => None,
         };
         let existing =
-            self.get_dealer_messages(request.messages.protocol_type(), &sender, batch_index);
+            self.accepted_dealer_messages(request.messages.protocol_type(), &sender, batch_index)?;
         if let Some(existing_messages) = existing {
             let existing_hash = compute_messages_hash(&existing_messages);
             let incoming_hash = compute_messages_hash(&request.messages);
@@ -5810,6 +5810,45 @@ impl MpcManager {
                     .map(|m| Messages::NonceGeneration(m.clone()))
             }
         }
+    }
+
+    fn accepted_dealer_messages(
+        &self,
+        protocol_type: ProtocolTypeIndicator,
+        dealer: &Address,
+        batch_index: Option<u32>,
+    ) -> MpcResult<Option<Messages>> {
+        if let Some(cached) = self.get_dealer_messages(protocol_type, dealer, batch_index) {
+            return Ok(Some(cached));
+        }
+        let epoch = self.mpc_config.epoch;
+        let stored = match protocol_type {
+            ProtocolTypeIndicator::Dkg => self
+                .public_messages_store
+                .get_dealer_message(epoch, dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(Messages::Dkg),
+            ProtocolTypeIndicator::KeyRotation => self
+                .public_messages_store
+                .get_rotation_messages(epoch, dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(Messages::Rotation),
+            ProtocolTypeIndicator::NonceGeneration => {
+                let Some(batch_index) = batch_index else {
+                    return Ok(None);
+                };
+                self.public_messages_store
+                    .get_nonce_message(epoch, batch_index, dealer)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .map(|message| {
+                        Messages::NonceGeneration(NonceMessage {
+                            batch_index,
+                            message,
+                        })
+                    })
+            }
+        };
+        Ok(stored)
     }
 
     pub(crate) fn required_nonce_weight(&self) -> u32 {
