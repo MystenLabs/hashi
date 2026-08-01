@@ -1242,6 +1242,8 @@ struct InMemoryPublicMessagesStore {
     avid_held_echoes_stored: HashMap<(u32, Address), HeldAvidEchoes>,
     avid_dealer_builder_stored: HashMap<u32, batch_avss_avid::AvssMessageBuilder>,
     fail_nonce_reads: bool,
+    fail_avid_round_state_reads: bool,
+    fail_avid_held_echoes_reads: bool,
 }
 
 impl InMemoryPublicMessagesStore {
@@ -1254,6 +1256,8 @@ impl InMemoryPublicMessagesStore {
             avid_held_echoes_stored: HashMap::new(),
             avid_dealer_builder_stored: HashMap::new(),
             fail_nonce_reads: false,
+            fail_avid_round_state_reads: false,
+            fail_avid_held_echoes_reads: false,
         }
     }
 }
@@ -1365,6 +1369,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<AvidRoundState>> {
+        if self.fail_avid_round_state_reads {
+            return Err(anyhow::anyhow!("avid round state read failure"));
+        }
         Ok(self.avid_round_stored.get(&(batch_index, *dealer)).cloned())
     }
 
@@ -1398,6 +1405,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        if self.fail_avid_held_echoes_reads {
+            return Err(anyhow::anyhow!("avid held echoes read failure"));
+        }
         Ok(self
             .avid_held_echoes_stored
             .get(&(batch_index, *dealer))
@@ -11967,6 +11977,79 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
 }
 
 #[test]
+fn test_avid_optimistic_ingest_fails_closed_when_the_store_read_fails() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new_avid(5);
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let batch_index = 0u32;
+    let receiver_idx = 1;
+
+    let builder = dealer
+        .create_avid_nonce_dealer_builder(batch_index, &mut rng)
+        .unwrap();
+    let deal = dealer.avid_nonce_optimistic_messages(&builder, batch_index)[receiver_idx]
+        .1
+        .clone();
+
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_avid_round_state_reads = true;
+    let mut receiver = setup.create_manager_with_store(receiver_idx, Box::new(store));
+
+    let err = receiver
+        .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: deal })
+        .expect_err("an unreadable store must not be read as 'no round accepted yet'");
+    assert!(
+        matches!(err, MpcError::StorageError(_)),
+        "expected StorageError, got {err:?}"
+    );
+    assert!(
+        receiver.current_avid_round_state.is_empty(),
+        "nothing may be accepted when the guard could not see the stored round",
+    );
+}
+
+#[test]
+fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_avid_held_echoes_reads = true;
+    let mut receiver = setup.create_manager_with_store(1, Box::new(store));
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+
+    let err = receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .expect_err("an unreadable store must not be read as 'nothing held'");
+    assert!(
+        matches!(err, MpcError::StorageError(_)),
+        "expected StorageError, got {err:?}"
+    );
+    assert!(
+        receiver.avid_held_echoes.is_empty(),
+        "nothing may be held when the guard could not see the stored echoes",
+    );
+}
+
+#[test]
 fn test_handle_avid_echo_push_is_rejected() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
@@ -13210,8 +13293,10 @@ fn test_avid_voter_state_survives_restart() {
         );
     }
     let common = restarted
-        .get_avid_round_common(batch_index, &dealer_addr)
-        .unwrap();
+        .get_avid_round_state(batch_index, &dealer_addr)
+        .unwrap()
+        .unwrap()
+        .common;
     let (outcome, _) = laggard
         .decode_avid_nonce_share(
             dealer_addr,
