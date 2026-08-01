@@ -1241,6 +1241,7 @@ struct InMemoryPublicMessagesStore {
     avid_round_stored: HashMap<(u32, Address), AvidRoundState>,
     avid_held_echoes_stored: HashMap<(u32, Address), HeldAvidEchoes>,
     avid_dealer_builder_stored: HashMap<u32, batch_avss_avid::AvssMessageBuilder>,
+    fail_nonce_reads: bool,
 }
 
 impl InMemoryPublicMessagesStore {
@@ -1252,6 +1253,7 @@ impl InMemoryPublicMessagesStore {
             avid_round_stored: HashMap::new(),
             avid_held_echoes_stored: HashMap::new(),
             avid_dealer_builder_stored: HashMap::new(),
+            fail_nonce_reads: false,
         }
     }
 }
@@ -1327,6 +1329,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<batch_avss::Message>> {
+        if self.fail_nonce_reads {
+            return Err(anyhow::anyhow!("nonce read failure"));
+        }
         Ok(self.nonce_stored.get(&(batch_index, *dealer)).cloned())
     }
 
@@ -5096,6 +5101,140 @@ async fn test_handle_send_messages_request_equivocation() {
         }
         _ => panic!("Expected InvalidMessage error"),
     }
+}
+
+#[tokio::test]
+async fn test_nonce_ingest_fails_closed_when_the_store_read_fails() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_nonce_reads = true;
+    let mut manager = setup.create_manager_with_store(0, Box::new(store));
+    let dealer = setup.address(1);
+    let batch_index = 3u32;
+    let nonce = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+
+    let err = manager
+        .handle_send_messages_request(
+            dealer,
+            &SendMessagesRequest {
+                messages: Messages::NonceGeneration(nonce),
+            },
+        )
+        .expect_err("an unreadable store must not be read as 'nothing stored'");
+    assert!(
+        matches!(err, MpcError::StorageError(_)),
+        "expected StorageError, got {err:?}"
+    );
+    assert!(
+        manager.current_nonce_messages.is_empty(),
+        "nothing may be accepted when the guard could not see the stored message",
+    );
+}
+
+#[tokio::test]
+async fn test_nonce_equivocation_is_rejected_for_a_pruned_batch() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let manager = setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let dealer = setup.address(1);
+    let batch_index = 0u32;
+    let epoch = manager.mpc_config.epoch;
+
+    let certified = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    let re_deal = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::NonceGeneration(certified.clone())),
+        compute_messages_hash(&Messages::NonceGeneration(re_deal.clone())),
+        "Test precondition: the two deals must differ",
+    );
+
+    let manager = Arc::new(RwLock::new(manager));
+    manager
+        .write()
+        .unwrap()
+        .cache_and_persist_nonce_message(epoch, dealer, &certified)
+        .unwrap();
+
+    // Advance far enough that batch 0 falls outside the retained window.
+    MpcManager::prune_nonce_state(&manager, batch_index + PRUNE_KEEP_RECENT_BATCHES);
+    assert!(
+        manager.read().unwrap().current_nonce_messages.is_empty(),
+        "precondition: the pruner must have evicted the batch from memory",
+    );
+
+    let err = manager
+        .write()
+        .unwrap()
+        .handle_send_messages_request(
+            dealer,
+            &SendMessagesRequest {
+                messages: Messages::NonceGeneration(re_deal),
+            },
+        )
+        .expect_err("a differing re-deal must be rejected for a pruned batch");
+    assert!(
+        matches!(&err, MpcError::InvalidMessage { reason, .. } if reason.contains("different messages")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_nonce_equivocation_is_rejected_after_a_restart() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let dealer = setup.address(1);
+    // Non-zero so a hardcoded-batch regression cannot pass.
+    let batch_index = 4u32;
+    let epoch = manager.mpc_config.epoch;
+
+    let certified = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    let re_deal = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::NonceGeneration(certified.clone())),
+        compute_messages_hash(&Messages::NonceGeneration(re_deal.clone())),
+        "Test precondition: the two deals must differ",
+    );
+
+    manager
+        .cache_and_persist_nonce_message(epoch, dealer, &certified)
+        .unwrap();
+
+    // The restart: in-memory caches are gone, the store still holds the deal.
+    manager.current_nonce_messages.clear();
+    manager.message_responses.clear();
+
+    let err = manager
+        .handle_send_messages_request(
+            dealer,
+            &SendMessagesRequest {
+                messages: Messages::NonceGeneration(re_deal),
+            },
+        )
+        .expect_err("a differing re-deal must be rejected after a restart");
+    match err {
+        MpcError::InvalidMessage { sender, reason } => {
+            assert_eq!(sender, dealer);
+            assert!(reason.contains("different messages"), "got: {reason}");
+        }
+        other => panic!("Expected InvalidMessage, got {other:?}"),
+    }
+
+    let stored = manager
+        .public_messages_store
+        .get_nonce_message(epoch, batch_index, &dealer)
+        .unwrap()
+        .expect("store still holds the certified deal");
+    assert_eq!(
+        compute_messages_hash(&Messages::NonceGeneration(NonceMessage {
+            batch_index,
+            message: stored,
+        })),
+        compute_messages_hash(&Messages::NonceGeneration(certified)),
+        "the re-deal must not have overwritten the certified message",
+    );
 }
 
 #[tokio::test]
