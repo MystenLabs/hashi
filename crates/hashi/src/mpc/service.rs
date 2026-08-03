@@ -316,12 +316,8 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let certs = fetch_key_generation_certificates(&onchain_state, epoch)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("failed to fetch reconfig certs for epoch {epoch}: {e}")
-            })?;
-        let is_key_rotation = matches!(certs.first(), Some((_, CertificateV1::Rotation(_))));
+        let is_key_rotation =
+            is_key_rotation_epoch(onchain_state.state().hashi().committees.committees(), epoch);
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
@@ -1766,6 +1762,10 @@ pub(crate) async fn verify_fetched_certificates(
     verified
 }
 
+fn is_key_rotation_epoch<C>(committees: &std::collections::BTreeMap<u64, C>, epoch: u64) -> bool {
+    committees.range(..epoch).next_back().is_some()
+}
+
 fn certified_nonce_weight<T>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
     certs: &[(sui_sdk_types::Address, T)],
@@ -1912,6 +1912,36 @@ mod presig_count_tests {
 
 fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) || current_epoch == target_epoch
+}
+
+#[cfg(test)]
+mod key_rotation_epoch_tests {
+    use std::collections::BTreeMap;
+
+    use super::is_key_rotation_epoch;
+
+    fn history(epochs: &[u64]) -> BTreeMap<u64, ()> {
+        epochs.iter().map(|e| (*e, ())).collect()
+    }
+
+    #[test]
+    fn the_earliest_committee_epoch_is_not_a_rotation() {
+        assert!(!is_key_rotation_epoch(&history(&[9, 32, 33]), 9));
+        assert!(!is_key_rotation_epoch(&history(&[]), 9));
+    }
+
+    #[test]
+    fn an_epoch_after_the_first_committee_is_a_rotation() {
+        assert!(is_key_rotation_epoch(&history(&[9, 32, 33]), 32));
+        assert!(is_key_rotation_epoch(&history(&[9, 32, 33]), 33));
+    }
+
+    /// Epochs between reconfigs have no committee of their own; the predecessor still decides.
+    #[test]
+    fn a_gap_epoch_resolves_from_the_nearest_earlier_committee() {
+        assert!(is_key_rotation_epoch(&history(&[9, 32]), 20));
+        assert!(!is_key_rotation_epoch(&history(&[9, 32]), 5));
+    }
 }
 
 #[cfg(test)]
