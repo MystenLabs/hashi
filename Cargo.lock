@@ -2999,8 +2999,6 @@ name = "hashi-guardian-init"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "aws-config",
- "aws-credential-types",
  "bitcoin",
  "clap",
  "hashi",
@@ -3048,17 +3046,23 @@ name = "hashi-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64ct",
  "bitcoin",
  "clap",
- "corepc-client",
  "e2e-tests",
+ "futures",
  "hashi-guardian",
  "hashi-types",
- "jsonrpc",
+ "minreq",
  "serde",
+ "serde_json",
  "serde_yaml",
+ "sui-rpc",
+ "sui-sdk-types",
  "tempfile",
+ "time",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

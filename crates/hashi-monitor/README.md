@@ -17,17 +17,49 @@ Audits the cross-system bridge flow on two parallel tracks.
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
 - **Successor existence**: for each non-terminal event, the configured next-event delay bound must hold.
 
+Findings are tagged as:
+- **liveness** when a successor is late or still missing after its deadline;
+- **safety** for a contradictory event, a late predecessor, or a predecessor
+  still missing after its source cursor passes the deadline.
+
+For withdrawals, a predecessor lookback that is too short can produce a false
+safety finding for a missing E1. Reconcile older Sui history before treating
+such a finding as conclusive.
+
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.
 2. **Continuous**: long-running monitor that polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
 
 ### Timeline semantics (withdrawals)
 - User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
-- Sui events are polled in a relaxed range to validate E2 predecessor constraints.
+- Sui withdrawal events are polled from `withdrawal_predecessor_lookback`
+  seconds before the guardian window to validate E2 predecessor constraints.
+- Deposit events are polled only from the start of the guardian window.
 - Orphan E1 findings are currently still reported when E1 falls in the user window.
-- Deposits are not gated by the audit window — there is no false-positive risk.
+- Deposits are audited over the derived Sui range rather than gated by the
+  withdrawal audit-window logic.
 
 ## Usage
+
+### Active testnet
+
+`audit.testnet.yaml` contains the active Hashi Guardian testnet deployment
+identifiers and PCR allowlist. Supply AWS credentials through the default
+credential chain and keep the Signet provider URI in the environment:
+
+```bash
+export AWS_PROFILE=guardian-s3-testnet
+export HASHI_SKIP_S3_OBJECT_LOCK_CHECK=1
+export HASHI_BITCOIN_RPC_URL="https://your-signet-json-rpc-endpoint"
+
+cargo run -p hashi-monitor -- continuous \
+  --config audit.testnet.yaml \
+  --start "$(($(date +%s) - 3600))"
+```
+
+Run this from `crates/hashi-monitor`, or prefix the configuration path with
+`crates/hashi-monitor/` when running from the repository root. The object-lock
+bypass is temporary and is described below.
 
 ### Batch audit
 ```bash
@@ -52,22 +84,25 @@ next_event_delays:
 # Optional: clock skew tolerance (default: 300s)
 # clock_skew: 300
 
-guardian:
-  access_key: "AWS_ACCESS_KEY_ID"
-  secret_key: "AWS_SECRET_ACCESS_KEY"
-  session_token:
-  bucket_info:
-    bucket: "hashi-guardian-logs"
-    region: "us-east-1"
+# Optional: Sui withdrawal history before the guardian window (default: 1 hour)
+# withdrawal_predecessor_lookback: 3600
+
+guardian_s3:
+  bucket: "hashi-guardian-logs"
+  region: "us-east-1"
+  # Omit both keys to use the AWS default credential chain.
+  # access_key: "..."
+  # secret_key: "..."
   retention_environment: "testnet"
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
-  rpc_url: "http://localhost:8332"
-  rpc_auth:
-    type: none
+  rpc_url: "env:BITCOIN_RPC_URL"
+  # http_headers:
+  #   Origin: "https://example.com"
 ```
 
 ## Status
@@ -75,9 +110,8 @@ btc:
   - Domain model and withdrawal / deposit state-machine checks.
   - Batch and continuous auditor loops (cursor advancement, BTC fetch, violation detection, GC, progress watermarks).
   - Guardian S3 withdrawal log polling with attestation and signature verification.
-  - BTC confirmation lookup via Bitcoin Core RPC.
-- Not yet implemented:
-  - Sui event polling — `AuditorCore::poll_sui` is a stub that returns `CursorUnmoved`, so E1 (withdrawal) and the deposit pipeline currently see no Sui input.
+  - Checkpoint-bounded, resumable Sui polling for withdrawal and deposit events.
+  - Batched BTC confirmation lookup over HTTP JSON-RPC.
 
 ## Temporary testnet object-lock bypass
 

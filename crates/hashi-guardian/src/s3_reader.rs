@@ -29,7 +29,7 @@ use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedSessionInfo;
 use hashi_types::guardian::S3_DIR_CEREMONY;
@@ -138,7 +138,7 @@ pub struct GuardianReader {
 }
 
 impl GuardianReader {
-    pub async fn new(config: &S3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
+    pub async fn new(config: &ResolvedS3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
         let s3 = GuardianS3Client::new_checked(config).await?;
         Ok(Self::from_s3_client(s3, allowlist))
     }

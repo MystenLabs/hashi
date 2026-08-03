@@ -68,8 +68,9 @@ pub struct GuardianWithdrawalsPoller {
 impl GuardianWithdrawalsPoller {
     // Note: Throws an error if there is a S3 connectivity issue
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
+        let guardian_s3 = hashi_guardian::resolve_s3_config(&config.guardian_s3).await?;
         Ok(Self {
-            reader: GuardianReader::new(&config.guardian, config.pcr_allowlist()).await?,
+            reader: GuardianReader::new(&guardian_s3, config.pcr_allowlist()).await?,
             cursor: withdraw_cursor(start),
         })
     }
@@ -78,8 +79,7 @@ impl GuardianWithdrawalsPoller {
         self.cursor.to_unix_seconds()
     }
 
-    /// Polls the Guardian S3 bucket for one hour worth of events.
-    /// A more aggressive fetch, e.g., one day at a time, can also be done if needed.
+    /// Poll one hourly Guardian S3 directory and advance to the next directory.
     pub async fn poll_one_hour(&mut self) -> anyhow::Result<PollOutcome> {
         if now_timestamp_secs() < self.cursor.write_completion_time() {
             return Ok(PollOutcome::CursorUnmoved);

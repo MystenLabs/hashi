@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::MAX_S3_WRITE_FAILURE_INTERVAL;
+use anyhow::Context;
+use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::LogRecord;
+use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::S3BucketInfo;
-use hashi_types::guardian::S3Config;
 use hashi_types::guardian::S3ObjectLockPolicy;
+use hashi_types::guardian::UnresolvedS3Config;
 use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
@@ -40,10 +43,58 @@ const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const SKIP_S3_OBJECT_LOCK_CHECK_ENV: &str = "HASHI_SKIP_S3_OBJECT_LOCK_CHECK";
 static SKIP_S3_OBJECT_LOCK_CHECK_WARNING: Once = Once::new();
 
+/// Resolve explicit credentials or, when both are omitted, use AWS's default
+/// provider chain.
+pub async fn resolve_s3_config(config: &UnresolvedS3Config) -> anyhow::Result<ResolvedS3Config> {
+    let access_key = config
+        .access_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let secret_key = config
+        .secret_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+
+    let (access_key, secret_key, session_token) = match (access_key, secret_key) {
+        (Some(access_key), Some(secret_key)) => {
+            (access_key.to_string(), secret_key.to_string(), None)
+        }
+        (None, None) => {
+            let provider =
+                aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                    .build()
+                    .await;
+            let credentials = provider
+                .provide_credentials()
+                .await
+                .context("failed to resolve AWS credentials from the default provider chain")?;
+            (
+                credentials.access_key_id().to_string(),
+                credentials.secret_access_key().to_string(),
+                credentials.session_token().map(ToOwned::to_owned),
+            )
+        }
+        _ => anyhow::bail!(
+            "guardian_s3 access_key and secret_key must either both be set or both be omitted"
+        ),
+    };
+
+    Ok(ResolvedS3Config {
+        access_key,
+        secret_key,
+        session_token,
+        bucket_info: S3BucketInfo {
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+        },
+        retention_environment: config.retention_environment,
+    })
+}
+
 #[derive(Clone)]
 pub struct GuardianS3Client {
     /// S3 connection and retention config.
-    config: S3Config,
+    config: ResolvedS3Config,
     /// S3 client
     client: S3Client,
     /// Expected object-lock policy for this Guardian deployment.
@@ -55,7 +106,7 @@ impl GuardianS3Client {
     // Constructors
     // ========================================================================
 
-    pub async fn new(config: &S3Config) -> Self {
+    pub async fn new(config: &ResolvedS3Config) -> Self {
         info!("S3 Configuration:");
         info!("   Bucket: {}", config.bucket_name());
         info!("   Region: {}", config.region());
@@ -91,7 +142,7 @@ impl GuardianS3Client {
         }
     }
 
-    pub async fn new_checked(config: &S3Config) -> GuardianResult<Self> {
+    pub async fn new_checked(config: &ResolvedS3Config) -> GuardianResult<Self> {
         let logger = Self::new(config).await;
         logger.test_s3_connectivity().await?;
         Ok(logger)
@@ -100,7 +151,7 @@ impl GuardianS3Client {
     /// Construct an `GuardianS3Client` from an already-configured S3 client.
     /// This is intended for unit tests that use a mock S3 Client.
     /// This is not put behind cfg(test) as tests in the enclave crate also use it.
-    pub fn from_client_for_tests(config: S3Config, client: S3Client) -> Self {
+    pub fn from_client_for_tests(config: ResolvedS3Config, client: S3Client) -> Self {
         let object_lock_policy = S3ObjectLockPolicy::for_environment(config.retention_environment);
         Self {
             client,
@@ -730,7 +781,7 @@ mod tests {
     use hashi_types::guardian::SessionID;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
-        let config = S3Config {
+        let config = ResolvedS3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
             session_token: None,

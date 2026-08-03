@@ -18,7 +18,7 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorActivateRequest;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
@@ -49,7 +49,7 @@ const ACTIVATION_HEARTBEAT_WAIT_BUFFER: Duration = Duration::from_mins(5);
 /// Activate a provisioner-initialized standby guardian.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
 
     info!(
@@ -297,7 +297,7 @@ struct StandbyChecks {
 
 fn verify_provisioned_standby_info(
     info: &GuardianInfo,
-    guardian_s3: &S3Config,
+    guardian_s3: &ResolvedS3Config,
     cfg: &Config,
     allowlist: &hashi_types::guardian::PcrAllowlist,
     master_g: &hashi_types::bitcoin::HashiMasterG,

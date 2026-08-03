@@ -182,7 +182,7 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
         let s3_config =
-            super::S3Config::try_from(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
+            super::ResolvedS3Config::try_from(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
         let genesis_state = req
             .genesis_state
             .map(|state| {
@@ -1108,7 +1108,7 @@ fn share_id_to_pb(id: ShareID) -> pb::GuardianShareId {
     }
 }
 
-impl TryFrom<pb::S3Config> for super::S3Config {
+impl TryFrom<pb::S3Config> for super::ResolvedS3Config {
     type Error = GuardianError;
 
     fn try_from(cfg: pb::S3Config) -> Result<Self, Self::Error> {
@@ -1132,7 +1132,7 @@ impl TryFrom<pb::S3Config> for super::S3Config {
     }
 }
 
-fn s3_config_to_pb(cfg: super::S3Config) -> pb::S3Config {
+fn s3_config_to_pb(cfg: super::ResolvedS3Config) -> pb::S3Config {
     pb::S3Config {
         access_key: Some(cfg.access_key),
         secret_key: Some(cfg.secret_key),

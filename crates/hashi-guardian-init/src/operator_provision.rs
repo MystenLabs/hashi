@@ -10,7 +10,7 @@ use hashi_types::guardian::GenesisState;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
@@ -24,7 +24,7 @@ use crate::guardian_info::verified_live_guardian_info;
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
     let retention_environment = guardian_s3.retention_environment;
     let allowlist = cfg.kp_roster.pcr_allowlist();
 
@@ -328,7 +328,7 @@ fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
 
 fn verify_initialized_info(
     info: GuardianInfo,
-    guardian_s3: &S3Config,
+    guardian_s3: &ResolvedS3Config,
     expected_instance: &SecretSharingInstance,
     expected_config: &InitConfig,
     expected_config_hash: [u8; 32],

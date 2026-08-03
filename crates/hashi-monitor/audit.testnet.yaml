@@ -1,0 +1,34 @@
+# Active Hashi Guardian testnet configuration for `hashi-monitor`.
+#
+# This file contains only public deployment identifiers and enclave build
+# measurements. AWS credentials come from the default credential chain, and
+# the Signet JSON-RPC endpoint comes from HASHI_BITCOIN_RPC_URL.
+
+next_event_delays:
+  - [E1HashiApproved, 600]
+  - [E2GuardianApproved, 86400]
+
+clock_skew: 300
+withdrawal_predecessor_lookback: 3600
+
+guardian_s3:
+  bucket: "mysten-hashi-guardian-enclave-testnet-3"
+  region: "us-west-2"
+  retention_environment: "testnet"
+
+current_build:
+  git_revision: "ae3fc68200a80fcef2dd5dbea5c4fd18a4ec8f0e"
+  pcr0: "2b32834f124e5d626fdbeb79d9b3bec20dc46365e3418508f794e31ce188d737f92dc0a89110530c027e22cec7741489"
+
+# Add older withdrawal-mode builds here only when auditing across an upgrade.
+# Ceremony-mode builds are not needed by the monitor's withdrawal log reader.
+prev_builds: []
+
+sui:
+  rpc_url: "https://fullnode.testnet.sui.io:443"
+  package_id: "0xfcea10cadbb553c4874201584abf68771592678952efd957b2e82c010c7f4360"
+
+btc:
+  rpc_url: "env:HASHI_BITCOIN_RPC_URL"
+  http_headers:
+    Origin: "https://testnet.hashi.sui.io"

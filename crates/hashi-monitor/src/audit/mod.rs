@@ -12,7 +12,8 @@
 //!         - call `if wsm.is_in_audit_window() { wsm.violations(&cursors) }` to identify errors.
 //!     - Currently we also report orphan E1 findings when they fall in the user window.
 //!
-//! Note that we do not use audit window gating for deposits because there is no risk of false violation flagging.
+//! Deposits are checked over the derived Sui polling range rather than gated by
+//! the withdrawal audit window.
 
 use crate::domain::Cursors;
 use crate::domain::MonitorDepositEvent;
@@ -21,6 +22,7 @@ use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 pub mod batch;
@@ -31,6 +33,7 @@ use crate::findings::FindingCategory;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
+use crate::rpc::sui::SuiEventsPoller;
 use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
@@ -82,9 +85,8 @@ pub struct AuditorCore {
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
     pending_deposits: HashMap<(Txid, u32), DepositStateMachine>,
     guardian_poller: GuardianWithdrawalsPoller,
+    sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
-    // placeholder until we implement sui rpc
-    sui_cursor: UnixSeconds,
 }
 
 impl AuditorCore {
@@ -94,8 +96,8 @@ impl AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?,
+            sui_poller: SuiEventsPoller::new(&cfg.sui, cursors.sui)?,
             btc_client: BtcRpcClient::new(cfg)?,
-            sui_cursor: cursors.sui,
         })
     }
 
@@ -148,6 +150,42 @@ impl AuditorCore {
         &mut self,
         window: &impl AuditWindow,
     ) -> anyhow::Result<Vec<MonitorFinding>> {
+        self.btc_client.clear_confirmation_cache();
+        let withdrawal_count = self
+            .pending_withdrawals
+            .values()
+            .filter(|sm| {
+                sm.is_in_audit_window(window) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
+            })
+            .count();
+        let deposit_count = self
+            .pending_deposits
+            .values()
+            .filter(|sm| sm.is_expecting_events())
+            .count();
+        let unique_txids = self
+            .pending_withdrawals
+            .values()
+            .filter(|sm| {
+                sm.is_in_audit_window(window) && sm.expects(WithdrawalEventType::E3BtcConfirmed)
+            })
+            .map(WithdrawalStateMachine::btc_txid)
+            .chain(
+                self.pending_deposits
+                    .values()
+                    .filter(|sm| sm.is_expecting_events())
+                    .map(DepositStateMachine::btc_txid),
+            )
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        tracing::info!(
+            withdrawal_count,
+            deposit_count,
+            unique_txids = unique_txids.len(),
+            "starting bitcoin confirmation lookups"
+        );
+        self.btc_client.prefetch_confirmations(&unique_txids)?;
         let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values_mut() {
             if !sm.is_in_audit_window(window) {
@@ -260,15 +298,14 @@ impl AuditorCore {
         }
     }
 
-    /// Polls one hour worth of guardian events
-    /// TODO: Provide an option to poll more aggressively if we are lagging behind
+    /// Advance the Guardian cursor by one hourly S3 directory. Callers may loop
+    /// to catch up multiple directories in one tick.
     pub async fn poll_guardian(&mut self) -> anyhow::Result<PollOutcome> {
         self.guardian_poller.poll_one_hour().await
     }
 
-    pub async fn poll_sui(&mut self) -> anyhow::Result<PollOutcome> {
-        // TODO: Implement me
-        Ok(PollOutcome::CursorUnmoved)
+    pub async fn poll_sui(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
+        self.sui_poller.poll(up_to).await
     }
 
     fn get_cursors(&self) -> Cursors {
@@ -278,7 +315,7 @@ impl AuditorCore {
         }
     }
     fn get_sui_cursor(&self) -> UnixSeconds {
-        self.sui_cursor
+        self.sui_poller.cursor_seconds()
     }
 
     fn get_guardian_cursor(&self) -> UnixSeconds {

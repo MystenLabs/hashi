@@ -6,14 +6,16 @@
 //! We model the cross-system withdrawal flow as a sequence of events:
 //! - E1 or E_hashi: Hashi approval event on sui (corresponds to WithdrawalPickedForProcessing)
 //! - E2 or E_guardian: Guardian approval event on S3 (corresponds to NormalWithdrawalSuccess)
-//! - E3 or E_btc: BTC tx broadcast
+//! - E3 or E_btc: BTC transaction confirmed
 //!
-//! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
+//! Predecessor checks: every E_{i+1} has a corresponding E_i, and E_i does not
+//! occur more than `clock_skew` after E_{i+1}.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 //!
 //! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
+use std::fmt;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -29,6 +31,35 @@ pub fn now_unix_seconds() -> UnixSeconds {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Unix seconds rendered together with their UTC wall-clock time.
+pub struct ReadableUnixSeconds(UnixSeconds);
+
+pub fn readable_unix_seconds(timestamp: UnixSeconds) -> ReadableUnixSeconds {
+    ReadableUnixSeconds(timestamp)
+}
+
+impl fmt::Display for ReadableUnixSeconds {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Ok(timestamp) = i64::try_from(self.0)
+            && let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        {
+            return write!(
+                formatter,
+                "{}({:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z)",
+                self.0,
+                datetime.year(),
+                u8::from(datetime.month()),
+                datetime.day(),
+                datetime.hour(),
+                datetime.minute(),
+                datetime.second(),
+            );
+        }
+
+        self.0.fmt(formatter)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +82,7 @@ pub struct MonitorWithdrawalEvent {
     /// Stable withdrawal identifier.
     pub wid: WithdrawalID,
 
-    /// Unix timestamp of sui checkpoint / s3 log / btc block
+    /// Unix timestamp embedded in the Sui event / S3 log / BTC block.
     pub timestamp_secs: UnixSeconds,
 
     /// btc txid

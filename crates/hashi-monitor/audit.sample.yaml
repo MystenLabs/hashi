@@ -8,13 +8,15 @@ next_event_delays:
 # Clock skew tolerance: E_{i+1} can occur up to clock_skew seconds before E_i (default: 300s)
 # clock_skew: 300
 
-guardian:
-  access_key: "AWS_ACCESS_KEY_ID"
-  secret_key: "AWS_SECRET_ACCESS_KEY"
-  session_token:
-  bucket_info:
-    bucket: "hashi-guardian-logs"
-    region: "us-east-1"
+# Sui withdrawal history searched before the guardian audit start (default: 1 hour)
+# withdrawal_predecessor_lookback: 3600
+
+guardian_s3:
+  bucket: "hashi-guardian-logs"
+  region: "us-east-1"
+  # Omit both keys to use the AWS default credential chain.
+  # access_key: "..."
+  # secret_key: "..."
   retention_environment: "testnet"
 
 # Expected enclave build: git revision + PCR0 (hex). The live guardian must
@@ -32,13 +34,10 @@ prev_builds: []
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 btc:
-  rpc_url: "http://localhost:8332"
-  rpc_auth:
-    type: none
-    # type: user_pass
-    # username: "rpcuser"
-    # password: "rpcpassword"
-    # type: cookie_file
-    # path: "/path/to/.cookie"
+  rpc_url: "env:BITCOIN_RPC_URL"
+  # Optional headers for hosted JSON-RPC providers:
+  # http_headers:
+  #   Origin: "https://example.com"

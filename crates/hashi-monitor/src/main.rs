@@ -57,10 +57,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
             let end = end.unwrap_or_else(now_unix_seconds);
             let mut auditor = hashi_monitor::audit::BatchAuditor::new(&cfg, start, end).await?;
-            auditor
-                .run()
-                .await
-                .unwrap_or_else(|e| panic!("infra failure: {e:#}"));
+            auditor.run().await?;
         }
         Command::Continuous { config, start } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
