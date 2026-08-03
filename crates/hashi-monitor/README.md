@@ -36,6 +36,26 @@ Findings are tagged as:
 
 ## Usage
 
+### Active testnet
+
+`audit.testnet.yaml` contains the active Hashi Guardian testnet deployment
+identifiers and PCR allowlist. Supply AWS credentials through the default
+credential chain and keep the Signet provider URI in the environment:
+
+```bash
+export AWS_PROFILE=guardian-s3-testnet
+export HASHI_SKIP_S3_OBJECT_LOCK_CHECK=1
+export HASHI_BITCOIN_RPC_URL="https://your-signet-json-rpc-endpoint"
+
+cargo run -p hashi-monitor -- continuous \
+  --config audit.testnet.yaml \
+  --start "$(($(date +%s) - 3600))"
+```
+
+Run this from `crates/hashi-monitor`, or prefix the configuration path with
+`crates/hashi-monitor/` when running from the repository root. The object-lock
+bypass is temporary and is described below.
+
 ### Batch audit
 ```bash
 cargo run -p hashi-monitor -- batch --config audit.sample.yaml --start 1700000000 --end 1700003600
