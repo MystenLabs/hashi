@@ -923,8 +923,11 @@ impl GetGuardianInfoResponse {
         &self,
         expected_build: &BuildPcrs,
     ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
-        self.signed_info.verify_signature(&self.signing_pub_key)?;
-        let info = self.signed_info.data.clone().into_response();
+        let info = self
+            .signed_info
+            .verify_signature(&self.signing_pub_key)?
+            .response
+            .clone();
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",
@@ -945,7 +948,7 @@ impl GetGuardianInfoResponse {
     /// the signature or attestation.
     pub fn into_info_unchecked(self) -> (GuardianInfo, GuardianPubKey) {
         (
-            self.signed_info.into_data_unchecked().into_response(),
+            self.signed_info.into_data_unchecked().response,
             self.signing_pub_key,
         )
     }
@@ -1068,7 +1071,7 @@ mod tests {
 
     #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {
-        let (mut info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        let mut info = GuardianInfo::mock_for_testing();
         info.config_hash = Some([0xab; 32]);
         let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
             .x_only_public_key()
@@ -1096,7 +1099,7 @@ mod tests {
     #[test]
     fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
         let resp = GetGuardianInfoResponse::mock_for_testing();
-        let expected_info = resp.signed_info.data.response.clone();
+        let expected_info = GuardianInfo::mock_for_testing();
         let expected_signing_pub_key = resp.signing_pub_key;
         let (info, signing_pub_key) = resp.into_info_unchecked();
 

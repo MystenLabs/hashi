@@ -118,7 +118,7 @@ impl LeaderService {
         // Authenticated by TLS; the per-input BTC witness signatures below only
         // spend the 2-of-2 if they verify against the on-chain guardian BTC key
         // (enforced by Bitcoin), so the response itself isn't signature-checked.
-        let response = signed_response.into_data_unchecked().into_response();
+        let response = signed_response.into_data_unchecked().response;
 
         anyhow::ensure!(
             response.enclave_signatures.len() == txn.inputs.len(),

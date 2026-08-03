@@ -134,10 +134,10 @@ impl Relay {
 /// relay roster and its detached signature must cover these exact
 /// (session, config, share) bytes. This is only a DoS guard; the enclave repeats
 /// signature verification authoritatively.
-fn verify_kp_submission(
-    signed_request: &KpSigned<SingleProvisionerInitRequest>,
+fn verify_kp_submission<'a>(
+    signed_request: &'a KpSigned<SingleProvisionerInitRequest>,
     authorized_kp_fingerprints: &[Fingerprint],
-) -> Result<(), Status> {
+) -> Result<&'a SingleProvisionerInitRequest, Status> {
     let fingerprint = signed_request.signer_fingerprint();
     if !authorized_kp_fingerprints.contains(&fingerprint) {
         return Err(Status::permission_denied(format!(
@@ -196,11 +196,12 @@ impl GuardianRelayService for Relay {
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
-        verify_kp_submission(&signed_request, &self.authorized_kp_fingerprints)?;
-        let expected_session_id = signed_request.data.expected_session_id().to_string();
-        let expected_config_hash = *signed_request.data.expected_config_hash();
-        let expected_genesis_state_hash = signed_request.data.expected_genesis_state_hash();
-        let id = u32::from(signed_request.data.encrypted_share().id.get());
+        let verified_request =
+            verify_kp_submission(&signed_request, &self.authorized_kp_fingerprints)?;
+        let expected_session_id = verified_request.expected_session_id().to_string();
+        let expected_config_hash = *verified_request.expected_config_hash();
+        let expected_genesis_state_hash = verified_request.expected_genesis_state_hash();
+        let id = u32::from(verified_request.encrypted_share().id.get());
 
         // Hold the accumulator across the status read + batch submit so a racing
         // session change can't wipe a half-filled buffer, and only one runs at a time.
@@ -364,11 +365,7 @@ mod tests {
         );
         let signed_bytes = KpSigned::signed_bytes(&request);
         let good_sig = sign_detached_in_process(&secret_armored, &signed_bytes);
-        let signed_request = KpSigned {
-            data: request.clone(),
-            signer_cert: cert.clone(),
-            signature: good_sig.clone(),
-        };
+        let signed_request = KpSigned::from_parts(request.clone(), cert.clone(), good_sig.clone());
 
         // A rostered signer with a valid signature over the exact submission passes.
         verify_kp_submission(&signed_request, &roster).unwrap();
@@ -384,11 +381,8 @@ mod tests {
             None,
             other_share,
         );
-        let signed_other_share = KpSigned {
-            data: other_request,
-            signer_cert: cert.clone(),
-            signature: good_sig.clone(),
-        };
+        let signed_other_share =
+            KpSigned::from_parts(other_request, cert.clone(), good_sig.clone());
         assert!(
             verify_kp_submission(&signed_other_share, &roster).is_err(),
             "signature bound to another share must be rejected"
@@ -399,11 +393,7 @@ mod tests {
             "non-rostered signer must be rejected"
         );
 
-        let missing_signature = KpSigned {
-            data: request.clone(),
-            signer_cert: cert.clone(),
-            signature: String::new(),
-        };
+        let missing_signature = KpSigned::from_parts(request.clone(), cert.clone(), String::new());
         assert!(
             verify_kp_submission(&missing_signature, &roster).is_err(),
             "missing signature must be rejected"
@@ -417,11 +407,7 @@ mod tests {
         );
         let other_bytes = KpSigned::signed_bytes(&other_session_request);
         let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
-        let stale_request = KpSigned {
-            data: request,
-            signer_cert: cert,
-            signature: stale_sig,
-        };
+        let stale_request = KpSigned::from_parts(request, cert, stale_sig);
         assert!(
             verify_kp_submission(&stale_request, &roster).is_err(),
             "signature bound to another session must be rejected"

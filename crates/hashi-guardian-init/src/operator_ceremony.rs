@@ -167,25 +167,22 @@ pub async fn run(cfg: Config) -> Result<()> {
         .into_inner();
     let signed_resp = GuardianSignedResponse::<SetupNewKeyResponse>::try_from(signed_resp_pb)
         .map_err(|e| anyhow!("decode SignedSetupNewKeyResponse: {e:?}"))?;
+
+    // 7. Verify the response under the pinned session's signing key,
+    //    and sanity-check the shape; keep the verified BTC master pubkey.
+    let response = signed_resp
+        .verify_into_data(&signing_pub_key)
+        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e}"))?
+        .response;
     info!(
         phase = "setup_new_key",
         n = cfg.kp_roster.num_shares,
         t = cfg.kp_roster.threshold,
-        share_count = signed_resp.data.response.encrypted_shares.share_count(),
-        ciphertext_count = signed_resp
-            .data
-            .response
-            .encrypted_shares
-            .ciphertext_count(),
+        share_count = response.encrypted_shares.share_count(),
+        ciphertext_count = response.encrypted_shares.ciphertext_count(),
         "setup_new_key response received",
     );
 
-    // 7. Verify the response under the pinned session's signing key,
-    //    and sanity-check the shape; keep the verified BTC master pubkey.
-    signed_resp
-        .verify_signature(&signing_pub_key)
-        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e}"))?;
-    let response = signed_resp.data.into_response();
     let live = CeremonyState::from(response);
     live.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(

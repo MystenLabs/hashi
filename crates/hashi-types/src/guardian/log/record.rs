@@ -66,7 +66,7 @@ impl Serialize for LogRecord {
         }
 
         let (data, signature) = match self {
-            Self::Signed(signed) => (&signed.data, Some(signed.signature)),
+            Self::Signed(signed) => (signed.data_unchecked(), Some(signed.signature)),
             Self::Unsigned(unsigned) => (unsigned, None),
         };
 
@@ -136,7 +136,7 @@ impl<'de> Deserialize<'de> for LogRecord {
             timestamp_ms: raw.timestamp_ms,
         };
         Ok(match raw.signature {
-            Some(signature) => Self::Signed(GuardianSigned { data, signature }),
+            Some(signature) => Self::Signed(GuardianSigned::from_parts(data, signature)),
             None => Self::Unsigned(data),
         })
     }
@@ -280,12 +280,13 @@ impl LogRecord {
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         match (self, signing_public_key) {
             (Self::Signed(signed), Some(signing_public_key)) => {
-                let timestamp_ms = signed.data.timestamp_ms;
-                signed.data.validate_signed(signing_public_key)?;
+                let timestamp_ms = signed.data_unchecked().timestamp_ms;
                 signed
-                    .verify_signature(signing_public_key)
+                    .data_unchecked()
+                    .validate_signed(signing_public_key)?;
+                let data = signed
+                    .verify_into_data(signing_public_key)
                     .map_err(|e| InvalidS3Log(format!("invalid log signature: {e}")))?;
-                let data = signed.data;
                 let (session_id, message) = data.into_current()?;
                 Ok((session_id, timestamp_ms, message))
             }
@@ -294,9 +295,13 @@ impl LogRecord {
                 InvalidS3Log("expected signed log record but message is unsigned".into()),
             ),
             (Self::Unsigned(_), Some(_)) => Err(InvalidS3Log("missing log signature".into())),
-            (Self::Signed(signed), None) if signed.data.message.is_allowed_unsigned() => Err(
-                InvalidS3Log("unsigned log record must not contain a signature".into()),
-            ),
+            (Self::Signed(signed), None)
+                if signed.data_unchecked().message.is_allowed_unsigned() =>
+            {
+                Err(InvalidS3Log(
+                    "unsigned log record must not contain a signature".into(),
+                ))
+            }
             (Self::Signed(_), None) => Err(InvalidS3Log(
                 "expected unsigned log record but message requires a signature".into(),
             )),
@@ -313,7 +318,7 @@ impl LogRecord {
     pub fn into_current_unchecked(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         match self {
             Self::Signed(signed) => {
-                let timestamp_ms = signed.data.timestamp_ms;
+                let timestamp_ms = signed.data_unchecked().timestamp_ms;
                 let (session_id, message) = signed.into_data_unchecked().into_current()?;
                 Ok((session_id, timestamp_ms, message))
             }
@@ -362,7 +367,7 @@ impl LogRecord {
 
     fn data(&self) -> &LogEntry {
         match self {
-            Self::Signed(signed) => &signed.data,
+            Self::Signed(signed) => signed.data_unchecked(),
             Self::Unsigned(unsigned) => unsigned,
         }
     }
@@ -370,7 +375,7 @@ impl LogRecord {
     #[cfg(test)]
     fn data_mut(&mut self) -> &mut LogEntry {
         match self {
-            Self::Signed(signed) => &mut signed.data,
+            Self::Signed(signed) => signed.data_unchecked_mut(),
             Self::Unsigned(unsigned) => unsigned,
         }
     }
@@ -382,9 +387,8 @@ mod tests {
     use crate::guardian::CeremonyLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
-    use crate::guardian::GetGuardianInfoResponse;
     use crate::guardian::GuardianError;
-    use crate::guardian::GuardianSignedResponse;
+    use crate::guardian::GuardianInfo;
     use crate::guardian::GuardianSigningIntentType;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
@@ -479,14 +483,9 @@ mod tests {
             StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed_request.into_parts();
         let request_data: StandardWithdrawalRequestWire = request_data.into();
-        let response = GuardianSignedResponse::<StandardWithdrawalResponse>::mock_for_testing()
-            .data
-            .response;
-        let encrypted_shares = GuardianSignedResponse::<RotateKpsResponse>::mock_for_testing()
-            .data
-            .response
-            .encrypted_shares;
-        let (guardian_info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        let response = StandardWithdrawalResponse::mock_for_testing();
+        let encrypted_shares = RotateKpsResponse::mock_for_testing().encrypted_shares;
+        let guardian_info = GuardianInfo::mock_for_testing();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;
@@ -766,21 +765,22 @@ mod tests {
         }
 
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
-        let LogRecord::Signed(signed) = log else {
-            panic!("heartbeat must be signed");
-        };
+        let data = log.data();
         let payload = DeployedLogSigningPayload {
-            schema_version: signed.data.schema_version,
-            session_id: &signed.data.session_id,
-            object_key: &signed.data.object_key,
-            message: &signed.data.message,
+            schema_version: data.schema_version,
+            session_id: &data.session_id,
+            object_key: &data.object_key,
+            message: &data.message,
         };
         let signed_bytes = bcs::to_bytes(&(
             GuardianSigningIntentType::LogEntry,
             payload,
-            signed.data.timestamp_ms,
+            data.timestamp_ms,
         ))
         .unwrap();
+        let LogRecord::Signed(signed) = log else {
+            panic!("heartbeat must be signed");
+        };
 
         assert_eq!(signed.signature, signing_key.sign(&signed_bytes));
     }
@@ -1061,9 +1061,7 @@ mod tests {
                 txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
                 request_data,
                 request_sign,
-                response: GuardianSignedResponse::<StandardWithdrawalResponse>::mock_for_testing()
-                    .data
-                    .response,
+                response: StandardWithdrawalResponse::mock_for_testing(),
                 post_state: LimiterState {
                     num_tokens_available: 0,
                     last_updated_at: 0,

@@ -170,10 +170,10 @@ pub async fn run(
     let signed_response =
         GuardianSignedResponse::<ProvisionerRotateCertResponse>::try_from(response_pb)
             .map_err(|e| anyhow!("decode SignedProvisionerRotateCertResponse: {e:?}"))?;
-    signed_response
-        .verify_signature(&signing_pub_key)
-        .map_err(|e| anyhow!("verify ProvisionerRotateCertResponse signature: {e}"))?;
-    let response = signed_response.data.into_response();
+    let response = signed_response
+        .verify_into_data(&signing_pub_key)
+        .map_err(|e| anyhow!("verify ProvisionerRotateCertResponse signature: {e}"))?
+        .response;
     let expected_cert_seq = old_cert_seq.checked_add(1).context("cert_seq overflow")?;
     anyhow::ensure!(
         response.cert_seq == expected_cert_seq,

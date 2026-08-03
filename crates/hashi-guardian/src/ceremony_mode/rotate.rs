@@ -209,9 +209,10 @@ mod tests {
     ) -> KPEncryptedSharesRoster {
         let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
         signed
-            .verify_signature(&enclave.signing_pubkey())
-            .expect("response signed by enclave");
-        signed.data.into_response().encrypted_shares
+            .verify_into_data(&enclave.signing_pubkey())
+            .expect("response signed by enclave")
+            .response
+            .encrypted_shares
     }
 
     /// Assert the rotation returned `new_n` PGP-armored shares and produced

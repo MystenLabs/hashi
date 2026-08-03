@@ -80,7 +80,7 @@ pub trait KpSigningIntent: Serialize {
 /// KP-submitted request payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KpSigned<T> {
-    pub data: T,
+    data: T,
     pub signer_cert: PgpPublicCert,
     pub signature: String,
 }
@@ -103,7 +103,7 @@ pub type GuardianSignedResponse<T> = GuardianSigned<GuardianResponse<T>>;
 /// Guardian-signed wrapper - adds a signature to any signable payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GuardianSigned<T> {
-    pub data: T,
+    data: T,
     pub signature: GuardianSignature,
 }
 
@@ -111,23 +111,23 @@ impl GuardianSigningIntent for LogEntry {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogEntry;
 }
 
-impl GuardianSigningIntent for SetupNewKeyResponse {
+impl GuardianSigningIntent for GuardianResponse<SetupNewKeyResponse> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::SetupNewKeyResponse;
 }
 
-impl GuardianSigningIntent for StandardWithdrawalResponse {
+impl GuardianSigningIntent for GuardianResponse<StandardWithdrawalResponse> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::StandardWithdrawalResponse;
 }
 
-impl GuardianSigningIntent for GuardianInfo {
+impl GuardianSigningIntent for GuardianResponse<GuardianInfo> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::GuardianInfo;
 }
 
-impl GuardianSigningIntent for RotateKpsResponse {
+impl GuardianSigningIntent for GuardianResponse<RotateKpsResponse> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpsResponse;
 }
 
-impl GuardianSigningIntent for ProvisionerRotateCertResponse {
+impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
     const INTENT: GuardianSigningIntentType =
         GuardianSigningIntentType::ProvisionerRotateCertResponse;
 }
@@ -147,17 +147,17 @@ impl<T> GuardianResponse<T> {
             timestamp_ms,
         }
     }
-
-    pub fn into_response(self) -> T {
-        self.response
-    }
 }
 
-impl<T: GuardianSigningIntent> GuardianSigningIntent for GuardianResponse<T> {
-    const INTENT: GuardianSigningIntentType = T::INTENT;
-}
-
+// Guardian unchecked access is intentionally narrow: LogRecord's custom wire
+// handling and node/proxy/CLI paths that establish trust independently.
+// KpSigned has no unchecked extraction; production KP payloads are always
+// verified before access.
 impl<T> GuardianSigned<T> {
+    pub fn from_parts(data: T, signature: GuardianSignature) -> Self {
+        Self { data, signature }
+    }
+
     fn signed_bytes(data: &T) -> Vec<u8>
     where
         T: GuardianSigningIntent,
@@ -174,25 +174,56 @@ impl<T> GuardianSigned<T> {
         Self { data, signature }
     }
 
-    /// Verify the Guardian signature without consuming the signed payload.
-    pub fn verify_signature(&self, pub_key: &VerificationKey) -> CryptoVerificationResult<()>
+    /// Verify the Guardian signature and borrow the authenticated payload.
+    pub fn verify_signature(&self, pub_key: &VerificationKey) -> CryptoVerificationResult<&T>
     where
         T: GuardianSigningIntent,
     {
         pub_key
             .verify(&self.signature, &Self::signed_bytes(&self.data))
-            .map_err(|_| CryptoVerificationError::new("signature invalid"))
+            .map_err(|_| CryptoVerificationError::new("signature invalid"))?;
+        Ok(&self.data)
     }
 
-    /// Move out the payload WITHOUT verifying the signature. The node uses this
-    /// on guardian responses it has already authenticated over TLS; the ed25519
-    /// signing key is verified only by KPs/monitors on the S3 audit logs.
+    /// Verify the Guardian signature and move out the authenticated payload.
+    pub fn verify_into_data(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T>
+    where
+        T: GuardianSigningIntent,
+    {
+        self.verify_signature(pub_key)?;
+        Ok(self.data)
+    }
+
+    /// Borrow the payload WITHOUT verifying the signature.
+    pub(crate) fn data_unchecked(&self) -> &T {
+        &self.data
+    }
+
+    #[cfg(test)]
+    pub(crate) fn data_unchecked_mut(&mut self) -> &mut T {
+        &mut self.data
+    }
+
+    /// Move out the payload WITHOUT verifying the signature.
+    /// The caller must establish trust in the payload independently.
     pub fn into_data_unchecked(self) -> T {
         self.data
+    }
+
+    pub(crate) fn into_parts(self) -> (T, GuardianSignature) {
+        (self.data, self.signature)
     }
 }
 
 impl<T: KpSigningIntent> KpSigned<T> {
+    pub fn from_parts(data: T, signer_cert: PgpPublicCert, signature: String) -> Self {
+        Self {
+            data,
+            signer_cert,
+            signature,
+        }
+    }
+
     /// Sign a KP payload by invoking `gpg --detach-sign` for the
     /// signer certificate's fingerprint. Includes the KP intent in the signed
     /// bytes; payload types carry any request-specific replay-binding fields.
@@ -219,14 +250,24 @@ impl<T: KpSigningIntent> KpSigned<T> {
         bcs::to_bytes(&tuple).expect("serialization should not fail")
     }
 
-    /// Verify the signature without consuming the signed request.
+    /// Verify the signature and borrow the authenticated request.
     /// Checks the intent byte to ensure the signature is for this request type.
-    pub fn verify_signature(&self) -> CryptoVerificationResult<()> {
+    pub fn verify_signature(&self) -> CryptoVerificationResult<&T> {
         let msg_bytes = Self::signed_bytes(&self.data);
         verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert).map_err(|e| {
             CryptoVerificationError::new(format!("KP signature verification failed: {e}"))
         })?;
-        Ok(())
+        Ok(&self.data)
+    }
+
+    /// Verify the KP signature and move out the authenticated payload.
+    pub fn verify_into_data(self) -> CryptoVerificationResult<T> {
+        self.verify_signature()?;
+        Ok(self.data)
+    }
+
+    pub(crate) fn into_parts(self) -> (T, PgpPublicCert, String) {
+        (self.data, self.signer_cert, self.signature)
     }
 
     pub fn signer_fingerprint(&self) -> Fingerprint {

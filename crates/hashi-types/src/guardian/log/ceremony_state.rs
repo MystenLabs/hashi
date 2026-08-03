@@ -108,13 +108,10 @@ impl From<SetupNewKeyResponse> for CeremonyState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guardian::GuardianSignedResponse;
 
     #[test]
     fn serialization_includes_all_encrypted_shares() {
-        let response = GuardianSignedResponse::<SetupNewKeyResponse>::mock_for_testing()
-            .data
-            .response;
+        let response = SetupNewKeyResponse::mock_for_testing();
         let expected_share_count = response.encrypted_shares.share_count();
         let state = CeremonyState::from(response);
 
@@ -128,9 +125,7 @@ mod tests {
 
     #[test]
     fn new_rejects_mismatched_sharing_seq() {
-        let response = GuardianSignedResponse::<SetupNewKeyResponse>::mock_for_testing()
-            .data
-            .response;
+        let response = SetupNewKeyResponse::mock_for_testing();
         let sharing_seq = response.secret_sharing_instance.sharing_seq();
         let err = CeremonyState::new(
             CeremonyLogMessage::NewKey {
@@ -145,9 +140,7 @@ mod tests {
 
     #[test]
     fn new_rejects_mismatched_share_count() {
-        let response = GuardianSignedResponse::<SetupNewKeyResponse>::mock_for_testing()
-            .data
-            .response;
+        let response = SetupNewKeyResponse::mock_for_testing();
         let sharing_seq = response.secret_sharing_instance.sharing_seq();
         let err = CeremonyState::new(
             CeremonyLogMessage::NewKey {

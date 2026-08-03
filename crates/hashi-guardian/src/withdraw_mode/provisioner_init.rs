@@ -148,10 +148,9 @@ fn verify_signed_submissions(
         .iter()
         .map(|signed| {
             let signer_fingerprint = signed.signer_fingerprint().to_hex();
-            signed
+            let submission = signed
                 .verify_signature()
                 .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
-            let submission = &signed.data;
 
             if submission.expected_session_id() != live_session_id.as_str() {
                 return Err(GuardianError::InvalidInputs(format!(
@@ -367,11 +366,8 @@ mod tests {
                 &mut rand::thread_rng(),
             );
             let (cert, secret) = signer;
-            KpSigned {
-                signature: sign_detached_in_process(secret, &KpSigned::signed_bytes(&request)),
-                data: request,
-                signer_cert: cert.clone(),
-            }
+            let signature = sign_detached_in_process(secret, &KpSigned::signed_bytes(&request));
+            KpSigned::from_parts(request, cert.clone(), signature)
         }
 
         fn request(&self, shares: &[Share]) -> ProvisionerInitRequest {

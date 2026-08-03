@@ -163,8 +163,8 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSignedResponse<SetupNewK
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
-        Ok(GuardianSigned {
-            data: GuardianResponse::new(
+        Ok(GuardianSigned::from_parts(
+            GuardianResponse::new(
                 SetupNewKeyResponse {
                     encrypted_shares,
                     secret_sharing_instance,
@@ -173,7 +173,7 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSignedResponse<SetupNewK
                 timestamp_ms,
             ),
             signature,
-        })
+        ))
     }
 }
 
@@ -301,11 +301,7 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
             expected_genesis_state_hash,
             encrypted_share,
         );
-        Ok(KpSigned {
-            data: request,
-            signer_cert,
-            signature: req.kp_signature,
-        })
+        Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
     }
 }
 
@@ -345,11 +341,7 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
             new_kp_pgp_cert,
             encrypted_share,
         );
-        Ok(KpSigned {
-            data: request,
-            signer_cert,
-            signature: req.kp_signature,
-        })
+        Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
     }
 }
 
@@ -409,10 +401,10 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSignedResponse<RotateKpsRe
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
-        Ok(GuardianSigned {
-            data: GuardianResponse::new(RotateKpsResponse { encrypted_shares }, timestamp_ms),
+        Ok(GuardianSigned::from_parts(
+            GuardianResponse::new(RotateKpsResponse { encrypted_shares }, timestamp_ms),
             signature,
-        })
+        ))
     }
 }
 
@@ -431,8 +423,8 @@ impl TryFrom<pb::SignedProvisionerRotateCertResponse>
                 .ok_or_else(|| missing("encrypted_shares"))?,
         )?;
 
-        Ok(GuardianSigned {
-            data: GuardianResponse::new(
+        Ok(GuardianSigned::from_parts(
+            GuardianResponse::new(
                 ProvisionerRotateCertResponse {
                     cert_seq: resp.cert_seq.ok_or_else(|| missing("cert_seq"))?,
                     encrypted_shares,
@@ -440,7 +432,7 @@ impl TryFrom<pb::SignedProvisionerRotateCertResponse>
                 timestamp_ms,
             ),
             signature,
-        })
+        ))
     }
 }
 
@@ -590,13 +582,13 @@ impl TryFrom<pb::SignedStandardWithdrawalResponse>
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(GuardianSigned {
-            data: GuardianResponse::new(
+        Ok(GuardianSigned::from_parts(
+            GuardianResponse::new(
                 StandardWithdrawalResponse { enclave_signatures },
                 timestamp_ms,
             ),
             signature,
-        })
+        ))
     }
 }
 
@@ -607,24 +599,23 @@ impl TryFrom<pb::SignedStandardWithdrawalResponse>
 pub fn setup_new_key_response_signed_to_pb(
     s: GuardianSignedResponse<SetupNewKeyResponse>,
 ) -> pb::SignedSetupNewKeyResponse {
-    let signature = s.signature.to_bytes().to_vec();
+    let (data, signature) = s.into_parts();
 
     pb::SignedSetupNewKeyResponse {
-        data: Some(setup_new_key_response_to_pb(s.data.response)),
-        timestamp_ms: Some(s.data.timestamp_ms),
-        signature: Some(signature.into()),
+        data: Some(setup_new_key_response_to_pb(data.response)),
+        timestamp_ms: Some(data.timestamp_ms),
+        signature: Some(signature.to_bytes().to_vec().into()),
     }
 }
 
 pub fn rotate_kps_response_signed_to_pb(
     s: GuardianSignedResponse<RotateKpsResponse>,
 ) -> pb::SignedRotateKpsResponse {
-    let signature = s.signature.to_bytes().to_vec();
+    let (data, signature) = s.into_parts();
 
     pb::SignedRotateKpsResponse {
         data: Some(pb::RotateKpsResponseData {
-            encrypted_shares: s
-                .data
+            encrypted_shares: data
                 .response
                 .encrypted_shares
                 .into_vec()
@@ -632,19 +623,20 @@ pub fn rotate_kps_response_signed_to_pb(
                 .map(kp_encrypted_shares_to_pb)
                 .collect(),
         }),
-        timestamp_ms: Some(s.data.timestamp_ms),
-        signature: Some(signature.into()),
+        timestamp_ms: Some(data.timestamp_ms),
+        signature: Some(signature.to_bytes().to_vec().into()),
     }
 }
 
 pub fn provisioner_rotate_cert_response_signed_to_pb(
     s: GuardianSignedResponse<ProvisionerRotateCertResponse>,
 ) -> pb::SignedProvisionerRotateCertResponse {
+    let (data, signature) = s.into_parts();
     pb::SignedProvisionerRotateCertResponse {
-        cert_seq: Some(s.data.response.cert_seq),
-        encrypted_shares: Some(kp_encrypted_shares_to_pb(s.data.response.encrypted_shares)),
-        timestamp_ms: Some(s.data.timestamp_ms),
-        signature: Some(s.signature.to_bytes().to_vec().into()),
+        cert_seq: Some(data.response.cert_seq),
+        encrypted_shares: Some(kp_encrypted_shares_to_pb(data.response.encrypted_shares)),
+        timestamp_ms: Some(data.timestamp_ms),
+        signature: Some(signature.to_bytes().to_vec().into()),
     }
 }
 
@@ -695,11 +687,7 @@ pub fn provisioner_init_request_to_pb(
 
 impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisionerInitRequest {
     fn from(r: KpSigned<SingleProvisionerInitRequest>) -> Self {
-        let KpSigned {
-            data: request,
-            signer_cert,
-            signature,
-        } = r;
+        let (request, signer_cert, signature) = r.into_parts();
         let (
             expected_session_id,
             expected_config_hash,
@@ -720,11 +708,7 @@ impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisione
 
 impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotateCertRequest {
     fn from(r: KpSigned<ProvisionerRotateCertRequest>) -> Self {
-        let KpSigned {
-            data: request,
-            signer_cert,
-            signature,
-        } = r;
+        let (request, signer_cert, signature) = r.into_parts();
         let (
             expected_session_id,
             expected_cert_seq,
@@ -827,20 +811,19 @@ pub fn signed_standard_withdrawal_request_to_pb(
 pub fn standard_withdrawal_response_signed_to_pb(
     s: GuardianSignedResponse<StandardWithdrawalResponse>,
 ) -> pb::SignedStandardWithdrawalResponse {
-    let signature = s.signature.to_bytes().to_vec();
+    let (data, signature) = s.into_parts();
 
     pb::SignedStandardWithdrawalResponse {
         data: Some(pb::StandardWithdrawalResponseData {
-            enclave_signatures: s
-                .data
+            enclave_signatures: data
                 .response
                 .enclave_signatures
                 .iter()
                 .map(|sig| sig.to_vec().into())
                 .collect(),
         }),
-        timestamp_ms: Some(s.data.timestamp_ms),
-        signature: Some(signature.into()),
+        timestamp_ms: Some(data.timestamp_ms),
+        signature: Some(signature.to_bytes().to_vec().into()),
     }
 }
 
@@ -1089,18 +1072,19 @@ impl TryFrom<pb::SignedGuardianInfo> for GuardianSignedResponse<GuardianInfo> {
         let signature = GuardianSignature::try_from(signature_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid signed_info.signature: {e}")))?;
 
-        Ok(Self {
-            data: GuardianResponse::new(GuardianInfo::try_from(data_pb)?, timestamp_ms),
+        Ok(Self::from_parts(
+            GuardianResponse::new(GuardianInfo::try_from(data_pb)?, timestamp_ms),
             signature,
-        })
+        ))
     }
 }
 
 fn signed_guardian_info_to_pb(s: GuardianSignedResponse<GuardianInfo>) -> pb::SignedGuardianInfo {
+    let (data, signature) = s.into_parts();
     pb::SignedGuardianInfo {
-        data: Some(guardian_info_data_to_pb(s.data.response)),
-        timestamp_ms: Some(s.data.timestamp_ms),
-        signature: Some(s.signature.to_bytes().to_vec().into()),
+        data: Some(guardian_info_data_to_pb(data.response)),
+        timestamp_ms: Some(data.timestamp_ms),
+        signature: Some(signature.to_bytes().to_vec().into()),
     }
 }
 
@@ -1726,12 +1710,8 @@ mod tests {
 
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let encrypted_share = ProvisionerInitRequest::mock_for_testing()
-            .0
-            .pop()
-            .unwrap()
-            .data
-            .encrypted_share;
+        let (_, _, _, encrypted_share) =
+            SingleProvisionerInitRequest::mock_for_testing().into_parts();
         let expected_config_hash = [9u8; 32];
         let expected_genesis_state_hash = Some([10u8; 32]);
         let request = SingleProvisionerInitRequest::new(
@@ -1742,23 +1722,19 @@ mod tests {
         );
         let signature =
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
-        let signed = KpSigned {
-            data: request,
-            signer_cert: cert.clone(),
-            signature,
-        };
+        let signed = KpSigned::from_parts(request, cert.clone(), signature);
 
         let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
         let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
-        assert_eq!(back.data.expected_session_id(), "session-a");
-        assert_eq!(back.data.expected_config_hash(), &expected_config_hash);
+        let data = back.verify_signature().unwrap();
+        assert_eq!(data.expected_session_id(), "session-a");
+        assert_eq!(data.expected_config_hash(), &expected_config_hash);
         assert_eq!(
-            back.data.expected_genesis_state_hash(),
+            data.expected_genesis_state_hash(),
             expected_genesis_state_hash
         );
-        assert_eq!(back.data.encrypted_share(), &encrypted_share);
+        assert_eq!(data.encrypted_share(), &encrypted_share);
         assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
-        back.verify_signature().unwrap();
 
         let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
