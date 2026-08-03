@@ -203,10 +203,9 @@ impl SuiEventsPoller {
 
     /// Find a safe checkpoint bracket `(before, at_or_after)` for a timestamp.
     ///
-    /// A few interpolation probes keep this well below public fullnode rate
-    /// limits. The returned lower bound is known to be before the timestamp and
-    /// the upper bound is known to be at or after it; callers may scan the
-    /// slightly wider interval without risking an event gap.
+    /// Exponential probing finds a lower bound, then binary search resolves the
+    /// exact adjacent checkpoint boundary. The returned lower bound is before
+    /// the timestamp and the upper bound is at or after it.
     async fn checkpoint_bracket(
         &mut self,
         timestamp_secs: UnixSeconds,
@@ -218,11 +217,11 @@ impl SuiEventsPoller {
 
         let elapsed = latest_timestamp.saturating_sub(timestamp_secs);
         let mut distance = elapsed.saturating_mul(6).max(1);
-        let (mut low_sequence, mut low_timestamp) = loop {
+        let mut low_sequence = loop {
             let probe = latest_sequence.saturating_sub(distance);
             let timestamp = self.checkpoint_timestamp(probe).await?;
             if timestamp < timestamp_secs {
-                break (probe, timestamp);
+                break probe;
             }
             if probe == 0 {
                 return Ok(Some((0, 0)));
@@ -230,33 +229,19 @@ impl SuiEventsPoller {
             distance = distance.saturating_mul(2);
         };
         let mut high_sequence = latest_sequence;
-        let mut high_timestamp = latest_timestamp;
 
-        // Interpolation converges rapidly because recent checkpoint production
-        // is close to linear. A fixed cap bounds RPC usage; an inexact bracket
-        // merely scans a few additional checkpoints.
-        for _ in 0..6 {
-            if high_sequence <= low_sequence + 1 {
-                break;
-            }
-            let sequence_span = high_sequence - low_sequence;
-            let timestamp_span = high_timestamp.saturating_sub(low_timestamp);
-            let estimate = if timestamp_span == 0 {
-                low_sequence + sequence_span / 2
+        // Resolve the exact adjacent checkpoint boundary. A previously capped
+        // interpolation could leave a very wide but technically safe bracket
+        // for historical timestamps, forcing ListEvents to scan many unrelated
+        // checkpoint ranges. Binary search keeps the lookup logarithmic even
+        // when checkpoint production has varied over time.
+        while high_sequence > low_sequence.saturating_add(1) {
+            let midpoint = low_sequence + (high_sequence - low_sequence) / 2;
+            let midpoint_timestamp = self.checkpoint_timestamp(midpoint).await?;
+            if midpoint_timestamp < timestamp_secs {
+                low_sequence = midpoint;
             } else {
-                let target_offset = timestamp_secs.saturating_sub(low_timestamp);
-                let interpolated = (u128::from(sequence_span) * u128::from(target_offset)
-                    / u128::from(timestamp_span)) as u64;
-                low_sequence.saturating_add(interpolated)
-            }
-            .clamp(low_sequence + 1, high_sequence - 1);
-            let estimate_timestamp = self.checkpoint_timestamp(estimate).await?;
-            if estimate_timestamp < timestamp_secs {
-                low_sequence = estimate;
-                low_timestamp = estimate_timestamp;
-            } else {
-                high_sequence = estimate;
-                high_timestamp = estimate_timestamp;
+                high_sequence = midpoint;
             }
         }
 
