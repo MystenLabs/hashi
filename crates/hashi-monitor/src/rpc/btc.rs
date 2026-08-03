@@ -450,6 +450,7 @@ mod tests {
             ])
             .expect("valid next event delays"),
             clock_skew: 10,
+            withdrawal_predecessor_lookback: 60 * 60,
             guardian_s3: GuardianS3Config {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),

@@ -27,6 +27,11 @@ pub struct Config {
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
+    /// How far before the guardian audit start to search Sui for withdrawal
+    /// predecessor events (default: 1 hour).
+    #[serde(default = "default_withdrawal_predecessor_lookback")]
+    pub withdrawal_predecessor_lookback: u64,
+
     pub guardian_s3: GuardianS3Config,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
@@ -172,6 +177,10 @@ impl BtcRpcAuth {
 
 fn default_clock_skew() -> u64 {
     300
+}
+
+fn default_withdrawal_predecessor_lookback() -> u64 {
+    60 * 60
 }
 
 impl NextEventDelays {

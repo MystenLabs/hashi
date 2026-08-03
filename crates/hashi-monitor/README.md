@@ -30,7 +30,9 @@ Findings are tagged as:
 
 ### Timeline semantics (withdrawals)
 - User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
-- Sui events are polled in a relaxed range to validate E2 predecessor constraints.
+- Sui withdrawal events are polled from `withdrawal_predecessor_lookback`
+  seconds before the guardian window to validate E2 predecessor constraints.
+- Deposit events are polled only from the start of the guardian window.
 - Orphan E1 findings are currently still reported when E1 falls in the user window.
 - Deposits are not gated by the audit window — there is no false-positive risk.
 
@@ -78,6 +80,9 @@ next_event_delays:
 
 # Optional: clock skew tolerance (default: 300s)
 # clock_skew: 300
+
+# Optional: Sui withdrawal history before the guardian window (default: 1 hour)
+# withdrawal_predecessor_lookback: 3600
 
 guardian_s3:
   bucket: "hashi-guardian-logs"

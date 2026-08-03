@@ -9,6 +9,7 @@ next_event_delays:
   - [E2GuardianApproved, 86400]
 
 clock_skew: 300
+withdrawal_predecessor_lookback: 3600
 
 guardian_s3:
   bucket: "mysten-hashi-guardian-enclave-testnet-3"

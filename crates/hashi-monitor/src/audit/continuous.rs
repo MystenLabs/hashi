@@ -10,7 +10,6 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
@@ -43,10 +42,7 @@ impl AuditWindow for ContinuousAuditWindow {
 
 impl ContinuousAuditWindow {
     pub fn new(cfg: &Config, start: UnixSeconds) -> Self {
-        let e1_e2_delay_secs = cfg
-            .next_event_delay(WithdrawalEventType::E1HashiApproved)
-            .expect("should be Some");
-        let sui_start = start.saturating_sub(e1_e2_delay_secs); // guardian_e2@{start} might match sui_e1@{start-e1_e2_delay_secs}
+        let sui_start = start.saturating_sub(cfg.withdrawal_predecessor_lookback);
         let guardian_start = start;
 
         Self {

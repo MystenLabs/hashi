@@ -45,13 +45,18 @@ pub struct SuiEventsPoller {
     package_versions: PackageVersions,
     package_id: String,
     cursor_seconds: UnixSeconds,
+    full_event_start: UnixSeconds,
     next_checkpoint: Option<u64>,
     checkpoint_timestamps: BTreeMap<u64, UnixSeconds>,
     latest_checkpoint: Option<(u64, UnixSeconds)>,
 }
 
 impl SuiEventsPoller {
-    pub fn new(config: &SuiConfig, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub fn new(
+        config: &SuiConfig,
+        start: UnixSeconds,
+        full_event_start: UnixSeconds,
+    ) -> anyhow::Result<Self> {
         let package_id = Address::from_str(&config.package_id)
             .with_context(|| format!("invalid Hashi package ID {}", config.package_id))?;
         Address::from_str(&config.hashi_object_id)
@@ -67,6 +72,7 @@ impl SuiEventsPoller {
             package_versions,
             package_id: config.package_id.clone(),
             cursor_seconds: start,
+            full_event_start,
             next_checkpoint: None,
             checkpoint_timestamps: BTreeMap::new(),
             latest_checkpoint: None,
@@ -130,9 +136,13 @@ impl SuiEventsPoller {
         }
 
         let mut retry_same_range = true;
+        // Before the guardian window, only withdrawal predecessors are useful.
+        // A range that crosses the boundary includes deposits as well; deposits
+        // older than the boundary are discarded after their timestamp is decoded.
+        let include_deposits = scanned_through_timestamp >= self.full_event_start;
         let raw_events = loop {
             match self
-                .list_events_in_range(start_checkpoint, end_checkpoint)
+                .list_events_in_range(start_checkpoint, end_checkpoint, include_deposits)
                 .await
             {
                 Ok(events) => break events,
@@ -168,7 +178,13 @@ impl SuiEventsPoller {
         };
         let mut events = Vec::with_capacity(raw_events.len());
         for event in raw_events {
-            if let Some(event) = self.parse_event(event).await? {
+            if let Some(event) = self.parse_event(event).await?
+                && !matches!(
+                    &event,
+                    MonitorEvent::Deposit(deposit)
+                        if deposit.timestamp_secs < self.full_event_start
+                )
+            {
                 events.push(event);
             }
         }
@@ -304,12 +320,13 @@ impl SuiEventsPoller {
         &mut self,
         start_checkpoint: u64,
         end_checkpoint: u64,
+        include_deposits: bool,
     ) -> anyhow::Result<Vec<Event>> {
         if start_checkpoint >= end_checkpoint {
             return Ok(Vec::new());
         }
 
-        let filter = self.event_filter();
+        let filter = self.event_filter(include_deposits);
         let mut after = None;
         let mut all_events = Vec::new();
 
@@ -377,14 +394,14 @@ impl SuiEventsPoller {
         }
     }
 
-    fn event_filter(&self) -> EventFilter {
-        let event_types = [
-            format!(
-                "{}::withdrawal_queue::WithdrawalPickedForProcessing",
-                self.package_id
-            ),
-            format!("{}::deposit::DepositConfirmed", self.package_id),
-        ];
+    fn event_filter(&self, include_deposits: bool) -> EventFilter {
+        let mut event_types = vec![format!(
+            "{}::withdrawal_queue::WithdrawalPickedForProcessing",
+            self.package_id
+        )];
+        if include_deposits {
+            event_types.push(format!("{}::deposit::DepositConfirmed", self.package_id));
+        }
         EventFilter::default().with_terms(
             event_types
                 .into_iter()

@@ -83,7 +83,7 @@ impl AuditorCore {
             pending_withdrawals: HashMap::new(),
             pending_deposits: HashMap::new(),
             guardian_poller: GuardianWithdrawalsPoller::new(cfg, cursors.guardian).await?,
-            sui_poller: SuiEventsPoller::new(&cfg.sui, cursors.sui)?,
+            sui_poller: SuiEventsPoller::new(&cfg.sui, cursors.sui, cursors.guardian)?,
             btc_client: BtcRpcClient::new(cfg)?,
         })
     }

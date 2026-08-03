@@ -8,7 +8,6 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
@@ -29,11 +28,8 @@ pub struct BatchAuditWindow {
 
 impl BatchAuditWindow {
     pub fn new(cfg: &Config, start: UnixSeconds, end: UnixSeconds, cur_time: UnixSeconds) -> Self {
-        let e1_e2_delay_secs = cfg
-            .next_event_delay(WithdrawalEventType::E1HashiApproved)
-            .expect("should be Some");
         // Guardian timeline is authoritative. We still fetch Sui in a relaxed range to validate E2 -> E1.
-        let sui_start = start.saturating_sub(e1_e2_delay_secs); // guardian_e2@{start} might match sui_e1@{start-e1_e2_delay_secs}
+        let sui_start = start.saturating_sub(cfg.withdrawal_predecessor_lookback);
         let sui_end = end.saturating_add(cfg.clock_skew).min(cur_time); // guardian_e2@{end} might match sui_e1@{end+clock_skew}
 
         // User [start, end] is interpreted as guardian timestamps.
@@ -61,7 +57,8 @@ impl AuditWindow for BatchAuditWindow {
 ///
 /// It functions as follows:
 ///     - fetch guardian events from `[t1, t2]` (authoritative timeline)
-///     - fetch sui events from `[t1 - e1_e2_delay_secs, t2 + clock_skew]` (for E2 predecessor checks)
+///     - fetch withdrawal events from `[t1 - withdrawal_predecessor_lookback, t1)`
+///     - fetch withdrawal and deposit events from `[t1, t2 + clock_skew]`
 ///     - fetch btc tx & perform checks for withdrawals anchored by guardian events in `[t1, t2]`
 /// Finally, it outputs a timestamp `verified_up_to` to be used as `t1` in the next audit.
 ///
