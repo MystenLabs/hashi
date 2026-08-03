@@ -27,7 +27,7 @@ pub mod batch;
 pub mod continuous;
 
 use crate::config::Config;
-use crate::errors::MonitorError;
+use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
 use crate::state_machine::BtcFetchOutcome;
@@ -43,11 +43,12 @@ pub trait AuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool;
 }
 
-pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorError]) {
+pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
     for finding in findings.iter() {
         tracing::error!(
             source,
             phase,
+            category = %finding.category(),
             total = findings.len(),
             ?finding,
             "monitor finding"
@@ -67,7 +68,7 @@ pub struct AuditorCore {
     cfg: Config,
     // mutable
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
-    pending_deposits: HashMap<Txid, DepositStateMachine>,
+    pending_deposits: HashMap<(Txid, u32), DepositStateMachine>,
     guardian_poller: GuardianWithdrawalsPoller,
     btc_client: BtcRpcClient,
     // placeholder until we implement sui rpc
@@ -86,53 +87,48 @@ impl AuditorCore {
         })
     }
 
-    pub fn ingest(&mut self, event: MonitorEvent) -> Option<MonitorError> {
+    pub fn ingest(&mut self, event: MonitorEvent) -> Vec<MonitorFinding> {
         match event {
             MonitorEvent::Withdrawal(event) => self.ingest_withdrawal(event),
             MonitorEvent::Deposit(event) => self.ingest_deposit(event),
         }
     }
 
-    fn ingest_withdrawal(&mut self, event: MonitorWithdrawalEvent) -> Option<MonitorError> {
+    fn ingest_withdrawal(&mut self, event: MonitorWithdrawalEvent) -> Vec<MonitorFinding> {
         let wid = event.wid;
         match self.pending_withdrawals.entry(wid) {
-            Entry::Occupied(mut entry) => {
-                if let Err(e) = entry.get_mut().add_event(event, &self.cfg) {
-                    return Some(e);
-                }
-            }
+            Entry::Occupied(mut entry) => entry.get_mut().add_event(event, &self.cfg),
             Entry::Vacant(entry) => {
                 entry.insert(WithdrawalStateMachine::new(event, &self.cfg));
+                Vec::new()
             }
         }
-        None
     }
 
-    fn ingest_deposit(&mut self, event: MonitorDepositEvent) -> Option<MonitorError> {
-        let txid = event.btc_txid;
-        match self.pending_deposits.entry(txid) {
+    fn ingest_deposit(&mut self, event: MonitorDepositEvent) -> Vec<MonitorFinding> {
+        let outpoint = (event.btc_txid, event.btc_vout);
+        match self.pending_deposits.entry(outpoint) {
             Entry::Occupied(entry) => {
                 if entry.get().hashi_deposit_event() != &event {
-                    return Some(MonitorError::InvalidEventAdded(
-                        "duplicate deposit event for same txid with different contents".to_string(),
-                    ));
+                    return vec![MonitorFinding::InvalidEventAdded(
+                        "duplicate deposit event for same outpoint with different contents"
+                            .to_string(),
+                    )];
                 }
             }
             Entry::Vacant(entry) => {
                 entry.insert(DepositStateMachine::new(event, &self.cfg));
             }
         }
-        None
+        Vec::new()
     }
 
-    pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) -> Vec<MonitorError> {
-        let mut errors = Vec::new();
+    pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) -> Vec<MonitorFinding> {
+        let mut findings = Vec::new();
         for event in events {
-            if let Some(e) = self.ingest(event) {
-                errors.push(e);
-            }
+            findings.extend(self.ingest(event));
         }
-        errors
+        findings
     }
 
     /// Pings Bitcoin RPC for all relevant withdrawals & deposits.
@@ -140,8 +136,8 @@ impl AuditorCore {
     pub fn fetch_btc_info(
         &mut self,
         window: &impl AuditWindow,
-    ) -> anyhow::Result<Vec<MonitorError>> {
-        let mut errors = Vec::new();
+    ) -> anyhow::Result<Vec<MonitorFinding>> {
+        let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values_mut() {
             if !sm.is_in_audit_window(window) {
                 continue;
@@ -149,27 +145,27 @@ impl AuditorCore {
 
             // Fetch BTC info for expecting withdrawals
             if sm.expects(WithdrawalEventType::E3BtcConfirmed)
-                && let BtcFetchOutcome::Confirmed(Some(e)) =
+                && let BtcFetchOutcome::Confirmed(new_findings) =
                     sm.try_fetch_btc_tx(&self.cfg, &self.btc_client)?
             {
-                errors.push(e);
+                findings.extend(new_findings);
             }
         }
 
         for sm in self.pending_deposits.values_mut() {
-            if sm.expects_btc_event()
-                && let BtcFetchOutcome::Confirmed(Some(e)) =
+            if sm.is_expecting_events()
+                && let BtcFetchOutcome::Confirmed(new_findings) =
                     sm.try_fetch_btc_tx(&self.btc_client)?
             {
-                errors.push(e);
+                findings.extend(new_findings);
             }
         }
 
-        Ok(errors)
+        Ok(findings)
     }
 
-    pub fn detect_violations(&self, window: &impl AuditWindow) -> Vec<MonitorError> {
-        let mut errors = Vec::new();
+    pub fn detect_violations(&self, window: &impl AuditWindow) -> Vec<MonitorFinding> {
+        let mut findings = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if !sm.is_in_audit_window(window) {
                 continue;
@@ -178,16 +174,16 @@ impl AuditorCore {
             // Gather all violations so far
             let violations = sm.violations(&self.get_cursors());
             if !violations.is_empty() {
-                errors.extend(violations);
+                findings.extend(violations);
             }
         }
         for sm in self.pending_deposits.values() {
             let violations = sm.violations();
             if !violations.is_empty() {
-                errors.extend(violations);
+                findings.extend(violations);
             }
         }
-        errors
+        findings
     }
 
     pub fn garbage_collect(&mut self, window: &impl AuditWindow) {
@@ -196,8 +192,8 @@ impl AuditorCore {
             if !sm.is_in_audit_window(window) {
                 continue;
             }
-            if sm.is_valid() {
-                tracing::info!(%wid, "withdrawal is valid");
+            if !sm.is_expecting_events() {
+                tracing::info!(%wid, "withdrawal flow is complete");
                 completed_withdrawals.push(*wid);
             }
         }
@@ -207,22 +203,22 @@ impl AuditorCore {
         }
 
         let mut completed_deposits = Vec::new();
-        for (txid, sm) in &mut self.pending_deposits {
-            if sm.is_valid() {
-                tracing::info!(%txid, "deposit is valid");
-                completed_deposits.push(*txid);
+        for ((txid, vout), sm) in &mut self.pending_deposits {
+            if !sm.is_expecting_events() {
+                tracing::debug!(%txid, vout, "deposit flow is complete");
+                completed_deposits.push((*txid, *vout));
             }
         }
 
-        for txid in completed_deposits {
-            self.pending_deposits.remove(&txid);
+        for outpoint in completed_deposits {
+            self.pending_deposits.remove(&outpoint);
         }
     }
 
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
         let mut verified_up_to_withdrawals = self.get_guardian_cursor();
         for sm in self.pending_withdrawals.values() {
-            if !sm.is_in_audit_window(window) || sm.is_valid() {
+            if !sm.is_in_audit_window(window) || !sm.is_expecting_events() {
                 continue;
             }
 
@@ -239,7 +235,7 @@ impl AuditorCore {
         let unresolved_deposit_floor = self
             .pending_deposits
             .values()
-            .filter(|sm| !sm.is_valid())
+            .filter(|sm| sm.is_expecting_events())
             .map(|sm| sm.hashi_deposit_event().timestamp_secs)
             .min()
             .unwrap_or(u64::MAX);
