@@ -1,27 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Verified read layer over the guardian's S3 logs.
+//! Verified reads of the guardian's S3 logs.
 //!
-//! The guardian writes its logs via [`GuardianS3Client`]; off-enclave readers
-//! (the monitor auditor, KP/operator init tooling) replay them here through a
-//! [`GuardianReader`], which owns the S3 client and a per-session info cache
-//! that records the build PCRs verified for each session. Streams are
-//! hour-partitioned (`withdraw/`/`heartbeat/`);
-//! [`withdraw_cursor`]/[`heartbeat_cursor`] open a cursor that the caller
-//! advances/retreats and feeds to [`GuardianReader::read_logs_in_dir`].
+//! [`GuardianReader`] applies each log stream's S3 immutability policy, verifies
+//! records with their writing session's attestation-anchored key, and caches the
+//! verified session info for reuse.
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessageV1;
@@ -30,12 +24,8 @@ use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::VersionedLogMessage;
-use hashi_types::guardian::S3_DIR_CEREMONY;
-use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
-use hashi_types::guardian::S3_DIR_GENESIS;
-use hashi_types::guardian::S3_DIR_HEARTBEAT;
-use hashi_types::guardian::S3_DIR_WITHDRAW;
+use hashi_types::guardian::VersionedLogMessage::V1;
+use hashi_types::guardian::VersionedLogMessage::V2;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -47,24 +37,13 @@ mod verified;
 pub use verified::VerifiedLogRecord;
 pub use verified::VerifiedSessionInfo;
 
-/// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
-/// retreat with [`S3HourScopedDirectory::next_dir`]/`prev_dir`, gate on
-/// `write_completion_time`, and read via [`GuardianReader::read_logs_in_dir`].
-pub fn withdraw_cursor(start: UnixSeconds) -> S3HourScopedDirectory {
-    S3HourScopedDirectory::new(S3_DIR_WITHDRAW, start)
-}
-
-/// Like [`withdraw_cursor`], but over the `heartbeat/` stream.
-pub fn heartbeat_cursor(start: UnixSeconds) -> S3HourScopedDirectory {
-    S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, start)
-}
-
+/// Internal policy for sharing read implementations that differ only in which
+/// attested guardian builds they accept.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BuildPolicy {
-    /// Accept only the configured current guardian build.
+enum BuildPolicy {
+    /// Require the configured current build.
     Current,
-    /// Accept either the configured current build or an explicitly allowlisted
-    /// previous build. This is for historical log reads, not live-session checks.
+    /// Accept any build represented in the PCR allowlist.
     AnyAllowlisted,
 }
 
@@ -77,48 +56,65 @@ impl BuildPolicy {
     }
 }
 
-/// Verified reader over the guardian's S3 logs. Owns the S3 client and a private
-/// session cache. Thread a single `&mut GuardianReader` through a run so repeated
-/// reads can reuse session info and inspect the attested build.
+/// Verified reader over the guardian's S3 logs.
+///
+/// Reads accept any allowlisted build unless the method explicitly requires
+/// the current build. Reuse one reader so repeated reads can share cached
+/// session attestations and signing keys.
 pub struct GuardianReader {
     s3: GuardianS3Client,
-    cache: GuardianSessionCache,
+    allowlist: PcrAllowlist,
+    sessions: HashMap<SessionID, VerifiedSessionInfo>,
 }
 
 impl GuardianReader {
+    /// Create a reader after checking S3 connectivity and object-lock support.
     pub async fn new(config: &S3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
         let s3 = GuardianS3Client::new_checked(config).await?;
         Ok(Self::from_s3_client(s3, allowlist))
     }
 
+    /// Create a reader from an existing S3 client without another connectivity
+    /// check.
     pub fn from_s3_client(s3: GuardianS3Client, allowlist: PcrAllowlist) -> Self {
         Self {
             s3,
-            cache: GuardianSessionCache::new(allowlist),
+            allowlist,
+            sessions: HashMap::new(),
         }
     }
 
-    /// Raw S3 client, for unverified listing/reads (e.g. the limiter's bucket walk).
-    pub fn s3(&self) -> &GuardianS3Client {
-        &self.s3
+    /// Load and verify a session's attestation and guardian info on first use,
+    /// then return the cached result.
+    async fn get_or_load_session_info(
+        &mut self,
+        session_id: &str,
+    ) -> GuardianResult<&VerifiedSessionInfo> {
+        if !self.sessions.contains_key(session_id) {
+            let session_info =
+                VerifiedSessionInfo::read_from_s3(&self.s3, session_id, &self.allowlist).await?;
+            self.sessions.insert(session_id.into(), session_info);
+        }
+        Ok(&self.sessions[session_id])
     }
 
-    pub fn require_current_build(&self, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
-        self.cache.allowlist.require_current_build(build_pcrs)
+    /// Verify a record with its session's attestation-anchored signing key.
+    async fn verify_record(&mut self, record: LogRecord) -> GuardianResult<VerifiedLogRecord> {
+        let session_info = self.get_or_load_session_info(record.session_id()).await?;
+        session_info.verify_record(record)
     }
 
-    fn enforce_build_policy(
-        &self,
-        build_policy: BuildPolicy,
-        build_pcrs: &BuildPcrs,
-    ) -> GuardianResult<()> {
-        build_policy.enforce(&self.cache.allowlist, build_pcrs)
+    /// Read an immutable S3 record and verify it with its session's
+    /// attestation-anchored signing key.
+    async fn read_verified_record(&mut self, key: &str) -> GuardianResult<VerifiedLogRecord> {
+        let record = self.s3.get_log_record(key).await?;
+        self.verify_record(record).await
     }
 
-    /// Read and verify every record in `dir`, resolving each writing session's
-    /// signing pubkey via the cache. Batch readers can straddle upgrades, so
-    /// callers that need current-only semantics must inspect each returned
-    /// record's build PCRs with [`Self::require_current_build`].
+    /// Read and verify every immutable record in an hour-scoped directory.
+    ///
+    /// Each result retains its writing session's attested build PCRs because a
+    /// directory may contain records from more than one build.
     pub async fn read_logs_in_dir(
         &mut self,
         dir: &S3HourScopedDirectory,
@@ -126,66 +122,46 @@ impl GuardianReader {
         let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
-        for log in all_logs {
-            out.push(self.cache.verify_record(&self.s3, log).await?);
+        for record in all_logs {
+            let verified_record = self.verify_record(record).await?;
+            out.push(verified_record);
         }
         Ok(out)
     }
 
-    /// The session's verified guardian info. Served from the session cache, which
-    /// resolves the attestation + signed info on first touch and records the
-    /// verified build PCRs.
-    pub async fn get_session_info(
+    /// Return verified session info after requiring the attested PCRs to match
+    /// the current build.
+    pub async fn get_current_session_info(
         &mut self,
         session_id: &str,
-        build_policy: BuildPolicy,
     ) -> GuardianResult<VerifiedSessionInfo> {
-        let session_info = self
-            .cache
-            .get_or_load_session_info(&self.s3, session_id)
-            .await?
-            .clone();
-        self.enforce_build_policy(build_policy, session_info.build_pcrs())?;
+        let session_info = self.get_or_load_session_info(session_id).await?.clone();
+        self.allowlist
+            .require_current_build(session_info.build_pcrs())?;
         Ok(session_info)
     }
 
-    /// The session's verified `GuardianInfo`, discarding the verified build PCRs.
-    pub async fn get_info(
-        &mut self,
-        session_id: &str,
-        build_policy: BuildPolicy,
-    ) -> GuardianResult<GuardianInfo> {
-        Ok(self
-            .get_session_info(session_id, build_policy)
-            .await?
-            .into_info())
-    }
-
-    /// The latest ceremony from `ceremony/` — the max-`sharing_seq` (lex-last)
-    /// entry, attestation- and signature-verified. `None` if no ceremony has
-    /// been logged yet.
+    /// Read and verify the latest ceremony, or return `None` if none exists.
     ///
-    /// `kp-shares/` is read independently so later KP cert rotations can advance
-    /// `cert_seq` without rewriting the `ceremony/` instance.
+    /// Ceremony keys begin with a zero-padded `sharing_seq`, so the
+    /// lexicographically greatest key identifies the latest ceremony.
     async fn read_latest_ceremony_log(
         &mut self,
         build_policy: BuildPolicy,
     ) -> GuardianResult<Option<CeremonyLogMessage>> {
         let keys = self
             .s3
-            .list_keys(&format!("{}/", S3_DIR_CEREMONY), true)
+            .list_keys(&CeremonyLogMessage::object_key_dir(), true)
             .await?;
-        let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
+        let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
-            VersionedLogMessage::V1(LogMessageV1::Ceremony(msg)) => msg,
-            VersionedLogMessage::V2(LogMessageV2::Ceremony(msg)) => msg,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+        let verified_record = self.read_verified_record(&key).await?;
+        build_policy.enforce(&self.allowlist, verified_record.build_pcrs())?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::Ceremony(msg)) | V2(LogMessageV2::Ceremony(msg)) => msg,
+            V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
             }
         };
@@ -193,15 +169,12 @@ impl GuardianReader {
         Ok(Some(*msg))
     }
 
-    /// Read + verify the latest encrypted KP share state for `sharing_seq`.
-    /// The lex-greatest object under `kp-shares/{sharing_seq:020}/` has the
-    /// latest `cert_seq`, so future per-KP cert rotation can advance the share
-    /// recipient state without changing the `ceremony/` instance.
+    /// Read and verify the latest encrypted KP-share state for `sharing_seq`.
     ///
-    /// Uses the lock-agnostic read: shares carry only a short lock that is
-    /// expected to expire, and their integrity is the enclave signature checked
-    /// below — not S3 immutability — so the immutable-log lock assertion in
-    /// `get_log_record` doesn't apply.
+    /// Keys begin with a zero-padded `cert_seq`, so the lexicographically
+    /// greatest key identifies the latest state. KP-share locks are expected to
+    /// expire, so this read authenticates the selected record without claiming
+    /// S3 immutability.
     async fn read_latest_kp_share_state_log(
         &mut self,
         sharing_seq: u64,
@@ -224,45 +197,44 @@ impl GuardianReader {
         Ok(Some(msg))
     }
 
-    /// Read and verify one exact encrypted KP-share snapshot.
+    /// Read and verify an exact encrypted KP-share state written by the current
+    /// build.
     ///
     /// The object key binds the writing guardian session and the two sequence
     /// numbers. This lets callers verify the snapshot produced by one request
     /// even if a later request has already advanced the latest state.
-    pub async fn read_kp_share_state_log(
+    pub async fn read_kp_share_state_log_from_current_build(
         &mut self,
         session_id: &SessionID,
         sharing_seq: u64,
         cert_seq: u64,
-        build_policy: BuildPolicy,
     ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
-        self.read_kp_share_state_log_at_key(&key, build_policy)
+        self.read_kp_share_state_log_at_key(&key, BuildPolicy::Current)
             .await
     }
 
-    /// Shared verification path for both latest and exact KP-share reads.
+    /// Read and verify one KP-share object under the requested build policy.
     async fn read_kp_share_state_log_at_key(
         &mut self,
         key: &str,
         build_policy: BuildPolicy,
     ) -> GuardianResult<KpShareStateLogMessage> {
-        // KP-share locks are short-lived and expected to expire. Expiry permits
-        // deletion but does not cause it; while an object remains, its contents
-        // are authenticatable through the enclave signature verified below.
+        // KP-share locks are expected to expire, so authenticate the record
+        // without claiming that S3 still makes it immutable.
         let record = self
             .s3
             .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
-            VersionedLogMessage::V1(LogMessageV1::KpShareState(msg)) => (*msg)
+        let verified_record = self.verify_record(record).await?;
+        build_policy.enforce(&self.allowlist, verified_record.build_pcrs())?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::KpShareState(msg)) => (*msg)
                 .try_into()
                 .map_err(|e| InvalidS3Log(format!("log schema conversion failed: {e}")))?,
-            VersionedLogMessage::V2(LogMessageV2::KpShareState(msg)) => *msg,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+            V2(LogMessageV2::KpShareState(msg)) => *msg,
+            V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
             }
         };
@@ -270,11 +242,26 @@ impl GuardianReader {
         Ok(msg)
     }
 
-    /// Read the latest ceremony together with the latest KP share state for its
-    /// `sharing_seq`. `None` means no ceremony has been logged. Once a ceremony
-    /// exists, its matching KP share state must also exist: ceremony writers
-    /// publish `kp-shares/` before `ceremony/`.
-    pub async fn read_latest_ceremony_state(
+    /// Read the latest ceremony together with the latest KP-share state for its
+    /// `sharing_seq`, accepting any allowlisted build.
+    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<Option<CeremonyState>> {
+        self.read_latest_ceremony_state_with_build_policy(BuildPolicy::AnyAllowlisted)
+            .await
+    }
+
+    /// Read the latest ceremony together with the latest KP-share state for its
+    /// `sharing_seq`, requiring both records to come from the current build.
+    pub async fn read_latest_ceremony_state_from_current_build(
+        &mut self,
+    ) -> GuardianResult<Option<CeremonyState>> {
+        self.read_latest_ceremony_state_with_build_policy(BuildPolicy::Current)
+            .await
+    }
+
+    /// Return `None` only when no ceremony exists. Once a ceremony is present,
+    /// its matching KP-share state must also exist because writers publish
+    /// `kp-shares/` before `ceremony/`.
+    async fn read_latest_ceremony_state_with_build_policy(
         &mut self,
         build_policy: BuildPolicy,
     ) -> GuardianResult<Option<CeremonyState>> {
@@ -295,44 +282,43 @@ impl GuardianReader {
         )))
     }
 
-    /// Latest serving committee, preferring `committee-update/` and falling back
-    /// to the KP-authorized `genesis/record.json` bootstrap record. `None`
-    /// means neither source has been written yet.
-    pub async fn read_latest_committee(
-        &mut self,
-        build_policy: BuildPolicy,
-    ) -> GuardianResult<Option<Committee>> {
-        if let Some(committee) = self.read_latest_committee_update(build_policy).await? {
+    /// Read the latest serving committee.
+    ///
+    /// Prefer the latest successful `committee-update/` record, then fall back
+    /// to the KP-authorized `genesis/record.json` bootstrap record. Return
+    /// `None` if neither source exists.
+    pub async fn read_latest_committee(&mut self) -> GuardianResult<Option<Committee>> {
+        if let Some(committee) = self.read_latest_committee_update().await? {
             return Ok(Some(committee));
         }
         Ok(self
-            .read_genesis_log(build_policy)
+            .read_genesis_log()
             .await?
             .map(|genesis| genesis.committee))
     }
 
-    /// The latest applied committee from `committee-update/` — the lex-last
-    /// non-`failure-` (i.e. highest-epoch Success) entry, attestation- and
-    /// signature-verified. `None` if no committee update has been logged.
-    async fn read_latest_committee_update(
-        &mut self,
-        build_policy: BuildPolicy,
-    ) -> GuardianResult<Option<Committee>> {
+    /// Read and verify the successfully applied committee with the highest
+    /// epoch, or return `None` if no successful update exists.
+    ///
+    /// Success keys begin with a zero-padded epoch, so the lexicographically
+    /// greatest non-failure key identifies the latest applied committee.
+    async fn read_latest_committee_update(&mut self) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
-            .list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE), true)
+            .list_keys(&CommitteeUpdateLogMessage::object_key_dir(), true)
             .await?;
-        let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
+        let Some(key) = keys
+            .into_iter()
+            .filter(|key| !CommitteeUpdateLogMessage::is_failure_object_key(key))
+            .max()
+        else {
             return Ok(None);
         };
-        let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
-            VersionedLogMessage::V1(LogMessageV1::CommitteeUpdate(msg)) => msg,
-            VersionedLogMessage::V2(LogMessageV2::CommitteeUpdate(msg)) => msg,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+        let verified_record = self.read_verified_record(&key).await?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::CommitteeUpdate(msg)) | V2(LogMessageV2::CommitteeUpdate(msg)) => msg,
+            V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!(
                     "expected a committee-update log at {key}"
                 )));
@@ -341,25 +327,20 @@ impl GuardianReader {
         let committee = match *msg {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
             CommitteeUpdateLogMessage::Failure { .. } => {
-                return Err(InvalidS3Log(format!(
-                    "lex-last non-failure key resolved to a Failure log at {key}"
-                )));
+                unreachable!("a verified non-failure key cannot contain a Failure log")
             }
         };
         log_verified_read(&key, &session_id);
         Ok(Some(committee))
     }
 
-    /// Fixed genesis record from `genesis/record.json`. `None` means the
-    /// KP-authorized bootstrap record has not been written yet.
-    async fn read_genesis_log(
-        &mut self,
-        build_policy: BuildPolicy,
-    ) -> GuardianResult<Option<GenesisLogMessage>> {
+    /// Read and verify the fixed KP-authorized bootstrap record, or return
+    /// `None` if `genesis/record.json` has not been written.
+    async fn read_genesis_log(&mut self) -> GuardianResult<Option<GenesisLogMessage>> {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .list_keys(&format!("{}/", S3_DIR_GENESIS), true)
+            .list_keys(&GenesisLogMessage::object_key_dir(), true)
             .await?;
         if keys.is_empty() {
             return Ok(None);
@@ -369,14 +350,11 @@ impl GuardianReader {
                 "expected exactly one genesis record at {key}, found {keys:?}"
             )));
         }
-        let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, record.build_pcrs())?;
-        let session_id = record.entry().session_id().clone();
-        let msg = match record.into_entry().into_message() {
-            VersionedLogMessage::V1(LogMessageV1::Genesis(msg)) => msg,
-            VersionedLogMessage::V2(LogMessageV2::Genesis(msg)) => msg,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+        let verified_record = self.read_verified_record(&key).await?;
+        let session_id = verified_record.entry().session_id().clone();
+        let msg = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::Genesis(msg)) | V2(LogMessageV2::Genesis(msg)) => msg,
+            V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
             }
         };
@@ -387,100 +365,4 @@ impl GuardianReader {
 
 fn log_verified_read(key: &str, session_id: &SessionID) {
     info!("Successfully read {key} from session {session_id}.");
-}
-
-/// Per-session [`VerifiedSessionInfo`] cache, internal to [`GuardianReader`]. The first
-/// touch of a session resolves and verifies its info (attestation + signed
-/// info, PCR0 pinned against `allowlist`); later reads reuse it and expose the
-/// verified build PCRs to callers.
-struct GuardianSessionCache {
-    sessions: HashMap<SessionID, VerifiedSessionInfo>,
-    allowlist: PcrAllowlist,
-}
-
-impl GuardianSessionCache {
-    fn new(allowlist: PcrAllowlist) -> Self {
-        Self {
-            sessions: HashMap::new(),
-            allowlist,
-        }
-    }
-
-    /// The session's verified info, resolving and caching it on first use.
-    async fn get_or_load_session_info(
-        &mut self,
-        s3: &GuardianS3Client,
-        session_id: &str,
-    ) -> GuardianResult<&VerifiedSessionInfo> {
-        if !self.sessions.contains_key(session_id) {
-            let session_info = VerifiedSessionInfo::new(s3, session_id, &self.allowlist).await?;
-            self.sessions.insert(session_id.into(), session_info);
-        }
-        Ok(&self.sessions[session_id])
-    }
-
-    /// Fully verify `record` under its session's attested signing key.
-    async fn verify_record(
-        &mut self,
-        s3: &GuardianS3Client,
-        record: LogRecord,
-    ) -> GuardianResult<VerifiedLogRecord> {
-        let session_id = record.session_id().clone();
-        let session_info = self.get_or_load_session_info(s3, &session_id).await?;
-        VerifiedLogRecord::new(record, session_info)
-    }
-}
-
-/// Pick the lex-greatest key, skipping any whose name starts with `<dir>/failure-`.
-/// Keys are zero-padded (ceremony `sharing_seq`, committee `epoch`), so the lex-max
-/// non-failure key is the latest successful entry.
-fn pick_latest_key(keys: Vec<String>, dir: &str) -> Option<String> {
-    let failure_prefix = format!("{dir}/failure-");
-    keys.into_iter()
-        .filter(|k| !k.starts_with(&failure_prefix))
-        .max()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn success_key(epoch: u64) -> String {
-        format!("{S3_DIR_COMMITTEE_UPDATE}/{epoch:020}-sess.json")
-    }
-    fn failure_key(epoch: u64) -> String {
-        format!("{S3_DIR_COMMITTEE_UPDATE}/failure-{epoch:020}-sess-abcd1234.json")
-    }
-
-    #[test]
-    fn pick_latest_key_none_when_empty() {
-        assert_eq!(pick_latest_key(vec![], S3_DIR_COMMITTEE_UPDATE), None);
-    }
-
-    #[test]
-    fn pick_latest_key_takes_lex_max() {
-        let keys = vec![success_key(3), success_key(7), success_key(5)];
-        assert_eq!(
-            pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE),
-            Some(success_key(7))
-        );
-    }
-
-    #[test]
-    fn pick_latest_key_skips_higher_failure() {
-        // A later-epoch failure (lex-greater than any success) must not win.
-        let keys = vec![success_key(5), failure_key(9)];
-        assert_eq!(
-            pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE),
-            Some(success_key(5))
-        );
-    }
-
-    #[test]
-    fn pick_latest_key_none_when_all_failures() {
-        assert_eq!(
-            pick_latest_key(vec![failure_key(9)], S3_DIR_COMMITTEE_UPDATE),
-            None
-        );
-    }
 }

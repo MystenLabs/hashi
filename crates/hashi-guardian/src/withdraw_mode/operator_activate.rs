@@ -5,7 +5,6 @@
 //! withdrawal enclave by deriving live serving state from S3 logs and checking the
 //! operator-pinned `ActivationState` hash.
 
-use crate::s3_reader::BuildPolicy;
 use crate::Enclave;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
@@ -49,7 +48,7 @@ impl OAInstall {
             .await?;
 
         let committee: HashiCommittee = reader
-            .read_latest_committee(BuildPolicy::AnyAllowlisted)
+            .read_latest_committee()
             .await?
             .ok_or_else(|| InvalidInputs("no committee-update or genesis record found".into()))?
             .try_into()

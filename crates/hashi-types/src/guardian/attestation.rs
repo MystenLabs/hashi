@@ -165,7 +165,7 @@ impl BuildPcrs {
 }
 
 /// PCR pins for enclave builds that may appear in guardian attestations.
-/// Used by GuardianReader in s3_reader.rs.
+/// Used by the guardian S3 reader.
 ///
 /// `current_build` is the current/live build. `prev_builds` contains older
 /// builds that may still appear in persisted logs during an upgrade or replay.

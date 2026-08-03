@@ -1,10 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LogRecord` written to S3: it wraps a
-//! `super::schema::VersionedLogMessage` with its routing context and, for
-//! signed logs, a guardian signature.
-//! The object key and lock duration are derived from the wrapped message.
+//! S3 log-record wire format and record-local validation.
+//!
+//! A [`LogRecord`] carries a [`VersionedLogMessage`] and its S3 routing
+//! context. Signed records carry a Guardian signature over their [`LogEntry`].
+//! The one permitted unsigned entry carries the OI attestation that establishes
+//! the Guardian signing key and must be authenticated separately.
 
 use super::ObjectKeyPattern;
 use super::retention::S3ObjectLockPolicy;
@@ -27,27 +29,35 @@ use serde::de::Error as _;
 use serde_json::Value;
 use std::time::Duration;
 
-/// The data authenticated by a signed log record.
+/// Routing context and versioned payload carried by a [`LogRecord`].
 ///
-/// Field order defines the BCS signing format.
+/// For signed records, field order defines the BCS signing format.
 #[derive(Debug, Serialize)]
 pub struct LogEntry {
+    /// Version of the message's serialized schema.
     schema_version: u64,
+    /// Guardian session that wrote the entry.
     session_id: SessionID,
     /// Final S3 destination selected before signing. Readers must compare this
     /// intended key with the actual key returned by S3.
     object_key: String,
+    /// Versioned log payload.
     message: VersionedLogMessage,
-    /// Milliseconds since Unix epoch.
+    /// Entry creation time in milliseconds since the Unix epoch.
     timestamp_ms: UnixMillis,
 }
 
-/// Write: `LogMessage` -> `LogRecord` -> JSON body.
-/// Read: actual S3 key + JSON body -> untrusted `LogRecord`; the reader layer
-/// fully verifies it before exposing its contents.
+/// A Guardian S3 log record.
+///
+/// Both variants use the same flat JSON representation; the optional
+/// `signature` field selects the variant during deserialization. A
+/// deserialized record remains untrusted until its routing context and
+/// applicable signature and attestation checks have been performed.
 #[derive(Debug)]
 pub enum LogRecord {
+    /// An entry carrying a Guardian signature.
     Signed(GuardianSigned<LogEntry>),
+    /// The OI-attestation entry, which is authenticated separately.
     Unsigned(LogEntry),
 }
 
@@ -145,26 +155,32 @@ impl<'de> Deserialize<'de> for LogRecord {
 }
 
 impl LogEntry {
+    /// Return the log schema version.
     pub fn schema_version(&self) -> u64 {
         self.schema_version
     }
 
+    /// Return the intended S3 object key.
     pub fn object_key(&self) -> &str {
         &self.object_key
     }
 
+    /// Return the writing Guardian session.
     pub fn session_id(&self) -> &SessionID {
         &self.session_id
     }
 
+    /// Return the entry creation time in milliseconds since the Unix epoch.
     pub fn timestamp_ms(&self) -> UnixMillis {
         self.timestamp_ms
     }
 
+    /// Return the versioned log payload.
     pub fn message(&self) -> &VersionedLogMessage {
         &self.message
     }
 
+    /// Consume the entry and return its versioned log payload.
     pub fn into_message(self) -> VersionedLogMessage {
         self.message
     }
@@ -202,8 +218,7 @@ impl LogEntry {
         Ok(())
     }
 
-    /// Validate an unsigned OI-attestation entry. The Nitro attestation itself
-    /// must be authenticated separately.
+    // The Nitro attestation itself must be authenticated separately.
     fn validate_unsigned(&self) -> GuardianResult<()> {
         if !self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
@@ -228,7 +243,6 @@ impl LogEntry {
         Ok(())
     }
 
-    /// Validate signed-log routing context.
     fn validate_signed(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
         if self.message.is_allowed_unsigned() {
             return Err(InvalidS3Log(
@@ -241,6 +255,10 @@ impl LogEntry {
 }
 
 impl LogRecord {
+    /// Construct a current-schema record using the current time.
+    ///
+    /// The OI-attestation message is emitted unsigned; every other message is
+    /// signed by `signing_key`.
     pub fn new(
         session_id: SessionID,
         message: LogMessage,
@@ -249,6 +267,10 @@ impl LogRecord {
         Self::new_at_timestamp(session_id, message, signing_key, now_timestamp_ms())
     }
 
+    /// Construct a current-schema record using an explicit timestamp.
+    ///
+    /// The OI-attestation message is emitted unsigned; every other message is
+    /// signed by `signing_key`.
     pub fn new_at_timestamp(
         session_id: SessionID,
         message: LogMessage,
@@ -266,28 +288,32 @@ impl LogRecord {
         }
     }
 
+    /// Return the intended S3 object key.
     pub fn object_key(&self) -> &str {
         &self.data().object_key
     }
 
+    /// Return the writing Guardian session.
     pub fn session_id(&self) -> &SessionID {
         &self.data().session_id
     }
 
+    /// Return the entry creation time in milliseconds since the Unix epoch.
     pub fn timestamp_ms(&self) -> UnixMillis {
         self.data().timestamp_ms
     }
 
+    /// Return the versioned log payload.
     pub fn message(&self) -> &VersionedLogMessage {
         &self.data().message
     }
 
-    /// Validate a record without consuming it.
+    /// Validate record-local invariants without consuming the record.
     ///
-    /// Validation checks record-local invariants and verifies a signed record
-    /// against the caller-supplied key. It does not establish that the key
-    /// belongs to an attested, approved guardian; the S3 reader's
-    /// `verify_record` performs that complete verification.
+    /// For a signed record, this also verifies the signature against the
+    /// caller-supplied key. It does not establish that the key belongs to an
+    /// attested, approved Guardian; the S3 reader performs that complete
+    /// verification.
     ///
     /// Signed records require `Some(signing_public_key)`; the one permitted
     /// unsigned record kind requires `None`. The caller is responsible for
@@ -321,11 +347,24 @@ impl LogRecord {
         }
     }
 
+    /// Validate the record, then consume it and return its versioned entry.
+    pub fn validate_into_entry(
+        self,
+        signing_public_key: Option<&GuardianPubKey>,
+    ) -> GuardianResult<LogEntry> {
+        self.validate(signing_public_key)?;
+        Ok(self.into_entry_unchecked())
+    }
+
+    /// Return the object-lock duration selected for the message type.
     pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
         policy.duration_for(self.data().message.log_type())
     }
 
-    /// Extract the entry without validating the record.
+    /// Consume the record and extract its entry without validation.
+    ///
+    /// This bypasses object-key and session-ID validation, Guardian signature
+    /// verification, and Nitro attestation authentication.
     pub fn into_entry_unchecked(self) -> LogEntry {
         match self {
             Self::Signed(signed) => signed.into_data_unchecked(),
