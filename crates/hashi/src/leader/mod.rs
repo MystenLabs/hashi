@@ -209,15 +209,29 @@ impl LeaderService {
         })
     }
 
+    /// Wait until the guardian's BTC pubkey has been pinned (fetched and
+    /// verified against the on-chain pin by the guardian bootstrap service).
+    /// Deposit address derivation needs it, and a validation attempt before
+    /// it lands would misclassify the deposit as permanently invalid.
+    async fn wait_for_guardian_btc_pubkey(&self) {
+        while self.inner.guardian_btc_pubkey().is_none() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     #[tracing::instrument(name = "leader", skip_all)]
     async fn run(mut self) {
         info!("Starting leader service");
 
-        // Wait for DKG to complete before processing any checkpoints.
+        // Deposit validation derives deposit addresses from the MPC public
+        // key and the guardian BTC pubkey; don't process anything until both
+        // are permanently available.
         let mpc_handle = self.inner.mpc_handle().expect("MpcHandle not initialized");
-        info!("Waiting for MPC key to become available...");
-        mpc_handle.wait_for_key_ready().await;
-        info!("MPC key is ready, starting leader loop");
+        info!("Waiting for MPC public key...");
+        mpc_handle.wait_for_pubkey_ready().await;
+        info!("Waiting for guardian BTC pubkey...");
+        self.wait_for_guardian_btc_pubkey().await;
+        info!("Deposit keys available, starting leader loop");
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
@@ -251,10 +265,12 @@ impl LeaderService {
                     }
 
                     self.check_reconcile_guardian_committee();
-                    self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_unsigned_withdrawal_txns();
-                    self.process_signed_withdrawal_txns();
+                    if self.inner.current_signing_manager().is_some() {
+                        self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
+                        self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
+                        self.process_unsigned_withdrawal_txns();
+                        self.process_signed_withdrawal_txns();
+                    }
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                     self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
@@ -270,7 +286,9 @@ impl LeaderService {
                     let block_height = *btc_block_rx.borrow_and_update();
                     let checkpoint_height = checkpoint_rx.borrow().height;
 
-                    self.schedule_withdrawal_checks_for_btc_block();
+                    if self.inner.current_signing_manager().is_some() {
+                        self.schedule_withdrawal_checks_for_btc_block();
+                    }
 
                     if self.is_current_leader(checkpoint_height) {
                         debug!("New Bitcoin block {block_height}: processing deposit requests");

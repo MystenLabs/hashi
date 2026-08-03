@@ -38,6 +38,7 @@ use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
+use crate::onchain::OnchainState;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
@@ -65,6 +66,7 @@ const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 #[derive(Clone)]
 pub struct MpcHandle {
     key_ready_rx: watch::Receiver<Option<G>>,
+    onchain_state: OnchainState,
 }
 
 impl std::fmt::Debug for MpcHandle {
@@ -74,16 +76,17 @@ impl std::fmt::Debug for MpcHandle {
 }
 
 impl MpcHandle {
-    pub async fn wait_for_key_ready(&self) -> G {
-        let mut rx = self.key_ready_rx.clone();
+    /// Wait until the MPC public key is available on-chain (populated
+    /// atomically with `end_reconfig`). Once present it never reverts, so
+    /// callers can rely on key lookups succeeding from then on. Wakes on
+    /// checkpoint changes, which is how the on-chain key propagates.
+    pub async fn wait_for_pubkey_ready(&self) -> G {
+        let mut checkpoint_rx = self.onchain_state.subscribe_checkpoint();
         loop {
-            {
-                let value = rx.borrow();
-                if let Some(pk) = value.as_ref() {
-                    return *pk;
-                }
+            if let Ok(g) = self.onchain_state.onchain_verifying_key_g() {
+                return g;
             }
-            if rx.changed().await.is_err() {
+            if checkpoint_rx.changed().await.is_err() {
                 std::future::pending().await
             }
         }
@@ -117,7 +120,10 @@ impl MpcService {
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
         };
-        let handle = MpcHandle { key_ready_rx };
+        let handle = MpcHandle {
+            key_ready_rx,
+            onchain_state: service.inner.onchain_state().clone(),
+        };
         (service, handle)
     }
 
