@@ -41,13 +41,23 @@ const MAX_CHECKPOINTS_PER_POLL: u64 = 200;
 const MIN_CHECKPOINTS_PER_POLL: u64 = 25;
 
 pub struct SuiEventsPoller {
+    /// Sui v2 gRPC client used for checkpoint and event requests.
     client: sui_rpc::Client,
+    /// Deployed package versions used to decode Hashi event BCS.
     package_versions: PackageVersions,
+    /// Current Hashi package used to construct server-side event type filters.
     package_id: String,
+    /// Latest timestamp through which the poller has completely scanned events.
     cursor_seconds: UnixSeconds,
+    /// Start of the user/guardian window. Before this timestamp, only withdrawal
+    /// predecessor events are retained; from this timestamp onward, deposits are
+    /// included as well.
     full_event_start: UnixSeconds,
+    /// First checkpoint not yet scanned, once the initial timestamp lookup completes.
     next_checkpoint: Option<u64>,
+    /// Checkpoint timestamps cached to avoid repeating `GetCheckpoint` requests.
     checkpoint_timestamps: BTreeMap<u64, UnixSeconds>,
+    /// Most recently fetched chain head as `(sequence_number, timestamp_secs)`.
     latest_checkpoint: Option<(u64, UnixSeconds)>,
 }
 
