@@ -19,6 +19,7 @@ use super::OrderedBroadcastChannel;
 use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
+use crate::mpc::types::MessageHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SuiTxExecutor;
 
@@ -169,7 +170,7 @@ pub async fn fetch_key_generation_certificates(
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
-        let dealer = cert.dealer_address();
+        let ours = cert.message();
         let existing = fetch_certificates(
             &self.onchain_state,
             self.epoch,
@@ -178,8 +179,29 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         )
         .await
         .map_err(ChannelError::from)?;
-        if existing.iter().any(|(d, _)| *d == dealer) {
-            return Ok(());
+        let published: Vec<(Address, MessageHash)> = existing
+            .iter()
+            .map(|(d, c)| (*d, c.message().messages_hash))
+            .collect();
+        match classify_published_cert(&published, &ours.dealer_address, ours.messages_hash) {
+            PublishedCert::Same => return Ok(()),
+            PublishedCert::Diverged { on_chain } => {
+                tracing::warn!(
+                    "{:?} epoch {} batch {:?}: dealer {} already has a certificate over \
+                     different messages (on chain {}, ours {}); regenerated messages or an \
+                     AVID optimistic/pessimistic flip",
+                    self.protocol_type,
+                    self.epoch,
+                    self.batch_index,
+                    ours.dealer_address,
+                    hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(&on_chain)),
+                    hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                        &ours.messages_hash
+                    )),
+                );
+                return Ok(());
+            }
+            PublishedCert::Absent => {}
         }
 
         let mut executor = self.create_executor();
@@ -285,6 +307,30 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PublishedCert {
+    Absent,
+    Same,
+    Diverged { on_chain: MessageHash },
+}
+
+fn classify_published_cert(
+    existing: &[(Address, MessageHash)],
+    dealer: &Address,
+    ours: MessageHash,
+) -> PublishedCert {
+    let Some((_, on_chain)) = existing.iter().find(|(d, _)| d == dealer) else {
+        return PublishedCert::Absent;
+    };
+    if *on_chain == ours {
+        PublishedCert::Same
+    } else {
+        PublishedCert::Diverged {
+            on_chain: *on_chain,
+        }
+    }
+}
+
 fn tob_wait_superseded(
     protocol_type: ProtocolType,
     channel_epoch: u64,
@@ -306,6 +352,51 @@ fn tob_wait_superseded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn addr(b: u8) -> Address {
+        Address::new([b; 32])
+    }
+
+    fn hash(b: u8) -> MessageHash {
+        let mut bytes = [0xAB; 32];
+        bytes[17] = b;
+        MessageHash::new(bytes)
+    }
+
+    #[test]
+    fn republishing_the_same_messages_is_not_a_divergence() {
+        let existing = [(addr(1), hash(9)), (addr(2), hash(8))];
+        assert_eq!(
+            classify_published_cert(&existing, &addr(1), hash(9)),
+            PublishedCert::Same
+        );
+    }
+
+    #[test]
+    fn different_messages_under_our_dealer_address_diverge() {
+        let existing = [(addr(1), hash(9))];
+        assert_eq!(
+            classify_published_cert(&existing, &addr(1), hash(7)),
+            PublishedCert::Diverged { on_chain: hash(9) }
+        );
+    }
+
+    #[test]
+    fn only_our_own_dealer_slot_is_compared() {
+        let existing = [(addr(2), hash(7)), (addr(3), hash(6))];
+        assert_eq!(
+            classify_published_cert(&existing, &addr(1), hash(9)),
+            PublishedCert::Absent
+        );
+    }
+
+    #[test]
+    fn an_empty_tob_slot_is_absent() {
+        assert_eq!(
+            classify_published_cert(&[], &addr(1), hash(9)),
+            PublishedCert::Absent
+        );
+    }
 
     #[test]
     fn nonce_wait_superseded_only_by_other_reconfig_or_passed_epoch() {
