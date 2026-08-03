@@ -12607,6 +12607,141 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 }
 
 #[tokio::test]
+async fn test_run_as_avid_nonce_party_ignores_second_dispersal_after_unresolved_first() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let mut shadow: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (shadow_sigs, shadow_target) =
+        avid_confirm_signatures(&setup, &mut shadow, 0, batch_index, &mut rng);
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    assert_ne!(
+        shadow_target.messages_hash, confirm_target.messages_hash,
+        "the two dispersals must differ for this to be the equivocation case"
+    );
+
+    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature]| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs.iter() {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+        }
+    };
+
+    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
+        make_cert(&shadow_target, &shadow_sigs),
+        make_cert(&confirm_target, &sigs),
+        make_cert(&second_target, &second_sigs),
+    ]);
+    let metrics = test_metrics();
+    let result = MpcManager::run_as_avid_nonce_party(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await;
+
+    assert_eq!(
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "equivocation"])
+            .get(),
+        1,
+        "dealer 0's second dispersal must be rejected, not consumed"
+    );
+    assert_eq!(
+        metrics
+            .mpc_avid_rounds_total
+            .with_label_values(&["confirm"])
+            .get(),
+        1,
+        "only dealer 2 may be consumed; dealer 0 is claimed by the cert that never resolved"
+    );
+    assert!(
+        result.is_err(),
+        "dealer 2 alone (6) is under the W-f floor (12), so dropping the equivocating dealer \
+         costs the round — the documented price of the claim"
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_avid_nonce_party_ignores_cert_from_another_batch() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let mut shadow: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (foreign_sigs, foreign_target) =
+        avid_confirm_signatures(&setup, &mut shadow, 0, batch_index, &mut rng);
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+
+    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature], batch: u32| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs.iter() {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index: batch,
+            cert: agg.finish().unwrap(),
+        }
+    };
+
+    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
+        make_cert(&foreign_target, &foreign_sigs, batch_index + 1),
+        make_cert(&confirm_target, &sigs, batch_index),
+        make_cert(&second_target, &second_sigs, batch_index),
+    ]);
+    let metrics = test_metrics();
+    let certified = MpcManager::run_as_avid_nonce_party(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        certified,
+        HashSet::from([setup.address(0), setup.address(2)]),
+        "the foreign-batch cert must not claim dealer 0's slot in this round"
+    );
+    assert_eq!(
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "equivocation"])
+            .get(),
+        0,
+        "a cert for another batch is out of scope here, not equivocation"
+    );
+}
+
+#[tokio::test]
 async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let mut rng = rand::thread_rng();
     // W=16, f=4: the W-f floor (12) takes both dealers (6+6).

@@ -3536,6 +3536,7 @@ impl MpcManager {
             )
         };
         let mut certified_dealers = HashSet::new();
+        let mut claimed_digests: HashMap<Address, MessageHash> = HashMap::new();
         let mut dealer_weight_sum = 0u32;
         loop {
             if dealer_weight_sum >= required_weight {
@@ -3551,11 +3552,15 @@ impl MpcManager {
                 .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             drop(_timer);
             let CertificateV1::NonceGeneration {
-                cert: nonce_cert, ..
+                batch_index: cert_batch_index,
+                cert: nonce_cert,
             } = cert
             else {
                 continue;
             };
+            if cert_batch_index != batch_index {
+                continue;
+            }
             let dealer = nonce_cert.message().dealer_address;
             if certified_dealers.contains(&dealer) {
                 continue;
@@ -3599,6 +3604,18 @@ impl MpcManager {
                 }
             };
             let digest = nonce_cert.message().messages_hash;
+            if *claimed_digests.entry(dealer).or_insert(digest) != digest {
+                tracing::warn!(
+                    "AVID nonce cert for dealer {:?} contradicts the dispersal already \
+                     certified for batch_index={batch_index}; ignoring",
+                    dealer
+                );
+                metrics
+                    .mpc_certs_rejected_total
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "equivocation"])
+                    .inc();
+                continue;
+            }
             let kind = {
                 let mgr = mpc_manager.read().unwrap();
                 mgr.resolve_avid_cert_kind_locally(batch_index, &dealer, &digest)
