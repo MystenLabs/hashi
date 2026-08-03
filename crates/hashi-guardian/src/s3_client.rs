@@ -609,7 +609,12 @@ impl GuardianS3Client {
                 key, e
             ))
         })?;
-        record.validate_actual_object_key(key)?;
+        if record.object_key() != key {
+            return Err(InvalidS3Log(format!(
+                "S3 object key mismatch: record contains {}, actual key is {key}",
+                record.object_key()
+            )));
+        }
         Ok(record)
     }
 
@@ -632,7 +637,7 @@ impl GuardianS3Client {
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
         let attestation_record = self.get_log_record(&att_key).await?;
-        let (_, _, attestation_message) = attestation_record.validate_unsigned()?;
+        let (_, _, attestation_message) = attestation_record.validate(None)?;
         let (attestation, signing_pubkey) = attestation_message
             .into_init_log()
             .and_then(|x| match x {
@@ -649,7 +654,7 @@ impl GuardianS3Client {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = self.get_log_record(&info_key).await?;
-        let (_, _, info_message) = info_record.verify(&signing_pubkey)?;
+        let (_, _, info_message) = info_record.validate(Some(&signing_pubkey))?;
         let info = info_message
             .into_init_log()
             .and_then(|x| match x {
@@ -699,6 +704,8 @@ mod tests {
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::NitroAttestation;
+    use hashi_types::guardian::SessionID;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -976,5 +983,126 @@ mod tests {
             matches!(error, S3Error(message) if message.contains("expired object lock metadata"))
         );
         assert_eq!(get_expired.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsigned_log_replay_reaches_canonical_key_validation() {
+        let signing_key = GuardianSignKeyPair::from([14u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let record = LogRecord::new_at_timestamp(
+            session_id,
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                attestation: NitroAttestation::new(vec![1, 2, 3]),
+                signing_public_key: signing_key.verification_key(),
+            })),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        let mut record_json = serde_json::to_value(record).unwrap();
+        record_json["object_key"] = "init/copied-attestation.json".into();
+        let body = serde_json::to_vec(&record_json).unwrap();
+        let get_copied = mock!(Client::get_object)
+            .match_requests(|req| {
+                req.bucket() == Some("bucket") && req.key() == Some("init/copied-attestation.json")
+            })
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(body.clone()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_copied]);
+        let logger = mk_logger_with_client(client);
+
+        let record = logger
+            .get_log_record_inner(
+                "init/copied-attestation.json",
+                LockCheck::Skipped,
+                HistoryCheck::AlreadyChecked,
+            )
+            .await
+            .expect("the embedded key matches the actual S3 key");
+        let error = record
+            .validate(None)
+            .expect_err("the copied key must still fail canonical validation");
+
+        assert!(
+            matches!(error, InvalidS3Log(message) if message.contains("non-canonical S3 object key"))
+        );
+        assert_eq!(get_copied.num_calls(), 1);
+    }
+
+    async fn assert_log_read_rejects_relocation(relocated_key: &str) {
+        let signing_key = GuardianSignKeyPair::from([13u8; 32]);
+        let record = LogRecord::new_at_timestamp(
+            "session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        let intended_key = record.object_key().to_string();
+        let body = serde_json::to_vec(&record).unwrap();
+        let relocated_key = relocated_key.to_string();
+        let mock_key = relocated_key.clone();
+        let get_relocated = mock!(Client::get_object)
+            .match_requests(move |req| {
+                req.bucket() == Some("bucket") && req.key() == Some(mock_key.as_str())
+            })
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from(body.clone()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_relocated]);
+        let logger = mk_logger_with_client(client);
+
+        let error = logger
+            .get_log_record_inner(
+                &relocated_key,
+                LockCheck::Skipped,
+                HistoryCheck::AlreadyChecked,
+            )
+            .await
+            .expect_err("a relocated record must be rejected");
+
+        assert!(matches!(
+            error,
+            InvalidS3Log(message)
+                if message == format!(
+                    "S3 object key mismatch: record contains {intended_key}, actual key is {relocated_key}"
+                )
+        ));
+        assert_eq!(get_relocated.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn signed_log_rejects_cross_prefix_relocation() {
+        assert_log_read_rejects_relocation(
+            "withdraw/2023/11/14/22/session-00000000000000000042.json",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_log_rejects_lexicographically_higher_key_relocation() {
+        assert_log_read_rejects_relocation(
+            "heartbeat/2023/11/14/22/session-00000000000000000043.json",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_log_rejects_future_hour_relocation() {
+        assert_log_read_rejects_relocation(
+            "heartbeat/2023/11/14/23/session-00000000000000000042.json",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_log_rejects_changed_session_relocation() {
+        assert_log_read_rejects_relocation(
+            "heartbeat/2023/11/14/22/aliased-session-00000000000000000042.json",
+        )
+        .await;
     }
 }

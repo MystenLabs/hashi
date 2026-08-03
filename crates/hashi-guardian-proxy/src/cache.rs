@@ -415,6 +415,7 @@ mod tests {
     use hashi_types::bitcoin::sign_btc_tx;
     use hashi_types::guardian::proto_conversions::get_guardian_info_response_to_pb;
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
+    use hashi_types::guardian::GuardianResponse;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::LimiterState;
@@ -589,7 +590,7 @@ mod tests {
             current_committee_epoch: None,
             mpc_master_g: Some(master_g),
         };
-        let signed_info = GuardianSigned::new(info, &signing_key, 1);
+        let signed_info = GuardianSigned::sign(GuardianResponse::new(info, 1), &signing_key);
         let domain = GetGuardianInfoResponse::new(
             NitroAttestation::new(vec![1, 2, 3]),
             signing_key.verification_key(),

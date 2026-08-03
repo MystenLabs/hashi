@@ -25,6 +25,7 @@
 //! read-after-write consistency to cover the old session's final writes.
 
 use super::GuardianReader;
+use super::VerifiedLogRecord;
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
@@ -32,7 +33,6 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
@@ -161,7 +161,6 @@ mod tests {
     use bitcoin::Txid;
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::GuardianError;
-    use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -185,7 +184,7 @@ mod tests {
             txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
             request_data: StandardWithdrawalRequestWire::from(request_data),
             request_sign,
-            response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+            response: StandardWithdrawalResponse::mock_for_testing(),
             post_state: state_with_seq(next_seq),
         };
         VerifiedLogRecord {

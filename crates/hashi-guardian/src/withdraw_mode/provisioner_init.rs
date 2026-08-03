@@ -148,10 +148,9 @@ fn verify_signed_submissions(
         .iter()
         .map(|signed| {
             let signer_fingerprint = signed.signer_fingerprint().to_hex();
-            signed
+            let submission = signed
                 .verify_signature()
                 .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
-            let submission = &signed.data;
 
             if submission.expected_session_id() != live_session_id.as_str() {
                 return Err(GuardianError::InvalidInputs(format!(
@@ -367,11 +366,8 @@ mod tests {
                 &mut rand::thread_rng(),
             );
             let (cert, secret) = signer;
-            KpSigned {
-                signature: sign_detached_in_process(secret, &KpSigned::signed_bytes(&request)),
-                data: request,
-                signer_cert: cert.clone(),
-            }
+            let signature = sign_detached_in_process(secret, &KpSigned::signed_bytes(&request));
+            KpSigned::from_parts(request, cert.clone(), signature)
         }
 
         fn request(&self, shares: &[Share]) -> ProvisionerInitRequest {
@@ -418,7 +414,7 @@ mod tests {
             "provisioner init should write one record"
         );
         let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Init(message)) = record.message else {
+        let VersionedLogMessage::V2(LogMessage::Init(message)) = record.message() else {
             panic!("expected V2 init record");
         };
         assert_eq!(
@@ -429,20 +425,20 @@ mod tests {
             sharing_seq,
             share_ids,
             enclave_btc_pubkey,
-        } = *message
+        } = message.as_ref()
         else {
             panic!("expected provisioner-init completion record");
         };
-        assert_eq!(sharing_seq, 0);
+        assert_eq!(*sharing_seq, 0);
         assert_eq!(
             share_ids,
-            ctx.shares[..TEST_T]
+            &ctx.shares[..TEST_T]
                 .iter()
                 .map(|share| share.id)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            enclave_btc_pubkey,
+            *enclave_btc_pubkey,
             ctx.enclave.config.enclave_btc_pubkey().unwrap()
         );
     }

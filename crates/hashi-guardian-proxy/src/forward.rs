@@ -45,7 +45,7 @@ fn verify_provisioner_rotate_cert_signature(
     let signed_request = KpSigned::<ProvisionerRotateCertRequest>::try_from(request.clone())
         .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
     signed_request
-        .verify()
+        .verify_signature()
         .map_err(|error| Status::unauthenticated(error.to_string()))?;
     Ok(())
 }
@@ -138,7 +138,6 @@ impl GuardianService for Forwarding {
 mod tests {
     use super::*;
     use crate::cache::CachingGuardianGrpc;
-    use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::ShareID;
@@ -345,24 +344,23 @@ mod tests {
     fn verifies_provisioner_rotate_cert_signature_before_forwarding() {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored.clone()).unwrap();
-        let mut request = proto::SignedProvisionerRotateCertRequest {
-            new_kp_pgp_cert: cert_armored.clone(),
-            encrypted_share: Some(guardian_encrypted_share_to_pb(GuardianEncryptedShare {
+        let domain = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
+            "session".into(),
+            0,
+            cert.fingerprint().to_hex(),
+            cert.clone(),
+            GuardianEncryptedShare {
                 id: ShareID::new(1).unwrap(),
                 ciphertext: Ciphertext {
                     encapsulated_key: vec![1, 2, 3],
                     aes_ciphertext: vec![4, 5, 6],
                 },
-            })),
-            expected_session_id: "session".into(),
-            signer_cert: cert_armored,
-            kp_signature: "placeholder".into(),
-            expected_cert_seq: Some(0),
-            target_kp_pgp_fingerprint: cert.fingerprint().to_hex(),
-        };
-        let domain = KpSigned::<ProvisionerRotateCertRequest>::try_from(request.clone()).unwrap();
-        request.kp_signature =
-            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain.data));
+            },
+        );
+        let signature = sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain));
+        let mut request = proto::SignedProvisionerRotateCertRequest::from(KpSigned::from_parts(
+            domain, cert, signature,
+        ));
 
         verify_provisioner_rotate_cert_signature(&request).unwrap();
 

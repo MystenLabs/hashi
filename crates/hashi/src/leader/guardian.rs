@@ -11,7 +11,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::CommitteeTransitionRequest;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
@@ -105,7 +105,7 @@ impl LeaderService {
             anyhow::anyhow!("Guardian rejected withdrawal: {}", status.message())
         })?;
 
-        let signed_response: GuardianSigned<StandardWithdrawalResponse> = response_pb
+        let signed_response: GuardianSignedResponse<StandardWithdrawalResponse> = response_pb
             .try_into()
             .inspect_err(|_| {
                 Self::record_guardian_rpc_outcome(
@@ -118,7 +118,7 @@ impl LeaderService {
         // Authenticated by TLS; the per-input BTC witness signatures below only
         // spend the 2-of-2 if they verify against the on-chain guardian BTC key
         // (enforced by Bitcoin), so the response itself isn't signature-checked.
-        let response = signed_response.into_data_unchecked();
+        let response = signed_response.into_data_unchecked().response;
 
         anyhow::ensure!(
             response.enclave_signatures.len() == txn.inputs.len(),

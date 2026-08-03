@@ -18,7 +18,7 @@ use tracing::info;
 pub async fn rotate_kps(
     enclave: Arc<Enclave>,
     request: RotateKpsRequest,
-) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
+) -> GuardianResult<GuardianSignedResponse<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
@@ -59,7 +59,7 @@ async fn finalize_rotation(
     old_shares: &[Share],
     old_instance: &SecretSharingInstance,
     state: RotateKpsState,
-) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
+) -> GuardianResult<GuardianSignedResponse<RotateKpsResponse>> {
     info!("Threshold reached, reconstructing BTC key.");
 
     let k256_sk =
@@ -209,8 +209,9 @@ mod tests {
     ) -> KPEncryptedSharesRoster {
         let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
         signed
-            .verify(&enclave.signing_pubkey())
+            .verify_into_data(&enclave.signing_pubkey())
             .expect("response signed by enclave")
+            .response
             .encrypted_shares
     }
 
@@ -253,14 +254,14 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message else {
+        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message() else {
             panic!("expected V2 Ceremony variant");
         };
         let CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
             btc_master_pubkey,
-        } = *ceremony
+        } = ceremony.as_ref()
         else {
             panic!("expected Rotate variant");
         };
@@ -282,7 +283,7 @@ mod tests {
         let reconstructed = combine_shares(&decrypted_shares[..new_t], new_t).unwrap();
         assert_eq!(
             k256_sk_to_btc_xonly_pubkey(&reconstructed),
-            btc_master_pubkey,
+            *btc_master_pubkey,
             "threshold decrypted rotation shares should reconstruct the original key"
         );
 
@@ -299,10 +300,11 @@ mod tests {
             "expected sharing_seq=1 cert_seq=0, got key {shares_key}"
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message
+        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message()
         else {
             panic!("expected V2 KpShareState variant");
         };
+        let shares = shares.as_ref();
         assert_eq!(shares.sharing_seq, 1);
         assert_eq!(shares.cert_seq, 0);
         assert_eq!(shares.encrypted_shares, *response_shares);

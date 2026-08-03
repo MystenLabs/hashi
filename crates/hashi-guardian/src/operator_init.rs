@@ -270,16 +270,16 @@ mod tests {
 
         let attestation: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         assert!(matches!(
-            attestation.message,
+            attestation.message(),
             VersionedLogMessage::V2(LogMessage::Init(message))
-                if matches!(*message, OIAttestationUnsigned { .. })
+                if matches!(message.as_ref(), OIAttestationUnsigned { .. })
         ));
 
         let guardian_info: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
-        let VersionedLogMessage::V2(LogMessage::Init(message)) = guardian_info.message else {
+        let VersionedLogMessage::V2(LogMessage::Init(message)) = guardian_info.message() else {
             panic!("expected V2 init record");
         };
-        let OIGuardianInfo(info) = *message else {
+        let OIGuardianInfo(info) = message.as_ref() else {
             panic!("expected operator-init GuardianInfo record");
         };
         assert_eq!(info.lifecycle, expected_lifecycle);

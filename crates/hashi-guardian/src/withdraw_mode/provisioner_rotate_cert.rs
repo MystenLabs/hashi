@@ -14,7 +14,7 @@ use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::Unauthenticated;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::ProvisionerRotateCertResponse;
@@ -23,12 +23,12 @@ use tracing::info;
 pub async fn provisioner_rotate_cert(
     enclave: Arc<Enclave>,
     signed_request: KpSigned<ProvisionerRotateCertRequest>,
-) -> GuardianResult<GuardianSigned<ProvisionerRotateCertResponse>> {
+) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
     info!("/provisioner_rotate_cert - Received request.");
 
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
     let request = signed_request
-        .verify()
+        .verify_into_data()
         .map_err(|error| Unauthenticated(error.to_string()))?;
 
     enclave.require_fully_initialized()?;

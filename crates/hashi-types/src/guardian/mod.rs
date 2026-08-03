@@ -26,12 +26,14 @@ pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
 pub use log::*;
+pub use signing::GuardianResponse;
 pub use signing::GuardianSigned;
-pub use signing::IntentType;
+pub use signing::GuardianSignedResponse;
+pub use signing::GuardianSigningIntent;
+pub use signing::GuardianSigningIntentType;
 pub use signing::KpSigned;
 pub use signing::KpSigningIntent;
 pub use signing::KpSigningIntentType;
-pub use signing::SigningIntent;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
 pub use time_utils::now_timestamp_secs;
@@ -86,7 +88,7 @@ pub struct GetGuardianInfoResponse {
     /// Signing pub key of the guardian
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
-    signed_info: GuardianSigned<GuardianInfo>,
+    signed_info: GuardianSignedResponse<GuardianInfo>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -221,7 +223,7 @@ impl crate::intent::IntentMessage for StandardWithdrawalRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::GuardianWithdrawalRequest;
 }
 
-/// `EnclaveSigned<T>`
+/// `GuardianSignedResponse<StandardWithdrawalResponse>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StandardWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
@@ -249,7 +251,7 @@ pub struct SetupNewKeyRequest {
     params: SecretSharingParams,
 }
 
-/// `EnclaveSigned<T>`
+/// `GuardianSignedResponse<SetupNewKeyResponse>`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: KPEncryptedSharesRoster,
@@ -280,7 +282,8 @@ pub struct RotateKpsState {
     new_params: SecretSharingParams,
 }
 
-/// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
+/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
+/// shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
     pub encrypted_shares: KPEncryptedSharesRoster,
@@ -299,8 +302,8 @@ pub struct ProvisionerRotateCertRequest {
     encrypted_share: GuardianEncryptedShare,
 }
 
-/// `GuardianSigned<ProvisionerRotateCertResponse>`. Returned after the guardian appends
-/// the next `kp-shares/` certificate-state snapshot.
+/// `GuardianSignedResponse<ProvisionerRotateCertResponse>`. Returned after the
+/// guardian appends the next `kp-shares/` certificate-state snapshot.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ProvisionerRotateCertResponse {
     pub cert_seq: u64,
@@ -896,7 +899,7 @@ impl GetGuardianInfoResponse {
     pub fn new(
         attestation: NitroAttestation,
         signing_pub_key: GuardianPubKey,
-        signed_info: GuardianSigned<GuardianInfo>,
+        signed_info: GuardianSignedResponse<GuardianInfo>,
     ) -> Self {
         Self {
             attestation,
@@ -920,7 +923,11 @@ impl GetGuardianInfoResponse {
         &self,
         expected_build: &BuildPcrs,
     ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
-        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
+        let info = self
+            .signed_info
+            .verify_signature(&self.signing_pub_key)?
+            .response
+            .clone();
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",
@@ -940,7 +947,10 @@ impl GetGuardianInfoResponse {
     /// Extract the guardian's self-reported info and signing key WITHOUT verifying
     /// the signature or attestation.
     pub fn into_info_unchecked(self) -> (GuardianInfo, GuardianPubKey) {
-        (self.signed_info.into_data_unchecked(), self.signing_pub_key)
+        (
+            self.signed_info.into_data_unchecked().response,
+            self.signing_pub_key,
+        )
     }
 }
 
@@ -1061,7 +1071,7 @@ mod tests {
 
     #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {
-        let (mut info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        let mut info = GuardianInfo::mock_for_testing();
         info.config_hash = Some([0xab; 32]);
         let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
             .x_only_public_key()
@@ -1089,7 +1099,7 @@ mod tests {
     #[test]
     fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
         let resp = GetGuardianInfoResponse::mock_for_testing();
-        let expected_info = resp.signed_info.data.clone();
+        let expected_info = GuardianInfo::mock_for_testing();
         let expected_signing_pub_key = resp.signing_pub_key;
         let (info, signing_pub_key) = resp.into_info_unchecked();
 
