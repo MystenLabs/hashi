@@ -33,6 +33,7 @@ use crate::metrics::Metrics;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
+use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
@@ -1122,7 +1123,7 @@ impl MpcService {
                 .await;
                 let expected_size =
                     expected_from(avid_certified_nonce_weight(mpc_manager, &certs))?;
-                let mut prefetched = PrefetchedTobChannel::new(certs);
+                let mut prefetched = PrefetchedTobChannel::new(certs.into_inner());
                 let outputs = MpcManager::run_nonce_generation(
                     mpc_manager,
                     batch_index,
@@ -1768,7 +1769,7 @@ fn is_key_rotation_epoch<C>(committees: &std::collections::BTreeMap<u64, C>, epo
 
 fn certified_nonce_weight<T>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, T)],
+    certs: &VerifiedNonceCerts<T>,
 ) -> u32 {
     mpc_manager
         .read()
@@ -1779,7 +1780,7 @@ fn certified_nonce_weight<T>(
 
 fn avid_certified_nonce_weight(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, CertificateV1)],
+    certs: &VerifiedNonceCerts<CertificateV1>,
 ) -> u32 {
     mpc_manager
         .read()

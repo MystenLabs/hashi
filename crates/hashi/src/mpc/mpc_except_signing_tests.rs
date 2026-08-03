@@ -12728,7 +12728,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         make_cert(2, &all),
     ];
 
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs);
+    let (certified, weight) =
+        mgr.avid_certified_nonce_dealers_from_certs(&VerifiedNonceCerts(certs.clone()));
     assert!(
         !certified.contains(&setup.address(3)),
         "cert one weight below the vote quorum must not be counted by sizing"
@@ -12745,12 +12746,12 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         "sizing must reach the floor from admissible certs despite the skipped one"
     );
 
-    let (blind, _) = mgr.certified_nonce_dealers_from_certs(&certs);
+    let (blind, _) = mgr.certified_nonce_dealers_from_certs(&VerifiedNonceCerts(certs.clone()));
     assert!(blind.contains(&setup.address(3)));
 
     let (_, foreign_keyed) = make_cert(0, &all);
     let rekeyed = vec![(setup.address(3), foreign_keyed)];
-    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed);
+    let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&VerifiedNonceCerts(rekeyed));
     assert_eq!(
         certified,
         HashSet::from([setup.address(0)]),
@@ -12760,7 +12761,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let (_, dup_a) = make_cert(0, &all);
     let (_, dup_b) = make_cert(0, &all);
     let duplicated = vec![(setup.address(0), dup_a), (setup.address(3), dup_b)];
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated);
+    let (certified, weight) =
+        mgr.avid_certified_nonce_dealers_from_certs(&VerifiedNonceCerts(duplicated));
     assert_eq!(certified, HashSet::from([setup.address(0)]));
     assert_eq!(
         weight,
