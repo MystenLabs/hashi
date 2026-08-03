@@ -22,7 +22,7 @@ use tracing::warn;
 
 use crate::Hashi;
 use crate::communication::PrefetchedTobChannel;
-use crate::communication::SuiTobChannel;
+use crate::communication::SuiTobSessionChannel;
 use crate::communication::fetch_certificates;
 use crate::communication::fetch_key_generation_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
@@ -448,7 +448,7 @@ impl MpcService {
             .expect("MpcManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_DKG);
-        let mut tob_channel = SuiTobChannel::new(
+        let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
             target_epoch,
@@ -489,7 +489,7 @@ impl MpcService {
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel =
             RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GENERATION);
-        let mut tob_channel = SuiTobChannel::new(
+        let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
             epoch,
@@ -1415,7 +1415,7 @@ impl MpcService {
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel =
             RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_KEY_ROTATION);
-        let mut tob_channel = SuiTobChannel::new(
+        let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
             target_epoch,
