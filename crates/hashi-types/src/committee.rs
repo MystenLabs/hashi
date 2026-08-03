@@ -34,6 +34,7 @@ pub use crate::move_types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
+// Fixed for non-MPC certificates mirroring Move's `threshold::certificate_threshold`.
 // TODO: Read threshold from on-chain config once it is made configurable.
 const CERTIFICATE_THRESHOLD_BPS: u64 = 6667;
 const MAX_BPS: u64 = 10000;
@@ -446,30 +447,18 @@ impl CommitteeSignature {
         nodes: &Nodes<EncryptionGroupElement>,
     ) -> Result<u32, SignatureError> {
         self.verify_committee(committee)?;
-        if nodes.num_nodes() != committee.size() {
-            return Err(SignatureError::from_source(format!(
-                "reduced weights cover {} nodes but the committee has {}",
-                nodes.num_nodes(),
-                committee.size(),
-            )));
-        }
-        self.signers_bitmap
+        bind_nodes_to_committee(committee, nodes)?;
+        Ok(self
+            .signers_bitmap
             .iter()
             .map(|index| {
-                let node = nodes
-                    .node_id_to_node(index as u16)
-                    .map_err(SignatureError::from_source)?;
-                let member = &committee.members[index];
-                if node.pk != member.encryption_public_key {
-                    return Err(SignatureError::from_source(format!(
-                        "reduced weights were derived for a different committee: node {} does not \
-                         hold the encryption key of member {}",
-                        index, member.address,
-                    )));
-                }
-                Ok(u32::from(node.weight))
+                u32::from(
+                    nodes.weight_of(index as u16).expect(
+                        "verify_committee bounded the bitmap; the binding matched node count",
+                    ),
+                )
             })
-            .sum()
+            .sum())
     }
 
     /// Check if the given address is a signer of this certificate. O(1) operation.
@@ -585,53 +574,124 @@ impl<T: IntentMessage> SignedMessage<T> {
     }
 }
 
+fn bind_nodes_to_committee(
+    committee: &Committee,
+    nodes: &Nodes<EncryptionGroupElement>,
+) -> Result<(), SignatureError> {
+    if nodes.num_nodes() != committee.size() {
+        return Err(SignatureError::from_source(format!(
+            "reduced weights cover {} nodes but the committee has {}",
+            nodes.num_nodes(),
+            committee.size(),
+        )));
+    }
+    for (index, member) in committee.members.iter().enumerate() {
+        let node = nodes
+            .node_id_to_node(index as u16)
+            .map_err(SignatureError::from_source)?;
+        if node.pk != member.encryption_public_key {
+            return Err(SignatureError::from_source(format!(
+                "reduced weights were derived for a different committee: node {} does not \
+                 hold the encryption key of member {}",
+                index, member.address,
+            )));
+        }
+    }
+    Ok(())
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::CommitteeWeight {}
+    impl Sealed for super::ReducedWeight<'_> {}
+}
+
+pub trait WeightDomain: sealed::Sealed {
+    fn add_signer(&mut self, committee: &Committee, index: usize);
+}
+
 #[derive(Debug)]
-pub struct BlsSignatureAggregator<'a, T> {
+pub struct CommitteeWeight {
+    signed: u64,
+}
+
+#[derive(Debug)]
+pub struct ReducedWeight<'a> {
+    nodes: &'a Nodes<EncryptionGroupElement>,
+    signed: u16,
+}
+
+impl WeightDomain for CommitteeWeight {
+    fn add_signer(&mut self, committee: &Committee, index: usize) {
+        self.signed += committee.members[index].weight;
+    }
+}
+
+impl WeightDomain for ReducedWeight<'_> {
+    fn add_signer(&mut self, _committee: &Committee, index: usize) {
+        self.signed += self
+            .nodes
+            .weight_of(index as u16)
+            .expect("node id checked against the committee at construction");
+    }
+}
+
+impl<'a> ReducedWeight<'a> {
+    fn new(
+        committee: &Committee,
+        nodes: &'a Nodes<EncryptionGroupElement>,
+    ) -> Result<Self, SignatureError> {
+        bind_nodes_to_committee(committee, nodes)?;
+        Ok(Self { nodes, signed: 0 })
+    }
+}
+
+#[derive(Debug)]
+pub struct BlsSignatureAggregator<'a, T, W = CommitteeWeight> {
     committee: &'a Committee,
     aggregate_signature: Option<BLS12381AggregateSignature>,
     bitmap: BitMap,
-    signed_weight: u64,
     message: T,
-    reduced_weights: Option<HashMap<Address, u16>>,
-    signed_reduced_weight: u16,
+    domain: W,
 }
 
-impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T> {
+impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, CommitteeWeight> {
     pub fn new(committee: &'a Committee, message: T) -> Self {
         Self {
             bitmap: BitMap::new(),
             committee,
             aggregate_signature: None,
-            signed_weight: 0,
             message,
-            reduced_weights: None,
-            signed_reduced_weight: 0,
+            domain: CommitteeWeight { signed: 0 },
         }
     }
 
-    pub fn new_with_reduced_weights(
+    pub fn weight(&self) -> u64 {
+        self.domain.signed
+    }
+}
+
+impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, ReducedWeight<'a>> {
+    pub fn new_reduced(
         committee: &'a Committee,
         message: T,
-        reduced_weights: HashMap<Address, u16>,
-    ) -> Self {
-        assert!(
-            committee
-                .members
-                .iter()
-                .all(|m| reduced_weights.contains_key(&m.address)),
-            "reduced_weights must contain all committee members",
-        );
-        Self {
+        nodes: &'a Nodes<EncryptionGroupElement>,
+    ) -> Result<Self, SignatureError> {
+        Ok(Self {
             bitmap: BitMap::new(),
             committee,
             aggregate_signature: None,
-            signed_weight: 0,
             message,
-            reduced_weights: Some(reduced_weights),
-            signed_reduced_weight: 0,
-        }
+            domain: ReducedWeight::new(committee, nodes)?,
+        })
     }
 
+    pub fn reduced_weight(&self) -> u16 {
+        self.domain.signed
+    }
+}
+
+impl<'a, T: IntentMessage + Clone, W: WeightDomain> BlsSignatureAggregator<'a, T, W> {
     /// Add a signature to this aggregator.
     ///
     /// Returns an error if:
@@ -662,20 +722,8 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T> {
                 .map_err(SignatureError::from_source)?,
         }
 
-        self.signed_weight += self.committee.members[*index].weight;
-        if let Some(ref weights) = self.reduced_weights {
-            self.signed_reduced_weight += weights
-                .get(&signature.address)
-                .copied()
-                .expect("reduced_weights must contain all committee members");
-        }
+        self.domain.add_signer(self.committee, *index);
         Ok(())
-    }
-
-    /// The total reduced weight of the signatures aggregated so far.
-    /// Only meaningful when constructed with [`Self::new_with_reduced_weights`].
-    pub fn reduced_weight(&self) -> u16 {
-        self.signed_reduced_weight
     }
 
     /// Add a raw [BLS12381Signature] from the given signer to this aggregator.
@@ -695,11 +743,6 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T> {
             signature,
         };
         self.add_signature(member_signature)
-    }
-
-    /// The total weight of the signatures aggregated so far.
-    pub fn weight(&self) -> u64 {
-        self.signed_weight
     }
 
     /// Return the aggregated signature from the signatures aggregated so far.
@@ -1063,72 +1106,31 @@ mod test {
 
     #[test]
     fn test_reduced_weight_tracking() {
-        let mut rng = rand::thread_rng();
-        let epoch = 1u64;
-
-        let private_keys: Vec<_> = (0..4)
-            .map(|_| Bls12381PrivateKey::generate(&mut rng))
-            .collect();
-        let addresses: Vec<_> = (0..4).map(|i| Address::new([i as u8; 32])).collect();
-        let encryption_keys: Vec<EncryptionPublicKey> = (0..4)
-            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
-            .collect();
-
-        let members: Vec<_> = (0..4)
-            .map(|i| CommitteeMember {
-                address: addresses[i],
-                public_key: private_keys[i].public_key(),
-                encryption_public_key: encryption_keys[i].clone(),
-                weight: 2500, // committee weight
-            })
-            .collect();
-        let committee = Committee::new(
-            members,
-            epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
-            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
-            TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
-        );
-
-        // Reduced weights: different from committee weights
-        let reduced_weights: HashMap<Address, u16> =
-            addresses.iter().map(|addr| (*addr, 1u16)).collect();
-
+        let (committee, nodes, private_keys, addresses) = reduced_weight_fixture(1, [3, 2, 1, 0]);
         let message = vec![42u8; 10];
 
-        // Aggregator without reduced weights: reduced_weight() is always 0
         let mut plain = BlsSignatureAggregator::new(&committee, message.clone());
         plain
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(1, addresses[0], &message))
             .unwrap();
         assert_eq!(plain.weight(), 2500);
-        assert_eq!(plain.reduced_weight(), 0);
 
-        // Aggregator with reduced weights
-        let mut agg = BlsSignatureAggregator::new_with_reduced_weights(
-            &committee,
-            message.clone(),
-            reduced_weights,
-        );
+        let mut agg =
+            BlsSignatureAggregator::new_reduced(&committee, message.clone(), &nodes).unwrap();
         assert_eq!(agg.reduced_weight(), 0);
 
-        agg.add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+        agg.add_signature(private_keys[2].sign(1, addresses[2], &message))
             .unwrap();
-        assert_eq!(agg.weight(), 2500);
-        assert_eq!(agg.reduced_weight(), 1);
+        assert_eq!(agg.reduced_weight(), 1, "node 2 carries weight 1");
 
-        agg.add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+        agg.add_signature(private_keys[0].sign(1, addresses[0], &message))
             .unwrap();
-        assert_eq!(agg.weight(), 5000);
-        assert_eq!(agg.reduced_weight(), 2);
+        assert_eq!(agg.reduced_weight(), 4, "node 0 carries weight 3");
 
-        agg.add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+        agg.add_signature(private_keys[3].sign(1, addresses[3], &message))
             .unwrap();
-        assert_eq!(agg.weight(), 7500);
-        assert_eq!(agg.reduced_weight(), 3);
+        assert_eq!(agg.reduced_weight(), 4, "node 3 carries weight 0");
 
-        // finish() still works and produces a valid cert
         let cert = agg.finish().unwrap();
         committee.verify_signature_any_weight(&cert).unwrap();
     }
@@ -1227,6 +1229,44 @@ mod test {
         assert!(reconstructed.is_signer(&addresses[1], &committee).unwrap());
         assert!(reconstructed.is_signer(&addresses[2], &committee).unwrap());
         assert!(!reconstructed.is_signer(&addresses[3], &committee).unwrap());
+    }
+
+    #[test]
+    fn binding_rejects_more_nodes_than_committee_members() {
+        let (committee, _, _, _) = reduced_weight_fixture(1, [1, 1, 1, 1]);
+        let mut rng = rand::thread_rng();
+        let mut oversized: Vec<Node<EncryptionGroupElement>> = (0..4)
+            .map(|i| Node {
+                id: i as u16,
+                pk: committee.members()[i].encryption_public_key().clone(),
+                weight: 1,
+            })
+            .collect();
+        oversized.push(Node {
+            id: 4,
+            pk: EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)),
+            weight: 1,
+        });
+        let nodes = Nodes::new(oversized).unwrap();
+        let err = BlsSignatureAggregator::new_reduced(&committee, vec![7u8; 4], &nodes)
+            .expect_err("more nodes than committee members must be refused");
+        assert!(
+            err.to_string()
+                .contains("cover 5 nodes but the committee has 4"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reduced_aggregator_rejects_nodes_from_another_committee() {
+        let (committee, _, _, _) = reduced_weight_fixture(1, [3, 2, 1, 0]);
+        let (_, foreign_nodes, _, _) = reduced_weight_fixture(1, [3, 2, 1, 0]);
+        let err = BlsSignatureAggregator::new_reduced(&committee, vec![42u8; 10], &foreign_nodes)
+            .expect_err("nodes from a different committee must be refused");
+        assert!(
+            err.to_string().contains("different committee"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Regression test: a peer-supplied bitmap whose set bits exceed the

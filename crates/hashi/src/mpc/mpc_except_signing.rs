@@ -1202,14 +1202,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
-            dealer_data.reduced_weights,
-        );
+            &dealer_data.nodes,
+        )
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_DKG])
@@ -1469,14 +1470,17 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
-            dealer_data.reduced_weights,
-        );
+            &dealer_data.nodes,
+        )
+        // Not a crypto failure: the local `nodes` do not match the committee
+        // they are being aggregated against.
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
@@ -1762,14 +1766,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
-            dealer_data.reduced_weights,
-        );
+            &dealer_data.nodes,
+        )
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -2772,16 +2777,6 @@ impl MpcManager {
             dealer_address: self.address,
             messages_hash: MessageHash::from(own_avss.common.hash().digest),
         };
-        let reduced_weights: HashMap<Address, u16> = self
-            .committee
-            .members()
-            .iter()
-            .filter_map(|m| {
-                let party_id = self.committee.index_of(&m.validator_address())? as u16;
-                let weight = self.mpc_config.nodes.weight_of(party_id).ok()?;
-                Some((m.validator_address(), weight))
-            })
-            .collect();
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
         let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
         Ok(AvidDealerFlowData {
@@ -2790,7 +2785,7 @@ impl MpcManager {
             my_signature,
             recipient_messages: messages,
             committee: self.committee.clone(),
-            reduced_weights,
+            nodes: self.mpc_config.nodes.clone(),
             total_reduced_weight,
             vote_quorum_weight,
         })
@@ -2817,14 +2812,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.confirm_target.clone(),
-            dealer_data.reduced_weights.clone(),
-        );
+            &dealer_data.nodes,
+        )
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature.clone())
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -2918,14 +2914,17 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut vote_aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut vote_aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             vote_target,
-            dealer_data.reduced_weights.clone(),
-        );
+            &dealer_data.nodes,
+        )
+        // Not a crypto failure: the local `nodes` do not match the committee
+        // they are being aggregated against.
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         vote_aggregator
             .add_signature(my_vote)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -3932,16 +3931,6 @@ impl MpcManager {
             .filter(|addr| *addr != self.address)
             .collect();
         let required_reduced_weight = self.mpc_config.threshold + self.mpc_config.max_faulty;
-        let reduced_weights: HashMap<Address, u16> = self
-            .committee
-            .members()
-            .iter()
-            .filter_map(|m| {
-                let party_id = self.committee.index_of(&m.validator_address())? as u16;
-                let weight = self.mpc_config.nodes.weight_of(party_id).ok()?;
-                Some((m.validator_address(), weight))
-            })
-            .collect();
         let request = SendMessagesRequest { messages };
         DealerFlowData {
             request,
@@ -3950,7 +3939,7 @@ impl MpcManager {
             my_signature,
             required_reduced_weight,
             committee: self.committee.clone(),
-            reduced_weights,
+            nodes: self.mpc_config.nodes.clone(),
         }
     }
 

@@ -31,7 +31,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::sync::Arc;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
@@ -681,7 +680,7 @@ pub struct DealerFlowData {
     pub my_signature: MemberSignature,
     pub required_reduced_weight: u16,
     pub committee: Committee,
-    pub reduced_weights: HashMap<Address, u16>,
+    pub nodes: Nodes<EncryptionGroupElement>,
 }
 
 pub(crate) struct AvidDealerFlowData {
@@ -691,7 +690,7 @@ pub(crate) struct AvidDealerFlowData {
     /// Per-recipient optimistic messages, excluding the dealer's own.
     pub(crate) recipient_messages: Vec<(Address, Messages)>,
     pub(crate) committee: Committee,
-    pub(crate) reduced_weights: HashMap<Address, u16>,
+    pub(crate) nodes: Nodes<EncryptionGroupElement>,
     pub(crate) total_reduced_weight: u32,
     /// `W − f` in reduced weight.
     pub(crate) vote_quorum_weight: u32,
