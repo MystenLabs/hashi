@@ -23,8 +23,7 @@ pub struct KpShareStateLogMessageV2 {
     pub encrypted_shares: KPEncryptedSharesRoster,
 }
 
-/// The current normalized KP-share state exposed to writers and verified
-/// readers.
+/// The KP-share state emitted by writers and returned by ceremony readers.
 pub type KpShareStateLogMessage = KpShareStateLogMessageV2;
 
 /// V1 encrypted share state: exactly one certificate and ciphertext per KP.
@@ -90,9 +89,13 @@ impl KpShareStateLogMessageV1 {
             self.cert_seq,
         ))
     }
+}
 
-    pub fn into_current(self) -> Result<KpShareStateLogMessageV2, GuardianError> {
-        let shares = self
+impl TryFrom<KpShareStateLogMessageV1> for KpShareStateLogMessageV2 {
+    type Error = GuardianError;
+
+    fn try_from(message: KpShareStateLogMessageV1) -> Result<Self, Self::Error> {
+        let shares = message
             .encrypted_shares
             .0
             .into_iter()
@@ -104,9 +107,9 @@ impl KpShareStateLogMessageV1 {
                 )]),
             })
             .collect();
-        Ok(KpShareStateLogMessageV2::new(
-            self.sharing_seq,
-            self.cert_seq,
+        Ok(Self::new(
+            message.sharing_seq,
+            message.cert_seq,
             KPEncryptedSharesRoster::new(shares)?,
         ))
     }
