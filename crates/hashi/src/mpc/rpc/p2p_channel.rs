@@ -58,13 +58,6 @@ impl RpcP2PChannel {
     }
 }
 
-/// Preserves the one status distinction callers care about: the app-level
-/// "signing manager not ready" response means the peer is up but still
-/// reconciling (e.g. right after an epoch change) and should be retried
-/// shortly rather than treated as failed. The check is deliberately narrow —
-/// tonic also maps transport failures (connection refused, REFUSED_STREAM,
-/// 503/504) to `Code::Unavailable`, and those must keep counting as peer
-/// failures or dead peers would never be cooled or surfaced in metrics.
 fn map_status(status: tonic::Status) -> ChannelError {
     if status.code() == tonic::Code::Unavailable
         && status
@@ -172,8 +165,6 @@ mod tests {
         ));
         assert!(matches!(map_status(not_ready), ChannelError::NotReady(_)));
 
-        // Transport failures also surface as Code::Unavailable; they must
-        // keep counting as failures so dead peers get cooled and surfaced.
         let refused = tonic::Status::unavailable("error trying to connect: connection refused");
         assert!(matches!(
             map_status(refused),
