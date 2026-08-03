@@ -317,8 +317,15 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let is_key_rotation =
-            is_key_rotation_epoch(onchain_state.state().hashi().committees.committees(), epoch);
+        let earliest_committee_epoch = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .keys()
+            .next()
+            .copied();
+        let is_key_rotation = is_key_rotation_epoch(earliest_committee_epoch, epoch);
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
@@ -1763,8 +1770,8 @@ pub(crate) async fn verify_fetched_certificates(
     verified
 }
 
-fn is_key_rotation_epoch<C>(committees: &std::collections::BTreeMap<u64, C>, epoch: u64) -> bool {
-    committees.range(..epoch).next_back().is_some()
+fn is_key_rotation_epoch(earliest_committee_epoch: Option<u64>, epoch: u64) -> bool {
+    earliest_committee_epoch.is_some_and(|earliest| earliest < epoch)
 }
 
 fn certified_nonce_weight<T>(
@@ -1917,31 +1924,23 @@ fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: 
 
 #[cfg(test)]
 mod key_rotation_epoch_tests {
-    use std::collections::BTreeMap;
-
     use super::is_key_rotation_epoch;
-
-    fn history(epochs: &[u64]) -> BTreeMap<u64, ()> {
-        epochs.iter().map(|e| (*e, ())).collect()
-    }
 
     #[test]
     fn the_earliest_committee_epoch_is_not_a_rotation() {
-        assert!(!is_key_rotation_epoch(&history(&[9, 32, 33]), 9));
-        assert!(!is_key_rotation_epoch(&history(&[]), 9));
+        assert!(!is_key_rotation_epoch(Some(9), 9));
+        assert!(!is_key_rotation_epoch(Some(9), 5));
     }
 
     #[test]
     fn an_epoch_after_the_first_committee_is_a_rotation() {
-        assert!(is_key_rotation_epoch(&history(&[9, 32, 33]), 32));
-        assert!(is_key_rotation_epoch(&history(&[9, 32, 33]), 33));
+        assert!(is_key_rotation_epoch(Some(9), 20));
+        assert!(is_key_rotation_epoch(Some(9), 32));
     }
 
-    /// Epochs between reconfigs have no committee of their own; the predecessor still decides.
     #[test]
-    fn a_gap_epoch_resolves_from_the_nearest_earlier_committee() {
-        assert!(is_key_rotation_epoch(&history(&[9, 32]), 20));
-        assert!(!is_key_rotation_epoch(&history(&[9, 32]), 5));
+    fn an_empty_committee_history_answers_dkg() {
+        assert!(!is_key_rotation_epoch(None, 9));
     }
 }
 
