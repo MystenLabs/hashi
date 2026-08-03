@@ -385,6 +385,27 @@ impl OnchainState {
         self.state().hashi.committees.epoch()
     }
 
+    pub(crate) fn earliest_committee_epoch(&self) -> Option<u64> {
+        self.state()
+            .hashi
+            .committees
+            .committees()
+            .keys()
+            .next()
+            .copied()
+    }
+
+    pub(crate) fn is_key_rotation_epoch(&self, epoch: u64) -> bool {
+        Self::epoch_after_first_committee(self.earliest_committee_epoch(), epoch)
+    }
+
+    pub(crate) fn epoch_after_first_committee(
+        earliest_committee_epoch: Option<u64>,
+        epoch: u64,
+    ) -> bool {
+        earliest_committee_epoch.is_some_and(|earliest| earliest < epoch)
+    }
+
     pub fn committee_handoff(
         &self,
         from_epoch: u64,
@@ -1847,5 +1868,27 @@ mod tests {
         let mut expected = [0u8; 48];
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());
+    }
+}
+
+#[cfg(test)]
+mod key_rotation_epoch_tests {
+    use super::OnchainState;
+
+    #[test]
+    fn the_earliest_committee_epoch_is_not_a_rotation() {
+        assert!(!OnchainState::epoch_after_first_committee(Some(9), 9));
+        assert!(!OnchainState::epoch_after_first_committee(Some(9), 5));
+    }
+
+    #[test]
+    fn an_epoch_after_the_first_committee_is_a_rotation() {
+        assert!(OnchainState::epoch_after_first_committee(Some(9), 20));
+        assert!(OnchainState::epoch_after_first_committee(Some(9), 32));
+    }
+
+    #[test]
+    fn an_empty_committee_history_answers_dkg() {
+        assert!(!OnchainState::epoch_after_first_committee(None, 9));
     }
 }
