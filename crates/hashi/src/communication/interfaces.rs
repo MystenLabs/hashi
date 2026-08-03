@@ -100,6 +100,7 @@ where
     /// Receive the next message in the total order
     async fn receive(&mut self) -> ChannelResult<M>;
 
-    /// Fetch existing certificates and return the dealer addresses.
-    async fn certified_dealers(&mut self) -> Vec<Address>;
+    /// Fetch existing certificates, paired with their dealer. Callers must
+    /// verify them before acting on their weight.
+    async fn certified_dealers(&mut self) -> Vec<(Address, M)>;
 }

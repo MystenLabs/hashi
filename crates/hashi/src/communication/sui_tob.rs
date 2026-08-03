@@ -122,17 +122,13 @@ pub async fn fetch_certificates(
 }
 
 pub struct PrefetchedTobChannel {
-    certs: VecDeque<CertificateV1>,
-    dealers: Vec<Address>,
+    certs: Vec<(Address, CertificateV1)>,
+    next: usize,
 }
 
 impl PrefetchedTobChannel {
     pub fn new(certs: Vec<(Address, CertificateV1)>) -> Self {
-        let dealers = certs.iter().map(|(dealer, _)| *dealer).collect();
-        Self {
-            certs: certs.into_iter().map(|(_, cert)| cert).collect(),
-            dealers,
-        }
+        Self { certs, next: 0 }
     }
 }
 
@@ -145,13 +141,16 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        self.certs
-            .pop_front()
-            .ok_or_else(|| ChannelError::Other("replayed certificate stream exhausted".into()))
+        let (_, cert) = self
+            .certs
+            .get(self.next)
+            .ok_or_else(|| ChannelError::Other("replayed certificate stream exhausted".into()))?;
+        self.next += 1;
+        Ok(cert.clone())
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
-        self.dealers.clone()
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
+        self.certs.clone()
     }
 }
 
@@ -262,8 +261,8 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         }
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(Ok(all_certs)) = tokio::time::timeout(
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
+        let Ok(Ok(all_certs)) = tokio::time::timeout(
             FETCH_STALL_TIMEOUT,
             fetch_certificates(
                 &self.onchain_state,
@@ -273,15 +272,16 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
             ),
         )
         .await
-        {
-            for (dealer, cert) in all_certs {
-                if !self.seen_dealers.contains(&dealer) {
-                    self.seen_dealers.insert(dealer);
-                    self.pending_certs.push_back(cert);
-                }
+        else {
+            return vec![];
+        };
+        for (dealer, cert) in &all_certs {
+            if !self.seen_dealers.contains(dealer) {
+                self.seen_dealers.insert(*dealer);
+                self.pending_certs.push_back(cert.clone());
             }
         }
-        self.seen_dealers.iter().copied().collect()
+        all_certs
     }
 }
 

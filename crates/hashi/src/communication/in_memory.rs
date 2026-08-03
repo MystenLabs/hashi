@@ -81,7 +81,7 @@ where
         }
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
+    async fn certified_dealers(&mut self) -> Vec<(Address, M)> {
         vec![]
     }
 }
