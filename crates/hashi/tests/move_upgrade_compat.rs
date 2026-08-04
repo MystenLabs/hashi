@@ -20,8 +20,12 @@
 //! The "deployed package" side of the comparison is a **checked-in bytecode
 //! snapshot** (`tests/move_upgrade_snapshots/<network>/v<version>/`), NOT a
 //! live RPC fetch. CI must not depend on a network call, so the deployed
-//! package's compiled modules are committed to the repo. When a new version is
-//! deployed on chain, regenerate the snapshot — see
+//! package's compiled modules are committed to the repo. Which snapshot(s) to
+//! check is derived from `packages/hashi/Published.toml`: the gate checks the
+//! current source against every published environment at its recorded
+//! version, and cross-validates the snapshot's manifest and bytecode ids
+//! against that entry. When a new version is deployed on chain (Published.toml
+//! is bumped), capture a new snapshot — see
 //! `tests/move_upgrade_snapshots/README.md`.
 //!
 //! ## What runs where
@@ -33,17 +37,18 @@
 //!   in every `cargo test` invocation, locally and in CI.
 //!
 //! * [`current_source_is_compatible_upgrade_of_deployed`] is the real gate. It
-//!   builds `packages/hashi`, loads the checked-in snapshot of the deployed
-//!   package's bytecode, and asserts the current source is a compatible
-//!   upgrade. It requires only the `sui` binary (to build the current source) —
-//!   no network. It does NOT skip: any missing tool / build failure / IO error
-//!   fails the test — this is a required gate and must never green by skipping.
+//!   builds `packages/hashi`, loads the checked-in snapshot of each deployment
+//!   recorded in `Published.toml`, and asserts the current source is a
+//!   compatible upgrade of every one. It requires only the `sui` binary (to
+//!   build the current source) — no network. It does NOT skip: any missing
+//!   tool / build failure / IO error fails the test — this is a required gate
+//!   and must never green by skipping.
 //!
 //! ## Configuration (env vars)
 //!
-//! * `HASHI_COMPAT_SNAPSHOT_DIR` — directory of `<module>.mv` snapshot files to
-//!   check against. Defaults to
-//!   `<CARGO_MANIFEST_DIR>/tests/move_upgrade_snapshots/testnet/v1`.
+//! * `HASHI_COMPAT_SNAPSHOT_DIR` — dev escape hatch: check exactly this
+//!   snapshot directory instead of the `Published.toml`-derived set (the
+//!   `Published.toml` cross-validation is skipped for it).
 //! * `SUI_BINARY` — path to the `sui` CLI (default `sui`).
 //!
 //! ## Addressing
@@ -258,19 +263,91 @@ fn write_throwaway_client_config() -> Result<(tempfile::TempDir, PathBuf)> {
     Ok((dir, client_yaml))
 }
 
-/// Directory holding the checked-in bytecode snapshot of the deployed package.
-///
-/// Defaults to `<CARGO_MANIFEST_DIR>/tests/move_upgrade_snapshots/testnet/v1`;
-/// override with `HASHI_COMPAT_SNAPSHOT_DIR`.
-fn snapshot_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("HASHI_COMPAT_SNAPSHOT_DIR") {
-        return PathBuf::from(dir);
-    }
+/// One `[published.<network>]` entry of `packages/hashi/Published.toml` —
+/// the Move tooling's record of where (and at what version) the package is
+/// deployed. This is the source of truth the gate derives its snapshot
+/// locations from, so bumping the version there without capturing a matching
+/// snapshot fails the gate instead of silently checking an obsolete package.
+#[derive(serde_derive::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct PublishedEntry {
+    published_at: String,
+    original_id: String,
+    version: u64,
+}
+
+#[derive(serde_derive::Deserialize)]
+struct PublishedFile {
+    published: std::collections::BTreeMap<String, PublishedEntry>,
+}
+
+/// Parse `packages/hashi/Published.toml` into its per-network entries.
+fn published_entries() -> Result<std::collections::BTreeMap<String, PublishedEntry>> {
+    let path = workspace_package_path().join("Published.toml");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let parsed: PublishedFile =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    anyhow::ensure!(
+        !parsed.published.is_empty(),
+        "{} declares no published environments — the gate has nothing to check against",
+        path.display()
+    );
+    Ok(parsed.published)
+}
+
+/// Root of the checked-in snapshots: `tests/move_upgrade_snapshots/`.
+/// Per-deployment snapshots live at `<network>/v<version>/` beneath it, with
+/// network and version taken from `Published.toml`.
+fn snapshots_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("move_upgrade_snapshots")
-        .join("testnet")
-        .join("v1")
+}
+
+/// Validate a loaded snapshot against its `Published.toml` entry: manifest
+/// network/version must match the entry, manifest `package_id` must be the
+/// entry's `published-at` (the storage id the capture was fetched from), and
+/// the bytecode's self-address must be the entry's `original-id` (the runtime
+/// id the validator's compat check runs against).
+fn validate_snapshot_against_published(
+    manifest: &SnapshotManifest,
+    bytecode_self_address: AccountAddress,
+    network: &str,
+    entry: &PublishedEntry,
+) -> Result<()> {
+    anyhow::ensure!(
+        manifest.network == network,
+        "snapshot manifest network `{}` does not match Published.toml environment `{network}`",
+        manifest.network
+    );
+    anyhow::ensure!(
+        manifest.version == entry.version,
+        "snapshot manifest version {} does not match Published.toml version {} — regenerate the \
+         snapshot for the currently-deployed package",
+        manifest.version,
+        entry.version
+    );
+    let manifest_id = AccountAddress::from_hex_literal(&manifest.package_id)
+        .context("parsing snapshot manifest package_id")?;
+    let published_at = AccountAddress::from_hex_literal(&entry.published_at)
+        .context("parsing Published.toml published-at")?;
+    anyhow::ensure!(
+        manifest_id == published_at,
+        "snapshot manifest package_id {} does not match Published.toml published-at {} — the \
+         snapshot must capture the currently-deployed package",
+        manifest.package_id,
+        entry.published_at
+    );
+    let original_id = AccountAddress::from_hex_literal(&entry.original_id)
+        .context("parsing Published.toml original-id")?;
+    anyhow::ensure!(
+        bytecode_self_address == original_id,
+        "snapshot bytecode self-address {bytecode_self_address} does not match Published.toml \
+         original-id {} — the capture does not belong to this deployment",
+        entry.original_id
+    );
+    Ok(())
 }
 
 /// The `manifest.json` checked in alongside a snapshot's `.mv` files.
@@ -402,15 +479,53 @@ fn workspace_package_path() -> PathBuf {
 
 // ───────────────────────────── the real gate ─────────────────────────────
 
-/// Assert the current `packages/hashi` source is a compatible upgrade of the
-/// deployed package captured in the checked-in snapshot. This is the CI gate.
-/// It never skips: a missing tool, build failure or IO error fails the test.
-/// Fully synchronous — there is no network call.
+/// Assert the current `packages/hashi` source is a compatible upgrade of
+/// every deployed package recorded in `Published.toml`, each captured as a
+/// checked-in snapshot at `move_upgrade_snapshots/<network>/v<version>/`.
+/// This is the CI gate. It never skips: a missing tool, build failure, IO
+/// error, or a `Published.toml` entry without a matching snapshot fails the
+/// test. Fully synchronous — there is no network call.
+///
+/// `HASHI_COMPAT_SNAPSHOT_DIR` is a dev escape hatch: when set, exactly that
+/// directory is checked and the `Published.toml` cross-validation is skipped
+/// (there is no entry to validate an arbitrary directory against).
 #[test]
 fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
-    let mut new_modules = build_current_source()?;
+    let built = build_current_source()?;
 
-    let (_manifest, old_modules) = load_snapshot(&snapshot_dir())?;
+    if let Ok(dir) = std::env::var("HASHI_COMPAT_SNAPSHOT_DIR") {
+        eprintln!("HASHI_COMPAT_SNAPSHOT_DIR is set — checking only {dir}");
+        return check_snapshot_compat(Path::new(&dir), &built, None);
+    }
+
+    for (network, entry) in published_entries()? {
+        let dir = snapshots_root().join(&network).join(format!("v{}", entry.version));
+        check_snapshot_compat(&dir, &built, Some((&network, &entry))).with_context(|| {
+            format!(
+                "current packages/hashi source failed the upgrade check against the `{network}` \
+                 v{} deployment",
+                entry.version
+            )
+        })?;
+    }
+
+    eprintln!("OK: current source is a compatible upgrade of every published deployment");
+    Ok(())
+}
+
+/// Check the built modules against one snapshot directory. When `published`
+/// carries the corresponding `Published.toml` entry, the snapshot's manifest
+/// and bytecode are first validated against it: manifest network/version must
+/// match the entry, manifest `package_id` must be the entry's `published-at`
+/// (the storage id the capture was fetched from), and the bytecode's
+/// self-address must be the entry's `original-id` (the runtime id the
+/// validator's compat check runs against).
+fn check_snapshot_compat(
+    dir: &Path,
+    built: &[CompiledModule],
+    published: Option<(&str, &PublishedEntry)>,
+) -> Result<()> {
+    let (manifest, old_modules) = load_snapshot(dir)?;
 
     // The snapshot modules are addressed at the package's runtime/original id.
     // Rebase the freshly-built (0x0-addressed) modules to that same address so
@@ -426,23 +541,25 @@ fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
         runtime_address != AccountAddress::ZERO,
         "snapshot modules unexpectedly carry a 0x0 self-address"
     );
+    if let Some((network, entry)) = published {
+        validate_snapshot_against_published(&manifest, runtime_address, network, entry)?;
+    }
+
+    let mut new_modules = built.to_vec();
     for module in &mut new_modules {
         substitute_self_address(module, runtime_address)?;
     }
 
     eprintln!(
-        "checking compatibility against runtime address {runtime_address}: {} snapshot module(s) vs \
-         {} freshly-built module(s)",
+        "checking compatibility against runtime address {runtime_address}: {} snapshot module(s) \
+         vs {} freshly-built module(s)",
         old_modules.len(),
         new_modules.len()
     );
 
     assert_compatible_upgrade(&old_modules, &new_modules).context(
         "current packages/hashi source is NOT a compatible upgrade of the deployed package",
-    )?;
-
-    eprintln!("OK: current source is a compatible upgrade of the deployed package");
-    Ok(())
+    )
 }
 
 // ─────────────────── network-free machinery self-tests ───────────────────
@@ -493,15 +610,36 @@ fn synthetic_identical_module_is_compatible() {
         .expect("an identical module must be a compatible upgrade of itself");
 }
 
-/// The default (checked-in) snapshot location, ignoring the
+/// The committed testnet/v1 snapshot location, ignoring the
 /// `HASHI_COMPAT_SNAPSHOT_DIR` override — the manifest self-tests below must
 /// always exercise the real committed snapshot.
 fn checked_in_snapshot_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("move_upgrade_snapshots")
-        .join("testnet")
-        .join("v1")
+    snapshots_root().join("testnet").join("v1")
+}
+
+/// Every deployment recorded in `Published.toml` must have a checked-in
+/// snapshot whose manifest and bytecode agree with it. Network-free and does
+/// not build the package, so it runs everywhere — this is what forces a
+/// snapshot capture when `Published.toml` is bumped by an on-chain upgrade.
+#[test]
+fn every_published_deployment_has_a_valid_snapshot() -> Result<()> {
+    for (network, entry) in published_entries()? {
+        let dir = snapshots_root().join(&network).join(format!("v{}", entry.version));
+        let (manifest, modules) = load_snapshot(&dir).with_context(|| {
+            format!(
+                "Published.toml records a `{network}` v{} deployment but its snapshot is missing \
+                 or invalid — capture it per tests/move_upgrade_snapshots/README.md",
+                entry.version
+            )
+        })?;
+        let self_address = module_self_address(
+            modules
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("snapshot returned zero modules"))?,
+        );
+        validate_snapshot_against_published(&manifest, self_address, &network, &entry)?;
+    }
+    Ok(())
 }
 
 /// The committed snapshot must satisfy its own manifest — files, names and

@@ -23,13 +23,15 @@ move_upgrade_snapshots/
   README.md
 ```
 
-Currently only `testnet/v1/` exists. The test defaults to
-`testnet/v1`; override the directory with the `HASHI_COMPAT_SNAPSHOT_DIR`
-environment variable.
-
-> **TODO (mainnet):** once Hashi is deployed to mainnet, add a `mainnet/vN/`
-> snapshot and check the current source against it too (add a matrix entry / a
-> second assertion in the gate).
+Which `<network>/v<version>/` directories the gate checks is **derived from
+`packages/hashi/Published.toml`**: every `[published.<network>]` entry must
+have a snapshot at its recorded version, and the snapshot's manifest and
+bytecode ids are cross-validated against that entry (`package_id` ↔
+`published-at`, bytecode self-address ↔ `original-id`). Bumping
+`Published.toml` without capturing a matching snapshot fails the gate — so a
+mainnet deployment is picked up automatically once its entry lands. The
+`HASHI_COMPAT_SNAPSHOT_DIR` environment variable is a dev escape hatch that
+checks exactly one directory instead.
 
 ## When to regenerate
 
