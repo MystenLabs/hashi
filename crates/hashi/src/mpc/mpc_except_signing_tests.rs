@@ -424,6 +424,7 @@ fn create_rotation_test_certificate(
 struct MockP2PChannel {
     managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, MpcManager>>>,
     current_sender: Address,
+    retrieve_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockP2PChannel {
@@ -431,7 +432,13 @@ impl MockP2PChannel {
         Self {
             managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
             current_sender,
+            retrieve_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    fn retrieve_calls(&self) -> usize {
+        self.retrieve_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -462,6 +469,7 @@ impl P2PChannel for MockP2PChannel {
         party: &Address,
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
+        self.retrieve_calls.fetch_add(1, Ordering::Relaxed);
         let managers = self.managers.lock().unwrap();
         let manager = managers.get(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -7478,6 +7486,102 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
 }
 
 #[tokio::test]
+async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let test_addr = rotation_setup.setup.address(0);
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_epoch = epoch;
+
+    let diverged_dealer = rotation_setup
+        .setup
+        .address(rotation_setup.dealer_indices[0]);
+    let Messages::Dkg(certified_msg) = &rotation_setup.dealer_messages[0] else {
+        panic!("expected a DKG message");
+    };
+    let Messages::Dkg(other_msg) = &rotation_setup.dealer_messages[1] else {
+        panic!("expected a DKG message");
+    };
+    let certified_hash = compute_messages_hash(&Messages::Dkg(certified_msg.clone()));
+    assert_ne!(
+        compute_messages_hash(&Messages::Dkg(other_msg.clone())),
+        certified_hash,
+        "Test precondition: the stored message must differ from the certified one",
+    );
+    test_manager
+        .cache_and_persist_dkg_message(epoch, diverged_dealer, other_msg)
+        .unwrap();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for i in 1..5 {
+        let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+        manager.previous_output = Some(output);
+        manager.previous_epoch = epoch;
+        for (j, msg) in rotation_setup.dealer_messages.iter().enumerate() {
+            let dealer_addr = rotation_setup
+                .setup
+                .address(rotation_setup.dealer_indices[j]);
+            if let Messages::Dkg(dkg_msg) = msg {
+                manager
+                    .current_dkg_messages
+                    .insert(dealer_addr, dkg_msg.clone());
+            }
+        }
+        other_managers_map.insert(rotation_setup.setup.address(i), manager);
+    }
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let previous_certs = rotation_setup.certificates();
+    assert!(
+        matches!(
+            test_manager
+                .read()
+                .unwrap()
+                .reconstruct_previous_output(&previous_certs, &HashMap::new()),
+            Err(MpcError::StoredMessageDiverged { dealer }) if dealer == diverged_dealer
+        ),
+        "reconstruction must reject the diverged copy by variant, before any repair",
+    );
+
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &previous_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await
+    .expect("prepare_previous_output should succeed after re-fetching the diverged message");
+
+    assert!(is_member, "Validator 0 is in the previous committee");
+    assert!(
+        !previous_output.key_shares.shares.is_empty(),
+        "reconstruction must succeed on the re-fetched message; the new-member fallback would \
+         leave this node with no previous shares and so unable to deal in the rotation",
+    );
+    assert_eq!(
+        previous_output.public_key, test_dkg_output.public_key,
+        "reconstruction must recover the original key, not merely produce some shares",
+    );
+
+    let stored = test_manager
+        .read()
+        .unwrap()
+        .public_messages_store
+        .get_dealer_message(epoch, &diverged_dealer)
+        .unwrap()
+        .expect("the re-fetched message is persisted");
+    assert_eq!(
+        compute_messages_hash(&Messages::Dkg(stored)),
+        certified_hash,
+        "the diverged copy must be replaced by the certified one",
+    );
+}
+
+#[tokio::test]
 async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     // Test that prepare_previous_output fetches rotation messages from peers
     // when they are missing from the local store.
@@ -7583,6 +7687,368 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     assert!(
         !previous_output.key_shares.shares.is_empty(),
         "Should have key shares after reconstruction"
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            mgr.session_id = rotation_session_id.clone();
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut certified: HashMap<Address, RotationMessages> = HashMap::new();
+
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        certified.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let diverged_dealer = rotation_setup.setup.address(dealer_indices[0]);
+    let dealer0_output = dealers[0].2.clone();
+    let diverged = dealers[0]
+        .1
+        .create_rotation_messages(&dealer0_output, &mut rng);
+    let certified_hash =
+        compute_messages_hash(&Messages::Rotation(certified[&diverged_dealer].clone()));
+    assert_ne!(
+        compute_messages_hash(&Messages::Rotation(diverged.clone())),
+        certified_hash,
+        "Test precondition: the stored deal must differ from the certified one",
+    );
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager
+        .cache_and_persist_rotation_messages(epoch, diverged_dealer, &diverged)
+        .unwrap();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    assert!(
+        matches!(
+            test_manager
+                .read()
+                .unwrap()
+                .reconstruct_previous_output(&rotation_certs, &HashMap::new()),
+            Err(MpcError::StoredMessageDiverged { dealer }) if dealer == diverged_dealer
+        ),
+        "reconstruction must reject the diverged copy by variant, before any repair",
+    );
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await
+    .expect("prepare_previous_output should succeed after re-fetching the diverged message");
+
+    assert!(is_member, "Validator 2 is in the previous committee");
+    assert!(
+        !previous_output.key_shares.shares.is_empty(),
+        "reconstruction must succeed on the re-fetched message; the new-member fallback would \
+         leave this node with no previous shares and so unable to deal in the rotation",
+    );
+    assert_eq!(
+        previous_output.public_key, test_dkg_output.public_key,
+        "reconstruction must recover the original key, not merely produce some shares",
+    );
+
+    let stored = test_manager
+        .read()
+        .unwrap()
+        .public_messages_store
+        .get_rotation_messages(epoch, &diverged_dealer)
+        .unwrap()
+        .expect("the re-fetched message is persisted");
+    assert_eq!(
+        compute_messages_hash(&Messages::Rotation(stored)),
+        certified_hash,
+        "the diverged copy must be replaced by the certified one",
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            mgr.session_id = rotation_session_id.clone();
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut certified: HashMap<Address, RotationMessages> = HashMap::new();
+
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        certified.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    for (dealer_addr, msgs) in &certified {
+        test_manager
+            .cache_and_persist_rotation_messages(epoch, *dealer_addr, msgs)
+            .unwrap();
+    }
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await
+    .expect("prepare_previous_output should succeed from the stored messages alone");
+
+    assert!(is_member, "Validator 2 is in the previous committee");
+    assert_eq!(
+        previous_output.public_key, test_dkg_output.public_key,
+        "reconstruction must recover the original key from the stored messages",
+    );
+    assert_eq!(
+        mock_p2p.retrieve_calls(),
+        0,
+        "a message matching its certificate must never be re-fetched",
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            mgr.session_id = rotation_session_id.clone();
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut certified: HashMap<Address, RotationMessages> = HashMap::new();
+
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        certified.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let unrepairable = rotation_setup.setup.address(dealer_indices[0]);
+    let repairable = rotation_setup.setup.address(dealer_indices[2]);
+
+    for d in dealers.iter_mut() {
+        d.1.current_rotation_messages.remove(&unrepairable);
+    }
+
+    let out_first = dealers[0].2.clone();
+    let diverged_first = dealers[0].1.create_rotation_messages(&out_first, &mut rng);
+    let out_later = dealers[2].2.clone();
+    let diverged_later = dealers[2].1.create_rotation_messages(&out_later, &mut rng);
+    let repairable_certified_hash =
+        compute_messages_hash(&Messages::Rotation(certified[&repairable].clone()));
+    assert_ne!(
+        compute_messages_hash(&Messages::Rotation(diverged_later.clone())),
+        repairable_certified_hash,
+        "Test precondition: the later dealer's stored deal must differ from its certified one",
+    );
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager
+        .cache_and_persist_rotation_messages(epoch, unrepairable, &diverged_first)
+        .unwrap();
+    test_manager
+        .cache_and_persist_rotation_messages(epoch, repairable, &diverged_later)
+        .unwrap();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let _ = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await;
+
+    let stored_later = test_manager
+        .read()
+        .unwrap()
+        .public_messages_store
+        .get_rotation_messages(epoch, &repairable)
+        .unwrap()
+        .expect("the later dealer's message is still present");
+    assert_eq!(
+        compute_messages_hash(&Messages::Rotation(stored_later)),
+        repairable_certified_hash,
+        "a failed repair must not skip the dealers certified after it",
     );
 }
 
@@ -9148,13 +9614,32 @@ fn test_recover_current_dkg() {
         "Suspicious must not commit current_output"
     );
 
-    // Hash mismatch (a stored message diverges from its certified hash) → Suspicious.
     let swap0 = |i: usize| if i == 0 { 1 } else { i };
     let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&swap0)))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
-        MpcOutputRecoveryOutcome::Suspicious(_)
+        MpcOutputRecoveryOutcome::NotApplicable
     ));
+
+    {
+        let guard = mgr.read().unwrap();
+        let context = crate::mpc::types::DkgReconstructionContext {
+            committee: &guard.committee,
+            nodes: &guard.mpc_config.nodes,
+            party_id: guard.party_id,
+            encryption_key: &guard.encryption_key,
+            output_threshold: guard.mpc_config.threshold,
+            output_max_faulty: guard.mpc_config.max_faulty,
+            epoch: guard.mpc_config.epoch,
+        };
+        assert!(
+            matches!(
+                guard.reconstruct_dkg_output(&context, &certificates, &HashMap::new()),
+                Err(MpcError::StoredMessageDiverged { .. })
+            ),
+            "the hash check, not a downstream AVSS failure, must reject the swapped message",
+        );
+    }
 
     // Missing local messages → NotApplicable (fall through to live).
     let mgr = Arc::new(RwLock::new(make_manager(Box::new(
