@@ -36,10 +36,20 @@ checks exactly one directory instead.
 ## When to regenerate
 
 Regenerate whenever a **new package version is deployed on chain** (i.e. an
-`Upgrade` is executed). Create a new `v<N+1>/` directory for it (bump the
-version rather than overwriting, so the history of deployed bytecode is
-preserved), update `manifest.json`, and point the test's default at the new
-directory.
+`Upgrade` is executed). The deployment bumps `version` (and `published-at`) in
+`packages/hashi/Published.toml`, and the gate follows that file — so all that
+is needed here is capturing the snapshot it now expects:
+
+1. Create the `<network>/v<N>/` directory matching the new `Published.toml`
+   version (keep the old `v<N-1>/` — the history of deployed bytecode is
+   preserved, it just stops being checked).
+2. Fetch the deployed modules into it (recipe below) and write a
+   `manifest.json` that matches the `Published.toml` entry (`network`,
+   `version`, `package_id` = `published-at`).
+
+Until the snapshot exists, the gate fails with a "snapshot is missing or
+invalid" error pointing here — it cannot silently keep checking the old
+version.
 
 ## How to regenerate
 
