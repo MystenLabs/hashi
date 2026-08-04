@@ -16,11 +16,18 @@ env:
 
 jobs:
   # Always runs. Decides whether any Move-relevant files changed.
+  #
+  # Two filter keys: `move` covers the Move packages themselves (drives every
+  # job below); `compat` covers the compat gate's own implementation and
+  # fixtures — a change to any of those must re-run the gate too, or a broken
+  # checker / stale snapshot would merge behind a green required check, but it
+  # does not need the formatting / package-test jobs.
   detect:
     name: Detect Move changes
     runs-on: ubuntu-latest
     outputs:
       move: ${{ steps.filter.outputs.move }}
+      compat: ${{ steps.filter.outputs.compat }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -30,6 +37,12 @@ jobs:
             move:
               - 'packages/**'
               - '.github/workflows/move.yml'
+            compat:
+              - 'crates/hashi/tests/move_upgrade_compat.rs'
+              - 'crates/hashi/tests/move_upgrade_snapshots/**'
+              - 'crates/hashi/src/publish.rs'
+              - 'crates/hashi/Cargo.toml'
+              - 'Cargo.lock'
 
   check-formatting:
     name: Formatting
@@ -70,7 +83,7 @@ jobs:
   move-compat:
     name: Upgrade compatibility
     needs: detect
-    if: needs.detect.outputs.move == 'true'
+    if: needs.detect.outputs.move == 'true' || needs.detect.outputs.compat == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -105,8 +118,9 @@ jobs:
             echo "Detect job did not succeed (result: ${{ needs.detect.result }}) — cannot tell whether Move files changed, failing closed."
             exit 1
           fi
-          if [ "${{ needs.detect.outputs.move }}" == "true" ] && [ "${{ needs.move-compat.result }}" != "success" ]; then
-            echo "Move files changed and the upgrade-compatibility check did not succeed (result: ${{ needs.move-compat.result }})."
+          if { [ "${{ needs.detect.outputs.move }}" == "true" ] || [ "${{ needs.detect.outputs.compat }}" == "true" ]; } \
+              && [ "${{ needs.move-compat.result }}" != "success" ]; then
+            echo "Move or compat-gate files changed and the upgrade-compatibility check did not succeed (result: ${{ needs.move-compat.result }})."
             exit 1
           fi
           echo "Gate passed (move changed: ${{ needs.detect.outputs.move }}, move-compat result: ${{ needs.move-compat.result }})."
