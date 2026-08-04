@@ -55,6 +55,8 @@
 //! comparing — exactly what the Sui adapter does via `substitute_package_id`
 //! right before `check_compatibility`.
 
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -271,23 +273,53 @@ fn snapshot_dir() -> PathBuf {
         .join("v1")
 }
 
-/// Load and deserialize every `*.mv` file in the snapshot directory.
+/// The `manifest.json` checked in alongside a snapshot's `.mv` files.
+#[derive(serde_derive::Deserialize)]
+struct SnapshotManifest {
+    network: String,
+    version: u64,
+    package_id: String,
+    module_count: usize,
+    modules: Vec<String>,
+}
+
+/// Load a snapshot directory: parse `manifest.json`, deserialize every `*.mv`
+/// file, and cross-check the two.
 ///
-/// These are the raw compiled modules of the deployed package, addressed at the
-/// package's runtime/original id. This replaces the old network fetch: the
-/// snapshot IS the deployed package. Errors clearly if the directory is missing
-/// or contains no `.mv` files — a required gate must not silently pass with an
-/// empty "deployed" side.
-fn load_snapshot_modules() -> Result<Vec<CompiledModule>> {
-    let dir = snapshot_dir();
+/// The `.mv` files are the raw compiled modules of the deployed package,
+/// addressed at the package's runtime/original id. This replaces the old
+/// network fetch: the snapshot IS the deployed package.
+///
+/// A nonempty directory is not enough: a snapshot missing one `.mv` file would
+/// make that module look *newly added* in the current source, silently
+/// bypassing its compatibility check. So the manifest's module list must match
+/// the files on disk — and each file's deserialized self-name — exactly, in
+/// both directions.
+fn load_snapshot(dir: &Path) -> Result<(SnapshotManifest, Vec<CompiledModule>)> {
     anyhow::ensure!(
         dir.is_dir(),
-        "snapshot directory does not exist: {} (set HASHI_COMPAT_SNAPSHOT_DIR or regenerate the \
-         snapshot — see tests/move_upgrade_snapshots/README.md)",
+        "snapshot directory does not exist: {} (regenerate the snapshot — see \
+         tests/move_upgrade_snapshots/README.md)",
         dir.display()
     );
 
-    let mut mv_paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let manifest_path = dir.join("manifest.json");
+    let manifest: SnapshotManifest = serde_json::from_str(
+        &std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("reading snapshot manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("parsing snapshot manifest {}", manifest_path.display()))?;
+
+    anyhow::ensure!(
+        manifest.module_count == manifest.modules.len(),
+        "snapshot manifest {} is inconsistent: module_count is {} but the modules list has {} \
+         entries",
+        manifest_path.display(),
+        manifest.module_count,
+        manifest.modules.len()
+    );
+
+    let mut mv_paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading snapshot directory {}", dir.display()))?
         .map(|entry| entry.map(|e| e.path()).map_err(anyhow::Error::from))
         .collect::<Result<Vec<_>>>()?
@@ -296,10 +328,30 @@ fn load_snapshot_modules() -> Result<Vec<CompiledModule>> {
         .collect();
     mv_paths.sort();
 
+    let file_names: BTreeSet<String> = mv_paths
+        .iter()
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    let manifest_names: BTreeSet<String> = manifest.modules.iter().cloned().collect();
     anyhow::ensure!(
-        !mv_paths.is_empty(),
-        "snapshot directory {} contains no `.mv` files (regenerate the snapshot — see \
-         tests/move_upgrade_snapshots/README.md)",
+        manifest_names.len() == manifest.modules.len(),
+        "snapshot manifest {} lists duplicate module names",
+        manifest_path.display()
+    );
+
+    let missing: Vec<&String> = manifest_names.difference(&file_names).collect();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "snapshot {} is INCOMPLETE: manifest lists module(s) with no `.mv` file: {missing:?}. An \
+         omitted module would be treated as newly added and skip compatibility checking entirely \
+         (regenerate the snapshot — see tests/move_upgrade_snapshots/README.md)",
+        dir.display()
+    );
+    let unlisted: Vec<&String> = file_names.difference(&manifest_names).collect();
+    anyhow::ensure!(
+        unlisted.is_empty(),
+        "snapshot {} contains `.mv` file(s) not listed in its manifest: {unlisted:?} (regenerate \
+         the snapshot — see tests/move_upgrade_snapshots/README.md)",
         dir.display()
     );
 
@@ -310,8 +362,21 @@ fn load_snapshot_modules() -> Result<Vec<CompiledModule>> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    deserialize_modules(&raw)
-        .with_context(|| format!("deserializing snapshot modules from {}", dir.display()))
+    let modules = deserialize_modules(&raw)
+        .with_context(|| format!("deserializing snapshot modules from {}", dir.display()))?;
+
+    for (path, module) in mv_paths.iter().zip(&modules) {
+        let self_name = module.identifier_at(module.self_handle().name).as_str();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        anyhow::ensure!(
+            self_name == stem,
+            "snapshot module file {} deserializes to a module named `{self_name}` — file name and \
+             module self-name must agree",
+            path.display()
+        );
+    }
+
+    Ok((manifest, modules))
 }
 
 /// Deserialize raw module bytecode into `CompiledModule`s.
@@ -345,7 +410,7 @@ fn workspace_package_path() -> PathBuf {
 fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
     let mut new_modules = build_current_source()?;
 
-    let old_modules = load_snapshot_modules()?;
+    let (_manifest, old_modules) = load_snapshot(&snapshot_dir())?;
 
     // The snapshot modules are addressed at the package's runtime/original id.
     // Rebase the freshly-built (0x0-addressed) modules to that same address so
@@ -426,4 +491,59 @@ fn synthetic_identical_module_is_compatible() {
 
     assert_compatible_upgrade(&[old], &[new])
         .expect("an identical module must be a compatible upgrade of itself");
+}
+
+/// The default (checked-in) snapshot location, ignoring the
+/// `HASHI_COMPAT_SNAPSHOT_DIR` override — the manifest self-tests below must
+/// always exercise the real committed snapshot.
+fn checked_in_snapshot_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("move_upgrade_snapshots")
+        .join("testnet")
+        .join("v1")
+}
+
+/// The committed snapshot must satisfy its own manifest — files, names and
+/// counts all agree. Network-free; runs everywhere.
+#[test]
+fn checked_in_snapshot_passes_manifest_validation() -> Result<()> {
+    let (manifest, modules) = load_snapshot(&checked_in_snapshot_dir())?;
+    assert_eq!(manifest.module_count, modules.len());
+    Ok(())
+}
+
+/// Proves the manifest cross-check catches an incomplete capture: copy the
+/// real snapshot minus one `.mv` file (keeping the manifest) and assert
+/// loading fails. Without this check the omitted module would silently be
+/// treated as newly added and skip compatibility checking.
+#[test]
+fn snapshot_missing_module_file_is_detected() -> Result<()> {
+    let src = checked_in_snapshot_dir();
+    let tmp = tempfile::tempdir().context("creating temp snapshot dir")?;
+
+    let mut dropped: Option<String> = None;
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&src)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    entries.sort();
+    for path in entries {
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if dropped.is_none() && path.extension().and_then(|e| e.to_str()) == Some("mv") {
+            dropped = Some(name.trim_end_matches(".mv").to_string());
+            continue;
+        }
+        std::fs::copy(&path, tmp.path().join(name))?;
+    }
+    let dropped = dropped.expect("checked-in snapshot should contain at least one .mv file");
+
+    let err = load_snapshot(tmp.path())
+        .err()
+        .expect("a snapshot missing a manifest-listed .mv file MUST fail to load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("INCOMPLETE") && msg.contains(&dropped),
+        "error should name the missing module `{dropped}`, got: {msg}"
+    );
+    Ok(())
 }

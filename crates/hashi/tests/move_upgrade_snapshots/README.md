@@ -77,8 +77,12 @@ jq -r '.result.data.bcs.moduleMap | to_entries[] | "\(.key)\t\(.value)"' /tmp/ha
 ```
 
 Then refresh `manifest.json` (network, version, `package_id`, `module_count`,
-and the module list) to match what you just wrote. Verify the capture is well
-formed by running the gate:
+and the module list) to match what you just wrote. The gate validates the
+manifest **strictly**: `module_count` must equal the list length, and the list
+must match the `.mv` filenames — and each file's deserialized module self-name
+— exactly, in both directions. An incomplete capture (a listed module with no
+file) fails loudly rather than silently skipping that module's compatibility
+check. Verify the capture is well formed by running the gate:
 
 ```bash
 cargo test -p hashi --test move_upgrade_compat -- --nocapture
