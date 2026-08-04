@@ -1,9 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
+use crate::communication::PublishOutcome;
 use crate::communication::with_timeout_and_retry;
 use crate::communication::with_timeout_and_retry_budget;
 use crate::constants::is_production_sui_chain;
@@ -1261,16 +1263,7 @@ impl MpcManager {
                 .finish()
                 .expect("signatures should always be valid");
             let cert = CertificateV1::Dkg(dkg_cert);
-            let _timer = metrics
-                .mpc_cert_publish_duration_seconds
-                .with_label_values(&[MPC_LABEL_DKG])
-                .start_timer();
-            with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
-                .await
-                .map_err(|e| {
-                    MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
-                })?;
-            drop(_timer);
+            publish_dealer_cert(tob_channel, cert, MPC_LABEL_DKG, metrics).await?;
         } else {
             tracing::warn!(
                 "Dealer: insufficient signatures ({} < {}); publishing no cert",
@@ -1560,16 +1553,13 @@ impl MpcManager {
                 .finish()
                 .expect("signatures should always be valid");
             let cert = CertificateV1::Rotation(rotation_cert);
-            let _timer = metrics
-                .mpc_cert_publish_duration_seconds
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                .start_timer();
-            with_timeout_and_retry(|| ordered_broadcast_channel.publish(cert.clone()))
-                .await
-                .map_err(|e| {
-                    MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
-                })?;
-            drop(_timer);
+            publish_dealer_cert(
+                ordered_broadcast_channel,
+                cert,
+                MPC_LABEL_KEY_ROTATION,
+                metrics,
+            )
+            .await?;
         } else {
             tracing::warn!(
                 "Dealer: insufficient signatures ({} < {}); publishing no cert",
@@ -3761,13 +3751,7 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<()> {
         let cert = CertificateV1::NonceGeneration { batch_index, cert };
-        let _timer = metrics
-            .mpc_cert_publish_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-            .start_timer();
-        with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
-            .await
-            .map_err(|e| MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e)))
+        publish_dealer_cert(tob_channel, cert, MPC_LABEL_NONCE_GENERATION, metrics).await
     }
 
     fn verify_avid_nonce_echo(
@@ -6545,6 +6529,45 @@ fn build_reduced_nodes(
 fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {
     let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
     Blake2b256::digest(&bytes).digest
+}
+
+async fn publish_dealer_cert(
+    tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+    cert: CertificateV1,
+    protocol: &'static str,
+    metrics: &Metrics,
+) -> MpcResult<()> {
+    let _timer = metrics
+        .mpc_cert_publish_duration_seconds
+        .with_label_values(&[protocol])
+        .start_timer();
+    let result = with_timeout_and_retry(|| tob_channel.publish(cert.clone())).await;
+    drop(_timer);
+    let outcome = match &result {
+        Ok(PublishOutcome::Landed) => "ok",
+        Ok(PublishOutcome::AlreadyPresent) => "already_present",
+        Ok(PublishOutcome::Diverged) => "diverged",
+        Err(e) => publish_outcome_label(e),
+    };
+    metrics
+        .mpc_cert_publish_total
+        .with_label_values(&[protocol, outcome])
+        .inc();
+    result
+        .map(|_| ())
+        .map_err(|e| MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e)))
+}
+
+fn publish_outcome_label(e: &ChannelError) -> &'static str {
+    match e {
+        ChannelError::RequestFailed(_) => "request_failed",
+        ChannelError::NotReady(_) => "not_ready",
+        ChannelError::ClientNotFound(_) => "client_not_found",
+        ChannelError::Timeout => "timeout",
+        ChannelError::Superseded(_) => "superseded",
+        ChannelError::Closed => "closed",
+        ChannelError::Other(_) => "other",
+    }
 }
 
 fn consume_certified_nonce_outputs<T>(

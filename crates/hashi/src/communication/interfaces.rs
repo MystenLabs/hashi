@@ -85,6 +85,17 @@ pub trait P2PChannel: Send + Sync {
     ) -> ChannelResult<GetPartialSignaturesResponse>;
 }
 
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// Submitted by this call.
+    Landed,
+    /// An equivalent message was already present, so nothing was submitted.
+    AlreadyPresent,
+    /// A different message from this sender is already present and cannot be replaced.
+    Diverged,
+}
+
 /// Ordered broadcast channel for consensus-critical messages
 ///
 /// This is a generic interface that provides total ordering guarantees:
@@ -95,7 +106,7 @@ where
     M: Clone + Send + Sync + 'static,
 {
     /// Broadcast a message with guaranteed ordering across all validators
-    async fn publish(&self, message: M) -> ChannelResult<()>;
+    async fn publish(&self, message: M) -> ChannelResult<PublishOutcome>;
 
     /// Receive the next message in the total order
     async fn receive(&mut self) -> ChannelResult<M>;
