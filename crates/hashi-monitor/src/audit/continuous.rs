@@ -123,26 +123,53 @@ impl ContinuousAuditor {
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        tracing::info!(
+            "starting continuous audit:\n  requested_start={}\n  sui_start={}\n  guardian_start={}",
+            utc_timestamp(self.window.user_start),
+            utc_timestamp(self.window.sui_start),
+            utc_timestamp(self.window.guardian_start),
+        );
+        tracing::info!(
+            cursor = %utc_timestamp(self.inner.get_sui_cursor()),
+            "starting initial Sui catch-up"
+        );
         if let Err(error) = self.tick_sui().await {
             tracing::warn!(
                 source = "sui",
                 ?error,
                 "initial catch-up failed; continuing"
             );
+        } else {
+            tracing::info!(
+                cursor = %utc_timestamp(self.inner.get_sui_cursor()),
+                "finished initial Sui catch-up"
+            );
         }
+        tracing::info!(
+            cursor = %utc_timestamp(self.inner.get_guardian_cursor()),
+            "starting initial Guardian catch-up"
+        );
         if let Err(error) = self.tick_guardian().await {
             tracing::warn!(
                 source = "guardian",
                 ?error,
                 "initial catch-up failed; continuing"
             );
+        } else {
+            tracing::info!(
+                cursor = %utc_timestamp(self.inner.get_guardian_cursor()),
+                "finished initial Guardian catch-up"
+            );
         }
+        tracing::info!("starting initial Bitcoin confirmation lookups");
         if let Err(error) = self.tick_btc() {
             tracing::warn!(
                 source = "btc",
                 ?error,
                 "initial catch-up failed; continuing"
             );
+        } else {
+            tracing::info!("finished initial Bitcoin confirmation lookups");
         }
         self.tick_state_checks_and_gc();
 

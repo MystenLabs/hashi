@@ -201,6 +201,12 @@ impl SuiEventsPoller {
         timestamp_secs: UnixSeconds,
         (latest_sequence, latest_timestamp): (u64, UnixSeconds),
     ) -> anyhow::Result<Option<(u64, u64)>> {
+        tracing::info!(
+            target = %utc_timestamp(timestamp_secs),
+            latest_checkpoint = latest_sequence,
+            latest_timestamp = %utc_timestamp(latest_timestamp),
+            "resolving Sui checkpoint boundary"
+        );
         if latest_timestamp < timestamp_secs {
             return Ok(None);
         }
@@ -235,6 +241,12 @@ impl SuiEventsPoller {
             }
         }
 
+        tracing::info!(
+            target = %utc_timestamp(timestamp_secs),
+            before_checkpoint = low_sequence,
+            at_or_after_checkpoint = high_sequence,
+            "resolved Sui checkpoint boundary"
+        );
         Ok(Some((low_sequence, high_sequence)))
     }
 
@@ -311,6 +323,7 @@ impl SuiEventsPoller {
         let filter = self.event_filter();
         let mut after = None;
         let mut all_events = Vec::new();
+        tracing::info!(start_checkpoint, end_checkpoint, "starting Sui event scan");
 
         loop {
             let mut options = QueryOptions::default()
@@ -354,9 +367,17 @@ impl SuiEventsPoller {
                 }
             }
 
-            match end_reason.context("Sui ListEvents ended without QueryEnd")? {
+            let end_reason = end_reason.context("Sui ListEvents ended without QueryEnd")?;
+            match end_reason {
                 QueryEndReason::CheckpointBound => return Ok(all_events),
                 QueryEndReason::ItemLimit | QueryEndReason::ScanLimit => {
+                    tracing::info!(
+                        start_checkpoint,
+                        end_checkpoint,
+                        events = all_events.len(),
+                        ?end_reason,
+                        "Sui event scan progress"
+                    );
                     let next = page_cursor
                         .context("Sui ListEvents reached a page limit without a resume cursor")?;
                     anyhow::ensure!(
