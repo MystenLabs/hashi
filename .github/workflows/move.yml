@@ -13,6 +13,16 @@ permissions:
 
 env:
   MOVE_PACKAGES_PATH: packages
+  # Pinned toolchain. The compat checker links move-binary-format at a fixed
+  # sui rev (crates/hashi/Cargo.toml), so the compiler producing the bytecode
+  # must be pinned too or the two can drift independently. SUI_PIN tracks the
+  # publish toolchain recorded in packages/hashi/Published.toml
+  # (toolchain-version = 1.73.2; there is no testnet-1.73.2 release, the
+  # mainnet binary ships the same compiler). Bump all three deliberately,
+  # together with the checker's move-binary-format rev when relevant.
+  SUIUP_PIN: v0.0.14
+  SUI_PIN: mainnet-1.73.2
+  MVR_PIN: 0.1.0
 
 jobs:
   # Always runs. Decides whether any Move-relevant files changed.
@@ -67,8 +77,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --locked
-      - run: suiup install sui -y; suiup install mvr -y
+      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --tag "$SUIUP_PIN" --locked
+      - run: suiup install "sui@$SUI_PIN" -y; suiup install "mvr@$MVR_PIN" -y
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: sui --version; mvr --version
@@ -88,8 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --locked
-      - run: suiup install sui -y; suiup install mvr -y
+      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --tag "$SUIUP_PIN" --locked
+      - run: suiup install "sui@$SUI_PIN" -y; suiup install "mvr@$MVR_PIN" -y
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: sui --version; mvr --version
