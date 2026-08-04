@@ -107,7 +107,7 @@ jobs:
       # SUI_BINARY / HASHI_COMPAT_SNAPSHOT_DIR can be overridden here if the
       # defaults ever need to change.
       - name: Run upgrade compatibility check
-        run: cargo test -p hashi --test move_upgrade_compat -- --nocapture
+        run: cargo test --locked -p hashi --test move_upgrade_compat -- --nocapture
 
   # THE REQUIRED STATUS CHECK. Always reports. Passes on non-Move PRs (nothing
   # to check) and fails only when Move files changed and the compat job did not
