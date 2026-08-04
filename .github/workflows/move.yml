@@ -89,6 +89,10 @@ jobs:
   # THE REQUIRED STATUS CHECK. Always reports. Passes on non-Move PRs (nothing
   # to check) and fails only when Move files changed and the compat job did not
   # succeed. This lets a single required check work for every PR.
+  #
+  # Fails CLOSED: if `detect` itself did not succeed, we cannot know whether
+  # Move files changed (its `move` output is unset, which would otherwise be
+  # treated like `false`), so the gate fails rather than assuming "no change".
   move-compat-gate:
     name: Move compat gate
     needs: [detect, move-compat]
@@ -97,6 +101,10 @@ jobs:
     steps:
       - name: Evaluate gate
         run: |
+          if [ "${{ needs.detect.result }}" != "success" ]; then
+            echo "Detect job did not succeed (result: ${{ needs.detect.result }}) — cannot tell whether Move files changed, failing closed."
+            exit 1
+          fi
           if [ "${{ needs.detect.outputs.move }}" == "true" ] && [ "${{ needs.move-compat.result }}" != "success" ]; then
             echo "Move files changed and the upgrade-compatibility check did not succeed (result: ${{ needs.move-compat.result }})."
             exit 1
