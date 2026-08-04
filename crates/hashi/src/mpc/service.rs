@@ -33,6 +33,7 @@ use crate::metrics::Metrics;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
+use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
@@ -316,12 +317,15 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let certs = fetch_key_generation_certificates(&onchain_state, epoch)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("failed to fetch reconfig certs for epoch {epoch}: {e}")
-            })?;
-        let is_key_rotation = matches!(certs.first(), Some((_, CertificateV1::Rotation(_))));
+        let earliest_committee_epoch = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .keys()
+            .next()
+            .copied();
+        let is_key_rotation = is_key_rotation_epoch(earliest_committee_epoch, epoch);
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
@@ -1126,7 +1130,7 @@ impl MpcService {
                 .await;
                 let expected_size =
                     expected_from(avid_certified_nonce_weight(mpc_manager, &certs))?;
-                let mut prefetched = PrefetchedTobChannel::new(certs);
+                let mut prefetched = PrefetchedTobChannel::new(certs.into_inner());
                 let outputs = MpcManager::run_nonce_generation(
                     mpc_manager,
                     batch_index,
@@ -1766,9 +1770,13 @@ pub(crate) async fn verify_fetched_certificates(
     verified
 }
 
+fn is_key_rotation_epoch(earliest_committee_epoch: Option<u64>, epoch: u64) -> bool {
+    earliest_committee_epoch.is_some_and(|earliest| earliest < epoch)
+}
+
 fn certified_nonce_weight<T>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, T)],
+    certs: &VerifiedNonceCerts<T>,
 ) -> u32 {
     mpc_manager
         .read()
@@ -1779,7 +1787,7 @@ fn certified_nonce_weight<T>(
 
 fn avid_certified_nonce_weight(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, CertificateV1)],
+    certs: &VerifiedNonceCerts<CertificateV1>,
 ) -> u32 {
     mpc_manager
         .read()
@@ -1912,6 +1920,28 @@ mod presig_count_tests {
 
 fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) || current_epoch == target_epoch
+}
+
+#[cfg(test)]
+mod key_rotation_epoch_tests {
+    use super::is_key_rotation_epoch;
+
+    #[test]
+    fn the_earliest_committee_epoch_is_not_a_rotation() {
+        assert!(!is_key_rotation_epoch(Some(9), 9));
+        assert!(!is_key_rotation_epoch(Some(9), 5));
+    }
+
+    #[test]
+    fn an_epoch_after_the_first_committee_is_a_rotation() {
+        assert!(is_key_rotation_epoch(Some(9), 20));
+        assert!(is_key_rotation_epoch(Some(9), 32));
+    }
+
+    #[test]
+    fn an_empty_committee_history_answers_dkg() {
+        assert!(!is_key_rotation_epoch(None, 9));
+    }
 }
 
 #[cfg(test)]

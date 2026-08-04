@@ -164,6 +164,18 @@ pub struct MpcManager {
     test_corrupt_shares_for: Option<Address>,
 }
 
+pub(crate) struct VerifiedNonceCerts<T>(Vec<(Address, T)>);
+
+impl<T> VerifiedNonceCerts<T> {
+    pub(crate) fn as_slice(&self) -> &[(Address, T)] {
+        &self.0
+    }
+
+    pub(crate) fn into_inner(self) -> Vec<(Address, T)> {
+        self.0
+    }
+}
+
 impl MpcManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1011,10 +1023,10 @@ impl MpcManager {
         Ok(outputs)
     }
 
-    pub fn reconstruct_presignatures(
+    pub(crate) fn reconstruct_presignatures(
         &self,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &VerifiedNonceCerts<hashi_types::move_types::DealerSubmissionV1>,
     ) -> MpcResult<NonceReconstructionOutcome> {
         let (certified_dealers, _) = self.certified_nonce_dealers_from_certs(certs);
         let messages = self
@@ -1056,12 +1068,12 @@ impl MpcManager {
 
     pub(crate) fn certified_nonce_dealers_from_certs<T>(
         &self,
-        certs: &[(Address, T)],
+        certs: &VerifiedNonceCerts<T>,
     ) -> (HashSet<Address>, u32) {
         let required_weight = self.required_nonce_weight();
         let mut weight_sum = 0u32;
         let mut certified = HashSet::new();
-        for (dealer, _) in certs {
+        for (dealer, _) in certs.as_slice() {
             if let Some(party_id) = self.committee.index_of(dealer)
                 && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
             {
@@ -1077,14 +1089,14 @@ impl MpcManager {
 
     pub(crate) fn avid_certified_nonce_dealers_from_certs(
         &self,
-        certs: &[(Address, CertificateV1)],
+        certs: &VerifiedNonceCerts<CertificateV1>,
     ) -> (HashSet<Address>, u32) {
         let required_weight = self.required_nonce_weight();
         let vote_quorum_weight =
             Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
         let mut weight_sum = 0u32;
         let mut certified = HashSet::new();
-        for (table_dealer, cert) in certs {
+        for (table_dealer, cert) in certs.as_slice() {
             let CertificateV1::NonceGeneration { cert, .. } = cert else {
                 continue;
             };
@@ -1135,7 +1147,7 @@ impl MpcManager {
         epoch: u64,
         certs: Vec<(Address, T)>,
         metrics: &Metrics,
-    ) -> Vec<(Address, T)>
+    ) -> VerifiedNonceCerts<T>
     where
         T: NonceCertToVerify,
     {
@@ -1178,7 +1190,7 @@ impl MpcManager {
                 }
             }
         }
-        verified
+        VerifiedNonceCerts(verified)
     }
 
     async fn run_dkg_as_dealer(
@@ -5639,7 +5651,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &VerifiedNonceCerts<hashi_types::move_types::DealerSubmissionV1>,
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         Self::retrieve_missing_nonce_messages(mpc_manager, batch_index, certs, p2p_channel).await?;
@@ -5669,6 +5681,7 @@ impl MpcManager {
                             ProtocolComplaint::BatchedAvss(complaint),
                         );
                         certs
+                            .as_slice()
                             .iter()
                             .find(|(addr, _)| *addr == dealer_address)
                             .map(|(_, cert)| {
@@ -5700,14 +5713,14 @@ impl MpcManager {
     async fn retrieve_missing_nonce_messages(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &VerifiedNonceCerts<hashi_types::move_types::DealerSubmissionV1>,
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<()> {
         let (certified_dealers, _) = mpc_manager
             .read()
             .unwrap()
             .certified_nonce_dealers_from_certs(certs);
-        for (dealer, cert) in certs {
+        for (dealer, cert) in certs.as_slice() {
             if !certified_dealers.contains(dealer) {
                 continue;
             }
