@@ -27,6 +27,7 @@ pub mod batch;
 pub mod continuous;
 
 use crate::config::Config;
+use crate::findings::FindingCategory;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use crate::rpc::guardian::GuardianWithdrawalsPoller;
@@ -45,14 +46,25 @@ pub trait AuditWindow {
 
 pub fn log_findings(source: &'static str, phase: &'static str, findings: &[MonitorFinding]) {
     for finding in findings.iter() {
-        tracing::error!(
-            source,
-            phase,
-            category = %finding.category(),
-            total = findings.len(),
-            ?finding,
-            "monitor finding"
-        );
+        let category = finding.category();
+        match category {
+            FindingCategory::Safety => tracing::error!(
+                source,
+                phase,
+                %category,
+                total = findings.len(),
+                ?finding,
+                "monitor finding"
+            ),
+            FindingCategory::Liveness => tracing::warn!(
+                source,
+                phase,
+                %category,
+                total = findings.len(),
+                ?finding,
+                "monitor finding"
+            ),
+        }
     }
 }
 
