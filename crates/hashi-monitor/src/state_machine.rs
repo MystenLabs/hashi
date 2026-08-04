@@ -280,7 +280,7 @@ pub struct DepositStateMachine {
 
 impl DepositStateMachine {
     pub fn new(event: MonitorDepositEvent, cfg: &Config) -> Self {
-        if event.event_type != DepositEventType::E2HashiDeposited {
+        if event.event_type != DepositEventType::E2HashiApproved {
             panic!("unexpected event type");
         }
         // btc confirmation is a predecessor event => we set the deadline to now (+skew).
@@ -441,7 +441,7 @@ mod tests {
 
     fn deposit_event(timestamp: UnixSeconds, fill: u8) -> MonitorDepositEvent {
         MonitorDepositEvent {
-            event_type: DepositEventType::E2HashiDeposited,
+            event_type: DepositEventType::E2HashiApproved,
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
             btc_vout: 0,

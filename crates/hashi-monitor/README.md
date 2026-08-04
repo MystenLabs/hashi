@@ -11,7 +11,9 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 ### Deposits (BTC → Sui)
 - **E1**: Deposit confirmed on Bitcoin.
-- **E2**: `DepositConfirmed` on Sui.
+- **E2**: `DepositApproved` on Sui. The monitor checks the committee's
+  security-critical approval against Bitcoin; it does not track whether that
+  approval later progresses to `DepositConfirmed`.
 
 ### Checks
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
@@ -78,3 +80,11 @@ btc:
   - BTC confirmation lookup via Bitcoin Core RPC.
 - Not yet implemented:
   - Sui event polling — `AuditorCore::poll_sui` is a stub that returns `CursorUnmoved`, so E1 (withdrawal) and the deposit pipeline currently see no Sui input.
+
+## Temporary testnet object-lock bypass
+
+Setting `HASHI_SKIP_S3_OBJECT_LOCK_CHECK` disables S3 object-lock metadata
+validation for the process. Signature, PCR, signed object-key, and S3 version
+history checks remain enabled. This escape hatch exists only for legacy testnet
+logs written before long-lived retention was configured and should be removed
+after the planned testnet wipe.

@@ -108,14 +108,13 @@ impl AuditorCore {
     fn ingest_deposit(&mut self, event: MonitorDepositEvent) -> Vec<MonitorFinding> {
         let outpoint = (event.btc_txid, event.btc_vout);
         match self.pending_deposits.entry(outpoint) {
-            Entry::Occupied(entry) => {
-                if entry.get().hashi_deposit_event() != &event {
-                    return vec![MonitorFinding::InvalidEventAdded(
-                        "duplicate deposit event for same outpoint with different contents"
-                            .to_string(),
-                    )];
-                }
-            }
+            // Duplicate DepositApproved events are legitimate: a pending deposit
+            // must be approved again after committee rotation. Sui events arrive
+            // in ascending order, so retain the first approval; it gives the
+            // strictest check that Bitcoin preceded the committee approval.
+            // Restore duplicate detection if this monitor returns to the unique
+            // DepositConfirmed event.
+            Entry::Occupied(_) => {}
             Entry::Vacant(entry) => {
                 entry.insert(DepositStateMachine::new(event, &self.cfg));
             }
