@@ -6,6 +6,7 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
+use crate::domain::utc_timestamp;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
 use hashi_guardian::s3_reader::withdraw_cursor;
@@ -90,6 +91,9 @@ impl GuardianWithdrawalsPoller {
             return Ok(PollOutcome::CursorUnmoved);
         }
 
+        let start = self.cursor.to_unix_seconds();
+        let next_cursor = self.cursor.next_dir();
+        let end = next_cursor.to_unix_seconds();
         let verified_logs = self.reader.read_logs_in_dir(&self.cursor).await?;
         // Withdrawal polling may replay historical buckets during an upgrade, so
         // this caller accepts any record whose session build verifies against the
@@ -106,7 +110,14 @@ impl GuardianWithdrawalsPoller {
             })
             .collect::<Vec<MonitorEvent>>();
 
-        self.cursor = self.cursor.next_dir();
+        self.cursor = next_cursor;
+        tracing::info!(
+            start = %utc_timestamp(start),
+            end = %utc_timestamp(end),
+            cursor = %utc_timestamp(self.cursor.to_unix_seconds()),
+            events = withdrawal_events.len(),
+            "completed Guardian event range"
+        );
         Ok(PollOutcome::CursorAdvanced(withdrawal_events))
     }
 }
