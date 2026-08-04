@@ -123,8 +123,11 @@ fn substitute_self_address(module: &mut CompiledModule, new_address: AccountAddr
 /// Mirrors `check_compatibility` in the Sui adapter: every module present in
 /// the old package must be present in the new package and pass
 /// `Compatibility::upgrade_check().check(old, new)`. Adding brand-new modules
-/// is allowed under the `Compatible` policy. Returns a human-readable error
-/// describing the first incompatibility found.
+/// is allowed under the `Compatible` policy — but, like the adapter, a new
+/// module must not define an `init` function: the validator aborts such
+/// upgrades with `FeatureNotYetSupported` ("`init` in new modules on upgrade
+/// is not yet supported"). Returns a human-readable error describing the
+/// first incompatibility found.
 fn assert_compatible_upgrade(
     old_modules: &[CompiledModule],
     new_modules: &[CompiledModule],
@@ -164,6 +167,30 @@ fn assert_compatible_upgrade(
                  function signatures, struct/enum layouts or abilities, etc."
             )
         })?;
+    }
+
+    // Whatever is left in `new_normalized` was not in the old package, i.e. a
+    // brand-new module. Adding modules is allowed, but the adapter separately
+    // rejects new modules that define an `init` function (it cannot run `init`
+    // on upgrade) — mirror that or the gate would green-light an upgrade the
+    // validator aborts. Existing modules keeping their `init` are fine; it
+    // simply never re-runs. See `execution.rs` (`check_for_init_during_upgrade`)
+    // at the rev move-binary-format is pinned to.
+    for module in new_modules {
+        let name = module.identifier_at(module.self_handle().name).as_str();
+        if !new_normalized.contains_key(name) {
+            continue;
+        }
+        let has_init = module.function_defs.iter().any(|fdef| {
+            let fhandle = module.function_handle_at(fdef.function);
+            module.identifier_at(fhandle.name).as_str() == "init"
+        });
+        anyhow::ensure!(
+            !has_init,
+            "newly added module `{name}` defines an `init` function — the validator rejects such \
+             upgrades (\"`init` in new modules on upgrade is not yet supported\"). Move the \
+             initialization into an explicit function called after the upgrade."
+        );
     }
 
     Ok(())
@@ -284,8 +311,8 @@ struct PublishedFile {
 /// Parse `packages/hashi/Published.toml` into its per-network entries.
 fn published_entries() -> Result<std::collections::BTreeMap<String, PublishedEntry>> {
     let path = workspace_package_path().join("Published.toml");
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: PublishedFile =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     anyhow::ensure!(
@@ -499,7 +526,9 @@ fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
     }
 
     for (network, entry) in published_entries()? {
-        let dir = snapshots_root().join(&network).join(format!("v{}", entry.version));
+        let dir = snapshots_root()
+            .join(&network)
+            .join(format!("v{}", entry.version));
         check_snapshot_compat(&dir, &built, Some((&network, &entry))).with_context(|| {
             format!(
                 "current packages/hashi source failed the upgrade check against the `{network}` \
@@ -610,6 +639,72 @@ fn synthetic_identical_module_is_compatible() {
         .expect("an identical module must be a compatible upgrade of itself");
 }
 
+/// Rewrite a module's self-name (the identifier its module handle points at).
+fn rename_module(module: &mut CompiledModule, new_name: &str) {
+    use move_core_types::identifier::Identifier;
+    let idx = module.self_handle().name;
+    module.identifiers[idx.0 as usize] = Identifier::new(new_name).unwrap();
+}
+
+/// Rewrite the name of the module's first function definition.
+fn rename_first_function(module: &mut CompiledModule, new_name: &str) {
+    use move_core_types::identifier::Identifier;
+    let idx = module
+        .function_handle_at(module.function_defs[0].function)
+        .name;
+    module.identifiers[idx.0 as usize] = Identifier::new(new_name).unwrap();
+}
+
+/// A newly added module that defines `init` must be rejected: the validator
+/// aborts such upgrades with "`init` in new modules on upgrade is not yet
+/// supported", so the gate has to as well.
+#[test]
+fn synthetic_new_module_with_init_is_rejected() {
+    use move_binary_format::file_format::basic_test_module;
+
+    let old = basic_test_module();
+    let mut fresh = basic_test_module();
+    rename_module(&mut fresh, "fresh");
+    rename_first_function(&mut fresh, "init");
+
+    let new = vec![old.clone(), fresh];
+    let result = assert_compatible_upgrade(&[old], &new);
+    let err = result.expect_err("a new module defining `init` MUST be rejected");
+    assert!(
+        format!("{err:#}").contains("init"),
+        "error should mention `init`, got: {err:#}"
+    );
+}
+
+/// The positive counterpart: adding a new module *without* `init` is a
+/// compatible upgrade.
+#[test]
+fn synthetic_new_module_without_init_is_accepted() {
+    use move_binary_format::file_format::basic_test_module;
+
+    let old = basic_test_module();
+    let mut fresh = basic_test_module();
+    rename_module(&mut fresh, "fresh");
+
+    let new = vec![old.clone(), fresh];
+    assert_compatible_upgrade(&[old], &new)
+        .expect("adding a new module without `init` must be a compatible upgrade");
+}
+
+/// `init` is only banned in *newly added* modules. An existing module keeping
+/// its `init` (as every already-published module does) must still pass.
+#[test]
+fn synthetic_existing_module_keeping_init_is_accepted() {
+    use move_binary_format::file_format::basic_test_module;
+
+    let mut old = basic_test_module();
+    rename_first_function(&mut old, "init");
+    let new = old.clone();
+
+    assert_compatible_upgrade(&[old], &[new])
+        .expect("an existing module keeping its `init` must be a compatible upgrade");
+}
+
 /// The committed testnet/v1 snapshot location, ignoring the
 /// `HASHI_COMPAT_SNAPSHOT_DIR` override — the manifest self-tests below must
 /// always exercise the real committed snapshot.
@@ -624,7 +719,9 @@ fn checked_in_snapshot_dir() -> PathBuf {
 #[test]
 fn every_published_deployment_has_a_valid_snapshot() -> Result<()> {
     for (network, entry) in published_entries()? {
-        let dir = snapshots_root().join(&network).join(format!("v{}", entry.version));
+        let dir = snapshots_root()
+            .join(&network)
+            .join(format!("v{}", entry.version));
         let (manifest, modules) = load_snapshot(&dir).with_context(|| {
             format!(
                 "Published.toml records a `{network}` v{} deployment but its snapshot is missing \
