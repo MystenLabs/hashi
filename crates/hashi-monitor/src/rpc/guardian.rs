@@ -17,14 +17,7 @@ use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
 use tracing::debug;
-use tracing::info;
-
-enum VerifiedWithdrawal {
-    Success(MonitorWithdrawalEvent),
-    Failure,
-}
-
-impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
+impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {
     type Error = anyhow::Error;
 
     fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
@@ -42,16 +35,15 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
                     txid = %txid,
                     "successful guardian withdrawal log"
                 );
-                Ok(VerifiedWithdrawal::Success(MonitorWithdrawalEvent {
+                Ok(MonitorWithdrawalEvent {
                     event_type: WithdrawalEventType::E2GuardianApproved,
                     wid: request_data.wid,
                     timestamp_secs: unix_millis_to_seconds(timestamp_ms),
                     btc_txid: txid,
-                }))
+                })
             }
-            failure @ WithdrawalLogMessage::Failure { .. } => {
-                info!(?failure, "failed guardian withdrawal log");
-                Ok(VerifiedWithdrawal::Failure)
+            WithdrawalLogMessage::Failure { .. } => {
+                anyhow::bail!("failure log found under successful-withdrawal prefix")
             }
         }
     }
@@ -94,20 +86,20 @@ impl GuardianWithdrawalsPoller {
         let start = self.cursor.to_unix_seconds();
         let next_cursor = self.cursor.next_dir();
         let end = next_cursor.to_unix_seconds();
-        let verified_logs = self.reader.read_logs_in_dir(&self.cursor).await?;
+        let verified_logs = self
+            .reader
+            .read_successful_withdrawals_in_dir(&self.cursor)
+            .await?;
         // Withdrawal polling may replay historical buckets during an upgrade, so
         // this caller accepts any record whose session build verifies against the
         // configured allowlist. Add a cursor/cutoff policy here if tailing must
         // require the current build after the upgrade window.
         let withdrawal_events = verified_logs
             .into_iter()
-            .map(VerifiedWithdrawal::try_from)
+            .map(MonitorWithdrawalEvent::try_from)
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
-            .filter_map(|e| match e {
-                VerifiedWithdrawal::Success(event) => Some(MonitorEvent::Withdrawal(event)),
-                VerifiedWithdrawal::Failure => None,
-            })
+            .map(MonitorEvent::Withdrawal)
             .collect::<Vec<MonitorEvent>>();
 
         self.cursor = next_cursor;

@@ -591,7 +591,16 @@ impl GuardianS3Client {
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<LogRecord>> {
         let prefix = dir.to_string();
-        let keys = self.validate_prefix_history_and_list_keys(&prefix).await?;
+        self.list_all_log_records_with_prefix(&prefix).await
+    }
+
+    /// Batch read all immutable log records whose keys begin with `prefix`.
+    /// The prefix history is validated before any records are fetched.
+    pub(crate) async fn list_all_log_records_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> GuardianResult<Vec<LogRecord>> {
+        let keys = self.validate_prefix_history_and_list_keys(prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // The prefix history was checked above. Immutable batch logs also

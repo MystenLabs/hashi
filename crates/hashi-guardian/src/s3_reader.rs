@@ -32,6 +32,7 @@ use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedSessionInfo;
+use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_GENESIS;
@@ -175,13 +176,33 @@ impl GuardianReader {
         &mut self,
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
+        let prefix = dir.to_string();
+        self.read_logs_with_prefix(&prefix).await
+    }
+
+    async fn read_logs_with_prefix(
+        &mut self,
+        prefix: &str,
+    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+        let all_logs = self.s3.list_all_log_records_with_prefix(prefix).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
         for log in all_logs {
             out.push(self.cache.verify_record(&self.s3, log).await?);
         }
         Ok(out)
+    }
+
+    /// Read and verify successful withdrawal records in `dir`.
+    ///
+    /// This excludes rejected withdrawal requests, which do not represent
+    /// Guardian approval events and are not inputs to the monitor state machine.
+    pub async fn read_successful_withdrawals_in_dir(
+        &mut self,
+        dir: &S3HourScopedDirectory,
+    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+        let prefix = format!("{dir}{}", WithdrawalLogMessage::SUCCESS_OBJECT_KEY_PREFIX);
+        self.read_logs_with_prefix(&prefix).await
     }
 
     /// The session's verified guardian info. Served from the session cache, which
