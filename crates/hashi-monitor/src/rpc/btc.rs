@@ -16,6 +16,7 @@ use hashi_types::guardian::time_utils::UnixSeconds;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::debug;
+use tracing::info;
 use tracing::warn;
 
 use crate::config::Config;
@@ -219,8 +220,16 @@ impl HttpJsonRpcTransport {
         txids: &[Txid],
     ) -> anyhow::Result<HashMap<Txid, Option<UnixSeconds>>> {
         let mut confirmations = HashMap::with_capacity(txids.len());
-        for chunk in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE) {
+        for (batch_index, chunk) in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).enumerate() {
             confirmations.extend(self.lookup_confirmation_batch(chunk)?);
+            let processed_txids = ((batch_index + 1) * HTTP_JSON_RPC_BATCH_SIZE).min(txids.len());
+            if processed_txids % 200 == 0 || processed_txids == txids.len() {
+                info!(
+                    processed_txids,
+                    total_txids = txids.len(),
+                    "bitcoin confirmation lookup progress"
+                );
+            }
         }
         Ok(confirmations)
     }

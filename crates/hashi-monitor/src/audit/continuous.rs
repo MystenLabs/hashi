@@ -11,7 +11,7 @@ use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::now_unix_seconds;
-use crate::domain::readable_unix_seconds;
+use crate::domain::utc_timestamp;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
 // TODO: Consider switching to a streaming API
@@ -60,7 +60,9 @@ impl ContinuousAuditor {
         let cur_time = now_unix_seconds();
         anyhow::ensure!(
             start <= cur_time,
-            "start is in the future: start={start} > cur_time={cur_time}"
+            "start is in the future: start={} > current_time={}",
+            utc_timestamp(start),
+            utc_timestamp(cur_time),
         );
         let audit_window = ContinuousAuditWindow::new(cfg, start);
         let cursors = Cursors {
@@ -112,11 +114,11 @@ impl ContinuousAuditor {
         let progress = self.inner.progress_watermarks(&self.window);
         tracing::info!(
             "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  verified_up_to_withdrawals={}\n  verified_up_to_deposits={}\n  restart_start={}",
-            readable_unix_seconds(self.inner.get_guardian_cursor()),
-            readable_unix_seconds(self.inner.get_sui_cursor()),
-            readable_unix_seconds(progress.verified_up_to_withdrawals),
-            readable_unix_seconds(progress.verified_up_to_deposits),
-            readable_unix_seconds(progress.restart_start),
+            utc_timestamp(self.inner.get_guardian_cursor()),
+            utc_timestamp(self.inner.get_sui_cursor()),
+            utc_timestamp(progress.verified_up_to_withdrawals),
+            utc_timestamp(progress.verified_up_to_deposits),
+            utc_timestamp(progress.restart_start),
         );
     }
 

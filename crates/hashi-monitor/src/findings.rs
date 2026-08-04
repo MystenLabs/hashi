@@ -3,6 +3,7 @@
 
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventType;
+use crate::domain::utc_timestamp;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use std::fmt;
 
@@ -67,6 +68,32 @@ impl MonitorFinding {
 
 impl fmt::Display for MonitorFinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::InvalidEventAdded(message) => {
+                write!(f, "InvalidEventAdded(message={message})")
+            }
+            Self::EventOccurredAfterDeadline {
+                event,
+                relation,
+                deadline,
+                occurred_at,
+            } => write!(
+                f,
+                "EventOccurredAfterDeadline(event={event}, relation={relation:?}, deadline={}, occurred_at={})",
+                utc_timestamp(*deadline),
+                utc_timestamp(*occurred_at),
+            ),
+            Self::ExpectedEventMissing {
+                event_type,
+                relation,
+                deadline,
+                cursor,
+            } => write!(
+                f,
+                "ExpectedEventMissing(event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
+                utc_timestamp(*deadline),
+                utc_timestamp(*cursor),
+            ),
+        }
     }
 }

@@ -34,7 +34,7 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
-use crate::domain::readable_unix_seconds;
+use crate::domain::utc_timestamp;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
@@ -174,7 +174,7 @@ impl SuiEventsPoller {
         tracing::info!(
             start_checkpoint,
             end_checkpoint,
-            cursor = %readable_unix_seconds(self.cursor_seconds),
+            cursor = %utc_timestamp(self.cursor_seconds),
             events = events.len(),
             "completed Sui event range"
         );

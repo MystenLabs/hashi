@@ -17,7 +17,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sui-rpc.workspace = true
 sui-sdk-types.workspace = true
-time = "0.3"
+time = { version = "0.3", features = ["parsing"] }
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true

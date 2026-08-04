@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::Subcommand;
 use hashi_monitor::domain::now_unix_seconds;
+use hashi_monitor::domain::parse_utc_timestamp;
 
 #[derive(Debug, Parser)]
 #[command(name = "hashi-monitor")]
@@ -23,12 +24,12 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
 
-        /// Start of guardian audit window, as unix seconds.
-        #[arg(long)]
+        /// Start of guardian audit window as UTC, for example 2026-08-04T19:00:00Z.
+        #[arg(long, value_parser = parse_utc_timestamp)]
         start: u64,
 
-        /// End of guardian audit window, as unix seconds. Defaults to current time.
-        #[arg(long)]
+        /// End of guardian audit window as UTC. Defaults to the current time.
+        #[arg(long, value_parser = parse_utc_timestamp)]
         end: Option<u64>,
     },
     /// Run continuous monitoring on guardian timeline.
@@ -37,8 +38,8 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
 
-        /// Start of guardian audit period, as unix seconds.
-        #[arg(long)]
+        /// Start of guardian audit period as UTC, for example 2026-08-04T19:00:00Z.
+        #[arg(long, value_parser = parse_utc_timestamp)]
         start: u64,
     },
 }

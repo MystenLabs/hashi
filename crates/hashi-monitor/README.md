@@ -34,7 +34,6 @@ such a finding as conclusive.
 - User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
 - Sui withdrawal events are polled from `withdrawal_predecessor_lookback`
   seconds before the guardian window to validate E2 predecessor constraints.
-- Deposit events are polled only from the start of the guardian window.
 - Orphan E1 findings are currently still reported when E1 falls in the user window.
 - Deposits are audited over the derived Sui range rather than gated by the
   withdrawal audit-window logic.
@@ -54,7 +53,7 @@ export HASHI_BITCOIN_RPC_URL="https://your-signet-json-rpc-endpoint"
 
 cargo run -p hashi-monitor -- continuous \
   --config audit.testnet.yaml \
-  --start "$(($(date +%s) - 3600))"
+  --start 2026-08-04T19:00:00Z
 ```
 
 Run this from `crates/hashi-monitor`, or prefix the configuration path with
@@ -63,13 +62,19 @@ bypass is temporary and is described below.
 
 ### Batch audit
 ```bash
-cargo run -p hashi-monitor -- batch --config audit.sample.yaml --start 1700000000 --end 1700003600
+cargo run -p hashi-monitor -- batch \
+  --config audit.sample.yaml \
+  --start 2026-08-04T18:00:00Z \
+  --end 2026-08-04T19:00:00Z
 ```
-`--end` defaults to the current time if omitted.
+CLI timestamps use whole-second UTC RFC 3339 (`YYYY-MM-DDTHH:MM:SSZ`). `--end`
+defaults to the current time if omitted.
 
 ### Continuous monitoring
 ```bash
-cargo run -p hashi-monitor -- continuous --config audit.sample.yaml --start 1700000000
+cargo run -p hashi-monitor -- continuous \
+  --config audit.sample.yaml \
+  --start 2026-08-04T19:00:00Z
 ```
 
 ## Config

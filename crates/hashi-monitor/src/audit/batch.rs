@@ -9,7 +9,7 @@ use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::now_unix_seconds;
-use crate::domain::readable_unix_seconds;
+use crate::domain::utc_timestamp;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
 const NUM_ITERATIONS_BEFORE_FAIL: u8 = 5;
@@ -82,12 +82,16 @@ impl BatchAuditor {
     pub async fn new(cfg: &Config, start: UnixSeconds, end: UnixSeconds) -> anyhow::Result<Self> {
         anyhow::ensure!(
             start <= end,
-            "invalid time range: start={start} > end={end}"
+            "invalid time range: start={} > end={}",
+            utc_timestamp(start),
+            utc_timestamp(end),
         );
         let cur_time = now_unix_seconds();
         anyhow::ensure!(
             end <= cur_time,
-            "end is in the future: end={end} > cur_time={cur_time}"
+            "end is in the future: end={} > current_time={}",
+            utc_timestamp(end),
+            utc_timestamp(cur_time),
         );
 
         let audit_window = BatchAuditWindow::new(cfg, start, end, cur_time);
@@ -95,6 +99,15 @@ impl BatchAuditor {
             sui: audit_window.sui_start,
             guardian: audit_window.guardian_start,
         };
+        tracing::info!(
+            "starting batch audit:\n  requested_start={}\n  requested_end={}\n  sui_start={}\n  sui_target_end={}\n  guardian_start={}\n  guardian_target_end={}",
+            utc_timestamp(audit_window.user_start),
+            utc_timestamp(audit_window.user_end),
+            utc_timestamp(audit_window.sui_start),
+            utc_timestamp(audit_window.sui_end),
+            utc_timestamp(audit_window.guardian_start),
+            utc_timestamp(audit_window.guardian_end),
+        );
         Ok(Self {
             inner: AuditorCore::new(cfg, cursors).await?,
             audit_window,
@@ -141,23 +154,40 @@ impl BatchAuditor {
                 guardian_cursor_moved = true;
             }
 
+            if should_poll_guardian && !guardian_cursor_moved {
+                let ready_at = self.inner.get_guardian_next_partition_ready_at();
+                if now_unix_seconds() < ready_at {
+                    anyhow::bail!(
+                        "Guardian data is not finalized for the requested batch range:\n  \
+                         guardian_complete_through={}\n  requested_end={}\n  \
+                         next_partition_ready_at={}\nRerun at or after {}, or choose an end \
+                         time at or before {}.",
+                        utc_timestamp(self.inner.get_guardian_cursor()),
+                        utc_timestamp(self.audit_window.guardian_end),
+                        utc_timestamp(ready_at),
+                        utc_timestamp(ready_at),
+                        utc_timestamp(self.inner.get_guardian_cursor()),
+                    );
+                }
+            }
+
             if !sui_cursor_moved && !guardian_cursor_moved {
                 stalled_iterations = stalled_iterations.saturating_add(1);
                 if stalled_iterations >= NUM_ITERATIONS_BEFORE_FAIL {
                     anyhow::bail!(
-                        "batch polling cursors did not reach their targets \
-                         (sui={}/{}, guardian={}/{})",
-                        self.inner.get_sui_cursor(),
-                        self.audit_window.sui_end,
-                        self.inner.get_guardian_cursor(),
-                        self.audit_window.guardian_end,
+                        "batch polling stalled:\n  sui_cursor={}\n  sui_target={}\n  \
+                         guardian_cursor={}\n  guardian_target={}",
+                        utc_timestamp(self.inner.get_sui_cursor()),
+                        utc_timestamp(self.audit_window.sui_end),
+                        utc_timestamp(self.inner.get_guardian_cursor()),
+                        utc_timestamp(self.audit_window.guardian_end),
                     );
                 }
             } else {
                 stalled_iterations = 0;
             }
         }
-        tracing::info!("all desired cursor endpoints reached");
+        tracing::info!("all Sui and Guardian cursor endpoints reached");
         Ok(())
     }
 
@@ -167,14 +197,14 @@ impl BatchAuditor {
 
         tracing::info!(
             "finished batch polling:\n  start={}\n  end={}\n  sui_start={}\n  sui_target_end={}\n  sui_cursor={}\n  guardian_start={}\n  guardian_target_end={}\n  guardian_cursor={}",
-            readable_unix_seconds(self.audit_window.user_start),
-            readable_unix_seconds(self.audit_window.user_end),
-            readable_unix_seconds(self.audit_window.sui_start),
-            readable_unix_seconds(self.audit_window.sui_end),
-            readable_unix_seconds(self.inner.get_sui_cursor()),
-            readable_unix_seconds(self.audit_window.guardian_start),
-            readable_unix_seconds(self.audit_window.guardian_end),
-            readable_unix_seconds(self.inner.get_guardian_cursor()),
+            utc_timestamp(self.audit_window.user_start),
+            utc_timestamp(self.audit_window.user_end),
+            utc_timestamp(self.audit_window.sui_start),
+            utc_timestamp(self.audit_window.sui_end),
+            utc_timestamp(self.inner.get_sui_cursor()),
+            utc_timestamp(self.audit_window.guardian_start),
+            utc_timestamp(self.audit_window.guardian_end),
+            utc_timestamp(self.inner.get_guardian_cursor()),
         );
 
         // Fetch all BTC info
@@ -195,15 +225,15 @@ impl BatchAuditor {
 
         tracing::info!(
             "batch progress watermarks:\n  verified_up_to_withdrawals={}\n  verified_up_to_deposits={}\n  next_start={}",
-            readable_unix_seconds(progress.verified_up_to_withdrawals),
-            readable_unix_seconds(progress.verified_up_to_deposits),
-            readable_unix_seconds(progress.restart_start),
+            utc_timestamp(progress.verified_up_to_withdrawals),
+            utc_timestamp(progress.verified_up_to_deposits),
+            utc_timestamp(progress.restart_start),
         );
 
         if !self.violation_found {
             tracing::info!(
                 "audit passed. run next audit at {}",
-                readable_unix_seconds(progress.restart_start)
+                utc_timestamp(progress.restart_start)
             );
         } else {
             tracing::warn!("audit produced findings: see logs");

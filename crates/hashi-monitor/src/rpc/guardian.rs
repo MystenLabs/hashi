@@ -79,6 +79,11 @@ impl GuardianWithdrawalsPoller {
         self.cursor.to_unix_seconds()
     }
 
+    /// Time after which the next unread hourly partition is considered complete.
+    pub fn next_partition_ready_at(&self) -> UnixSeconds {
+        self.cursor.write_completion_time()
+    }
+
     /// Poll one hourly Guardian S3 directory and advance to the next directory.
     pub async fn poll_one_hour(&mut self) -> anyhow::Result<PollOutcome> {
         if now_timestamp_secs() < self.cursor.write_completion_time() {

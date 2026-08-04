@@ -33,22 +33,21 @@ pub fn now_unix_seconds() -> UnixSeconds {
         .as_secs()
 }
 
-/// Unix seconds rendered together with their UTC wall-clock time.
-pub struct ReadableUnixSeconds(UnixSeconds);
+/// Unix seconds rendered in the monitor's canonical UTC timestamp format.
+pub struct UtcTimestamp(UnixSeconds);
 
-pub fn readable_unix_seconds(timestamp: UnixSeconds) -> ReadableUnixSeconds {
-    ReadableUnixSeconds(timestamp)
+pub fn utc_timestamp(timestamp: UnixSeconds) -> UtcTimestamp {
+    UtcTimestamp(timestamp)
 }
 
-impl fmt::Display for ReadableUnixSeconds {
+impl fmt::Display for UtcTimestamp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Ok(timestamp) = i64::try_from(self.0)
             && let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(timestamp)
         {
             return write!(
                 formatter,
-                "{}({:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z)",
-                self.0,
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
                 datetime.year(),
                 u8::from(datetime.month()),
                 datetime.day(),
@@ -58,14 +57,60 @@ impl fmt::Display for ReadableUnixSeconds {
             );
         }
 
-        self.0.fmt(formatter)
+        formatter.write_str("<invalid UTC timestamp>")
     }
+}
+
+/// Parse the monitor's sole public timestamp format: whole-second UTC RFC 3339.
+pub fn parse_utc_timestamp(value: &str) -> Result<UnixSeconds, String> {
+    if !value.ends_with('Z') {
+        return Err(
+            "timestamp must be UTC and end in `Z` (for example, 2026-08-04T19:00:00Z)".to_string(),
+        );
+    }
+
+    let datetime =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .map_err(|error| format!("invalid UTC timestamp `{value}`: {error}"))?;
+    let timestamp = UnixSeconds::try_from(datetime.unix_timestamp())
+        .map_err(|_| "timestamp must not precede 1970-01-01T00:00:00Z".to_string())?;
+    if utc_timestamp(timestamp).to_string() != value {
+        return Err(
+            "timestamp must use exactly `YYYY-MM-DDTHH:MM:SSZ` with no fractional seconds"
+                .to_string(),
+        );
+    }
+
+    Ok(timestamp)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorEvent {
     Withdrawal(MonitorWithdrawalEvent),
     Deposit(MonitorDepositEvent),
+}
+
+impl fmt::Display for MonitorEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Withdrawal(event) => write!(
+                formatter,
+                "Withdrawal(type={:?}, wid={}, timestamp={}, btc_txid={})",
+                event.event_type,
+                event.wid,
+                utc_timestamp(event.timestamp_secs),
+                event.btc_txid,
+            ),
+            Self::Deposit(event) => write!(
+                formatter,
+                "Deposit(type={:?}, timestamp={}, btc_txid={}, btc_vout={})",
+                event.event_type,
+                utc_timestamp(event.timestamp_secs),
+                event.btc_txid,
+                event.btc_vout,
+            ),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -175,4 +220,23 @@ impl Cursors {
 pub enum PollOutcome {
     CursorAdvanced(Vec<MonitorEvent>),
     CursorUnmoved,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utc_timestamp_round_trip() {
+        let input = "2026-08-04T19:45:38Z";
+        let timestamp = parse_utc_timestamp(input).unwrap();
+        assert_eq!(utc_timestamp(timestamp).to_string(), input);
+    }
+
+    #[test]
+    fn timestamp_parser_requires_canonical_utc_format() {
+        assert!(parse_utc_timestamp("1785872738").is_err());
+        assert!(parse_utc_timestamp("2026-08-04T19:45:38+00:00").is_err());
+        assert!(parse_utc_timestamp("2026-08-04T19:45:38.000Z").is_err());
+    }
 }

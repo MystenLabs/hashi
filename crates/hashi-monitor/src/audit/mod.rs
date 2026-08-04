@@ -56,7 +56,7 @@ pub fn log_findings(source: &'static str, phase: &'static str, findings: &[Monit
                 phase,
                 %category,
                 total = findings.len(),
-                ?finding,
+                finding = %finding,
                 "monitor finding"
             ),
             FindingCategory::Liveness => tracing::warn!(
@@ -64,7 +64,7 @@ pub fn log_findings(source: &'static str, phase: &'static str, findings: &[Monit
                 phase,
                 %category,
                 total = findings.len(),
-                ?finding,
+                finding = %finding,
                 "monitor finding"
             ),
         }
@@ -320,5 +320,9 @@ impl AuditorCore {
 
     fn get_guardian_cursor(&self) -> UnixSeconds {
         self.guardian_poller.cursor_seconds()
+    }
+
+    fn get_guardian_next_partition_ready_at(&self) -> UnixSeconds {
+        self.guardian_poller.next_partition_ready_at()
     }
 }
