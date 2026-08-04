@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::config::Config;
 
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
-const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(250);
+const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
 
 pub struct BtcRpcClient {

@@ -5,7 +5,8 @@
 # the Signet JSON-RPC endpoint comes from HASHI_BITCOIN_RPC_URL.
 
 next_event_delays:
-  - [E1HashiApproved, 600]
+  # Active-testnet Guardian approvals normally arrive 13-15 minutes after E1.
+  - [E1HashiApproved, 1200]
   - [E2GuardianApproved, 86400]
 
 clock_skew: 300
