@@ -20,6 +20,7 @@ pub mod communication;
 pub mod config;
 pub mod constants;
 pub mod db;
+pub(crate) mod deposit_tracker;
 pub mod deposits;
 pub mod grpc;
 pub mod guardian_limiter;
@@ -741,9 +742,12 @@ impl Hashi {
                     .join("btc-monitor"),
             )
             .build();
-        let (client, service) =
-            crate::btc_monitor::monitor::Monitor::run(monitor_config, self.metrics.clone())
-                .expect("Failed to start BtcMonitor");
+        let (client, service) = crate::btc_monitor::monitor::Monitor::run_with_tracker(
+            monitor_config,
+            self.metrics.clone(),
+            self.onchain_state().deposit_tracker().clone(),
+        )
+        .expect("Failed to start BtcMonitor");
         self.btc_monitor
             .set(client)
             .map_err(|_| anyhow!("BtcMonitor already initialized"))?;

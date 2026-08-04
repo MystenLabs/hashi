@@ -175,6 +175,7 @@ async fn ensure_bootstrapped(
         .as_ref()
         .map(|cap| (cap.version, cap.package));
     state.replace_hashi_state(hashi);
+    state.reconcile_deposit_tracker();
     if let Some((version, package)) = latest_package {
         state.add_package_version(version, package);
     }
@@ -453,6 +454,15 @@ fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<apply::E
                 // The apply layer already extended the version map
                 // under the state guard; this is the operator signal.
                 tracing::info!(%package, version, "package upgraded; version map extended");
+            }
+            apply::Effect::DepositRequestUpserted {
+                request_id,
+                outpoint,
+            } => {
+                state.deposit_tracker().upsert_request(request_id, outpoint);
+            }
+            apply::Effect::DepositRequestRemoved(request_id) => {
+                state.deposit_tracker().remove_request(&request_id);
             }
             apply::Effect::WithdrawalTxnFullySigned(txn) => {
                 withdrawal_txn_fully_signed(state, timestamp_ms, &txn);
