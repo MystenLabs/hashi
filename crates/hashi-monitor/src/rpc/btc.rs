@@ -223,7 +223,7 @@ impl HttpJsonRpcTransport {
         for (batch_index, chunk) in txids.chunks(HTTP_JSON_RPC_BATCH_SIZE).enumerate() {
             confirmations.extend(self.lookup_confirmation_batch(chunk)?);
             let processed_txids = ((batch_index + 1) * HTTP_JSON_RPC_BATCH_SIZE).min(txids.len());
-            if processed_txids % 200 == 0 || processed_txids == txids.len() {
+            if processed_txids.is_multiple_of(200) || processed_txids == txids.len() {
                 info!(
                     processed_txids,
                     total_txids = txids.len(),
