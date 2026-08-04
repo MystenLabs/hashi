@@ -35,6 +35,7 @@ use tracing::warn;
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 /// Delay between application-level retries of an immutable S3 log write.
 const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+// TODO(testnet-wipe): Remove this escape hatch after the planned testnet wipe.
 /// Temporary testnet escape hatch for logs whose legacy seven-day locks expired.
 const SKIP_S3_OBJECT_LOCK_CHECK_ENV: &str = "HASHI_SKIP_S3_OBJECT_LOCK_CHECK";
 static SKIP_S3_OBJECT_LOCK_CHECK_WARNING: Once = Once::new();
