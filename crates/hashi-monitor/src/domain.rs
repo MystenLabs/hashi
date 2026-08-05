@@ -19,6 +19,7 @@ use std::fmt;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use bitcoin::OutPoint;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -154,12 +155,48 @@ impl fmt::Display for MonitorEvent {
             ),
             Self::Deposit(event) => write!(
                 formatter,
-                "Deposit(type={:?}, timestamp={}, btc_txid={}, btc_vout={})",
+                "Deposit(type={:?}, deposit_id={}, timestamp={})",
                 event.event_type,
+                event.deposit_id,
                 utc_timestamp(event.timestamp_secs),
-                event.btc_txid,
-                event.btc_vout,
             ),
+        }
+    }
+}
+
+/// Stable identifier for a monitored deposit: its Bitcoin outpoint.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DepositId(OutPoint);
+
+impl DepositId {
+    pub fn new(txid: Txid, vout: u32) -> Self {
+        Self(OutPoint { txid, vout })
+    }
+
+    pub fn txid(self) -> Txid {
+        self.0.txid
+    }
+}
+
+impl fmt::Display for DepositId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Correlation identifier for an event in the monitor's withdrawal or deposit model.
+/// This is not a chain-native event ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MonitorEventId {
+    Withdrawal(WithdrawalID),
+    Deposit(DepositId),
+}
+
+impl fmt::Display for MonitorEventId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Withdrawal(wid) => write!(formatter, "wid={wid}"),
+            Self::Deposit(deposit_id) => write!(formatter, "deposit_id={deposit_id}"),
         }
     }
 }
@@ -201,8 +238,7 @@ pub enum WithdrawalEventType {
 pub struct MonitorDepositEvent {
     pub event_type: DepositEventType,
     pub timestamp_secs: UnixSeconds,
-    pub btc_txid: Txid,
-    pub btc_vout: u32,
+    pub deposit_id: DepositId,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]

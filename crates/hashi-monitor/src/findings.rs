@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::domain::MonitorEvent;
+use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::human_duration;
 use crate::domain::utc_timestamp;
@@ -40,6 +41,7 @@ pub enum MonitorFinding {
         occurred_at: UnixSeconds, // same as event.timestamp
     },
     ExpectedEventMissing {
+        event_id: MonitorEventId,
         event_type: MonitorEventType,
         relation: EventRelation,
         deadline: UnixSeconds,
@@ -86,13 +88,14 @@ impl fmt::Display for MonitorFinding {
                 human_duration(occurred_at.saturating_sub(*deadline)),
             ),
             Self::ExpectedEventMissing {
+                event_id,
                 event_type,
                 relation,
                 deadline,
                 cursor,
             } => write!(
                 f,
-                "ExpectedEventMissing(event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
+                "ExpectedEventMissing({event_id}, event_type={event_type:?}, relation={relation:?}, deadline={}, cursor={})",
                 utc_timestamp(*deadline),
                 utc_timestamp(*cursor),
             ),

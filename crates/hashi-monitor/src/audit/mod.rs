@@ -16,6 +16,7 @@
 //! the withdrawal audit window.
 
 use crate::domain::Cursors;
+use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
@@ -40,7 +41,6 @@ use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 pub use batch::BatchAuditor;
-use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -85,7 +85,7 @@ pub struct AuditorCore {
     cfg: Config,
     // mutable
     pending_withdrawals: HashMap<WithdrawalID, WithdrawalStateMachine>,
-    pending_deposits: HashMap<(Txid, u32), DepositStateMachine>,
+    pending_deposits: HashMap<DepositId, DepositStateMachine>,
     guardian_poller: GuardianWithdrawalsPoller,
     sui_poller: SuiEventsPoller,
     btc_client: BtcRpcClient,
@@ -122,12 +122,15 @@ impl AuditorCore {
     }
 
     fn ingest_deposit(&mut self, event: MonitorDepositEvent) -> Vec<MonitorFinding> {
-        let outpoint = (event.btc_txid, event.btc_vout);
-        match self.pending_deposits.entry(outpoint) {
-            // Duplicate DepositApproved events are legitimate: a pending deposit
-            // must be approved again after committee rotation. Sui events arrive
-            // in ascending order, so retain the first approval; it gives the
-            // strictest check that Bitcoin preceded the committee approval.
+        let deposit_id = event.deposit_id;
+        match self.pending_deposits.entry(deposit_id) {
+            // Multiple DepositApproved events may legitimately share an outpoint:
+            // one request can be reapproved after committee rotation, and the
+            // anti-griefing design permits distinct pending requests for the same
+            // UTXO. This monitor checks only the shared Bitcoin evidence, so one
+            // state machine per deposit ID is sufficient. Sui events arrive in
+            // ascending order; retaining the first approval gives the strictest
+            // check that Bitcoin preceded committee approval.
             // Restore duplicate detection if this monitor returns to the unique
             // DepositConfirmed event.
             Entry::Occupied(_) => {}
@@ -271,15 +274,15 @@ impl AuditorCore {
         }
 
         let mut completed_deposits = Vec::new();
-        for ((txid, vout), sm) in &mut self.pending_deposits {
+        for (deposit_id, sm) in &mut self.pending_deposits {
             if !sm.is_expecting_events() {
-                tracing::debug!(%txid, vout, "deposit flow is complete");
-                completed_deposits.push((*txid, *vout));
+                tracing::debug!(%deposit_id, "deposit flow is complete");
+                completed_deposits.push(*deposit_id);
             }
         }
 
-        for outpoint in completed_deposits {
-            self.pending_deposits.remove(&outpoint);
+        for deposit_id in completed_deposits {
+            self.pending_deposits.remove(&deposit_id);
         }
     }
 
@@ -293,7 +296,7 @@ impl AuditorCore {
             if let Some(e2) = sm.get(WithdrawalEventType::E2GuardianApproved) {
                 verified_up_to_withdrawals = verified_up_to_withdrawals.min(e2.timestamp_secs);
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     wid = %sm.wid(),
                     "in-window withdrawal missing guardian anchor; skipping in verified_up_to computation"
                 );

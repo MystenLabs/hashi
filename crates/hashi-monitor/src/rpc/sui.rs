@@ -29,6 +29,7 @@ use sui_sdk_types::Address;
 
 use crate::config::SuiConfig;
 use crate::domain::DepositEventType;
+use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
@@ -435,8 +436,7 @@ impl SuiEventsPoller {
                 Some(MonitorEvent::Deposit(MonitorDepositEvent {
                     event_type: DepositEventType::E2HashiApproved,
                     timestamp_secs: unix_millis_to_seconds(event.approved_timestamp_ms),
-                    btc_txid: event.utxo.id.txid.into(),
-                    btc_vout: event.utxo.id.vout,
+                    deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
                 }))
             }
             Some(_) | None => None,
