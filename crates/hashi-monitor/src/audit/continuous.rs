@@ -10,8 +10,8 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::WithdrawalEventType;
 use crate::domain::now_unix_seconds;
+use crate::domain::utc_timestamp;
 use hashi_types::guardian::time_utils::UnixSeconds;
 
 // TODO: Consider switching to a streaming API
@@ -29,7 +29,8 @@ pub struct ContinuousAuditWindow {
 }
 
 /// A continuous auditor that runs indefinitely processing events as they arrive.
-/// Constructors accept a start time as input that acts as a starting point for the auditor.
+/// Its start time is on the Guardian timeline; Sui polling begins at the
+/// configured predecessor lookback before that boundary.
 pub struct ContinuousAuditor {
     pub inner: AuditorCore,
     pub window: ContinuousAuditWindow,
@@ -43,10 +44,7 @@ impl AuditWindow for ContinuousAuditWindow {
 
 impl ContinuousAuditWindow {
     pub fn new(cfg: &Config, start: UnixSeconds) -> Self {
-        let e1_e2_delay_secs = cfg
-            .next_event_delay(WithdrawalEventType::E1HashiApproved)
-            .expect("should be Some");
-        let sui_start = start.saturating_sub(e1_e2_delay_secs); // guardian_e2@{start} might match sui_e1@{start-e1_e2_delay_secs}
+        let sui_start = start.saturating_sub(cfg.withdrawal_predecessor_lookback);
         let guardian_start = start;
 
         Self {
@@ -62,7 +60,9 @@ impl ContinuousAuditor {
         let cur_time = now_unix_seconds();
         anyhow::ensure!(
             start <= cur_time,
-            "start is in the future: start={start} > cur_time={cur_time}"
+            "start is in the future: start={} > current_time={}",
+            utc_timestamp(start),
+            utc_timestamp(cur_time),
         );
         let audit_window = ContinuousAuditWindow::new(cfg, start);
         let cursors = Cursors {
@@ -82,14 +82,15 @@ impl ContinuousAuditor {
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
-        if let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui().await? {
+        let up_to = now_unix_seconds();
+        while let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui(up_to).await? {
             self.ingest_batch(events);
         }
         Ok(())
     }
 
     async fn tick_guardian(&mut self) -> anyhow::Result<()> {
-        if let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
+        while let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
             self.ingest_batch(events);
         }
         Ok(())
@@ -112,16 +113,66 @@ impl ContinuousAuditor {
 
         let progress = self.inner.progress_watermarks(&self.window);
         tracing::info!(
-            guardian_cursor = self.inner.get_guardian_cursor(),
-            sui_cursor = self.inner.get_sui_cursor(),
-            verified_up_to_withdrawals = progress.verified_up_to_withdrawals,
-            verified_up_to_deposits = progress.verified_up_to_deposits,
-            restart_start = progress.restart_start,
-            "continuous progress checkpoint"
+            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  verified_up_to_withdrawals={}\n  verified_up_to_deposits={}\n  restart_start={}",
+            utc_timestamp(self.inner.get_guardian_cursor()),
+            utc_timestamp(self.inner.get_sui_cursor()),
+            utc_timestamp(progress.verified_up_to_withdrawals),
+            utc_timestamp(progress.verified_up_to_deposits),
+            utc_timestamp(progress.restart_start),
         );
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        tracing::info!(
+            "starting continuous audit:\n  requested_start={}\n  sui_start={}\n  guardian_start={}",
+            utc_timestamp(self.window.user_start),
+            utc_timestamp(self.window.sui_start),
+            utc_timestamp(self.window.guardian_start),
+        );
+        tracing::info!(
+            cursor = %utc_timestamp(self.inner.get_sui_cursor()),
+            "starting initial Sui catch-up"
+        );
+        if let Err(error) = self.tick_sui().await {
+            tracing::warn!(
+                source = "sui",
+                ?error,
+                "initial catch-up failed; continuing"
+            );
+        } else {
+            tracing::info!(
+                cursor = %utc_timestamp(self.inner.get_sui_cursor()),
+                "finished initial Sui catch-up"
+            );
+        }
+        tracing::info!(
+            cursor = %utc_timestamp(self.inner.get_guardian_cursor()),
+            "starting initial Guardian catch-up"
+        );
+        if let Err(error) = self.tick_guardian().await {
+            tracing::warn!(
+                source = "guardian",
+                ?error,
+                "initial catch-up failed; continuing"
+            );
+        } else {
+            tracing::info!(
+                cursor = %utc_timestamp(self.inner.get_guardian_cursor()),
+                "finished initial Guardian catch-up"
+            );
+        }
+        tracing::info!("starting initial Bitcoin confirmation lookups");
+        if let Err(error) = self.tick_btc() {
+            tracing::warn!(
+                source = "btc",
+                ?error,
+                "initial catch-up failed; continuing"
+            );
+        } else {
+            tracing::info!("finished initial Bitcoin confirmation lookups");
+        }
+        self.tick_state_checks_and_gc();
+
         let mut sui_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut guardian_ticker = tokio::time::interval(POLL_INTERVAL);
         let mut btc_ticker = tokio::time::interval(POLL_INTERVAL);
@@ -132,7 +183,8 @@ impl ContinuousAuditor {
         btc_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         state_checks_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Consume the immediate first tick and then run on a stable cadence.
+        // The initial catch-up above handled startup; consume each immediate
+        // interval tick so the next pass runs on the configured cadence.
         sui_ticker.tick().await;
         guardian_ticker.tick().await;
         btc_ticker.tick().await;

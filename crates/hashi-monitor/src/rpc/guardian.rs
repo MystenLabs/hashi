@@ -6,6 +6,7 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
+use crate::domain::utc_timestamp;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
 use hashi_types::guardian::LogMessageV1;
@@ -17,7 +18,6 @@ use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
 use tracing::debug;
-
 impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {
     type Error = anyhow::Error;
 
@@ -78,13 +78,20 @@ impl GuardianWithdrawalsPoller {
         self.cursor.to_unix_seconds()
     }
 
-    /// Polls the Guardian S3 bucket for one hour worth of events.
-    /// A more aggressive fetch, e.g., one day at a time, can also be done if needed.
+    /// Time after which the next unread hourly partition is considered complete.
+    pub fn next_partition_ready_at(&self) -> UnixSeconds {
+        self.cursor.write_completion_time()
+    }
+
+    /// Poll one hourly Guardian S3 directory and advance to the next directory.
     pub async fn poll_one_hour(&mut self) -> anyhow::Result<PollOutcome> {
         if now_timestamp_secs() < self.cursor.write_completion_time() {
             return Ok(PollOutcome::CursorUnmoved);
         }
 
+        let start = self.cursor.to_unix_seconds();
+        let next_cursor = self.cursor.next_dir();
+        let end = next_cursor.to_unix_seconds();
         let verified_logs = self
             .reader
             .read_successful_withdrawals_in_dir(&self.cursor)
@@ -101,7 +108,14 @@ impl GuardianWithdrawalsPoller {
             .map(MonitorEvent::Withdrawal)
             .collect::<Vec<MonitorEvent>>();
 
-        self.cursor = self.cursor.next_dir();
+        self.cursor = next_cursor;
+        tracing::info!(
+            start = %utc_timestamp(start),
+            end = %utc_timestamp(end),
+            cursor = %utc_timestamp(self.cursor.to_unix_seconds()),
+            events = withdrawal_events.len(),
+            "completed Guardian event range"
+        );
         Ok(PollOutcome::CursorAdvanced(withdrawal_events))
     }
 }

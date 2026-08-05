@@ -7,8 +7,10 @@ use crate::audit::AuditWindow;
 use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::DepositEventType;
+use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
+use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
@@ -257,9 +259,8 @@ impl WithdrawalStateMachine {
                 WithdrawalEventType::E3BtcConfirmed => match self.btc_checked_at {
                     Some(checked_at) => checked_at,
                     None => {
-                        tracing::warn!(
-                            "callers should avoid reaching this branch by calling try_fetch_btc_tx before"
-                        );
+                        // Bitcoin and state checks have independent schedules.
+                        // Wait for the first lookup before evaluating absence.
                         continue;
                     }
                 },
@@ -267,6 +268,7 @@ impl WithdrawalStateMachine {
             };
             if *deadline <= cursor {
                 out.push(MonitorFinding::ExpectedEventMissing {
+                    event_id: MonitorEventId::Withdrawal(self.wid),
                     event_type: MonitorEventType::Withdrawal(*event_type),
                     relation: *relation,
                     deadline: *deadline,
@@ -305,7 +307,11 @@ impl DepositStateMachine {
     }
 
     pub fn btc_txid(&self) -> Txid {
-        self.hashi_deposit_event.btc_txid
+        self.hashi_deposit_event.deposit_id.txid()
+    }
+
+    pub fn deposit_id(&self) -> DepositId {
+        self.hashi_deposit_event.deposit_id
     }
 
     pub fn hashi_deposit_event(&self) -> &MonitorDepositEvent {
@@ -325,7 +331,8 @@ impl DepositStateMachine {
         }
 
         let deadline = self.btc_event_expected_at;
-        let btc_txid = self.hashi_deposit_event.btc_txid;
+        let deposit_id = self.hashi_deposit_event.deposit_id;
+        let btc_txid = deposit_id.txid();
         let cur_time = now_unix_seconds();
 
         match btc_rpc_client.lookup_confirmation(btc_txid) {
@@ -333,8 +340,7 @@ impl DepositStateMachine {
                 self.btc_checked_at = Some(cur_time);
                 let e_btc = MonitorDepositEvent {
                     event_type: DepositEventType::E1BtcConfirmed,
-                    btc_txid,
-                    btc_vout: self.hashi_deposit_event.btc_vout,
+                    deposit_id,
                     timestamp_secs: block_time,
                 };
 
@@ -366,10 +372,8 @@ impl DepositStateMachine {
 
         // btc event not yet found
         let Some(cursor) = self.btc_checked_at else {
-            tracing::warn!(
-                txid = %self.hashi_deposit_event.btc_txid,
-                "callers should avoid this branch by calling try_fetch_btc_tx before violations"
-            );
+            // Bitcoin and state checks have independent schedules. Wait for
+            // the first lookup before evaluating absence.
             return Vec::new();
         };
 
@@ -379,6 +383,7 @@ impl DepositStateMachine {
         }
 
         vec![MonitorFinding::ExpectedEventMissing {
+            event_id: MonitorEventId::Deposit(self.hashi_deposit_event.deposit_id),
             event_type: MonitorEventType::Deposit(DepositEventType::E1BtcConfirmed),
             relation: EventRelation::Predecessor,
             deadline,
@@ -417,6 +422,7 @@ mod tests {
             ])
             .expect("valid intra-event delays"),
             clock_skew: 10,
+            withdrawal_predecessor_lookback: 60 * 60,
             guardian_s3: UnresolvedS3Config {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -462,8 +468,7 @@ mod tests {
         MonitorDepositEvent {
             event_type: DepositEventType::E2HashiDeposited,
             timestamp_secs: timestamp,
-            btc_txid: txid(fill),
-            btc_vout: 0,
+            deposit_id: DepositId::new(txid(fill), 0),
         }
     }
 
@@ -613,6 +618,7 @@ mod tests {
         assert_eq!(
             violations[0],
             MonitorFinding::ExpectedEventMissing {
+                event_id: MonitorEventId::Withdrawal(WithdrawalID::new([1; 32])),
                 event_type: MonitorEventType::Withdrawal(WithdrawalEventType::E2GuardianApproved),
                 relation: EventRelation::Successor,
                 deadline: 200,
@@ -681,6 +687,7 @@ mod tests {
         assert_eq!(
             violations[0],
             MonitorFinding::ExpectedEventMissing {
+                event_id: MonitorEventId::Deposit(DepositId::new(txid(8), 0)),
                 event_type: MonitorEventType::Deposit(DepositEventType::E1BtcConfirmed),
                 relation: EventRelation::Predecessor,
                 deadline: 110,
