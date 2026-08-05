@@ -155,12 +155,16 @@ async fn ensure_bootstrapped(
     if mirror.is_some() {
         return Ok(());
     }
+    // Always `Full` — this replaces the authoritative snapshot, and only
+    // a full scrape yields a seed to rebuild the mirror from.
     let (_, hashi, seed) = super::scrape_hashi(
         client.clone(),
         state.hashi_id(),
         state.package_id_original(),
+        super::ScrapeScope::Full,
     )
     .await?;
+    let seed = seed.context("a full scrape must produce a mirror seed")?;
     tracing::info!(
         floor = seed.floor,
         objects = seed.index.len(),

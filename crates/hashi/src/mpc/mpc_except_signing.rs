@@ -5,9 +5,8 @@ use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
-use crate::communication::send_each;
-use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
+use crate::communication::with_timeout_and_retry_budget;
 use crate::constants::is_production_sui_chain;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
@@ -91,6 +90,7 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
+use hashi_types::committee::ReducedWeight;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -109,10 +109,21 @@ const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed"
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
 const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
+/// Per-call budget for pulling AVID dispersal artifacts from a cert's signers.
+const AVID_RETRIEVAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+const AVID_RETRIEVAL_CALL_RETRIES: usize = 2;
+
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the first phase of batch AVSS keeps waiting for unanimity once the
+/// pessimistic fallback is already assured.
+const BATCH_AVSS_VOTES_GRACE: Duration = Duration::from_secs(90);
+
+/// Backstop on a dealer's whole collection, for the case where the stopping
+/// threshold is never reached.
+const DEALER_COLLECTION_CEILING: Duration = Duration::from_secs(240);
 
 type AvidEchoAndVote = (
     BLS12381Signature,
@@ -1332,23 +1343,23 @@ impl MpcManager {
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_DKG])
             .start_timer();
-        let results = send_to_many(
-            dealer_data.recipients.iter().copied(),
-            dealer_data.request,
-            |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
+        let request = Arc::new(dealer_data.request.clone());
+        let requests = dealer_data
+            .recipients
+            .iter()
+            .map(|addr| (*addr, Arc::clone(&request)))
+            .collect();
+        collect_dealer_signatures(
+            &mut aggregator,
+            requests,
+            dealer_data.required_reduced_weight,
+            Duration::ZERO,
+            p2p_channel,
+            MPC_LABEL_DKG,
+            metrics,
         )
         .await;
         drop(_timer);
-        for (addr, result) in results {
-            match result {
-                Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
-                        tracing::info!("Invalid signature from {:?}: {}", addr, e);
-                    }
-                }
-                Err(e) => tracing::info!("Failed to send message to {:?}: {}", addr, e),
-            }
-        }
         if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let dkg_cert = aggregator
                 .finish()
@@ -1364,6 +1375,16 @@ impl MpcManager {
                     MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
             drop(_timer);
+        } else {
+            tracing::warn!(
+                "Dealer: insufficient signatures ({} < {}); publishing no cert",
+                aggregator.reduced_weight(),
+                dealer_data.required_reduced_weight,
+            );
+            metrics
+                .mpc_dealer_cert_shortfall_total
+                .with_label_values(&[MPC_LABEL_DKG])
+                .inc();
         }
         Ok(())
     }
@@ -1621,26 +1642,23 @@ impl MpcManager {
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
             .start_timer();
-        let results = send_to_many(
-            dealer_data.recipients.iter().copied(),
-            dealer_data.request,
-            |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
+        let request = Arc::new(dealer_data.request.clone());
+        let requests = dealer_data
+            .recipients
+            .iter()
+            .map(|addr| (*addr, Arc::clone(&request)))
+            .collect();
+        collect_dealer_signatures(
+            &mut aggregator,
+            requests,
+            dealer_data.required_reduced_weight,
+            Duration::ZERO,
+            p2p_channel,
+            MPC_LABEL_KEY_ROTATION,
+            metrics,
         )
         .await;
         drop(_timer);
-        for (addr, result) in results {
-            match result {
-                Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature.clone())
-                    {
-                        tracing::info!("Invalid rotation signature from {:?}: {}", addr, e);
-                    }
-                }
-                Err(e) => {
-                    tracing::info!("Failed to send rotation messages to {:?}: {}", addr, e)
-                }
-            }
-        }
         if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let rotation_cert = aggregator
                 .finish()
@@ -1656,6 +1674,16 @@ impl MpcManager {
                     MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
                 })?;
             drop(_timer);
+        } else {
+            tracing::warn!(
+                "Dealer: insufficient signatures ({} < {}); publishing no cert",
+                aggregator.reduced_weight(),
+                dealer_data.required_reduced_weight,
+            );
+            metrics
+                .mpc_dealer_cert_shortfall_total
+                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                .inc();
         }
         Ok(())
     }
@@ -1923,29 +1951,39 @@ impl MpcManager {
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let results = send_to_many(
-            dealer_data.recipients.iter().copied(),
-            dealer_data.request,
-            |addr, req| async move { p2p_channel.send_messages(&addr, &req).await },
+        let request = Arc::new(dealer_data.request.clone());
+        let requests = dealer_data
+            .recipients
+            .iter()
+            .map(|addr| (*addr, Arc::clone(&request)))
+            .collect();
+        collect_dealer_signatures(
+            &mut aggregator,
+            requests,
+            dealer_data.required_reduced_weight,
+            Duration::ZERO,
+            p2p_channel,
+            MPC_LABEL_NONCE_GENERATION,
+            metrics,
         )
         .await;
         drop(_timer);
-        for (addr, result) in results {
-            match result {
-                Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
-                        tracing::info!("Invalid signature from {:?}: {}", addr, e);
-                    }
-                }
-                Err(e) => tracing::info!("Failed to send nonce message to {:?}: {}", addr, e),
-            }
-        }
         if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let nonce_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
             Self::publish_nonce_generation_cert(tob_channel, batch_index, nonce_cert, metrics)
                 .await?;
+        } else {
+            tracing::warn!(
+                "Dealer: insufficient signatures ({} < {}); publishing no cert",
+                aggregator.reduced_weight(),
+                dealer_data.required_reduced_weight,
+            );
+            metrics
+                .mpc_dealer_cert_shortfall_total
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                .inc();
         }
         Ok(())
     }
@@ -3064,25 +3102,28 @@ impl MpcManager {
             .start_timer();
         let requests: Vec<_> = std::mem::take(&mut dealer_data.recipient_messages)
             .into_iter()
-            .map(|(addr, messages)| (addr, SendMessagesRequest { messages }))
+            .map(|(addr, messages)| (addr, Arc::new(SendMessagesRequest { messages })))
             .collect();
-        let results = send_each(requests, |addr, req| async move {
-            p2p_channel.send_messages(&addr, &req).await
-        })
+        let (max_faulty, min_confirm_weight, address) = {
+            let mgr = mpc_manager.read().unwrap();
+            (
+                mgr.mpc_config.max_faulty as u32,
+                mgr.mpc_config.threshold as u32 + mgr.mpc_config.max_faulty as u32,
+                mgr.address,
+            )
+        };
+        let decided_weight = dealer_data.vote_quorum_weight.max(min_confirm_weight);
+        collect_dealer_signatures(
+            &mut aggregator,
+            requests,
+            decided_weight,
+            BATCH_AVSS_VOTES_GRACE,
+            p2p_channel,
+            MPC_LABEL_NONCE_GENERATION,
+            metrics,
+        )
         .await;
         drop(_timer);
-        for (addr, result) in results {
-            match result {
-                Ok(response) => {
-                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
-                        tracing::info!("Invalid Confirm signature from {:?}: {}", addr, e);
-                    }
-                }
-                Err(e) => {
-                    tracing::info!("Failed to send optimistic message to {:?}: {}", addr, e)
-                }
-            }
-        }
         let confirmed = aggregator.reduced_weight() as u32;
         if confirmed >= dealer_data.total_reduced_weight {
             let cert = aggregator
@@ -3092,19 +3133,15 @@ impl MpcManager {
                 .await;
         }
         let pending = dealer_data.total_reduced_weight - confirmed;
-        let (max_faulty, min_confirm_weight, address) = {
-            let mgr = mpc_manager.read().unwrap();
-            (
-                mgr.mpc_config.max_faulty as u32,
-                mgr.mpc_config.threshold as u32 + mgr.mpc_config.max_faulty as u32,
-                mgr.address,
-            )
-        };
         if pending > max_faulty || confirmed < min_confirm_weight {
             tracing::warn!(
                 "AVID nonce round abandoned: pending weight {pending} > f={max_faulty} or \
                  confirmed weight {confirmed} < t+f={min_confirm_weight} (batch_index={batch_index})"
             );
+            metrics
+                .mpc_dealer_cert_shortfall_total
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                .inc();
             return Ok(());
         }
         tracing::info!(
@@ -3168,23 +3205,19 @@ impl MpcManager {
             .start_timer();
         let requests: Vec<_> = recipient_dispersals
             .into_iter()
-            .map(|(addr, messages)| (addr, SendMessagesRequest { messages }))
+            .map(|(addr, messages)| (addr, Arc::new(SendMessagesRequest { messages })))
             .collect();
-        let results = send_each(requests, |addr, req| async move {
-            p2p_channel.send_messages(&addr, &req).await
-        })
+        collect_dealer_signatures(
+            &mut vote_aggregator,
+            requests,
+            dealer_data.vote_quorum_weight,
+            Duration::ZERO,
+            p2p_channel,
+            MPC_LABEL_NONCE_GENERATION,
+            metrics,
+        )
         .await;
         drop(_timer);
-        for (addr, result) in results {
-            match result {
-                Ok(response) => {
-                    if let Err(e) = vote_aggregator.add_signature_from(addr, response.signature) {
-                        tracing::info!("Invalid Vote signature from {:?}: {}", addr, e);
-                    }
-                }
-                Err(e) => tracing::info!("No Vote from {:?}: {}", addr, e),
-            }
-        }
         if (vote_aggregator.reduced_weight() as u32) >= dealer_data.vote_quorum_weight {
             tracing::info!(
                 "AVID nonce Vote quorum reached: dealer {address:?}, batch_index={batch_index}, \
@@ -3203,6 +3236,10 @@ impl MpcManager {
             vote_aggregator.reduced_weight(),
             dealer_data.vote_quorum_weight
         );
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .inc();
         Ok(())
     }
 
@@ -3464,9 +3501,16 @@ impl MpcManager {
             (request, signers)
         };
         let complaint_signers = signers.clone();
-        let results = send_to_many(signers, request, |addr, req| async move {
-            p2p_channel.retrieve_messages(&addr, &req).await
-        })
+        let request = &request;
+        let results = futures::future::join_all(signers.into_iter().map(|addr| async move {
+            let result = with_timeout_and_retry_budget(
+                || p2p_channel.retrieve_messages(&addr, request),
+                AVID_RETRIEVAL_CALL_TIMEOUT,
+                AVID_RETRIEVAL_CALL_RETRIES,
+            )
+            .await;
+            (addr, result)
+        }))
         .await;
         let bundles: Vec<(Address, AvidNonceRetrievalMessage)> = results
             .into_iter()
@@ -6496,6 +6540,66 @@ fn verify_complaint_response_from_signer(
             );
             None
         }
+    }
+}
+
+async fn collect_dealer_signatures<P: P2PChannel>(
+    aggregator: &mut BlsSignatureAggregator<'_, DealerMessagesHash, ReducedWeight<'_>>,
+    requests: Vec<(Address, Arc<SendMessagesRequest>)>,
+    stop_threshold: u32,
+    grace: Duration,
+    p2p_channel: &P,
+    protocol: &'static str,
+    metrics: &Metrics,
+) {
+    let mut in_flight: FuturesUnordered<_> = requests
+        .into_iter()
+        .map(|(addr, request)| async move {
+            let result =
+                with_timeout_and_retry(|| p2p_channel.send_messages(&addr, &request)).await;
+            (addr, result)
+        })
+        .collect();
+    let ceiling = tokio::time::Instant::now() + DEALER_COLLECTION_CEILING;
+    let mut grace_deadline = (u32::from(aggregator.reduced_weight()) >= stop_threshold)
+        .then(|| tokio::time::Instant::now() + grace);
+    let stop_reason = loop {
+        let deadline = grace_deadline.map_or(ceiling, |grace| grace.min(ceiling));
+        let next = match tokio::time::timeout_at(deadline, in_flight.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                break if deadline == ceiling {
+                    "ceiling"
+                } else {
+                    "grace"
+                };
+            }
+        };
+        let Some((addr, result)) = next else {
+            break "drained";
+        };
+        match result {
+            Ok(response) => {
+                if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
+                    tracing::info!("Invalid signature from {:?} ({protocol}): {}", addr, e);
+                }
+            }
+            Err(e) => tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e),
+        }
+        if grace_deadline.is_none() && u32::from(aggregator.reduced_weight()) >= stop_threshold {
+            grace_deadline = Some(tokio::time::Instant::now() + grace);
+        }
+    };
+    metrics
+        .mpc_dealer_collection_stops_total
+        .with_label_values(&[protocol, stop_reason])
+        .inc();
+    let collected = u32::from(aggregator.reduced_weight());
+    if collected >= stop_threshold {
+        metrics
+            .mpc_dealer_collected_margin_weight
+            .with_label_values(&[protocol])
+            .observe(f64::from(collected - stop_threshold));
     }
 }
 

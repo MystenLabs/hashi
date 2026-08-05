@@ -1327,8 +1327,13 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
 
     // Pre-flight: read the launch state and who would form the initial
     // committee. No hard failures yet — status mode reports every state.
-    let (onchain, _watcher) =
-        crate::onchain::OnchainState::new(&opts.sui_rpc_url, ids, None, None, None).await?;
+    let onchain = crate::onchain::OnchainState::new_reader(
+        &opts.sui_rpc_url,
+        ids,
+        None,
+        crate::onchain::ScrapeScope::GovernanceOnly,
+    )
+    .await?;
     let (launched, roster): (bool, Vec<(sui_sdk_types::Address, bool)>) = {
         let state = onchain.state();
         (

@@ -95,6 +95,8 @@ fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = 
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
 prometheus-closure-metric = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
 sui-futures = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
+move-binary-format = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
+move-core-types = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
 
 # Metrics push
 snap = "1"

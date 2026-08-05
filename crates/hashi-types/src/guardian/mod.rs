@@ -20,7 +20,6 @@ pub use attestation::BuildPcrs;
 pub use attestation::GitRevision;
 pub use attestation::NitroAttestation;
 pub use attestation::PcrAllowlist;
-pub use attestation::VerifiedSessionInfo;
 pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;

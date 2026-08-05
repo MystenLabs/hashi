@@ -581,34 +581,50 @@ fn apply_write(
         )
         .map(|field| {
             let utxo_id = field.value.utxo.id;
-            hashi.utxo_pool.utxo_records.insert(utxo_id, field.value);
+            hashi
+                .bitcoin_mut()
+                .utxo_pool
+                .utxo_records
+                .insert(utxo_id, field.value);
             TrackedKind::UtxoRecord(utxo_id)
         }),
         Slot::SpentUtxos => {
             decode::<move_types::Field<types::UtxoId, u64>>(contents, &id).map(|field| {
-                hashi.utxo_pool.spent_utxos.insert(field.name, field.value);
+                hashi
+                    .bitcoin_mut()
+                    .utxo_pool
+                    .spent_utxos
+                    .insert(field.name, field.value);
                 TrackedKind::SpentUtxo(field.name)
             })
         }
         Slot::DepositRequests => {
             decode::<move_types::DepositRequest>(contents, &id).map(|request| {
                 let request_id = request.id;
-                hashi.deposit_queue.requests.insert(request_id, request);
+                hashi
+                    .bitcoin_mut()
+                    .deposit_queue
+                    .requests
+                    .insert(request_id, request);
                 TrackedKind::DepositRequest(request_id)
             })
         }
         Slot::WithdrawalRequests => {
             decode::<move_types::WithdrawalRequest>(contents, &id).map(|request| {
                 let request_id = request.id;
-                hashi.withdrawal_queue.requests.insert(request_id, request);
+                hashi
+                    .bitcoin_mut()
+                    .withdrawal_queue
+                    .requests
+                    .insert(request_id, request);
                 TrackedKind::WithdrawalRequest(request_id)
             })
         }
         Slot::WithdrawalTxns => {
             decode::<move_types::WithdrawalTransaction>(contents, &id).map(|txn| {
                 let txn_id = txn.id;
-                let was_fully_signed = hashi
-                    .withdrawal_queue
+                let withdrawal_queue = &mut hashi.bitcoin_mut().withdrawal_queue;
+                let was_fully_signed = withdrawal_queue
                     .withdrawal_txns
                     .get(&txn_id)
                     .is_some_and(|t| t.is_fully_signed());
@@ -616,7 +632,7 @@ fn apply_write(
                     out.effects
                         .push(Effect::WithdrawalTxnFullySigned(Box::new(txn.clone())));
                 }
-                hashi.withdrawal_queue.withdrawal_txns.insert(txn_id, txn);
+                withdrawal_queue.withdrawal_txns.insert(txn_id, txn);
                 TrackedKind::WithdrawalTxn(txn_id)
             })
         }
@@ -757,19 +773,24 @@ fn retire(
             hashi.committees.committee_handoffs_mut().remove(epoch);
         }
         TrackedKind::UtxoRecord(utxo_id) => {
-            hashi.utxo_pool.utxo_records.remove(utxo_id);
+            hashi.bitcoin_mut().utxo_pool.utxo_records.remove(utxo_id);
         }
         TrackedKind::SpentUtxo(utxo_id) => {
-            hashi.utxo_pool.spent_utxos.remove(utxo_id);
+            hashi.bitcoin_mut().utxo_pool.spent_utxos.remove(utxo_id);
         }
         TrackedKind::DepositRequest(id) => {
-            hashi.deposit_queue.requests.remove(id);
+            hashi.bitcoin_mut().deposit_queue.requests.remove(id);
         }
         TrackedKind::WithdrawalRequest(id) => {
-            hashi.withdrawal_queue.requests.remove(id);
+            hashi.bitcoin_mut().withdrawal_queue.requests.remove(id);
         }
         TrackedKind::WithdrawalTxn(id) => {
-            if let Some(txn) = hashi.withdrawal_queue.withdrawal_txns.remove(id) {
+            if let Some(txn) = hashi
+                .bitcoin_mut()
+                .withdrawal_queue
+                .withdrawal_txns
+                .remove(id)
+            {
                 effects.push(Effect::WithdrawalTxnRemoved(Box::new(txn)));
             }
         }
@@ -979,25 +1000,27 @@ mod tests {
                     treasury_caps: BTreeMap::new(),
                     metadata_caps: BTreeMap::new(),
                 },
-                deposit_queue: types::DepositRequestQueue {
-                    id: dep_requests_id(),
-                    requests: BTreeMap::new(),
-                    processed_id: dep_processed_id(),
-                },
-                withdrawal_queue: types::WithdrawalRequestQueue {
-                    requests_id: wdr_requests_id(),
-                    requests: BTreeMap::new(),
-                    processed_id: wdr_processed_id(),
-                    withdrawal_txns_id: withdrawal_txns_id(),
-                    withdrawal_txns: BTreeMap::new(),
-                    confirmed_txns_id: confirmed_txns_id(),
-                },
-                utxo_pool: types::UtxoPool {
-                    utxo_records_id: utxo_records_id(),
-                    utxo_records: BTreeMap::new(),
-                    spent_utxos_id: spent_utxos_id(),
-                    spent_utxos: BTreeMap::new(),
-                },
+                bitcoin: Some(types::BitcoinCollections {
+                    deposit_queue: types::DepositRequestQueue {
+                        id: dep_requests_id(),
+                        requests: BTreeMap::new(),
+                        processed_id: dep_processed_id(),
+                    },
+                    withdrawal_queue: types::WithdrawalRequestQueue {
+                        requests_id: wdr_requests_id(),
+                        requests: BTreeMap::new(),
+                        processed_id: wdr_processed_id(),
+                        withdrawal_txns_id: withdrawal_txns_id(),
+                        withdrawal_txns: BTreeMap::new(),
+                        confirmed_txns_id: confirmed_txns_id(),
+                    },
+                    utxo_pool: types::UtxoPool {
+                        utxo_records_id: utxo_records_id(),
+                        utxo_records: BTreeMap::new(),
+                        spent_utxos_id: spent_utxos_id(),
+                        spent_utxos: BTreeMap::new(),
+                    },
+                }),
                 proposals: types::Proposals {
                     active_id: active_id(),
                     executed_id: executed_id(),
@@ -1308,13 +1331,13 @@ mod tests {
 
         let out = fixture.apply(&tx(vec![written(utxo_field_object(field_id, 1, 1_000))]));
         assert!(out.unrouted.is_empty());
-        assert_eq!(fixture.hashi.utxo_pool.utxo_records.len(), 1);
+        assert_eq!(fixture.hashi.bitcoin().utxo_pool.utxo_records.len(), 1);
 
         // The cleanup transaction deletes the Field object with no
         // event; the mirror must still drop the record.
         let out = fixture.apply(&tx(vec![TxChange::Deleted { id: field_id }]));
         assert!(out.unrouted.is_empty());
-        assert!(fixture.hashi.utxo_pool.utxo_records.is_empty());
+        assert!(fixture.hashi.bitcoin().utxo_pool.utxo_records.is_empty());
         assert!(fixture.index.get(&field_id).is_none());
     }
 
@@ -1331,6 +1354,7 @@ mod tests {
 
         let record = fixture
             .hashi
+            .bitcoin()
             .utxo_pool
             .utxo_records
             .values()
@@ -1353,7 +1377,15 @@ mod tests {
         ]));
         assert!(out.unrouted.is_empty());
         assert!(out.effects.is_empty());
-        assert_eq!(fixture.hashi.withdrawal_queue.withdrawal_txns.len(), 1);
+        assert_eq!(
+            fixture
+                .hashi
+                .bitcoin()
+                .withdrawal_queue
+                .withdrawal_txns
+                .len(),
+            1
+        );
 
         // Finalized: value-only mutation (the wrapper is not part of
         // the transaction) flips it to fully signed exactly once.
@@ -1382,7 +1414,14 @@ mod tests {
         assert!(
             matches!(out.effects.as_slice(), [Effect::WithdrawalTxnRemoved(txn)] if txn.id == value_id)
         );
-        assert!(fixture.hashi.withdrawal_queue.withdrawal_txns.is_empty());
+        assert!(
+            fixture
+                .hashi
+                .bitcoin()
+                .withdrawal_queue
+                .withdrawal_txns
+                .is_empty()
+        );
     }
 
     #[test]

@@ -252,12 +252,24 @@ pub async fn fetch_key_generation_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    let rotation =
-        fetch_certificates(onchain_state, epoch, None, ProtocolType::KeyRotation).await?;
-    if !rotation.is_empty() {
-        return Ok(rotation);
+    let earliest_committee_epoch = onchain_state.earliest_committee_epoch();
+    let protocol_type = key_generation_protocol(earliest_committee_epoch, epoch);
+    let certificates = fetch_certificates(onchain_state, epoch, None, protocol_type).await?;
+    if certificates.is_empty() {
+        tracing::warn!(
+            "epoch {epoch}: no key-generation certificates in the {protocol_type:?} bucket \
+             (earliest committee epoch {earliest_committee_epoch:?})"
+        );
     }
-    fetch_certificates(onchain_state, epoch, None, ProtocolType::Dkg).await
+    Ok(certificates)
+}
+
+fn key_generation_protocol(earliest_committee_epoch: Option<u64>, epoch: u64) -> ProtocolType {
+    if OnchainState::epoch_after_first_committee(earliest_committee_epoch, epoch) {
+        ProtocolType::KeyRotation
+    } else {
+        ProtocolType::Dkg
+    }
 }
 
 #[async_trait]
@@ -641,6 +653,21 @@ mod tests {
         assert_eq!(
             classify_published_cert(&[], &addr(1), hash(9)),
             PublishedCert::Absent
+        );
+    }
+
+    #[test]
+    fn the_genesis_epoch_selects_dkg() {
+        assert_eq!(key_generation_protocol(Some(9), 9), ProtocolType::Dkg);
+        assert_eq!(key_generation_protocol(Some(9), 5), ProtocolType::Dkg);
+        assert_eq!(key_generation_protocol(None, 9), ProtocolType::Dkg);
+    }
+
+    #[test]
+    fn an_epoch_after_the_first_committee_selects_rotation() {
+        assert_eq!(
+            key_generation_protocol(Some(9), 32),
+            ProtocolType::KeyRotation
         );
     }
 

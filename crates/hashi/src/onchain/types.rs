@@ -36,18 +36,46 @@ pub use hashi_types::move_types::WithdrawalRequest;
 pub use hashi_types::move_types::WithdrawalStatus;
 pub use hashi_types::move_types::WithdrawalTransaction;
 
+const NOT_SCRAPED: &str = "Bitcoin state was not scraped (ScrapeScope::GovernanceOnly)";
+
+/// The Bitcoin-side collections, scraped as a unit or not at all.
+#[derive(Debug)]
+pub struct BitcoinCollections {
+    pub deposit_queue: DepositRequestQueue,
+    pub withdrawal_queue: WithdrawalRequestQueue,
+    pub utxo_pool: UtxoPool,
+}
+
 #[derive(Debug)]
 pub struct Hashi {
     pub id: Address,
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub deposit_queue: DepositRequestQueue,
-    pub withdrawal_queue: WithdrawalRequestQueue,
-    pub utxo_pool: UtxoPool,
+    /// `None` under `ScrapeScope::GovernanceOnly`. An `Option` rather than
+    /// empty collections so a scope mistake can't read as "no withdrawals".
+    pub(super) bitcoin: Option<BitcoinCollections>,
     pub proposals: Proposals,
     pub tob_id: Address,
     pub num_consumed_presigs: u64,
+}
+
+impl Hashi {
+    /// Panics under a governance-only scrape; the validator always scrapes
+    /// `Full`. Callers that may not should use [`Hashi::try_bitcoin`].
+    #[track_caller]
+    pub fn bitcoin(&self) -> &BitcoinCollections {
+        self.bitcoin.as_ref().expect(NOT_SCRAPED)
+    }
+
+    pub fn try_bitcoin(&self) -> Option<&BitcoinCollections> {
+        self.bitcoin.as_ref()
+    }
+
+    #[track_caller]
+    pub(super) fn bitcoin_mut(&mut self) -> &mut BitcoinCollections {
+        self.bitcoin.as_mut().expect(NOT_SCRAPED)
+    }
 }
 
 pub struct CommitteeSet {

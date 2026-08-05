@@ -93,3 +93,5 @@ tracing-test = "0.2"
 http-body = "1"
 # Paused-clock tests (`start_paused`) for deadline/cooldown behavior.
 tokio = { workspace = true, features = ["test-util"] }
+move-binary-format.workspace = true
+move-core-types.workspace = true

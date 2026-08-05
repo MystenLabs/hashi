@@ -1,5 +1,10 @@
 name: Move CI
 
+# NOTE: intentionally NO trigger-level `paths:` filter. `move-compat-gate`
+# below is meant to be a *required* status check. A required check that never
+# reports (because the whole workflow was path-skipped) blocks merges on
+# non-Move PRs. Instead we always run a lightweight `detect` job and gate the
+# real work on it, so the gate still reports green on Rust-only PRs.
 on:
   pull_request:
 
@@ -8,10 +13,51 @@ permissions:
 
 env:
   MOVE_PACKAGES_PATH: packages
+  # Pinned toolchain. The compat checker links move-binary-format at a fixed
+  # sui rev (crates/hashi/Cargo.toml), so the compiler producing the bytecode
+  # must be pinned too or the two can drift independently. SUI_PIN tracks the
+  # publish toolchain recorded in packages/hashi/Published.toml
+  # (toolchain-version = 1.73.2; there is no testnet-1.73.2 release, the
+  # mainnet binary ships the same compiler). Bump all three deliberately,
+  # together with the checker's move-binary-format rev when relevant.
+  SUIUP_PIN: v0.0.14
+  SUI_PIN: mainnet-1.73.2
+  MVR_PIN: 0.1.0
 
 jobs:
+  # Always runs. Decides whether any Move-relevant files changed.
+  #
+  # Two filter keys: `move` covers the Move packages themselves (drives every
+  # job below); `compat` covers the compat gate's own implementation and
+  # fixtures — a change to any of those must re-run the gate too, or a broken
+  # checker / stale snapshot would merge behind a green required check, but it
+  # does not need the formatting / package-test jobs.
+  detect:
+    name: Detect Move changes
+    runs-on: ubuntu-latest
+    outputs:
+      move: ${{ steps.filter.outputs.move }}
+      compat: ${{ steps.filter.outputs.compat }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            move:
+              - 'packages/**'
+              - '.github/workflows/move.yml'
+            compat:
+              - 'crates/hashi/tests/move_upgrade_compat.rs'
+              - 'crates/hashi/tests/move_upgrade_snapshots/**'
+              - 'crates/hashi/src/publish.rs'
+              - 'crates/hashi/Cargo.toml'
+              - 'Cargo.lock'
+
   check-formatting:
     name: Formatting
+    needs: detect
+    if: needs.detect.outputs.move == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -19,8 +65,11 @@ jobs:
         with:
           prettier-plugin-move-version: "latest"
           working-directory: ${{ env.MOVE_PACKAGES_PATH }}
+
   test-move-packages:
     name: Build & Test
+    needs: detect
+    if: needs.detect.outputs.move == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -28,10 +77,60 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --locked
-      - run: suiup install sui -y; suiup install mvr -y
+      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --tag "$SUIUP_PIN" --locked
+      - run: suiup install "sui@$SUI_PIN" -y; suiup install "mvr@$MVR_PIN" -y
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: sui --version; mvr --version
       - run: ls -d ./*/ | xargs -I {} bash -c "sui move build --path '{}'"
       - run: ls -d ./*/ | xargs -I {} bash -c "sui move test --path '{}'"
+
+  # Verifies the current packages/hashi source is a *compatible upgrade* of the
+  # deployed package. The deployed package's bytecode is a checked-in snapshot
+  # (crates/hashi/tests/move_upgrade_snapshots/), so this runs hermetically with
+  # NO network access — it needs only the `sui` CLI to build the current source.
+  # See crates/hashi/tests/move_upgrade_compat.rs.
+  move-compat:
+    name: Upgrade compatibility
+    needs: detect
+    if: needs.detect.outputs.move == 'true' || needs.detect.outputs.compat == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo install --git https://github.com/Mystenlabs/suiup.git --tag "$SUIUP_PIN" --locked
+      - run: suiup install "sui@$SUI_PIN" -y; suiup install "mvr@$MVR_PIN" -y
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: sui --version; mvr --version
+      # Runs the snapshot-based gate plus the network-free machinery self-tests.
+      # SUI_BINARY / HASHI_COMPAT_SNAPSHOT_DIR can be overridden here if the
+      # defaults ever need to change.
+      - name: Run upgrade compatibility check
+        run: cargo test --locked -p hashi --test move_upgrade_compat -- --nocapture
+
+  # THE REQUIRED STATUS CHECK. Always reports. Passes on non-Move PRs (nothing
+  # to check) and fails only when Move files changed and the compat job did not
+  # succeed. This lets a single required check work for every PR.
+  #
+  # Fails CLOSED: if `detect` itself did not succeed, we cannot know whether
+  # Move files changed (its `move` output is unset, which would otherwise be
+  # treated like `false`), so the gate fails rather than assuming "no change".
+  move-compat-gate:
+    name: Move compat gate
+    needs: [detect, move-compat]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate gate
+        run: |
+          if [ "${{ needs.detect.result }}" != "success" ]; then
+            echo "Detect job did not succeed (result: ${{ needs.detect.result }}) — cannot tell whether Move files changed, failing closed."
+            exit 1
+          fi
+          if { [ "${{ needs.detect.outputs.move }}" == "true" ] || [ "${{ needs.detect.outputs.compat }}" == "true" ]; } \
+              && [ "${{ needs.move-compat.result }}" != "success" ]; then
+            echo "Move or compat-gate files changed and the upgrade-compatibility check did not succeed (result: ${{ needs.move-compat.result }})."
+            exit 1
+          fi
+          echo "Gate passed (move changed: ${{ needs.detect.outputs.move }}, move-compat result: ${{ needs.move-compat.result }})."

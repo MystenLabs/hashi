@@ -102,7 +102,7 @@ pub struct Metrics {
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
-    pub sui_balance: IntGauge,
+    pub sui_balance: IntGaugeVec,
 
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
@@ -118,6 +118,12 @@ pub struct Metrics {
 
     pub mpc_sign_duration_seconds: HistogramVec,
     pub mpc_sign_failures_total: IntCounterVec,
+    /// Dealer rounds that ended without publishing a certificate.
+    pub mpc_dealer_cert_shortfall_total: IntCounterVec,
+    pub mpc_dealer_collection_stops_total: IntCounterVec,
+    /// Reduced weight a dealer collected above its stopping threshold,
+    /// recorded only when that threshold was met.
+    pub mpc_dealer_collected_margin_weight: HistogramVec,
     /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
     /// Each failure also puts the peer in a short poll cooldown, so this is
     /// the per-validator health signal for the MPC signing path.
@@ -211,6 +217,10 @@ pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "4",
     "5",
     "6_plus",
+];
+
+const REDUCED_WEIGHT_BUCKETS: &[f64] = &[
+    0., 1., 2., 5., 10., 25., 50., 100., 250., 500., 1000., 2500., 5000.,
 ];
 
 const MESSAGE_SIZE_BYTES_BUCKETS: &[f64] = &[
@@ -690,10 +700,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            sui_balance: register_int_gauge_with_registry!(
+            sui_balance: register_int_gauge_vec_with_registry!(
                 "hashi_sui_balance",
                 "Operator gas wallet SUI balance in MIST, totaled across owned \
-                 coins and the address balance",
+                 coins and the address balance. Labeled with the operator \
+                 address that pays gas, so a low-balance alert names the \
+                 wallet to top up. One series per node.",
+                &["address"],
                 registry,
             )
             .unwrap(),
@@ -760,6 +773,31 @@ impl Metrics {
                  on without the read (including when a reconfig superseded it for unrelated \
                  reasons), `failed` means this stall is what gave up.",
                 &["protocol", "outcome"],
+                registry,
+            )
+            .unwrap(),
+            mpc_dealer_cert_shortfall_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_dealer_cert_shortfall_total",
+                "Dealer rounds that fell short of their cert quorum. Excludes rounds that reached \
+                 quorum and then failed to publish, which return an error and are not counted here",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_dealer_collection_stops_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_dealer_collection_stops_total",
+                "Why a dealer stopped collecting: drained (every send resolved, including \
+                 peers that failed every retry), grace (straggler window expired after the \
+                 threshold), ceiling (hit the hard cap, quorum reached or not)",
+                &["protocol", "reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_dealer_collected_margin_weight: register_histogram_vec_with_registry!(
+                "hashi_mpc_dealer_collected_margin_weight",
+                "Reduced weight collected above the dealer's stopping threshold.",
+                &["protocol"],
+                REDUCED_WEIGHT_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
@@ -941,7 +979,7 @@ impl Metrics {
             .unwrap(),
             mpc_p2p_broadcast_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_p2p_broadcast_duration_seconds",
-                "Duration of send_to_many",
+                "Dealer fan-out duration.",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
@@ -1192,8 +1230,9 @@ impl Metrics {
             });
         self.paused.set(if hashi.config.paused() { 1 } else { 0 });
         self.deposit_queue_size
-            .set(hashi.deposit_queue.requests().len() as i64);
+            .set(hashi.bitcoin().deposit_queue.requests().len() as i64);
         let (requested, approved) = hashi
+            .bitcoin()
             .withdrawal_queue
             .requests()
             .values()
@@ -1206,7 +1245,7 @@ impl Metrics {
         let mut signed = Vec::new();
         let mut signing = Vec::new();
         let mut pending = Vec::new();
-        for w in hashi.withdrawal_queue.withdrawal_txns().values() {
+        for w in hashi.bitcoin().withdrawal_queue.withdrawal_txns().values() {
             if w.is_fully_signed() {
                 signed.push(w);
             } else if w.signing.signed_count() > 0 {
@@ -1277,7 +1316,7 @@ impl Metrics {
         let mut available_value = 0u64;
         let mut unconfirmed_change_value = 0u64;
         let mut locked_value = 0u64;
-        for record in hashi.utxo_pool.utxo_records().values() {
+        for record in hashi.bitcoin().utxo_pool.utxo_records().values() {
             if record.spent_by.is_some() {
                 locked_count += 1;
                 locked_value += record.utxo.amount;

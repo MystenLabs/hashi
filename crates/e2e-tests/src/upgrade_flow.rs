@@ -76,17 +76,19 @@ pub fn prepare_upgrade_package(
         .parse()
         .map_err(|e| anyhow::anyhow!("PACKAGE_VERSION is not a u64 in {versioning_path:?}: {e}"))?;
     anyhow::ensure!(
-        current != target_version,
-        "upgrade would declare PACKAGE_VERSION {current}, which the source already has: \
-         the Sui package counter and the Move constant are out of step"
+        current <= target_version,
+        "source declares PACKAGE_VERSION {current}, above the {target_version} this upgrade \
+         would publish; point the base at a newer snapshot"
     );
-    let patched = format!(
-        "{}{}{}",
-        &versioning_src[..value_start],
-        target_version,
-        &versioning_src[value_start + value_len..]
-    );
-    std::fs::write(&versioning_path, patched)?;
+    if current < target_version {
+        let patched = format!(
+            "{}{}{}",
+            &versioning_src[..value_start],
+            target_version,
+            &versioning_src[value_start + value_len..]
+        );
+        std::fs::write(&versioning_path, patched)?;
+    }
 
     // Patch Move.toml: add published-at
     let move_toml_path = dst.join("Move.toml");

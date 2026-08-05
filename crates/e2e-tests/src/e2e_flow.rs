@@ -29,9 +29,11 @@ mod tests {
 
     use crate::test_helpers::BackgroundMiner;
     use crate::test_helpers::create_deposit_and_wait;
+    use crate::test_helpers::extract_witness_program;
     use crate::test_helpers::get_hbtc_balance;
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
+    use crate::test_helpers::subscribe_withdrawal_confirmations;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
@@ -238,87 +240,6 @@ mod tests {
             deposit_request.approval_cert.is_none(),
             "brand-new deposit should not be approved by epoch-change stale-cert processing"
         );
-    }
-
-    async fn wait_for_withdrawal_confirmation(
-        sui_client: &mut sui_rpc::Client,
-        timeout: Duration,
-    ) -> Result<WithdrawalConfirmed> {
-        info!("Waiting for withdrawal confirmation...");
-
-        let start = std::time::Instant::now();
-        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
-            .transactions()
-            .events()
-            .events()
-            .contents()
-            .finish()]);
-        let mut subscription = sui_client
-            .subscription_client()
-            .subscribe_checkpoints(
-                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
-            )
-            .await?
-            .into_inner();
-
-        while let Some(item) = subscription.next().await {
-            if start.elapsed() > timeout {
-                return Err(anyhow!(
-                    "Timeout waiting for withdrawal confirmation after {:?}",
-                    timeout
-                ));
-            }
-
-            let checkpoint = match item {
-                Ok(checkpoint) => checkpoint,
-                Err(e) => {
-                    debug!("Error in checkpoint stream: {}", e);
-                    continue;
-                }
-            };
-
-            debug!(
-                "Received checkpoint {}, checking for WithdrawalConfirmed...",
-                checkpoint.cursor()
-            );
-
-            for txn in checkpoint.checkpoint().transactions() {
-                for event in txn.events().events() {
-                    let event_type = event.contents().name();
-
-                    if event_type.contains("WithdrawalConfirmed") {
-                        match WithdrawalConfirmed::from_bcs(event.contents().value()) {
-                            Ok(event_data) => {
-                                info!(
-                                    withdrawal_txn_id = %event_data.withdrawal_txn_id,
-                                    txid = %event_data.txid,
-                                    "Withdrawal confirmed!"
-                                );
-                                return Ok(event_data);
-                            }
-                            Err(e) => {
-                                debug!("Failed to parse WithdrawalConfirmed: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
-    }
-
-    fn extract_witness_program(address: &BitcoinAddress) -> Result<Vec<u8>> {
-        let script = address.script_pubkey();
-        let bytes = script.as_bytes();
-        match bytes {
-            [0x00, 0x14, rest @ ..] if rest.len() == 20 => Ok(rest.to_vec()),
-            [0x51, 0x20, rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
-            _ => Err(anyhow!(
-                "Unsupported script pubkey for withdrawal: {script}"
-            )),
-        }
     }
 
     /// Wait for a withdrawal transaction to be confirmed on the Bitcoin chain.
@@ -595,6 +516,9 @@ mod tests {
             withdrawal_amount_sats, btc_destination
         );
 
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
                 .with_signer(user_key.clone().into());
@@ -605,11 +529,9 @@ mod tests {
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
-        let confirmed_event = wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let confirmed_event = confirmations
+            .wait_for(withdrawal_request_id, Duration::from_secs(60))
+            .await?;
         info!("Withdrawal confirmed on Sui");
 
         drop(miner);
@@ -694,19 +616,19 @@ mod tests {
     ) -> Result<()> {
         let btc_destination = networks.bitcoin_node.get_new_address()?;
         let destination_bytes = extract_witness_program(&btc_destination)?;
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
             .with_signer(signer.into());
-        executor
+        let withdrawal_request_id = executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
-        let confirmed = wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let confirmed = confirmations
+            .wait_for(withdrawal_request_id, Duration::from_secs(60))
+            .await?;
 
         drop(miner);
 
@@ -1184,10 +1106,13 @@ mod tests {
             .current_epoch()
             .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
 
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
                 .with_signer(user_key.clone().into());
-        withdrawal_executor
+        let withdrawal_request_id = withdrawal_executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
 
@@ -1211,11 +1136,9 @@ mod tests {
         }
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
-        wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(180),
-        )
-        .await?;
+        confirmations
+            .wait_for(withdrawal_request_id, Duration::from_secs(180))
+            .await?;
         drop(miner);
 
         Ok(())
@@ -1773,8 +1696,8 @@ mod tests {
         // Positive control: the outage must have been real.
         let severed_watermark = proxied.onchain_state().state_watermark();
         assert!(
-            severed_watermark < last_checkpoint,
-            "the severed node's watermark ({severed_watermark}) covers the outage \
+            severed_watermark.is_none_or(|covered| covered < last_checkpoint),
+            "the severed node's watermark ({severed_watermark:?}) covers the outage \
              transactions (checkpoint {last_checkpoint}); the outage was not effective"
         );
         {

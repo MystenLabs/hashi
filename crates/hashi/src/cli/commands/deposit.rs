@@ -374,13 +374,13 @@ async fn request_all(
 }
 
 async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
-    let client = HashiClient::new(config).await?;
+    let client = HashiClient::new_with_bitcoin_state(config).await?;
 
     let req_addr = request_id
         .parse::<sui_sdk_types::Address>()
         .context("Invalid request ID")?;
 
-    let deposits = client.fetch_deposit_requests();
+    let deposits = client.fetch_deposit_requests()?;
     let deposit = deposits.iter().find(|d| d.id == req_addr);
 
     println!("\n{}", "Deposit Request Status".bold());
@@ -430,9 +430,9 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
 }
 
 async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
-    let client = HashiClient::new(config).await?;
+    let client = HashiClient::new_with_bitcoin_state(config).await?;
 
-    let deposits = client.fetch_deposit_requests();
+    let deposits = client.fetch_deposit_requests()?;
 
     match output_format {
         OutputFormat::Json => {

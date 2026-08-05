@@ -9,7 +9,9 @@
 //! - Package ID routing updates correctly in OnchainState
 
 use anyhow::Result;
+use e2e_tests::TestNetworks;
 use e2e_tests::TestNetworksBuilder;
+use e2e_tests::snapshot;
 use e2e_tests::test_helpers::create_deposit_and_wait;
 use e2e_tests::test_helpers::get_hbtc_balance;
 use e2e_tests::test_helpers::init_test_logging;
@@ -22,6 +24,43 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::info;
+
+/// Poll until every node's watcher reports `package_id` as the active
+/// package — the PackageUpgraded handler in watcher.rs must update
+/// OnchainState's package_versions map on all nodes. Prints per-node
+/// diagnostics before failing on timeout.
+async fn wait_for_package_convergence(
+    networks: &TestNetworks,
+    package_id: Address,
+    max_wait: Duration,
+) -> Result<()> {
+    info!("waiting for all nodes to detect the new package version...");
+    let wait_start = std::time::Instant::now();
+    loop {
+        let all_updated = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .all(|node| node.hashi().onchain_state().package_id() == Some(package_id));
+        if all_updated {
+            return Ok(());
+        }
+        if wait_start.elapsed() > max_wait {
+            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+                let latest = node.hashi().onchain_state().package_id();
+                let versions = node
+                    .hashi()
+                    .onchain_state()
+                    .state()
+                    .package_versions()
+                    .clone();
+                info!("node {i}: package_id={latest:?}, versions={versions:?}");
+            }
+            anyhow::bail!("timeout: not all nodes detected the new package version");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
 
 /// Test the full upgrade lifecycle, exercising real cascading effects.
 ///
@@ -59,38 +98,7 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     assert_ne!(new_package_id, hashi_ids.package_id);
 
     // ── Cascading effect 1: Watcher picks up new package ────────────────
-    //
-    // The PackageUpgraded handler in watcher.rs should update
-    // OnchainState's package_versions map. Poll until all nodes see the
-    // new package — this proves the watcher correctly processes the event.
-    info!("waiting for all nodes to detect the new package version...");
-    let wait_start = std::time::Instant::now();
-    let max_wait = Duration::from_secs(30);
-    loop {
-        let all_updated = networks
-            .hashi_network
-            .nodes()
-            .iter()
-            .all(|node| node.hashi().onchain_state().package_id() == Some(new_package_id));
-        if all_updated {
-            break;
-        }
-        if wait_start.elapsed() > max_wait {
-            // Print diagnostic info before failing
-            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
-                let latest = node.hashi().onchain_state().package_id();
-                let versions = node
-                    .hashi()
-                    .onchain_state()
-                    .state()
-                    .package_versions()
-                    .clone();
-                info!("node {i}: package_id={latest:?}, versions={versions:?}");
-            }
-            anyhow::bail!("timeout: not all nodes detected the new package version");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
 
     // ── Cascading effect 2: Package ID routing ──────────────────────────
     //
@@ -220,5 +228,124 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     info!("v1 entry point correctly rejected");
 
     info!("=== UPGRADE TEST PASSED ===");
+    Ok(())
+}
+
+/// The real "deployed bytecode → current source" upgrade test.
+///
+/// Bootstraps the local net by publishing the checked-in **bytecode snapshot**
+/// of the deployed testnet package as v1 (via
+/// [`TestNetworksBuilder::with_v1_from_snapshot`]), then runs the ordinary
+/// governance-gated upgrade flow ([`upgrade_flow::execute_full_upgrade`]) to
+/// upgrade it to the current `packages/hashi` source. This proves — end to
+/// end, against a running Sui net — that the deployed bytecode can actually be
+/// upgraded to what's in the tree today, a strictly stronger claim than the
+/// static compatibility gate (which only normalizes-and-diffs the modules).
+///
+/// Asserts:
+/// - v1 publishes from the snapshot and forms a committee (DKG completes).
+/// - a deposit confirms against the snapshot bytecode, establishing real
+///   v1-initialized on-chain state before the upgrade.
+/// - the governance upgrade to current source succeeds (effects success).
+/// - the new package id differs from v1's.
+/// - all nodes' watchers pick up the new package version.
+/// - a post-upgrade deposit confirms through the full validator path, on top
+///   of the state the snapshot bytecode initialized.
+/// - a v2-only module (`upgrade_canary::version`) is callable post-upgrade.
+#[tokio::test]
+async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
+    init_test_logging();
+
+    // v1 = the checked-in deployed bytecode snapshot, NOT a source build.
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
+        .build()
+        .await?;
+
+    let hashi_ids = networks.hashi_network.ids();
+    info!("snapshot-published v1 package ID: {}", hashi_ids.package_id);
+
+    // Committee must be formed (DKG done) before the upgrade proposal can be
+    // voted through at the required 100% quorum.
+    networks.hashi_network.nodes()[0]
+        .wait_for_mpc_key(Duration::from_secs(120))
+        .await?;
+
+    // ── Pre-upgrade: deposit against the snapshot bytecode ──────────────
+    //
+    // Establishes real on-chain state *initialized by the deployed v1
+    // bytecode* (UTXO pool entries, deposit records, hBTC supply), so the
+    // post-upgrade assertions below exercise the upgraded package against
+    // v1-created state — not a fresh object graph.
+    info!("depositing 100k sats against the snapshot bytecode...");
+    let hbtc_recipient = create_deposit_and_wait(&mut networks, 100_000).await?;
+    let balance_before = get_hbtc_balance(
+        &mut networks.sui_network.client,
+        hashi_ids.package_id,
+        hbtc_recipient,
+    )
+    .await?;
+    assert_eq!(balance_before, 100_000);
+    info!("pre-upgrade balance: {balance_before} sats");
+
+    // ── Upgrade the deployed bytecode to the current source ─────────────
+    let new_package_id = upgrade_flow::execute_full_upgrade(&mut networks).await?;
+    info!("upgraded snapshot v1 -> current source: new package {new_package_id}");
+    assert_ne!(
+        new_package_id, hashi_ids.package_id,
+        "upgrade should mint a new package id"
+    );
+
+    // ── All nodes' watchers must pick up the new package version ─────────
+    wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
+
+    // ── Post-upgrade: deposit on top of v1-initialized state ────────────
+    //
+    // The full validator confirmation path (observe DepositRequested, build
+    // the BLS certificate, approve, time-delay, confirm) must work against
+    // the upgraded package operating on state the snapshot bytecode created.
+    info!("depositing 50k sats post-upgrade (full validator confirmation path)...");
+    create_deposit_and_wait(&mut networks, 50_000).await?;
+    let balance_after = get_hbtc_balance(
+        &mut networks.sui_network.client,
+        hashi_ids.package_id,
+        hbtc_recipient,
+    )
+    .await?;
+    assert_eq!(
+        balance_after, 150_000,
+        "post-upgrade deposit should confirm on top of snapshot-initialized state"
+    );
+    info!("post-upgrade deposit confirmed, balance: {balance_after} sats");
+
+    // ── v2-only canary module must be callable post-upgrade ─────────────
+    //
+    // `execute_full_upgrade` adds an `upgrade_canary` module to the patched
+    // source; being callable proves the new code (not just a new object id)
+    // is live on the upgraded package.
+    info!("calling v2-only upgrade_canary::version()...");
+    let user_key = networks.sui_network.user_keys.first().unwrap();
+    let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+    let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+        .with_signer(user_key.clone().into());
+
+    let mut builder = TransactionBuilder::new();
+    builder.move_call(
+        Function::new(
+            new_package_id,
+            Identifier::from_static("upgrade_canary"),
+            Identifier::from_static("version"),
+        ),
+        vec![],
+    );
+    let canary_resp = executor.execute(builder).await?;
+    assert!(
+        canary_resp.transaction().effects().status().success(),
+        "v2-only canary module should be callable after upgrading the deployed bytecode"
+    );
+    info!("v2 canary module call succeeded");
+
+    info!("=== SNAPSHOT UPGRADE TEST PASSED ===");
     Ok(())
 }

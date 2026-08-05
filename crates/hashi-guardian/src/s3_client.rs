@@ -24,9 +24,6 @@ use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::InitLogMessage;
-use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::VerifiedSessionInfo;
 use serde::Serialize;
 use tracing::info;
 use tracing::warn;
@@ -379,23 +376,20 @@ impl GuardianS3Client {
     }
 }
 
-/// Controls whether an S3 read requires Compliance-mode object-lock metadata.
-pub(crate) enum LockCheck {
-    /// Reject the object unless its Compliance lock is still unexpired, except
+/// Controls whether an S3 read establishes that the object is still immutable.
+#[derive(Clone, Copy)]
+pub(crate) enum ImmutabilityCheck {
+    /// Validate the exact key has no mutation history and reject the object
+    /// unless its Compliance lock is still unexpired, except when the
+    /// process-wide temporary testnet override is set.
+    Required,
+    /// The caller already validated the enclosing prefix has no mutations;
+    /// still reject the object unless its Compliance lock is unexpired, except
     /// when the process-wide temporary testnet override is set.
-    Required,
-    /// Do not inspect lock metadata. Used for signed records whose short lock
-    /// is expected to expire, such as KP-share state.
+    MutationAlreadyChecked,
+    /// Do not claim S3 immutability. Used for signed records whose short locks
+    /// are expected to expire, such as KP-share state.
     Skipped,
-}
-
-/// Controls whether an S3 read validates that the key has no overwrite or
-/// deletion history.
-pub(crate) enum HistoryCheck {
-    /// Validate the exact key's history before fetching it.
-    Required,
-    /// The caller already validated the history of the enclosing prefix.
-    AlreadyChecked,
 }
 
 impl GuardianS3Client {
@@ -447,12 +441,15 @@ impl GuardianS3Client {
         Ok(out.into_iter().collect())
     }
 
-    /// Lists every key under `prefix`, refusing to proceed if any matching
-    /// object has a delete marker or non-latest version. The prefix may be a
-    /// directory or a complete object key. Returned keys are unique and sorted.
-    pub async fn validate_prefix_history_and_list_keys(
+    /// Lists the currently visible keys under `prefix` using S3 version
+    /// history. When `reject_mutations` is true, any overwrite or deletion is
+    /// rejected; otherwise it is logged and only the latest visible versions
+    /// are returned. Mutation validation establishes immutability only when
+    /// each selected object also has an unexpired lock.
+    pub(crate) async fn list_keys(
         &self,
         prefix: &str,
+        reject_mutations: bool,
     ) -> GuardianResult<Vec<String>> {
         let s3_client = &self.client;
         let s3_config = &self.config;
@@ -460,6 +457,7 @@ impl GuardianS3Client {
         let mut key_marker: Option<String> = None;
         let mut version_id_marker: Option<String> = None;
         let mut seen_keys: BTreeSet<String> = BTreeSet::new();
+        let mut found_mutation = false;
 
         loop {
             let mut req = s3_client
@@ -482,10 +480,13 @@ impl GuardianS3Client {
             })?;
 
             if !response.delete_markers().is_empty() {
-                return Err(S3Error(format!(
-                    "Delete marker found under prefix {}",
-                    prefix
-                )));
+                if reject_mutations {
+                    return Err(S3Error(format!(
+                        "Delete marker found under prefix {}",
+                        prefix
+                    )));
+                }
+                found_mutation = true;
             }
 
             // https://docs.aws.amazon.com/AmazonS3/latest/API/API_ObjectVersion.html
@@ -497,18 +498,25 @@ impl GuardianS3Client {
                 // NOTE: If an object's lock expires, then all bets are off.
                 // For example, is_latest could be true even though an older version of it was deleted (post lock expiry).
                 if version.is_latest() != Some(true) {
-                    return Err(S3Error(format!(
-                        "Non-latest version found for key {} under prefix {}",
-                        key, prefix
-                    )));
+                    if reject_mutations {
+                        return Err(S3Error(format!(
+                            "Non-latest version found for key {} under prefix {}",
+                            key, prefix
+                        )));
+                    }
+                    found_mutation = true;
+                    continue;
                 }
 
                 if !seen_keys.insert(key.to_string()) {
-                    // this check is redundant as we ensure is_latest = true above
-                    return Err(S3Error(format!(
-                        "Duplicate version found for key {} under prefix {}",
-                        key, prefix
-                    )));
+                    if reject_mutations {
+                        // This check is redundant as we ensure is_latest = true above.
+                        return Err(S3Error(format!(
+                            "Duplicate version found for key {} under prefix {}",
+                            key, prefix
+                        )));
+                    }
+                    found_mutation = true;
                 }
             }
 
@@ -527,6 +535,12 @@ impl GuardianS3Client {
             }
         }
 
+        if found_mutation {
+            warn!(
+                prefix,
+                "S3 object mutation found; continuing because mutation rejection is disabled"
+            );
+        }
         Ok(seen_keys.into_iter().collect())
     }
 
@@ -540,32 +554,31 @@ impl GuardianS3Client {
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<LogRecord>> {
         let prefix = dir.to_string();
-        let keys = self.validate_prefix_history_and_list_keys(&prefix).await?;
+        let keys = self.list_keys(&prefix, true).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // The prefix history was checked above. Immutable batch logs also
             // require an unexpired Compliance lock unless the temporary
             // process-wide testnet override is set.
             out.push(
-                self.get_log_record_inner(&key, LockCheck::Required, HistoryCheck::AlreadyChecked)
+                self.get_log_record_inner(&key, ImmutabilityCheck::MutationAlreadyChecked)
                     .await?,
             );
         }
         Ok(out)
     }
 
-    /// Fetches and deserializes a record with explicit S3 integrity checks,
-    /// always rejecting a mismatch between its signed intended key and the
-    /// actual S3 key. `HistoryCheck::AlreadyChecked` requires the caller to have
-    /// validated the key's enclosing prefix.
+    /// Fetches and deserializes a record with the requested S3 immutability
+    /// policy, always rejecting a mismatch between its signed intended key and
+    /// the actual S3 key. `ImmutabilityCheck::MutationAlreadyChecked` requires
+    /// the caller to have validated the key's enclosing prefix.
     pub(crate) async fn get_log_record_inner(
         &self,
         key: &str,
-        lock_check: LockCheck,
-        history_check: HistoryCheck,
+        immutability_check: ImmutabilityCheck,
     ) -> GuardianResult<LogRecord> {
-        if matches!(history_check, HistoryCheck::Required) {
-            let keys = self.validate_prefix_history_and_list_keys(key).await?;
+        if matches!(immutability_check, ImmutabilityCheck::Required) {
+            let keys = self.list_keys(key, true).await?;
             if keys.len() != 1 || keys[0] != key {
                 return Err(S3Error(format!(
                     "expected exactly one object for key {}, found {:?}",
@@ -589,7 +602,7 @@ impl GuardianS3Client {
                 ))
             })?;
 
-        if matches!(lock_check, LockCheck::Required)
+        if !matches!(immutability_check, ImmutabilityCheck::Skipped)
             && !skip_s3_object_lock_check()
             && !has_unexpired_compliance_lock(
                 response.object_lock_mode(),
@@ -629,63 +642,8 @@ impl GuardianS3Client {
     /// Read an immutable-log object with history and Compliance-lock checks.
     /// The temporary process-wide testnet override skips only the lock check.
     pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
-        self.get_log_record_inner(key, LockCheck::Required, HistoryCheck::Required)
+        self.get_log_record_inner(key, ImmutabilityCheck::Required)
             .await
-    }
-
-    /// Resolve a session's [`VerifiedSessionInfo`]: read the AWS-self-signed
-    /// attestation (anchoring the signing pubkey), then the signed `GuardianInfo`,
-    /// and pin the attestation's PCR0 against the `allowlist` entry named by the
-    /// info's reported build. No caller needs the raw attestation bytes.
-    pub(crate) async fn get_verified_session_info(
-        &self,
-        session_id: &str,
-        allowlist: &PcrAllowlist,
-    ) -> GuardianResult<VerifiedSessionInfo> {
-        // 1. Attestation (unsigned: authenticated by AWS, not the enclave key) →
-        //    the signing pubkey it commits to.
-        let att_key = InitLogMessage::attestation_object_key(session_id);
-        let attestation_record = self.get_log_record(&att_key).await?;
-        let (_, _, attestation_message) = attestation_record.validate(None)?;
-        let (attestation, signing_pubkey) = attestation_message
-            .into_init_log()
-            .and_then(|x| match x {
-                InitLogMessage::OIAttestationUnsigned {
-                    attestation,
-                    signing_public_key,
-                } => Some((attestation, signing_public_key)),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                InvalidS3Log(format!("expected OIAttestationUnsigned at key {att_key}"))
-            })?;
-
-        // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
-        let info_key = InitLogMessage::guardian_info_object_key(session_id);
-        let info_record = self.get_log_record(&info_key).await?;
-        let (_, _, info_message) = info_record.validate(Some(&signing_pubkey))?;
-        let info = info_message
-            .into_init_log()
-            .and_then(|x| match x {
-                InitLogMessage::OIGuardianInfo(info) => Some(*info),
-                _ => None,
-            })
-            .ok_or_else(|| InvalidS3Log(format!("expected OIGuardianInfo at key {info_key}")))?;
-
-        // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
-        //    reported build. This replays a logged attestation whose short-lived
-        //    leaf cert has typically expired, so the chain is checked at the
-        //    document's own signed timestamp, not now.
-        let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
-        attestation
-            .verify_replay(&signing_pubkey, &build_pcrs)
-            .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
-
-        Ok(VerifiedSessionInfo {
-            signing_pubkey,
-            info,
-            build_pcrs,
-        })
     }
 }
 
@@ -725,6 +683,7 @@ mod tests {
     use aws_smithy_mocks::RuleMode;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
+    use hashi_types::guardian::InitLogMessage;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::SessionID;
@@ -997,7 +956,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
 
         let error = logger
-            .get_log_record_inner("key", LockCheck::Required, HistoryCheck::AlreadyChecked)
+            .get_log_record_inner("key", ImmutabilityCheck::MutationAlreadyChecked)
             .await
             .expect_err("an expired required lock must be rejected");
 
@@ -1036,11 +995,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
 
         let record = logger
-            .get_log_record_inner(
-                "init/copied-attestation.json",
-                LockCheck::Skipped,
-                HistoryCheck::AlreadyChecked,
-            )
+            .get_log_record_inner("init/copied-attestation.json", ImmutabilityCheck::Skipped)
             .await
             .expect("the embedded key matches the actual S3 key");
         let error = record
@@ -1078,11 +1033,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
 
         let error = logger
-            .get_log_record_inner(
-                &relocated_key,
-                LockCheck::Skipped,
-                HistoryCheck::AlreadyChecked,
-            )
+            .get_log_record_inner(&relocated_key, ImmutabilityCheck::Skipped)
             .await
             .expect_err("a relocated record must be rejected");
 

@@ -12,10 +12,8 @@
 //! advances/retreats and feeds to [`GuardianReader::read_logs_in_dir`].
 
 use crate::s3_client::GuardianS3Client;
-use crate::s3_client::HistoryCheck;
-use crate::s3_client::LockCheck;
+use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::time_utils::UnixMillis;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
@@ -26,12 +24,13 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
-use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
+use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::VerifiedSessionInfo;
+use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_GENESIS;
@@ -43,61 +42,10 @@ use tracing::info;
 
 mod heartbeat_checks;
 mod limiter_recovery;
+mod verified;
 
-/// A log record whose message signature and writing session's attestation/PCRs
-/// have both been verified. Its message is normalized to the current schema.
-/// If a future schema cannot be converted losslessly, this type should retain
-/// the versioned message and leave version acceptance to callers instead.
-#[derive(Debug)]
-pub struct VerifiedLogRecord {
-    object_key: String,
-    session_id: SessionID,
-    timestamp_ms: UnixMillis,
-    message: LogMessage,
-    build_pcrs: BuildPcrs,
-}
-
-impl VerifiedLogRecord {
-    fn new(
-        object_key: String,
-        session_id: SessionID,
-        timestamp_ms: UnixMillis,
-        message: LogMessage,
-        build_pcrs: BuildPcrs,
-    ) -> Self {
-        Self {
-            object_key,
-            session_id,
-            timestamp_ms,
-            message,
-            build_pcrs,
-        }
-    }
-
-    pub fn object_key(&self) -> &str {
-        &self.object_key
-    }
-
-    pub fn session_id(&self) -> &SessionID {
-        &self.session_id
-    }
-
-    pub fn timestamp_ms(&self) -> UnixMillis {
-        self.timestamp_ms
-    }
-
-    pub fn message(&self) -> &LogMessage {
-        &self.message
-    }
-
-    pub fn build_pcrs(&self) -> &BuildPcrs {
-        &self.build_pcrs
-    }
-
-    pub fn into_message(self) -> LogMessage {
-        self.message
-    }
-}
+pub use verified::VerifiedLogRecord;
+pub use verified::VerifiedSessionInfo;
 
 /// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
 /// retreat with [`S3HourScopedDirectory::next_dir`]/`prev_dir`, gate on
@@ -197,7 +145,7 @@ impl GuardianReader {
             .get_or_load_session_info(&self.s3, session_id)
             .await?
             .clone();
-        self.enforce_build_policy(build_policy, &session_info.build_pcrs)?;
+        self.enforce_build_policy(build_policy, session_info.build_pcrs())?;
         Ok(session_info)
     }
 
@@ -207,7 +155,10 @@ impl GuardianReader {
         session_id: &str,
         build_policy: BuildPolicy,
     ) -> GuardianResult<GuardianInfo> {
-        Ok(self.get_session_info(session_id, build_policy).await?.info)
+        Ok(self
+            .get_session_info(session_id, build_policy)
+            .await?
+            .into_info())
     }
 
     /// The latest ceremony from `ceremony/` — the max-`sharing_seq` (lex-last)
@@ -222,18 +173,21 @@ impl GuardianReader {
     ) -> GuardianResult<Option<CeremonyLogMessage>> {
         let keys = self
             .s3
-            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
+            .list_keys(&format!("{}/", S3_DIR_CEREMONY), true)
             .await?;
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        let build_pcrs = record.build_pcrs.clone();
-        self.enforce_build_policy(build_policy, &build_pcrs)?;
-        let session_id = record.session_id;
-        let LogMessage::Ceremony(msg) = record.message else {
-            return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
+        self.enforce_build_policy(build_policy, record.build_pcrs())?;
+        let session_id = record.entry().session_id().clone();
+        let msg = match record.into_entry().into_message() {
+            VersionedLogMessage::V1(LogMessageV1::Ceremony(msg)) => msg,
+            VersionedLogMessage::V2(LogMessageV2::Ceremony(msg)) => msg,
+            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
+            }
         };
         log_verified_read(&key, &session_id);
         Ok(Some(*msg))
@@ -254,17 +208,12 @@ impl GuardianReader {
         build_policy: BuildPolicy,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self
-            .s3
-            .validate_prefix_history_and_list_keys(&prefix)
-            .await?;
+        let keys = self.s3.list_keys(&prefix, false).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        // The enclosing prefix's version history was checked while listing the
-        // candidate keys above, so the selected key does not need another check.
         let msg = self
-            .read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::AlreadyChecked)
+            .read_kp_share_state_log_at_key(&key, build_policy)
             .await?;
         if msg.sharing_seq != sharing_seq {
             return Err(InvalidS3Log(format!(
@@ -288,9 +237,7 @@ impl GuardianReader {
         build_policy: BuildPolicy,
     ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
-        // Unlike the latest-state path, this direct read has not already
-        // checked an enclosing prefix, so validate this exact key's history.
-        self.read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::Required)
+        self.read_kp_share_state_log_at_key(&key, build_policy)
             .await
     }
 
@@ -299,23 +246,28 @@ impl GuardianReader {
         &mut self,
         key: &str,
         build_policy: BuildPolicy,
-        history_check: HistoryCheck,
     ) -> GuardianResult<KpShareStateLogMessage> {
         // KP-share locks are short-lived and expected to expire. Expiry permits
         // deletion but does not cause it; while an object remains, its contents
         // are authenticatable through the enclave signature verified below.
         let record = self
             .s3
-            .get_log_record_inner(key, LockCheck::Skipped, history_check)
+            .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, &record.build_pcrs)?;
-        let session_id = record.session_id;
-        let LogMessage::KpShareState(msg) = record.message else {
-            return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
+        self.enforce_build_policy(build_policy, record.build_pcrs())?;
+        let session_id = record.entry().session_id().clone();
+        let msg = match record.into_entry().into_message() {
+            VersionedLogMessage::V1(LogMessageV1::KpShareState(msg)) => (*msg)
+                .try_into()
+                .map_err(|e| InvalidS3Log(format!("log schema conversion failed: {e}")))?,
+            VersionedLogMessage::V2(LogMessageV2::KpShareState(msg)) => *msg,
+            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
+            }
         };
         log_verified_read(key, &session_id);
-        Ok(*msg)
+        Ok(msg)
     }
 
     /// Read the latest ceremony together with the latest KP share state for its
@@ -368,19 +320,23 @@ impl GuardianReader {
     ) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
-            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
+            .list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE), true)
             .await?;
         let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, &record.build_pcrs)?;
-        let session_id = record.session_id;
-        let LogMessage::CommitteeUpdate(msg) = record.message else {
-            return Err(InvalidS3Log(format!(
-                "expected a committee-update log at {key}"
-            )));
+        self.enforce_build_policy(build_policy, record.build_pcrs())?;
+        let session_id = record.entry().session_id().clone();
+        let msg = match record.into_entry().into_message() {
+            VersionedLogMessage::V1(LogMessageV1::CommitteeUpdate(msg)) => msg,
+            VersionedLogMessage::V2(LogMessageV2::CommitteeUpdate(msg)) => msg,
+            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                return Err(InvalidS3Log(format!(
+                    "expected a committee-update log at {key}"
+                )));
+            }
         };
         let committee = match *msg {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
@@ -403,7 +359,7 @@ impl GuardianReader {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_GENESIS))
+            .list_keys(&format!("{}/", S3_DIR_GENESIS), true)
             .await?;
         if keys.is_empty() {
             return Ok(None);
@@ -415,10 +371,14 @@ impl GuardianReader {
         }
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy(build_policy, &record.build_pcrs)?;
-        let session_id = record.session_id;
-        let LogMessage::Genesis(msg) = record.message else {
-            return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
+        self.enforce_build_policy(build_policy, record.build_pcrs())?;
+        let session_id = record.entry().session_id().clone();
+        let msg = match record.into_entry().into_message() {
+            VersionedLogMessage::V1(LogMessageV1::Genesis(msg)) => msg,
+            VersionedLogMessage::V2(LogMessageV2::Genesis(msg)) => msg,
+            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
+                return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
+            }
         };
         log_verified_read(&key, &session_id);
         Ok(Some(*msg))
@@ -453,9 +413,7 @@ impl GuardianSessionCache {
         session_id: &str,
     ) -> GuardianResult<&VerifiedSessionInfo> {
         if !self.sessions.contains_key(session_id) {
-            let session_info = s3
-                .get_verified_session_info(session_id, &self.allowlist)
-                .await?;
+            let session_info = VerifiedSessionInfo::new(s3, session_id, &self.allowlist).await?;
             self.sessions.insert(session_id.into(), session_info);
         }
         Ok(&self.sessions[session_id])
@@ -467,19 +425,9 @@ impl GuardianSessionCache {
         s3: &GuardianS3Client,
         record: LogRecord,
     ) -> GuardianResult<VerifiedLogRecord> {
-        let object_key = record.object_key().to_owned();
         let session_id = record.session_id().clone();
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
-        let signing_pubkey = session_info.signing_pubkey;
-        let build_pcrs = session_info.build_pcrs.clone();
-        let (session_id, timestamp_ms, message) = record.validate(Some(&signing_pubkey))?;
-        Ok(VerifiedLogRecord::new(
-            object_key,
-            session_id,
-            timestamp_ms,
-            message,
-            build_pcrs,
-        ))
+        VerifiedLogRecord::new(record, session_info)
     }
 }
 
