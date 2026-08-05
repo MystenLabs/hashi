@@ -196,6 +196,7 @@ use sui_rpc::proto::sui::rpc::v2::ExecutionStatus;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
+use sui_rpc::proto::sui::rpc::v2::changed_object::IdOperation;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -1204,7 +1205,7 @@ impl SuiTxExecutor {
     pub async fn execute_submit_certificate(
         &mut self,
         cert: &CertificateV1,
-    ) -> Result<(), SubmitCertError> {
+    ) -> Result<bool, SubmitCertError> {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
@@ -1248,11 +1249,15 @@ impl SuiTxExecutor {
         );
 
         let response = self.execute(builder).await?;
-        let status = response.transaction().effects().status();
+        let effects = response.transaction().effects();
+        let status = effects.status();
         if !status.success() {
             return Err(SubmitCertError::Rejected(Box::new(status.clone())));
         }
-        Ok(())
+        Ok(effects
+            .changed_objects()
+            .iter()
+            .any(|o| o.id_operation() == IdOperation::Created))
     }
 
     /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.

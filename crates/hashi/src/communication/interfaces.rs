@@ -88,9 +88,10 @@ pub trait P2PChannel: Send + Sync {
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishOutcome {
-    /// Submitted by this call.
+    /// This call submitted; insertion is confirmed unless the follow-up read failed.
     Landed,
-    /// An equivalent message was already present, so nothing was submitted.
+    /// A message with the same hash was already present when this call checked. An earlier
+    /// attempt of this same call may have been the one that submitted it.
     AlreadyPresent,
     /// A different message from this sender is already present and cannot be replaced.
     Diverged,

@@ -205,18 +205,17 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         if let Some(outcome) = short_circuit_outcome(&classified) {
             return Ok(outcome);
         }
-
         let mut executor = self.create_executor();
-        executor
+        let inserted = executor
             .execute_submit_certificate(&cert)
             .await
             .map_err(|e| match &e {
                 SubmitCertError::Rejected(_) => ChannelError::Other(e.to_string()),
                 SubmitCertError::Submit(_) => ChannelError::RequestFailed(e.to_string()),
             })?;
-
-        // Our transaction executed, so a failed confirmation read must not turn a success into a
-        // reported failure.
+        if inserted {
+            return Ok(PublishOutcome::Landed);
+        }
         let Ok(settled) = fetch_certificates(
             &self.onchain_state,
             self.epoch,
@@ -225,17 +224,30 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         )
         .await
         else {
-            return Ok(PublishOutcome::Landed);
+            return Ok(PublishOutcome::Diverged);
         };
         let settled: Vec<(Address, MessageHash)> = settled
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))
             .collect();
-        Ok(settled_outcome(&classify_published_cert(
+        let outcome = raced_outcome(&classify_published_cert(
             &settled,
             &ours.dealer_address,
             ours.messages_hash,
-        )))
+        ));
+        tracing::warn!(
+            "{:?} epoch {} batch {:?}: this submission for dealer {} inserted nothing; a \
+             certificate already held the slot (ours {}), outcome {:?}",
+            self.protocol_type,
+            self.epoch,
+            self.batch_index,
+            ours.dealer_address,
+            hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                &ours.messages_hash
+            )),
+            outcome,
+        );
+        Ok(outcome)
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
@@ -341,10 +353,10 @@ enum PublishedCert {
     Diverged { on_chain: MessageHash },
 }
 
-fn settled_outcome(classified: &PublishedCert) -> PublishOutcome {
+fn raced_outcome(classified: &PublishedCert) -> PublishOutcome {
     match classified {
-        PublishedCert::Same | PublishedCert::Absent => PublishOutcome::Landed,
-        PublishedCert::Diverged { .. } => PublishOutcome::Diverged,
+        PublishedCert::Same => PublishOutcome::AlreadyPresent,
+        PublishedCert::Diverged { .. } | PublishedCert::Absent => PublishOutcome::Diverged,
     }
 }
 
@@ -406,17 +418,17 @@ mod tests {
     }
 
     #[test]
-    fn settled_outcome_maps_each_classification() {
+    fn raced_outcome_maps_each_classification() {
         assert_eq!(
-            settled_outcome(&PublishedCert::Same),
-            PublishOutcome::Landed
+            raced_outcome(&PublishedCert::Same),
+            PublishOutcome::AlreadyPresent
         );
         assert_eq!(
-            settled_outcome(&PublishedCert::Absent),
-            PublishOutcome::Landed
+            raced_outcome(&PublishedCert::Absent),
+            PublishOutcome::Diverged
         );
         assert_eq!(
-            settled_outcome(&PublishedCert::Diverged { on_chain: hash(1) }),
+            raced_outcome(&PublishedCert::Diverged { on_chain: hash(1) }),
             PublishOutcome::Diverged
         );
     }
