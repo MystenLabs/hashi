@@ -51,6 +51,7 @@ pub struct Metrics {
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
     pub guardian_finalize_deferred_total: IntCounter,
     pub guardian_limiter_reconciled_total: IntCounter,
+    pub guardian_limiter_config_changed_total: IntCounter,
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
@@ -442,6 +443,13 @@ impl Metrics {
             guardian_limiter_reconciled_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_reconciled_total",
                 "Local limiter reconciled to the guardian after a stall (recovers events dropped across a checkpoint-subscription reconnect)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_config_changed_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_config_changed_total",
+                "Times the local limiter adopted a changed guardian limiter policy, i.e. a \
+                 guardian re-provision installed a different refill rate or bucket capacity",
                 registry,
             )
             .unwrap(),

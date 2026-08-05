@@ -515,7 +515,8 @@ fn withdrawal_txn_fully_signed(
         Ok(()) => {
             if let Some(metrics) = state.metrics() {
                 metrics.guardian_limiter_anchor_events_total.inc();
-                metrics.record_limiter_state(&limiter.snapshot(), limiter.config());
+                let view = limiter.view();
+                metrics.record_limiter_state(&view.state, &view.config);
             }
             tracing::info!(
                 seq,

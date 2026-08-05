@@ -11,9 +11,22 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::RwLock;
 
+/// The mirrored policy and the position under it. Capacity is a function of
+/// both, so they are read as a pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LimiterView {
+    pub config: LimiterConfig,
+    pub state: LimiterState,
+}
+
+impl LimiterView {
+    pub fn capacity_at(&self, timestamp_secs: u64) -> u64 {
+        project_capacity(&self.config, &self.state, timestamp_secs)
+    }
+}
+
 pub struct LocalLimiter {
-    config: LimiterConfig,
-    state: RwLock<LimiterState>,
+    view: RwLock<LimiterView>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -30,8 +43,10 @@ pub enum LocalLimiterError {
 
 impl fmt::Debug for LocalLimiter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `try_read` like std's own `RwLock` impl: never block to format.
+        let config = self.view.try_read().ok().map(|view| view.config);
         f.debug_struct("LocalLimiter")
-            .field("config", &self.config)
+            .field("config", &config)
             .finish_non_exhaustive()
     }
 }
@@ -39,26 +54,30 @@ impl fmt::Debug for LocalLimiter {
 impl LocalLimiter {
     pub fn new(config: LimiterConfig, state: LimiterState) -> Self {
         Self {
-            config,
-            state: RwLock::new(state),
+            view: RwLock::new(LimiterView { config, state }),
         }
     }
 
-    pub fn config(&self) -> &LimiterConfig {
-        &self.config
+    /// Both halves under one lock; two accessors could straddle an
+    /// [`Self::adopt_config`].
+    pub fn view(&self) -> LimiterView {
+        *self.view.read().unwrap()
+    }
+
+    pub fn config(&self) -> LimiterConfig {
+        self.view.read().unwrap().config
     }
 
     pub fn snapshot(&self) -> LimiterState {
-        *self.state.read().unwrap()
+        self.view.read().unwrap().state
     }
 
     pub fn capacity_at(&self, timestamp_secs: u64) -> u64 {
-        let state = *self.state.read().unwrap();
-        project_capacity(&self.config, &state, timestamp_secs)
+        self.view().capacity_at(timestamp_secs)
     }
 
     pub fn next_seq(&self) -> u64 {
-        self.state.read().unwrap().next_seq
+        self.view.read().unwrap().state.next_seq
     }
 
     /// Validate a consume; does not mutate state.
@@ -68,20 +87,20 @@ impl LocalLimiter {
         timestamp_secs: u64,
         amount_sats: u64,
     ) -> Result<(), LocalLimiterError> {
-        let state = *self.state.read().unwrap();
-        if expected_seq != state.next_seq {
+        let view = *self.view.read().unwrap();
+        if expected_seq != view.state.next_seq {
             return Err(LocalLimiterError::SeqMismatch {
-                local: state.next_seq,
+                local: view.state.next_seq,
                 incoming: expected_seq,
             });
         }
-        if timestamp_secs < state.last_updated_at {
+        if timestamp_secs < view.state.last_updated_at {
             return Err(LocalLimiterError::StaleTimestamp {
-                local_last: state.last_updated_at,
+                local_last: view.state.last_updated_at,
                 incoming: timestamp_secs,
             });
         }
-        let capacity = project_capacity(&self.config, &state, timestamp_secs);
+        let capacity = view.capacity_at(timestamp_secs);
         if capacity < amount_sats {
             return Err(LocalLimiterError::InsufficientCapacity {
                 needed: amount_sats,
@@ -99,53 +118,78 @@ impl LocalLimiter {
         timestamp_secs: u64,
         amount_sats: u64,
     ) -> Result<(), LocalLimiterError> {
-        let mut guard = self.state.write().unwrap();
-        if applied_seq != guard.next_seq {
+        let mut guard = self.view.write().unwrap();
+        if applied_seq != guard.state.next_seq {
             return Err(LocalLimiterError::SeqMismatch {
-                local: guard.next_seq,
+                local: guard.state.next_seq,
                 incoming: applied_seq,
             });
         }
-        if timestamp_secs < guard.last_updated_at {
+        if timestamp_secs < guard.state.last_updated_at {
             return Err(LocalLimiterError::StaleTimestamp {
-                local_last: guard.last_updated_at,
+                local_last: guard.state.last_updated_at,
                 incoming: timestamp_secs,
             });
         }
-        let capacity = project_capacity(&self.config, &guard, timestamp_secs);
+        let capacity = guard.capacity_at(timestamp_secs);
         if capacity < amount_sats {
             return Err(LocalLimiterError::InsufficientCapacity {
                 needed: amount_sats,
                 available: capacity,
             });
         }
-        guard.num_tokens_available = capacity - amount_sats;
-        guard.last_updated_at = timestamp_secs;
-        guard.next_seq += 1;
+        guard.state.num_tokens_available = capacity - amount_sats;
+        guard.state.last_updated_at = timestamp_secs;
+        guard.state.next_seq += 1;
         Ok(())
+    }
+
+    /// Take the guardian's current policy, capping tokens to the new ceiling as
+    /// the guardian's own activation recovery does. Returns the replaced policy
+    /// if it changed.
+    ///
+    /// A rotation re-provisions the enclave, so the policy can move under a
+    /// running mirror; reconciling state cannot correct that, since both sides
+    /// are then projected through a capacity function that no longer matches.
+    /// No seq guard is needed: `next_seq` is untouched and tokens only move
+    /// down, so this can neither double-count an in-flight withdrawal nor
+    /// invent capacity.
+    pub fn adopt_config(&self, config: LimiterConfig) -> Option<LimiterConfig> {
+        let mut guard = self.view.write().unwrap();
+        let previous = guard.config;
+        if previous == config {
+            return None;
+        }
+        guard.config = config;
+        guard.state.num_tokens_available = guard
+            .state
+            .num_tokens_available
+            .min(config.max_bucket_capacity);
+        Some(previous)
     }
 
     /// Overwrite local state with the guardian's authoritative `state`.
     pub fn reconcile_to(&self, state: LimiterState) {
-        *self.state.write().unwrap() = state;
+        self.view.write().unwrap().state = state;
     }
 
     /// Snap the mirror to the guardian's `state` on genuine drift, only at a matching
     /// `next_seq` (so a racing `apply_consume` isn't clobbered). A pure refill-timing
     /// difference — same bucket line, different snapshot instant — isn't drift (equal
     /// projected capacity at a common time); clobbering it would stall the refill.
+    /// Callers must [`Self::adopt_config`] first: both sides project through
+    /// the mirror's own policy, so a stale ceiling saturates them into a
+    /// false match.
     pub fn reconcile_token_drift(&self, state: LimiterState) -> bool {
-        let mut guard = self.state.write().unwrap();
-        if guard.next_seq != state.next_seq {
+        let mut guard = self.view.write().unwrap();
+        if guard.state.next_seq != state.next_seq {
             return false;
         }
-        let common = guard.last_updated_at.max(state.last_updated_at);
-        if project_capacity(&self.config, &guard, common)
-            == project_capacity(&self.config, &state, common)
-        {
+        let common = guard.state.last_updated_at.max(state.last_updated_at);
+        if guard.capacity_at(common) == project_capacity(&guard.config, &state, common) {
             return false;
         }
-        *guard = state;
+        guard.state = state;
         true
     }
 }
@@ -454,6 +498,83 @@ mod tests {
         assert!(!mirror.reconcile_token_drift(guardian));
         assert_eq!(mirror.snapshot().num_tokens_available, 600_000);
         assert_eq!(mirror.snapshot().last_updated_at, 1_100);
+    }
+
+    /// What a rotated guardian installs below: 10x `make_limiter`'s policy.
+    fn raised_config() -> LimiterConfig {
+        LimiterConfig {
+            refill_rate: 10_000,
+            max_bucket_capacity: 20_000_000,
+        }
+    }
+
+    #[test]
+    fn adopt_config_is_a_noop_when_the_policy_is_unchanged() {
+        let limiter = make_limiter(1_500, 40, 3);
+        let before = limiter.snapshot();
+        assert!(limiter.adopt_config(limiter.config()).is_none());
+        assert_eq!(limiter.snapshot(), before);
+    }
+
+    #[test]
+    fn adopt_config_raises_the_ceiling_without_inventing_tokens() {
+        let limiter = make_limiter(1_000_000, 0, 4);
+        let previous = limiter.adopt_config(raised_config()).unwrap();
+        assert_eq!(previous.max_bucket_capacity, 2_000_000);
+        // Tokens carry over; only the ceiling and the refill move.
+        assert_eq!(limiter.snapshot().num_tokens_available, 1_000_000);
+        assert_eq!(limiter.capacity_at(1_000), 11_000_000);
+    }
+
+    #[test]
+    fn adopt_config_caps_tokens_when_the_ceiling_drops() {
+        let limiter = make_limiter(1_800_000, 500, 9);
+        limiter
+            .adopt_config(LimiterConfig {
+                refill_rate: 1_000,
+                max_bucket_capacity: 1_000_000,
+            })
+            .unwrap();
+        // Capped, but the position must not look like a consume.
+        assert_eq!(
+            limiter.snapshot(),
+            LimiterState {
+                num_tokens_available: 1_000_000,
+                last_updated_at: 500,
+                next_seq: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_policy_rejects_a_withdrawal_the_rotated_guardian_would_allow() {
+        let limiter = make_limiter(2_000_000, 0, 3);
+        let stale = limiter.validate_consume(3, 1_000, 5_000_000).unwrap_err();
+        assert!(matches!(
+            stale,
+            LocalLimiterError::InsufficientCapacity {
+                available: 2_000_000,
+                ..
+            }
+        ));
+        limiter.adopt_config(raised_config()).unwrap();
+        limiter.validate_consume(3, 1_000, 5_000_000).unwrap();
+    }
+
+    #[test]
+    fn adopt_config_unmasks_drift_hidden_by_a_stale_ceiling() {
+        // Under the stale ceiling both sides saturate at it and read as in sync.
+        let guardian = LimiterState {
+            num_tokens_available: 15_000_000,
+            last_updated_at: 1_000,
+            next_seq: 7,
+        };
+        let mirror = make_limiter(2_000_000, 1_000, 7);
+        assert!(!mirror.reconcile_token_drift(guardian));
+
+        mirror.adopt_config(raised_config()).unwrap();
+        assert!(mirror.reconcile_token_drift(guardian));
+        assert_eq!(mirror.snapshot(), guardian);
     }
 
     #[test]

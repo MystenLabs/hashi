@@ -984,12 +984,14 @@ impl Hashi {
         Ok(info)
     }
 
-    /// Fetch the guardian's authoritative `LimiterState` and the live local
-    /// limiter handle. `None` if not seeded, the RPC fails, or pubkey mismatches.
+    /// Fetch the guardian's authoritative limiter policy and state, plus the
+    /// live local limiter handle. `None` if not seeded, the RPC fails, the
+    /// pubkey mismatches, or the guardian has no limiter yet.
     async fn guardian_limiter_and_state(
         &self,
     ) -> Option<(
         Arc<guardian_limiter::LocalLimiter>,
+        hashi_types::guardian::LimiterConfig,
         hashi_types::guardian::LimiterState,
     )> {
         let limiter = self.local_limiter()?;
@@ -997,8 +999,42 @@ impl Hashi {
         if !self.verify_and_pin_guardian_btc_pubkey(info.enclave_btc_pubkey) {
             return None;
         }
-        let state = info.limiter_state?;
-        Some((limiter, state))
+        match (info.limiter_config, info.limiter_state) {
+            (Some(config), Some(state)) => Some((limiter, config, state)),
+            // The enclave installs the config at operator_init and builds the
+            // limiter from it at operator_activate, so state can never outrun
+            // config. Say so rather than stalling every reconcile in silence.
+            (None, Some(_)) => {
+                tracing::warn!(
+                    "Guardian reported limiter state without a config; skipping reconcile"
+                );
+                None
+            }
+            // Provisioned but not yet activated — ordinary mid-rotation.
+            _ => None,
+        }
+    }
+
+    /// Adopt the guardian's limiter policy when a re-provision changed it. The
+    /// policy is pinned per enclave session, so a rotation can move it under a
+    /// running mirror. It rides the same `GetGuardianInfo` response already
+    /// trusted for `LimiterState`, so this widens nothing.
+    fn adopt_guardian_limiter_config(
+        &self,
+        limiter: &guardian_limiter::LocalLimiter,
+        config: hashi_types::guardian::LimiterConfig,
+    ) {
+        let Some(previous) = limiter.adopt_config(config) else {
+            return;
+        };
+        self.metrics.guardian_limiter_config_changed_total.inc();
+        let view = limiter.view();
+        self.metrics.record_limiter_state(&view.state, &view.config);
+        tracing::warn!(
+            ?previous,
+            ?config,
+            "Guardian limiter config changed; local mirror adopted it",
+        );
     }
 
     /// Cross-check the live guardian's BTC pubkey against the on-chain pin and
@@ -1038,7 +1074,7 @@ impl Hashi {
         state: hashi_types::guardian::LimiterState,
     ) {
         self.metrics.guardian_limiter_reconciled_total.inc();
-        self.metrics.record_limiter_state(&state, limiter.config());
+        self.metrics.record_limiter_state(&state, &limiter.config());
     }
 
     /// Snap the local limiter to the guardian once `tracker` confirms the
@@ -1047,9 +1083,11 @@ impl Hashi {
         &self,
         tracker: &mut guardian_limiter::LimiterStallTracker,
     ) {
-        let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
+        let Some((limiter, config, state)) = self.guardian_limiter_and_state().await else {
             return;
         };
+        // Before the state comparison below, which projects through this policy.
+        self.adopt_guardian_limiter_config(&limiter, config);
         let local_seq = limiter.next_seq();
         if tracker.observe(local_seq, state.next_seq) {
             tracing::warn!(
@@ -1077,9 +1115,10 @@ impl Hashi {
     /// again). So only re-align the bucket at a matching seq; seq drift is
     /// left to the stall tick.
     async fn reconcile_guardian_limiter_on_rebootstrap(&self) {
-        let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
+        let Some((limiter, config, state)) = self.guardian_limiter_and_state().await else {
             return;
         };
+        self.adopt_guardian_limiter_config(&limiter, config);
         if limiter.reconcile_token_drift(state) {
             self.record_limiter_reconcile(&limiter, state);
             tracing::debug!(
