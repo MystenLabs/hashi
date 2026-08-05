@@ -26,6 +26,7 @@ pub mod forward;
 pub mod info;
 pub mod metrics;
 pub mod relay;
+pub mod remote_write;
 pub mod widlog;
 
 pub use cache::CachingGuardianGrpc;
