@@ -23,6 +23,5 @@ pub use sui_tob::PrefetchedTobChannel;
 pub use sui_tob::SuiTobSessionChannel;
 pub use sui_tob::fetch_certificates;
 pub use sui_tob::fetch_key_generation_certificates;
-pub use timeout_and_retry::send_to_many;
 pub use timeout_and_retry::with_timeout_and_retry;
 pub use timeout_and_retry::with_timeout_and_retry_budget;
