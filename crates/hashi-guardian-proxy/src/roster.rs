@@ -4,17 +4,17 @@
 //! The relay's KP roster, read from the guardian's S3 share log. A ceremony
 //! commits who holds shares — every encrypted share is labeled with its
 //! recipient's PGP fingerprint — so the latest share log IS the authorization
-//! roster: exactly the set that can produce a share worth relaying. The read is
-//! deliberately unverified (no enclave-signature check): the bucket only admits
-//! enclave writes, and this gate is DoS-tier — the enclave still verifies every
+//! roster. The read is deliberately unverified: the bucket only admits enclave
+//! writes and this gate is DoS-tier, with the enclave still verifying every
 //! share cryptographically (config_hash AAD + commitments).
 //!
 //! Two layouts are in flight (#779 migrates the first to the second):
 //!   `shares/{sharing_seq:020}-{session}.json` (message `Shares`)
 //!   `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session}.json` (`KpShareState`)
-//! The reader prefers `kp-shares/` and falls back to `shares/`, parsing a local
-//! tolerant shape rather than the hashi-types enum, so the proxy keeps working
-//! on either side of that migration and on buckets whose ceremony predates it.
+//! The reader prefers `kp-shares/`, parsing a local tolerant shape rather than
+//! the hashi-types enum so it keeps working across that migration.
+
+use std::collections::BTreeMap;
 
 use anyhow::Context as _;
 use hashi_types::pgp::Fingerprint;
@@ -72,9 +72,39 @@ struct ShareState {
     encrypted_shares: Vec<LabeledShare>,
 }
 
+/// A share names its recipient in one of two shapes, and both are live: the
+/// guardian deployed on testnet writes `schema_version: 1` records carrying a
+/// single `recipient_fingerprint`, while current builds write
+/// `schema_version: 2` with `ciphertexts_by_fingerprint`, one entry per cert
+/// since a KP may hold several. A rotation reads the old record before it
+/// writes the new one, so the relay has to accept either.
 #[derive(Deserialize)]
-struct LabeledShare {
-    recipient_fingerprint: String,
+#[serde(untagged)]
+enum LabeledShare {
+    MultiCert {
+        ciphertexts_by_fingerprint: BTreeMap<String, serde_json::Value>,
+    },
+    SingleCert {
+        recipient_fingerprint: String,
+    },
+}
+
+impl LabeledShare {
+    /// Every fingerprint naming this share's holder. More than one only in the
+    /// multi-cert shape, where they are all the same KP.
+    fn fingerprints(&self) -> Vec<&str> {
+        match self {
+            Self::MultiCert {
+                ciphertexts_by_fingerprint,
+            } => ciphertexts_by_fingerprint
+                .keys()
+                .map(String::as_str)
+                .collect(),
+            Self::SingleCert {
+                recipient_fingerprint,
+            } => vec![recipient_fingerprint.as_str()],
+        }
+    }
 }
 
 fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
@@ -83,7 +113,8 @@ fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
     state
         .encrypted_shares
         .iter()
-        .map(|share| parse_recipient_fingerprint(&share.recipient_fingerprint))
+        .flat_map(|share| share.fingerprints())
+        .map(parse_recipient_fingerprint)
         .collect()
 }
 
@@ -109,7 +140,10 @@ mod tests {
         hex.parse().unwrap()
     }
 
-    fn labeled_shares(fingerprints: &[&str]) -> Vec<serde_json::Value> {
+    /// `schema_version: 1` shares — one cert each, named by a scalar. This is
+    /// what the guardian currently deployed on testnet writes, so a rotation
+    /// reads this shape before it writes anything.
+    fn single_cert_shares(fingerprints: &[&str]) -> Vec<serde_json::Value> {
         fingerprints
             .iter()
             .enumerate()
@@ -118,6 +152,25 @@ mod tests {
                     "id": i + 1,
                     "recipient_fingerprint": fp,
                     "armored_ciphertext": "",
+                })
+            })
+            .collect()
+    }
+
+    /// `schema_version: 2` shares — a map, because one KP may hold several
+    /// certs. This is what current builds write.
+    fn multi_cert_shares(per_share: &[&[&str]]) -> Vec<serde_json::Value> {
+        per_share
+            .iter()
+            .enumerate()
+            .map(|(i, fps)| {
+                let ciphertexts: serde_json::Map<String, serde_json::Value> = fps
+                    .iter()
+                    .map(|fp| ((*fp).to_string(), serde_json::json!("")))
+                    .collect();
+                serde_json::json!({
+                    "id": i + 1,
+                    "ciphertexts_by_fingerprint": ciphertexts,
                 })
             })
             .collect()
@@ -132,7 +185,7 @@ mod tests {
             "timestamp_ms": 0,
             "message": { "Shares": {
                 "sharing_seq": sharing_seq,
-                "encrypted_shares": labeled_shares(fingerprints),
+                "encrypted_shares": single_cert_shares(fingerprints),
             }},
             "signature": null,
         });
@@ -141,13 +194,15 @@ mod tests {
     }
 
     /// A `kp-shares/` record in #779's shape — the layout the enclave writes
-    /// today.
+    /// today. One cert per share; use `kp_shares_record_multi_cert` for a KP
+    /// holding several.
     fn kp_shares_record(
         sharing_seq: u64,
         cert_seq: u64,
         fingerprints: &[&str],
     ) -> (String, Vec<u8>) {
-        let shares = labeled_shares(fingerprints);
+        let per_share: Vec<&[&str]> = fingerprints.iter().map(std::slice::from_ref).collect();
+        let shares = multi_cert_shares(&per_share);
         let record = serde_json::json!({
             "session_id": "test-session",
             "timestamp_ms": 0,
@@ -209,6 +264,68 @@ mod tests {
 
         let roster = latest_kp_roster(&store).await.unwrap().unwrap();
         assert_eq!(roster, vec![fp(FP_B)]);
+    }
+
+    /// The shape the guardian deployed on testnet writes: a `kp-shares/` record
+    /// whose shares name one cert each via a scalar `recipient_fingerprint`
+    /// (`schema_version: 1`). Fingerprints are the real gen-3 roster; the
+    /// ciphertexts are elided because the roster read never decrypts.
+    ///
+    /// Regression: the relay parsed only one share shape, so against a real
+    /// bucket it failed closed with "KP roster unavailable" and no KP could
+    /// submit a share.
+    #[tokio::test]
+    async fn deployed_testnet_single_cert_shares_parse() {
+        const DEPLOYED: &[&str] = &[
+            "010AFFD5514AE454CA0D56DAA40FE24388998D2A",
+            "69A798B4CD1FE3F7C827381BC56DF2575EC846C3",
+            "8D798722C24B2A15C15036A1DEFA2C01C4350A31",
+        ];
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "916c711a5e81c2b0",
+            "timestamp_ms": 1784219535816u64,
+            "message": { "KpShareState": {
+                "sharing_seq": 0,
+                "cert_seq": 0,
+                "encrypted_shares": single_cert_shares(DEPLOYED),
+            }},
+            "signature": null,
+        });
+        let store = MemStore::default();
+        store.insert(
+            "kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json".to_string(),
+            serde_json::to_vec(&record).unwrap(),
+        );
+
+        let roster = latest_kp_roster(&store).await.unwrap().unwrap();
+        assert_eq!(roster, DEPLOYED.iter().map(|f| fp(f)).collect::<Vec<_>>());
+    }
+
+    /// One KP holding several certs contributes every one of them: any of its
+    /// certs can sign a submission that is still that single share holder.
+    #[tokio::test]
+    async fn multi_cert_share_contributes_every_fingerprint() {
+        let store = MemStore::default();
+        let shares = multi_cert_shares(&[&[FP_A, FP_B]]);
+        let record = serde_json::json!({
+            "schema_version": 2,
+            "session_id": "test-session",
+            "timestamp_ms": 0,
+            "message": { "KpShareState": {
+                "sharing_seq": 0,
+                "cert_seq": 0,
+                "encrypted_shares": shares,
+            }},
+            "signature": null,
+        });
+        store.insert(
+            "kp-shares/00000000000000000000/00000000000000000000-test-session.json".to_string(),
+            serde_json::to_vec(&record).unwrap(),
+        );
+
+        let roster = latest_kp_roster(&store).await.unwrap().unwrap();
+        assert_eq!(roster, vec![fp(FP_A), fp(FP_B)]);
     }
 
     #[tokio::test]
