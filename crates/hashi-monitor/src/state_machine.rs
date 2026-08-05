@@ -259,11 +259,8 @@ impl WithdrawalStateMachine {
                 WithdrawalEventType::E3BtcConfirmed => match self.btc_checked_at {
                     Some(checked_at) => checked_at,
                     None => {
-                        tracing::debug!(
-                            wid = %self.wid,
-                            btc_txid = %self.btc_txid,
-                            "callers should avoid reaching this branch by calling try_fetch_btc_tx before"
-                        );
+                        // Bitcoin and state checks have independent schedules.
+                        // Wait for the first lookup before evaluating absence.
                         continue;
                     }
                 },
@@ -375,10 +372,8 @@ impl DepositStateMachine {
 
         // btc event not yet found
         let Some(cursor) = self.btc_checked_at else {
-            tracing::debug!(
-                deposit_id = %self.hashi_deposit_event.deposit_id,
-                "callers should avoid this branch by calling try_fetch_btc_tx before violations"
-            );
+            // Bitcoin and state checks have independent schedules. Wait for
+            // the first lookup before evaluating absence.
             return Vec::new();
         };
 
