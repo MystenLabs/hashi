@@ -37,7 +37,7 @@ use crate::guardian_info::verified_live_guardian_info;
 /// See the module docs for the full step-by-step flow. Each step is logged via
 /// `tracing` so the operator can follow exactly what is happening.
 pub async fn run(cfg: Config) -> Result<()> {
-    let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
     let retention_environment = guardian_s3.retention_environment;
 
     info!(

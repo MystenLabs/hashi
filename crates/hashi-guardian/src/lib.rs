@@ -34,6 +34,7 @@ pub mod withdraw_mode;
 pub mod test_utils;
 
 pub use enclave::Enclave;
+pub use s3_client::resolve_s3_config;
 pub use s3_client::GuardianS3Client;
 
 #[cfg(any(test, feature = "test-utils"))]

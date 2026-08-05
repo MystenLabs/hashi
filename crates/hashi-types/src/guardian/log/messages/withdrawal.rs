@@ -34,6 +34,9 @@ pub enum WithdrawalLogMessage {
 }
 
 impl WithdrawalLogMessage {
+    /// Prefix shared by all successful withdrawal object names within an hour.
+    pub const SUCCESS_OBJECT_KEY_PREFIX: &'static str = "success-";
+
     /// Success keys lead with `success-{seq:020}` so that lexicographic listing
     /// within an hour bucket is also seq-sorted — the last key is the max-seq
     /// log, which the KP reads to recover limiter state. Failures don't have a
@@ -47,8 +50,10 @@ impl WithdrawalLogMessage {
         let directory = S3HourScopedDirectory::withdraw(unix_millis_to_seconds(timestamp_ms));
         match self {
             Self::Success { request_data, .. } => ObjectKeyPattern::Fixed(format!(
-                "{directory}success-{:020}-{session_id}-wid{}.json",
-                request_data.seq, request_data.wid,
+                "{directory}{}{:020}-{session_id}-wid{}.json",
+                Self::SUCCESS_OBJECT_KEY_PREFIX,
+                request_data.seq,
+                request_data.wid,
             )),
             Self::Failure { request_data, .. } => ObjectKeyPattern::RandomSuffix(format!(
                 "{directory}failure-{session_id}-wid{}-",
