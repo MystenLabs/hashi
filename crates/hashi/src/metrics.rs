@@ -102,7 +102,7 @@ pub struct Metrics {
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
-    pub sui_balance: IntGauge,
+    pub sui_balance: IntGaugeVec,
 
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
@@ -669,10 +669,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            sui_balance: register_int_gauge_with_registry!(
+            sui_balance: register_int_gauge_vec_with_registry!(
                 "hashi_sui_balance",
                 "Operator gas wallet SUI balance in MIST, totaled across owned \
-                 coins and the address balance",
+                 coins and the address balance. Labeled with the operator \
+                 address that pays gas, so a low-balance alert names the \
+                 wallet to top up. One series per node.",
+                &["address"],
                 registry,
             )
             .unwrap(),

@@ -1097,10 +1097,6 @@ impl Hashi {
     fn start_sui_balance_metric(self: Arc<Self>) -> Service {
         const BALANCE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
         Service::new().spawn_aborting(async move {
-            // -1 = never sampled; keeps a `0 <= balance < threshold` alert
-            // from firing on nodes where this poller is disabled or has not
-            // yet succeeded (the gauge would otherwise read a false 0).
-            self.metrics.sui_balance.set(-1);
             let owner = match self.config.operator_private_key() {
                 Ok(key) => key.verifying_key().derive_address(),
                 Err(e) => {
@@ -1108,6 +1104,16 @@ impl Hashi {
                     return Ok(());
                 }
             };
+            // The address labels the series, so the gauge can only be
+            // published once the operator key resolves.
+            let balance = self
+                .metrics
+                .sui_balance
+                .with_label_values(&[&owner.to_string()]);
+            // -1 = never sampled; keeps a `0 <= balance < threshold` alert
+            // from firing before the first poll succeeds (the gauge would
+            // otherwise read a false 0).
+            balance.set(-1);
             let request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default()
                 .with_owner(owner)
                 .with_coin_type(sui_sdk_types::StructTag::sui());
@@ -1118,11 +1124,8 @@ impl Hashi {
                 interval.tick().await;
                 match client.state_client().get_balance(request.clone()).await {
                     Ok(response) => {
-                        if let Some(balance) = response.into_inner().balance.and_then(|b| b.balance)
-                        {
-                            self.metrics
-                                .sui_balance
-                                .set(balance.min(i64::MAX as u64) as i64);
+                        if let Some(sats) = response.into_inner().balance.and_then(|b| b.balance) {
+                            balance.set(sats.min(i64::MAX as u64) as i64);
                         }
                     }
                     Err(e) => tracing::debug!("failed to fetch operator SUI balance: {e}"),
