@@ -26,6 +26,15 @@ pub enum ChannelError {
     #[error("Request failed: {0}")]
     RequestFailed(String),
 
+    /// The peer explicitly answered that it is up but not ready to serve
+    /// yet (e.g. still reconciling its signing manager right after an epoch
+    /// change). Distinguished from [`ChannelError::RequestFailed`] so
+    /// callers can treat it as "retry shortly" rather than as peer failure.
+    /// Deliberately narrow: transport failures that gRPC also reports as
+    /// `Unavailable` do NOT map here.
+    #[error("Peer not ready: {0}")]
+    NotReady(String),
+
     #[error("Client not found for address {0}")]
     ClientNotFound(Address),
 
@@ -94,6 +103,7 @@ where
     /// Receive the next message in the total order
     async fn receive(&mut self) -> ChannelResult<M>;
 
-    /// Fetch existing certificates and return the dealer addresses.
-    async fn certified_dealers(&mut self) -> Vec<Address>;
+    /// Fetch existing certificates, paired with their dealer. Callers must
+    /// verify them before acting on their weight.
+    async fn certified_dealers(&mut self) -> Vec<(Address, M)>;
 }

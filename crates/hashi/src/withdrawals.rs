@@ -40,7 +40,14 @@ use crate::utxo_pool::UtxoCandidate;
 use crate::utxo_pool::UtxoStatus;
 use thiserror::Error;
 
-const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for collecting and aggregating one batch of MPC input signatures
+/// in `mpc_sign_withdrawal_tx`. Poll rounds inside `SigningManager::sign` are
+/// bounded by this deadline (and per-peer probes are individually bounded),
+/// so it is a real upper bound, not advisory. It must stay comfortably below
+/// the leader's per-task timeout (`LEADER_TASK_TIMEOUT`, 60 s) so a signing
+/// member that exhausts the deadline still reports its partial results to the
+/// leader instead of the leader's whole chunk task timing out.
+const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
@@ -93,32 +100,97 @@ pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction)
     inputs.saturating_sub(change)
 }
 
-/// Conservative runtime-object budget for withdrawal commit transactions.
+/// Conservative runtime-object budget shared by the withdrawal flow's Sui
+/// transactions.
 ///
-/// Sui's hard object-runtime cache limit is 1000 objects. Empirical
-/// measurements put withdrawal commit transactions at roughly
-/// `selected_utxos + 3 * requests + fixed_overhead` runtime objects. Target
-/// 922 to leave 7.8% headroom below the hard 1000 cap.
-const WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET: usize = 922;
+/// Sui's hard object-runtime cache limit is 1000 objects per transaction.
+/// Target 922 to leave 7.8% headroom below the hard cap.
+const WITHDRAWAL_RUNTIME_OBJECT_BUDGET: usize = 922;
+
+/// Runtime-object cost model for `commit_withdrawal_tx`. Empirical
+/// measurements put commit transactions at roughly
+/// `3 * requests + 1 * selected_utxos + fixed_overhead` runtime objects:
+/// each request is removed from the `requests` ObjectBag and re-added to
+/// `processed` (the `Field` wrapper, the child request object, and the new
+/// `Field`), and each input borrows and locks its `utxo_records` entry (one
+/// `Field` per input).
 const WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS: usize = 12;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 
-fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
-    let request_objects =
-        request_count.saturating_mul(WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST);
-    let runtime_input_budget = WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET
-        .saturating_sub(WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS)
+/// Funding-input reserve at the request-count cap. With largest-first
+/// selection a batch is normally funded by a handful of inputs; 16 leaves
+/// margin for a fragmented pool while giving the rest of the runtime-object
+/// budget to requests.
+const WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS: usize = 16;
+
+// `MAX_WITHDRAWAL_REQUESTS` is the largest request count that leaves at
+// least the funding-input reserve inside the commit object budget. Keep the
+// constant itself literal (it is quoted in operator-facing config docs) but
+// refuse to compile if it drifts from the cost model.
+const _: () = assert!(
+    CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        == (WITHDRAWAL_RUNTIME_OBJECT_BUDGET
+            - WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS
+            - WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS * WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT)
+            / WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST,
+    "MAX_WITHDRAWAL_REQUESTS must equal the Sui commit object-budget derivation"
+);
+
+/// Runtime-object cost model for `confirm_withdrawal`, with conservative
+/// upper-bound coefficients. `update_requests_confirmed` borrows each
+/// request in the `processed` ObjectBag (at most the `Field` wrapper plus
+/// the child object, 2 per request), and `mark_spent` borrows each input's
+/// `utxo_records` entry (1 per input; the record removal itself is deferred
+/// to `cleanup_spent_utxos`). `finalize_withdrawal` has the same
+/// per-request shape via `update_requests_signed` but no per-input loop, so
+/// confirm dominates it and is the only post-commit transaction modeled
+/// here.
+///
+/// With these coefficients the commit model above binds at every request
+/// count that matters (3 objects per request versus 2), but confirm is
+/// checked alongside it so a future change to either cost cannot silently
+/// regress the other.
+const WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS: usize = 43;
+const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
+const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
+
+/// How many inputs fit in [`WITHDRAWAL_RUNTIME_OBJECT_BUDGET`] after the
+/// fixed overhead and the per-request cost of `request_count` requests.
+fn runtime_object_input_budget(
+    fixed_objects: usize,
+    objects_per_request: usize,
+    objects_per_input: usize,
+    request_count: usize,
+) -> usize {
+    let request_objects = request_count.saturating_mul(objects_per_request);
+    let input_objects = WITHDRAWAL_RUNTIME_OBJECT_BUDGET
+        .saturating_sub(fixed_objects)
         .saturating_sub(request_objects);
-    let input_budget = runtime_input_budget / WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT;
-    configured_max_inputs.min(input_budget)
+    input_objects / objects_per_input
 }
 
-/// Confirm is no longer input-bound: spent UTXOs emit events only (0
-/// objects per input). The confirm transaction's object count is
-/// `requests + ~43` fixed overhead — well within the 1000-object limit
-/// for any practical request count. The commit path is the binding
-/// constraint.
+fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+    configured_max_inputs.min(runtime_object_input_budget(
+        WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS,
+        WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST,
+        WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT,
+        request_count,
+    ))
+}
+
+fn safe_withdrawal_confirm_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+    configured_max_inputs.min(runtime_object_input_budget(
+        WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS,
+        WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST,
+        WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT,
+        request_count,
+    ))
+}
+
+/// The input cap for the whole withdrawal flow at a given request count:
+/// the configured cap, the per-request consolidation budget, and the
+/// runtime-object budgets of both the commit and confirm transactions.
 fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
     let request_input_budget =
         request_count.saturating_mul(CoinSelectionParams::DEFAULT_INPUT_BUDGET);
@@ -128,6 +200,118 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
             request_count,
             configured_max_inputs,
         ))
+        .min(safe_withdrawal_confirm_max_inputs(
+            request_count,
+            configured_max_inputs,
+        ))
+}
+
+/// Cap on the trailing change outputs a commitment may declare. Coin
+/// selection emits at most one, and the shape check deliberately leaves
+/// room for one more so a future leader can split change into two UTXOs.
+/// Each change output becomes a pending UTXO object in the Sui flow, so
+/// the cap keeps a certified commitment's object cost inside the headroom
+/// the runtime-object budget leaves below Sui's hard cache limit.
+const WITHDRAWAL_MAX_CHANGE_OUTPUTS: usize = 2;
+
+/// Batch cap while the leader is in consolidation mode: the shape in which
+/// the per-request consolidation budget exactly fills the configured input
+/// cap (40 requests x 10 inputs = 400 inputs), so every batch keeps its
+/// full consolidation envelope instead of trading inputs for requests.
+const CONSOLIDATION_MODE_MAX_REQUESTS: usize = 40;
+
+const _: () = assert!(
+    CONSOLIDATION_MODE_MAX_REQUESTS * CoinSelectionParams::DEFAULT_INPUT_BUDGET
+        == CoinSelectionParams::DEFAULT_MAX_INPUTS,
+    "CONSOLIDATION_MODE_MAX_REQUESTS must fill the input cap at the per-request budget"
+);
+
+/// The request cap for one batch, chosen by comparing the depth of the
+/// withdrawal queue to the number of available (unlocked) pool UTXOs.
+///
+/// A queue deeper than the pool means throughput is the scarce resource:
+/// fill batches up to [`CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS`] and
+/// let the Sui commit object budget squeeze the input side (drain mode).
+/// Otherwise pool health is the scarce resource: cap the batch at
+/// [`CONSOLIDATION_MODE_MAX_REQUESTS`] so the full per-request
+/// consolidation budget stays available (consolidation mode).
+fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize) -> usize {
+    if pending_requests > available_utxos {
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+    } else {
+        CONSOLIDATION_MODE_MAX_REQUESTS
+    }
+}
+
+/// Estimate the weight of the unsigned withdrawal transaction described by
+/// a commitment: fixed segwit overhead, the CompactSize input and output
+/// counts, script-path 2-of-2 inputs, and the declared outputs. Matches the
+/// leader-side `TransactionBuilder::weight` term for term, so validator
+/// estimates cannot drift below what coin selection priced.
+fn estimated_withdrawal_tx_weight(
+    input_count: usize,
+    outputs: &[OutputUtxo],
+) -> anyhow::Result<Weight> {
+    let input_weight = hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT * input_count as u64;
+    let output_weight: u64 = outputs
+        .iter()
+        .map(|o| hashi_bitcoin::output_weight_for_witness_program(&o.bitcoin_address))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .iter()
+        .sum();
+    Ok(
+        Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight)
+            + utxo_pool::varint_weight(input_count as u64)
+            + utxo_pool::varint_weight(outputs.len() as u64),
+    )
+}
+
+/// Structural caps on a withdrawal commitment, checked before any state
+/// lookups. A commitment outside these bounds either cannot execute on Sui
+/// (the commit or confirm transaction would exceed the runtime-object
+/// cache limit), cannot relay on Bitcoin (past the standardness weight
+/// limit), or was not produced by the batching algorithm — no honest
+/// leader emits one, so validators refuse to certify it.
+fn validate_commitment_shape(
+    request_count: usize,
+    input_count: usize,
+    outputs: &[OutputUtxo],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        request_count <= CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+        "Commitment has {request_count} requests, exceeding the batch cap of {}",
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+    );
+
+    let max_inputs =
+        safe_withdrawal_flow_max_inputs(request_count, CoinSelectionParams::DEFAULT_MAX_INPUTS);
+    anyhow::ensure!(
+        input_count <= max_inputs,
+        "Commitment has {input_count} inputs for {request_count} requests, \
+         exceeding the flow cap of {max_inputs}",
+    );
+
+    // The counts above bound the input side, but the change-output count is
+    // otherwise unbounded, so an absurdly shaped commitment could still
+    // describe a transaction too heavy to relay.
+    let tx_weight = estimated_withdrawal_tx_weight(input_count, outputs)?;
+    anyhow::ensure!(
+        tx_weight <= CoinSelectionParams::DEFAULT_MAX_TX_WEIGHT,
+        "Estimated transaction weight {tx_weight} exceeds Bitcoin's \
+         standardness limit of {}",
+        CoinSelectionParams::DEFAULT_MAX_TX_WEIGHT,
+    );
+
+    // Bound the change outputs that survive the weight check: each one
+    // costs Sui objects the runtime-object models above do not price, so
+    // the count must stay inside the budget headroom.
+    let change_count = outputs.len().saturating_sub(request_count);
+    anyhow::ensure!(
+        change_count <= WITHDRAWAL_MAX_CHANGE_OUTPUTS,
+        "Commitment has {change_count} change outputs, exceeding the cap of {}",
+        WITHDRAWAL_MAX_CHANGE_OUTPUTS,
+    );
+    Ok(())
 }
 
 /// The data that validators BLS-sign over to approve a single withdrawal request.
@@ -260,6 +444,12 @@ impl Hashi {
             unique_utxo_ids.len() == approval.selected_utxos.len(),
             "Duplicate UTXO IDs"
         );
+
+        validate_commitment_shape(
+            approval.request_ids.len(),
+            approval.selected_utxos.len(),
+            &approval.outputs,
+        )?;
 
         // 1. Verify each request_id exists and is approved
         let requests: Vec<WithdrawalRequest> = approval
@@ -406,18 +596,8 @@ impl Hashi {
         //    what its ancestors owe, so judging the transaction alone
         //    would reject every legitimate rescue of a stalled settlement.
         {
-            // Estimate transaction weight.
-            let num_inputs = selected_utxos.len() as u64;
-            let input_weight = hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT * num_inputs;
-            let output_weight: u64 = approval
-                .outputs
-                .iter()
-                .map(|o| hashi_bitcoin::output_weight_for_witness_program(&o.bitcoin_address))
-                .collect::<anyhow::Result<Vec<_>>>()?
-                .iter()
-                .sum();
             let tx_weight =
-                Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight);
+                estimated_withdrawal_tx_weight(selected_utxos.len(), &approval.outputs)?;
 
             // Fee must be at least the minimum relay fee (1 sat/vB).
             let relay_min_fee = FeeRate::from_sat_per_vb_unchecked(1)
@@ -1118,7 +1298,6 @@ impl Hashi {
 
         let configured_max_inputs = CoinSelectionParams::DEFAULT_MAX_INPUTS;
         let configured_long_term_fee_rate = CoinSelectionParams::DEFAULT_LONG_TERM_FEE_RATE;
-        let configured_max_requests = self.config.withdrawal_max_batch_size().min(requests.len());
 
         // Snapshot both maps under a single read-lock so they are always
         // mutually consistent (e.g., a WithdrawalConfirmed cannot update
@@ -1151,6 +1330,22 @@ impl Hashi {
                 }
             })
             .collect();
+
+        // Drain versus consolidate: size the batch cap by comparing the
+        // queue depth to the available pool. `candidates` counts every
+        // unlocked UTXO — the same set coin selection draws from.
+        let batch_request_cap = withdrawal_batch_request_cap(requests.len(), candidates.len());
+        let configured_max_requests = self
+            .config
+            .withdrawal_max_batch_size()
+            .min(batch_request_cap)
+            .min(requests.len());
+        tracing::debug!(
+            pending_requests = requests.len(),
+            available_utxos = candidates.len(),
+            batch_request_cap,
+            "Sized the withdrawal batch cap from queue depth versus pool size",
+        );
 
         // Map on-chain WithdrawalRequests to the coin-selector view.
         // btc_amount is the full withdrawal amount.
@@ -1952,6 +2147,30 @@ mod tests {
     }
 
     #[test]
+    fn batch_cap_drains_when_queue_outnumbers_pool() {
+        assert_eq!(
+            withdrawal_batch_request_cap(5_000, 1_000),
+            CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        );
+    }
+
+    #[test]
+    fn batch_cap_consolidates_when_pool_outnumbers_queue() {
+        assert_eq!(
+            withdrawal_batch_request_cap(10, 1_000),
+            CONSOLIDATION_MODE_MAX_REQUESTS
+        );
+    }
+
+    #[test]
+    fn batch_cap_prefers_consolidation_at_parity() {
+        assert_eq!(
+            withdrawal_batch_request_cap(500, 500),
+            CONSOLIDATION_MODE_MAX_REQUESTS
+        );
+    }
+
+    #[test]
     fn requested_signing_indices_empty_request_defaults_to_unsigned_inputs() {
         let signing = signing(vec![
             hashi_types::move_types::MpcSig::Pending(10),
@@ -2052,23 +2271,38 @@ mod tests {
 
     #[test]
     fn withdrawal_flow_budget_at_absolute_cap() {
-        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 40);
+        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 298);
         assert_eq!(CoinSelectionParams::DEFAULT_MAX_INPUTS, 400);
         assert_eq!(
             safe_withdrawal_commit_max_inputs(
                 CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
             ),
-            400,
-            "the default input cap limits the commit to 400 inputs",
+            WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
+            "at the request cap, the commit object budget leaves exactly \
+             the funding-input reserve",
         );
         assert_eq!(
             safe_withdrawal_flow_max_inputs(
                 CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
             ),
+            WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
+            "a full drain-mode batch spends the object budget on requests, \
+             not inputs",
+        );
+    }
+
+    /// The pre-drain-mode production shape (40 requests / 400 inputs) must
+    /// keep working unchanged: at 40 requests, the per-request input budget
+    /// and the configured input cap both allow 400 inputs, and the commit
+    /// object budget does not bind.
+    #[test]
+    fn withdrawal_flow_budget_at_legacy_batch_size() {
+        assert_eq!(
+            safe_withdrawal_flow_max_inputs(40, CoinSelectionParams::DEFAULT_MAX_INPUTS),
             400,
-            "40 requests × 10 inputs/request limits the flow to 400 inputs",
+            "40 requests × 10 inputs/request still fills the configured input cap",
         );
     }
 
@@ -2079,6 +2313,108 @@ mod tests {
             10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
             "at low request counts, the per-request input budget is binding",
         );
+    }
+
+    /// One P2TR withdrawal output (32-byte witness program) per request,
+    /// the worst-case output shape a commitment can declare per request.
+    fn p2tr_outputs(count: usize) -> Vec<OutputUtxo> {
+        (0..count)
+            .map(|_| OutputUtxo {
+                amount: 100_000,
+                bitcoin_address: vec![0u8; 32],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn commitment_shape_accepts_production_envelopes() {
+        // (requests, inputs): the consolidation-heavy legacy shape, the
+        // drain-mode shape at the request cap, and a minimal batch.
+        for (requests, inputs) in [(40, 400), (298, 16), (1, 10)] {
+            validate_commitment_shape(requests, inputs, &p2tr_outputs(requests + 1))
+                .unwrap_or_else(|e| panic!("{requests} requests / {inputs} inputs rejected: {e}"));
+        }
+    }
+
+    #[test]
+    fn commitment_shape_rejects_request_count_above_cap() {
+        let err = validate_commitment_shape(299, 1, &p2tr_outputs(299)).unwrap_err();
+        assert!(err.to_string().contains("exceeding the batch cap"), "{err}");
+    }
+
+    #[test]
+    fn commitment_shape_rejects_inputs_above_flow_cap() {
+        // One over the per-request consolidation budget, the configured
+        // input cap, and the commit object budget's funding reserve.
+        for (requests, inputs) in [(1, 11), (40, 401), (298, 17)] {
+            let err =
+                validate_commitment_shape(requests, inputs, &p2tr_outputs(requests)).unwrap_err();
+            assert!(
+                err.to_string().contains("exceeding the flow cap"),
+                "{requests} requests / {inputs} inputs: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn commitment_shape_rejects_unrelayable_weight() {
+        // Request and input counts inside their caps, but enough change
+        // outputs to push the transaction past the 400 kWU standardness
+        // limit (~2,300 P2TR outputs).
+        let err = validate_commitment_shape(298, 16, &p2tr_outputs(3_000)).unwrap_err();
+        assert!(err.to_string().contains("standardness limit"), "{err}");
+    }
+
+    #[test]
+    fn commitment_shape_accepts_change_outputs_at_cap() {
+        validate_commitment_shape(40, 400, &p2tr_outputs(40 + WITHDRAWAL_MAX_CHANGE_OUTPUTS))
+            .expect("a commitment at the change-output cap must validate");
+    }
+
+    #[test]
+    fn commitment_shape_rejects_change_outputs_above_cap() {
+        let err = validate_commitment_shape(
+            298,
+            16,
+            &p2tr_outputs(298 + WITHDRAWAL_MAX_CHANGE_OUTPUTS + 1),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("change outputs"), "{err}");
+    }
+
+    #[test]
+    fn estimated_weight_includes_count_varints() {
+        // 16 inputs encode as a 1-byte varint (4 WU) and 299 outputs as a
+        // 3-byte varint (12 WU); the fixed overhead alone would undercount
+        // the drain-mode shape by 16 WU.
+        let weight = estimated_withdrawal_tx_weight(16, &p2tr_outputs(299)).unwrap();
+        let expected = hashi_bitcoin::TX_FIXED_WEIGHT_WU
+            + 16 * hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT
+            + 299 * hashi_bitcoin::P2TR_OUTPUT_WEIGHT_WU
+            + 4
+            + 12;
+        assert_eq!(weight, Weight::from_wu(expected));
+    }
+
+    /// The confirm model has a lower per-request cost (2 versus 3) but a
+    /// higher fixed cost (43 versus 12) than the commit model, so it only
+    /// undercuts commit below 31 requests — where the 10-inputs-per-request
+    /// budget is far more restrictive anyway. Verify confirm never binds,
+    /// at any request count, so adding it to the flow minimum is a pure
+    /// safety net.
+    #[test]
+    fn withdrawal_confirm_budget_never_binds() {
+        for request_count in 1..=1000 {
+            let configured = CoinSelectionParams::DEFAULT_MAX_INPUTS;
+            let without_confirm = configured
+                .min(request_count * CoinSelectionParams::DEFAULT_INPUT_BUDGET)
+                .min(safe_withdrawal_commit_max_inputs(request_count, configured));
+            assert_eq!(
+                safe_withdrawal_flow_max_inputs(request_count, configured),
+                without_confirm,
+                "confirm budget unexpectedly binds at {request_count} requests",
+            );
+        }
     }
 
     /// The settlement that stalled on signet: 314,662 wu on-chain

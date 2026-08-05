@@ -35,6 +35,7 @@ use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::RotationMessages;
+use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::types::MemberInfo;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
@@ -380,6 +381,45 @@ fn create_test_certificate(
         .map_err(|e| MpcError::CryptoError(e.to_string()))
 }
 
+/// Peer signatures over `dealer`'s rotation messages, from whichever of
+/// `signer_indices` are present in `managers`. Rotation certs need `t + f`
+/// reduced weight to pass the reader-side check, which a dealer plus one peer
+/// generally cannot reach.
+fn rotation_peer_signatures(
+    setup: &TestSetup,
+    managers: &mut HashMap<Address, MpcManager>,
+    dealer: Address,
+    messages: &Messages,
+    epoch: u64,
+    signer_indices: &[usize],
+) -> Vec<MemberSignature> {
+    let mut signatures = Vec::new();
+    for &index in signer_indices {
+        let signer_addr = setup.address(index);
+        if signer_addr == dealer {
+            continue;
+        }
+        let Some(signer) = managers.get_mut(&signer_addr) else {
+            continue;
+        };
+        let signer_prev = signer.previous_output.clone().unwrap();
+        // Empty rotation messages are deliberately left unregistered: some
+        // tests assert on the filter that excludes such dealers.
+        if let Messages::Rotation(msgs) = messages
+            && !msgs.is_empty()
+        {
+            signer
+                .current_rotation_messages
+                .insert(dealer, msgs.clone());
+        }
+        let signature = signer
+            .try_sign_rotation_messages(&signer_prev, dealer, messages)
+            .unwrap();
+        signatures.push(MemberSignature::new(epoch, signer_addr, signature));
+    }
+    signatures
+}
+
 fn create_rotation_test_certificate(
     committee: &Committee,
     rotation_messages: &Messages,
@@ -405,6 +445,7 @@ fn create_rotation_test_certificate(
 struct MockP2PChannel {
     managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, MpcManager>>>,
     current_sender: Address,
+    retrieve_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MockP2PChannel {
@@ -412,7 +453,13 @@ impl MockP2PChannel {
         Self {
             managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
             current_sender,
+            retrieve_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    fn retrieve_calls(&self) -> usize {
+        self.retrieve_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -443,6 +490,7 @@ impl P2PChannel for MockP2PChannel {
         party: &Address,
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
+        self.retrieve_calls.fetch_add(1, Ordering::Relaxed);
         let managers = self.managers.lock().unwrap();
         let manager = managers.get(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -511,8 +559,9 @@ struct MockOrderedBroadcastChannel {
     certificates: std::sync::Mutex<std::collections::VecDeque<CertificateV1>>,
     published: std::sync::Mutex<Vec<CertificateV1>>,
     /// Override for certified_dealers().
-    /// If set, returns these addresses instead of extracting from certificates.
-    override_certified_dealers: Option<Vec<Address>>,
+    /// If set, returns these dealer/certificate pairs instead of extracting
+    /// them from `certificates`.
+    override_certified_dealers: Option<Vec<(Address, CertificateV1)>>,
     /// If set, publish() will fail with this error message.
     fail_on_publish: Option<String>,
 }
@@ -527,7 +576,7 @@ impl MockOrderedBroadcastChannel {
         }
     }
 
-    fn with_override_certified_dealers(mut self, dealers: Vec<Address>) -> Self {
+    fn with_override_certified_dealers(mut self, dealers: Vec<(Address, CertificateV1)>) -> Self {
         self.override_certified_dealers = Some(dealers);
         self
     }
@@ -572,7 +621,7 @@ impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
             })
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
         if let Some(ref dealers) = self.override_certified_dealers {
             return dealers.clone();
         }
@@ -580,7 +629,7 @@ impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
             .lock()
             .unwrap()
             .iter()
-            .map(|c| c.dealer_address())
+            .map(|c| (c.dealer_address(), c.clone()))
             .collect()
     }
 }
@@ -901,7 +950,7 @@ impl OrderedBroadcastChannel<CertificateV1> for FailingOrderedBroadcastChannel {
         }
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
         vec![]
     }
 }
@@ -1262,6 +1311,9 @@ struct InMemoryPublicMessagesStore {
     avid_round_stored: HashMap<(u32, Address), AvidRoundState>,
     avid_held_echoes_stored: HashMap<(u32, Address), HeldAvidEchoes>,
     avid_dealer_builder_stored: HashMap<u32, batch_avss_avid::AvssMessageBuilder>,
+    fail_nonce_reads: bool,
+    fail_avid_round_state_reads: bool,
+    fail_avid_held_echoes_reads: bool,
 }
 
 impl InMemoryPublicMessagesStore {
@@ -1273,6 +1325,9 @@ impl InMemoryPublicMessagesStore {
             avid_round_stored: HashMap::new(),
             avid_held_echoes_stored: HashMap::new(),
             avid_dealer_builder_stored: HashMap::new(),
+            fail_nonce_reads: false,
+            fail_avid_round_state_reads: false,
+            fail_avid_held_echoes_reads: false,
         }
     }
 }
@@ -1348,6 +1403,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<batch_avss::Message>> {
+        if self.fail_nonce_reads {
+            return Err(anyhow::anyhow!("nonce read failure"));
+        }
         Ok(self.nonce_stored.get(&(batch_index, *dealer)).cloned())
     }
 
@@ -1381,6 +1439,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<AvidRoundState>> {
+        if self.fail_avid_round_state_reads {
+            return Err(anyhow::anyhow!("avid round state read failure"));
+        }
         Ok(self.avid_round_stored.get(&(batch_index, *dealer)).cloned())
     }
 
@@ -1414,6 +1475,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         batch_index: u32,
         dealer: &Address,
     ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        if self.fail_avid_held_echoes_reads {
+            return Err(anyhow::anyhow!("avid held echoes read failure"));
+        }
         Ok(self
             .avid_held_echoes_stored
             .get(&(batch_index, *dealer))
@@ -1954,6 +2018,8 @@ struct RunTestSetup {
     test_manager: Arc<RwLock<MpcManager>>,
     mock_p2p: MockP2PChannel,
     certificates: Vec<CertificateV1>,
+    setup: TestSetup,
+    dealer_messages: Vec<Messages>,
 }
 
 fn setup_run_test() -> RunTestSetup {
@@ -2008,6 +2074,8 @@ fn setup_run_test() -> RunTestSetup {
         test_manager,
         mock_p2p,
         certificates,
+        setup,
+        dealer_messages,
     }
 }
 
@@ -2778,28 +2846,33 @@ fn create_weight_based_test_certificate(
 
     let config = setup.dkg_config();
     let committee = setup.committee();
-    let mut aggregator =
-        hashi_types::committee::BlsSignatureAggregator::new(committee, dkg_message.clone());
+    let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message.clone());
 
-    // Add signatures from validators until we meet the required weight
-    let dkg_required = config.threshold;
-    let mut weight_sum = 0u16;
+    let dkg_required = config.threshold as u32 + config.max_faulty as u32;
+    let mut weight_sum = 0u32;
 
     for i in 0..setup.num_validators() {
         let signer_addr = setup.address(i);
         let signature = setup.signing_keys[i].sign(setup.epoch(), signer_addr, &dkg_message);
         aggregator.add_signature(signature).unwrap();
-        weight_sum += config
-            .nodes
-            .iter()
-            .find(|n| n.id == i as u16)
-            .map(|n| n.weight)
-            .unwrap_or(1);
+        weight_sum += u32::from(
+            config
+                .nodes
+                .iter()
+                .find(|n| n.id == i as u16)
+                .map(|n| n.weight)
+                .unwrap_or(1),
+        );
 
         if weight_sum >= dkg_required {
             break;
         }
     }
+    assert!(
+        weight_sum >= dkg_required,
+        "fixture cannot reach the quorum readers require ({weight_sum} < {dkg_required}); \
+         the cert would be rejected with no explanation"
+    );
 
     CertificateV1::Dkg(aggregator.finish().unwrap())
 }
@@ -5120,6 +5193,140 @@ async fn test_handle_send_messages_request_equivocation() {
 }
 
 #[tokio::test]
+async fn test_nonce_ingest_fails_closed_when_the_store_read_fails() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_nonce_reads = true;
+    let mut manager = setup.create_manager_with_store(0, Box::new(store));
+    let dealer = setup.address(1);
+    let batch_index = 3u32;
+    let nonce = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+
+    let err = manager
+        .handle_send_messages_request(
+            dealer,
+            &SendMessagesRequest {
+                messages: Messages::NonceGeneration(nonce),
+            },
+        )
+        .expect_err("an unreadable store must not be read as 'nothing stored'");
+    assert!(
+        matches!(err, MpcError::StorageError(_)),
+        "expected StorageError, got {err:?}"
+    );
+    assert!(
+        manager.current_nonce_messages.is_empty(),
+        "nothing may be accepted when the guard could not see the stored message",
+    );
+}
+
+#[tokio::test]
+async fn test_nonce_equivocation_is_rejected_for_a_pruned_batch() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let manager = setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let dealer = setup.address(1);
+    let batch_index = 0u32;
+    let epoch = manager.mpc_config.epoch;
+
+    let certified = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    let re_deal = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::NonceGeneration(certified.clone())),
+        compute_messages_hash(&Messages::NonceGeneration(re_deal.clone())),
+        "Test precondition: the two deals must differ",
+    );
+
+    let manager = Arc::new(RwLock::new(manager));
+    manager
+        .write()
+        .unwrap()
+        .cache_and_persist_nonce_message(epoch, dealer, &certified)
+        .unwrap();
+
+    // Advance far enough that batch 0 falls outside the retained window.
+    MpcManager::prune_nonce_state(&manager, batch_index + PRUNE_KEEP_RECENT_BATCHES);
+    assert!(
+        manager.read().unwrap().current_nonce_messages.is_empty(),
+        "precondition: the pruner must have evicted the batch from memory",
+    );
+
+    let err = manager
+        .write()
+        .unwrap()
+        .handle_send_messages_request(
+            dealer,
+            &SendMessagesRequest {
+                messages: Messages::NonceGeneration(re_deal),
+            },
+        )
+        .expect_err("a differing re-deal must be rejected for a pruned batch");
+    assert!(
+        matches!(&err, MpcError::InvalidMessage { reason, .. } if reason.contains("different messages")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_nonce_equivocation_is_rejected_after_a_restart() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let dealer = setup.address(1);
+    // Non-zero so a hardcoded-batch regression cannot pass.
+    let batch_index = 4u32;
+    let epoch = manager.mpc_config.epoch;
+
+    let certified = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    let re_deal = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::NonceGeneration(certified.clone())),
+        compute_messages_hash(&Messages::NonceGeneration(re_deal.clone())),
+        "Test precondition: the two deals must differ",
+    );
+
+    manager
+        .cache_and_persist_nonce_message(epoch, dealer, &certified)
+        .unwrap();
+
+    // The restart: in-memory caches are gone, the store still holds the deal.
+    manager.current_nonce_messages.clear();
+    manager.message_responses.clear();
+
+    let err = manager
+        .handle_send_messages_request(
+            dealer,
+            &SendMessagesRequest {
+                messages: Messages::NonceGeneration(re_deal),
+            },
+        )
+        .expect_err("a differing re-deal must be rejected after a restart");
+    match err {
+        MpcError::InvalidMessage { sender, reason } => {
+            assert_eq!(sender, dealer);
+            assert!(reason.contains("different messages"), "got: {reason}");
+        }
+        other => panic!("Expected InvalidMessage, got {other:?}"),
+    }
+
+    let stored = manager
+        .public_messages_store
+        .get_nonce_message(epoch, batch_index, &dealer)
+        .unwrap()
+        .expect("store still holds the certified deal");
+    assert_eq!(
+        compute_messages_hash(&Messages::NonceGeneration(NonceMessage {
+            batch_index,
+            message: stored,
+        })),
+        compute_messages_hash(&Messages::NonceGeneration(certified)),
+        "the re-deal must not have overwritten the certified message",
+    );
+}
+
+#[tokio::test]
 async fn test_handle_send_messages_request_invalid_shares_cached_on_retry() {
     // Second RPC call with invalid shares should not panic.
 
@@ -5873,8 +6080,15 @@ impl RotationTestSetup {
         }
     }
 
-    fn certificates(&self) -> Vec<CertificateV1> {
-        self.certificates.values().cloned().collect()
+    /// Reconstruction takes only verified certificates; these tests exercise
+    /// reconstruction itself, so they bypass the predicate rather than build
+    /// quorum-weight certs.
+    fn certificates(&self) -> Vec<VerifiedCertificateV1> {
+        self.certificates
+            .values()
+            .cloned()
+            .map(VerifiedCertificateV1::new_unchecked)
+            .collect()
     }
 
     /// Returns the subset of dealer addresses that `reconstruct_previous_dkg_output`
@@ -6370,10 +6584,13 @@ async fn test_run_key_rotation() {
             (rotation_messages, own_sig, epoch, prev_output)
         };
 
-        // Now get signature from validator 1
-        let other_validator_idx = 1; // validator 1, weight=2
-        let other_addr = rotation_setup.setup.address(other_validator_idx);
-        let other_sig = {
+        // Sign with enough peers to clear the t+f quorum the reader-side check
+        // enforces — the dealer's own weight of 1 is far below it. This is
+        // about who signs, not which share indices the dealer covers, which is
+        // what the test is exercising.
+        let mut signatures = vec![MemberSignature::new(epoch, addr, own_sig)];
+        for other_validator_idx in [1, 2, 4] {
+            let other_addr = rotation_setup.setup.address(other_validator_idx);
             let other_manager = other_managers.get_mut(&other_addr).unwrap();
             let other_prev_output = other_manager.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = rotation_messages {
@@ -6381,19 +6598,17 @@ async fn test_run_key_rotation() {
                     .current_rotation_messages
                     .insert(addr, msgs.clone());
             }
-            other_manager
+            let other_sig = other_manager
                 .try_sign_rotation_messages(&other_prev_output, addr, &rotation_messages)
-                .unwrap()
-        };
+                .unwrap();
+            signatures.push(MemberSignature::new(epoch, other_addr, other_sig));
+        }
 
-        // Create certificate with signatures from validator 3 (own) and validator 1
-        let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
-        let other_member_sig = MemberSignature::new(epoch, other_addr, other_sig);
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &rotation_messages,
             addr,
-            vec![own_member_sig, other_member_sig],
+            signatures,
         )
         .unwrap();
         rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -6511,26 +6726,28 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 (rotation_messages, own_sig, manager.mpc_config.epoch)
             };
 
-            // Get a second signature from validator 1
-            let signer_addr = rotation_setup.setup.address(1);
-            let signer_sig = {
+            let mut signatures = vec![MemberSignature::new(epoch, addr, own_sig)];
+            for signer_idx in [1, 2, 3, 4] {
+                let signer_addr = rotation_setup.setup.address(signer_idx);
+                if signer_addr == addr {
+                    continue;
+                }
                 let signer = other_managers.get_mut(&signer_addr).unwrap();
                 let signer_prev = signer.previous_output.clone().unwrap();
                 if let Messages::Rotation(ref msgs) = rotation_messages {
                     signer.current_rotation_messages.insert(addr, msgs.clone());
                 }
-                signer
+                let signer_sig = signer
                     .try_sign_rotation_messages(&signer_prev, addr, &rotation_messages)
-                    .unwrap()
-            };
+                    .unwrap();
+                signatures.push(MemberSignature::new(epoch, signer_addr, signer_sig));
+            }
 
-            let own_member_sig = MemberSignature::new(epoch, addr, own_sig);
-            let signer_member_sig = MemberSignature::new(epoch, signer_addr, signer_sig);
             let cert = create_rotation_test_certificate(
                 rotation_setup.setup.committee(),
                 &rotation_messages,
                 addr,
-                vec![own_member_sig, signer_member_sig],
+                signatures,
             )
             .unwrap();
             rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -6603,28 +6820,30 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
                 .unwrap();
             (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
-        let v2_signer_addr = rotation_setup.setup.address(3);
-        let v2_signer_sig = {
-            let signer = other_managers.get_mut(&v2_signer_addr).unwrap();
-            let signer_prev = signer.previous_output.clone().unwrap();
-            signer
-                .try_sign_rotation_messages(
-                    &signer_prev,
-                    validator_2_addr,
-                    &empty_rotation_messages,
-                )
-                .unwrap()
-        };
+        let mut v2_signatures = vec![MemberSignature::new(epoch, validator_2_addr, v2_own_sig)];
+        v2_signatures.extend(rotation_peer_signatures(
+            &rotation_setup.setup,
+            &mut other_managers,
+            validator_2_addr,
+            &empty_rotation_messages,
+            epoch,
+            &[1, 2, 3, 4],
+        ));
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &empty_rotation_messages,
             validator_2_addr,
-            vec![
-                MemberSignature::new(epoch, validator_2_addr, v2_own_sig),
-                MemberSignature::new(epoch, v2_signer_addr, v2_signer_sig),
-            ],
+            v2_signatures,
         )
         .unwrap();
+        assert!(
+            rotation_setup
+                .setup
+                .create_manager(0)
+                .verify_certificate(CertificateV1::Rotation(cert.clone()))
+                .is_ok(),
+            "fixture precondition: validator 2's cert must verify"
+        );
         rotation_certificates.push(CertificateV1::Rotation(cert));
 
         // Validator 1: valid rotation messages (weight=2).
@@ -6641,27 +6860,20 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
                 .unwrap();
             (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
-        let v1_signer_addr = rotation_setup.setup.address(3);
-        let v1_signer_sig = {
-            let signer = other_managers.get_mut(&v1_signer_addr).unwrap();
-            let signer_prev = signer.previous_output.clone().unwrap();
-            if let Messages::Rotation(ref msgs) = v1_rotation_messages {
-                signer
-                    .current_rotation_messages
-                    .insert(validator_1_addr, msgs.clone());
-            }
-            signer
-                .try_sign_rotation_messages(&signer_prev, validator_1_addr, &v1_rotation_messages)
-                .unwrap()
-        };
+        let mut v1_signatures = vec![MemberSignature::new(epoch, validator_1_addr, v1_own_sig)];
+        v1_signatures.extend(rotation_peer_signatures(
+            &rotation_setup.setup,
+            &mut other_managers,
+            validator_1_addr,
+            &v1_rotation_messages,
+            epoch,
+            &[1, 2, 3, 4],
+        ));
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &v1_rotation_messages,
             validator_1_addr,
-            vec![
-                MemberSignature::new(epoch, validator_1_addr, v1_own_sig),
-                MemberSignature::new(epoch, v1_signer_addr, v1_signer_sig),
-            ],
+            v1_signatures,
         )
         .unwrap();
         rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -6792,30 +7004,42 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             epoch = manager.mpc_config.epoch;
         }
 
-        let addr_1 = rotation_setup.setup.address(1);
-        let signer_sig = {
-            let signer = other_managers.get_mut(&addr_1).unwrap();
+        let mut signatures = vec![MemberSignature::new(epoch, addr_2, own_sig)];
+        for signer_idx in [1, 2, 3, 4] {
+            let signer_addr = rotation_setup.setup.address(signer_idx);
+            if signer_addr == addr_2 {
+                continue;
+            }
+            let signer = other_managers.get_mut(&signer_addr).unwrap();
             let signer_prev = signer.previous_output.clone().unwrap();
-            if let Messages::Rotation(ref msgs) = correct_messages {
+            if let Messages::Rotation(msgs) = &correct_messages {
                 signer
                     .current_rotation_messages
                     .insert(addr_2, msgs.clone());
             }
-            signer
+            let signature = signer
                 .try_sign_rotation_messages(&signer_prev, addr_2, &correct_messages)
-                .unwrap()
-        };
+                .unwrap();
+            signatures.push(MemberSignature::new(epoch, signer_addr, signature));
+        }
 
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &correct_messages,
             addr_2,
-            vec![
-                MemberSignature::new(epoch, addr_2, own_sig),
-                MemberSignature::new(epoch, addr_1, signer_sig),
-            ],
+            signatures,
         )
         .unwrap();
+        // Precondition: this cert must clear the reader-side check, so the
+        // hash mismatch below is what drives the retrieval, not a rejection.
+        assert!(
+            rotation_setup
+                .setup
+                .create_manager(0)
+                .verify_certificate(CertificateV1::Rotation(cert.clone()))
+                .is_ok(),
+            "fixture precondition: validator 2's cert must verify"
+        );
         rotation_certificates.push(CertificateV1::Rotation(cert));
         correct_rotation_msgs.insert(addr_2, correct_messages);
     }
@@ -6837,28 +7061,30 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             (rotation_messages, own_sig, manager.mpc_config.epoch)
         };
 
-        let addr_1 = rotation_setup.setup.address(1);
-        let signer_sig = {
-            let signer = other_managers.get_mut(&addr_1).unwrap();
+        let mut signatures = vec![MemberSignature::new(epoch, addr_3, own_sig)];
+        for signer_idx in [1, 2, 3, 4] {
+            let signer_addr = rotation_setup.setup.address(signer_idx);
+            if signer_addr == addr_3 {
+                continue;
+            }
+            let signer = other_managers.get_mut(&signer_addr).unwrap();
             let signer_prev = signer.previous_output.clone().unwrap();
-            if let Messages::Rotation(ref msgs) = rotation_messages {
+            if let Messages::Rotation(msgs) = &rotation_messages {
                 signer
                     .current_rotation_messages
                     .insert(addr_3, msgs.clone());
             }
-            signer
+            let signature = signer
                 .try_sign_rotation_messages(&signer_prev, addr_3, &rotation_messages)
-                .unwrap()
-        };
+                .unwrap();
+            signatures.push(MemberSignature::new(epoch, signer_addr, signature));
+        }
 
         let cert = create_rotation_test_certificate(
             rotation_setup.setup.committee(),
             &rotation_messages,
             addr_3,
-            vec![
-                MemberSignature::new(epoch, addr_3, own_sig),
-                MemberSignature::new(epoch, addr_1, signer_sig),
-            ],
+            signatures,
         )
         .unwrap();
         rotation_certificates.push(CertificateV1::Rotation(cert));
@@ -7281,6 +7507,102 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
 }
 
 #[tokio::test]
+async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let test_addr = rotation_setup.setup.address(0);
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_epoch = epoch;
+
+    let diverged_dealer = rotation_setup
+        .setup
+        .address(rotation_setup.dealer_indices[0]);
+    let Messages::Dkg(certified_msg) = &rotation_setup.dealer_messages[0] else {
+        panic!("expected a DKG message");
+    };
+    let Messages::Dkg(other_msg) = &rotation_setup.dealer_messages[1] else {
+        panic!("expected a DKG message");
+    };
+    let certified_hash = compute_messages_hash(&Messages::Dkg(certified_msg.clone()));
+    assert_ne!(
+        compute_messages_hash(&Messages::Dkg(other_msg.clone())),
+        certified_hash,
+        "Test precondition: the stored message must differ from the certified one",
+    );
+    test_manager
+        .cache_and_persist_dkg_message(epoch, diverged_dealer, other_msg)
+        .unwrap();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for i in 1..5 {
+        let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+        manager.previous_output = Some(output);
+        manager.previous_epoch = epoch;
+        for (j, msg) in rotation_setup.dealer_messages.iter().enumerate() {
+            let dealer_addr = rotation_setup
+                .setup
+                .address(rotation_setup.dealer_indices[j]);
+            if let Messages::Dkg(dkg_msg) = msg {
+                manager
+                    .current_dkg_messages
+                    .insert(dealer_addr, dkg_msg.clone());
+            }
+        }
+        other_managers_map.insert(rotation_setup.setup.address(i), manager);
+    }
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let previous_certs = rotation_setup.certificates();
+    assert!(
+        matches!(
+            test_manager
+                .read()
+                .unwrap()
+                .reconstruct_previous_output(&previous_certs, &HashMap::new()),
+            Err(MpcError::StoredMessageDiverged { dealer }) if dealer == diverged_dealer
+        ),
+        "reconstruction must reject the diverged copy by variant, before any repair",
+    );
+
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &previous_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await
+    .expect("prepare_previous_output should succeed after re-fetching the diverged message");
+
+    assert!(is_member, "Validator 0 is in the previous committee");
+    assert!(
+        !previous_output.key_shares.shares.is_empty(),
+        "reconstruction must succeed on the re-fetched message; the new-member fallback would \
+         leave this node with no previous shares and so unable to deal in the rotation",
+    );
+    assert_eq!(
+        previous_output.public_key, test_dkg_output.public_key,
+        "reconstruction must recover the original key, not merely produce some shares",
+    );
+
+    let stored = test_manager
+        .read()
+        .unwrap()
+        .public_messages_store
+        .get_dealer_message(epoch, &diverged_dealer)
+        .unwrap()
+        .expect("the re-fetched message is persisted");
+    assert_eq!(
+        compute_messages_hash(&Messages::Dkg(stored)),
+        certified_hash,
+        "the diverged copy must be replaced by the certified one",
+    );
+}
+
+#[tokio::test]
 async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     // Test that prepare_previous_output fetches rotation messages from peers
     // when they are missing from the local store.
@@ -7343,7 +7665,9 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
             vec![mem_sig0, mem_sig1],
         )
         .unwrap();
-        rotation_certs.push(CertificateV1::Rotation(cert));
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
     }
 
     // Create test manager (validator 2) with EMPTY store.
@@ -7384,6 +7708,368 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     assert!(
         !previous_output.key_shares.shares.is_empty(),
         "Should have key shares after reconstruction"
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            mgr.session_id = rotation_session_id.clone();
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut certified: HashMap<Address, RotationMessages> = HashMap::new();
+
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        certified.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let diverged_dealer = rotation_setup.setup.address(dealer_indices[0]);
+    let dealer0_output = dealers[0].2.clone();
+    let diverged = dealers[0]
+        .1
+        .create_rotation_messages(&dealer0_output, &mut rng);
+    let certified_hash =
+        compute_messages_hash(&Messages::Rotation(certified[&diverged_dealer].clone()));
+    assert_ne!(
+        compute_messages_hash(&Messages::Rotation(diverged.clone())),
+        certified_hash,
+        "Test precondition: the stored deal must differ from the certified one",
+    );
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager
+        .cache_and_persist_rotation_messages(epoch, diverged_dealer, &diverged)
+        .unwrap();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    assert!(
+        matches!(
+            test_manager
+                .read()
+                .unwrap()
+                .reconstruct_previous_output(&rotation_certs, &HashMap::new()),
+            Err(MpcError::StoredMessageDiverged { dealer }) if dealer == diverged_dealer
+        ),
+        "reconstruction must reject the diverged copy by variant, before any repair",
+    );
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await
+    .expect("prepare_previous_output should succeed after re-fetching the diverged message");
+
+    assert!(is_member, "Validator 2 is in the previous committee");
+    assert!(
+        !previous_output.key_shares.shares.is_empty(),
+        "reconstruction must succeed on the re-fetched message; the new-member fallback would \
+         leave this node with no previous shares and so unable to deal in the rotation",
+    );
+    assert_eq!(
+        previous_output.public_key, test_dkg_output.public_key,
+        "reconstruction must recover the original key, not merely produce some shares",
+    );
+
+    let stored = test_manager
+        .read()
+        .unwrap()
+        .public_messages_store
+        .get_rotation_messages(epoch, &diverged_dealer)
+        .unwrap()
+        .expect("the re-fetched message is persisted");
+    assert_eq!(
+        compute_messages_hash(&Messages::Rotation(stored)),
+        certified_hash,
+        "the diverged copy must be replaced by the certified one",
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            mgr.session_id = rotation_session_id.clone();
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut certified: HashMap<Address, RotationMessages> = HashMap::new();
+
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        certified.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    for (dealer_addr, msgs) in &certified {
+        test_manager
+            .cache_and_persist_rotation_messages(epoch, *dealer_addr, msgs)
+            .unwrap();
+    }
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await
+    .expect("prepare_previous_output should succeed from the stored messages alone");
+
+    assert!(is_member, "Validator 2 is in the previous committee");
+    assert_eq!(
+        previous_output.public_key, test_dkg_output.public_key,
+        "reconstruction must recover the original key from the stored messages",
+    );
+    assert_eq!(
+        mock_p2p.retrieve_calls(),
+        0,
+        "a message matching its certificate must never be re-fetched",
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
+    let rotation_setup = RotationTestSetup::new();
+    let epoch = rotation_setup.setup.epoch();
+    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
+
+    let dealer_indices = [0usize, 1, 4];
+    let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
+        .iter()
+        .map(|&i| {
+            let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
+            mgr.previous_output = Some(output.clone());
+            mgr.session_id = rotation_session_id.clone();
+            (i, mgr, output)
+        })
+        .collect();
+
+    let mut rng = rand::thread_rng();
+    let mut rotation_certs = Vec::new();
+    let mut certified: HashMap<Address, RotationMessages> = HashMap::new();
+
+    for idx in 0..dealers.len() {
+        let dealer_addr = rotation_setup.setup.address(dealers[idx].0);
+        let dkg_output = dealers[idx].2.clone();
+        let msgs = dealers[idx]
+            .1
+            .create_rotation_messages(&dkg_output, &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+        for d in dealers.iter_mut() {
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
+        }
+        certified.insert(dealer_addr, msgs);
+
+        let out0 = dealers[0].2.clone();
+        let out1 = dealers[1].2.clone();
+        let sig0 = dealers[0]
+            .1
+            .try_sign_rotation_messages(&out0, dealer_addr, &rotation_messages)
+            .unwrap();
+        let sig1 = dealers[1]
+            .1
+            .try_sign_rotation_messages(&out1, dealer_addr, &rotation_messages)
+            .unwrap();
+        let cert = create_rotation_test_certificate(
+            rotation_setup.setup.committee(),
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(epoch, rotation_setup.setup.address(0), sig0),
+                MemberSignature::new(epoch, rotation_setup.setup.address(1), sig1),
+            ],
+        )
+        .unwrap();
+        rotation_certs.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
+    }
+
+    let unrepairable = rotation_setup.setup.address(dealer_indices[0]);
+    let repairable = rotation_setup.setup.address(dealer_indices[2]);
+
+    for d in dealers.iter_mut() {
+        d.1.current_rotation_messages.remove(&unrepairable);
+    }
+
+    let out_first = dealers[0].2.clone();
+    let diverged_first = dealers[0].1.create_rotation_messages(&out_first, &mut rng);
+    let out_later = dealers[2].2.clone();
+    let diverged_later = dealers[2].1.create_rotation_messages(&out_later, &mut rng);
+    let repairable_certified_hash =
+        compute_messages_hash(&Messages::Rotation(certified[&repairable].clone()));
+    assert_ne!(
+        compute_messages_hash(&Messages::Rotation(diverged_later.clone())),
+        repairable_certified_hash,
+        "Test precondition: the later dealer's stored deal must differ from its certified one",
+    );
+
+    let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
+    let test_addr = rotation_setup.setup.address(2);
+    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
+    test_manager.previous_epoch = epoch;
+    test_manager.previous_output = Some(test_dkg_output.clone());
+    test_manager
+        .cache_and_persist_rotation_messages(epoch, unrepairable, &diverged_first)
+        .unwrap();
+    test_manager
+        .cache_and_persist_rotation_messages(epoch, repairable, &diverged_later)
+        .unwrap();
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let mut other_managers_map = HashMap::new();
+    for (i, mgr, _) in dealers {
+        other_managers_map.insert(rotation_setup.setup.address(i), mgr);
+    }
+    let (mut mgr3, out3) = rotation_setup.create_receiver_with_memory_store(3);
+    mgr3.previous_output = Some(out3);
+    other_managers_map.insert(rotation_setup.setup.address(3), mgr3);
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+
+    let _ = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &test_metrics(),
+    )
+    .await;
+
+    let stored_later = test_manager
+        .read()
+        .unwrap()
+        .public_messages_store
+        .get_rotation_messages(epoch, &repairable)
+        .unwrap()
+        .expect("the later dealer's message is still present");
+    assert_eq!(
+        compute_messages_hash(&Messages::Rotation(stored_later)),
+        repairable_certified_hash,
+        "a failed repair must not skip the dealers certified after it",
     );
 }
 
@@ -8581,7 +9267,9 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
             })
             .collect();
         let cert = create_test_certificate(committee, msg, dealer_addr, sigs).unwrap();
-        certificates.push(CertificateV1::Dkg(cert));
+        certificates.push(VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+            cert,
+        )));
     }
 
     // Set up CommitteeSet for reconstruction: epoch=100 is "previous",
@@ -8715,7 +9403,9 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
             })
             .collect();
         let cert = create_test_certificate(committee, msg, dealer_addr, sigs).unwrap();
-        certificates.push(CertificateV1::Dkg(cert));
+        certificates.push(VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+            cert,
+        )));
     }
 
     let target_epoch = epoch + 1;
@@ -8844,7 +9534,7 @@ fn test_recover_current_dkg() {
         .public_key;
 
     let committee = setup.committee();
-    let certificates: Vec<CertificateV1> = dealer_messages
+    let certificates: Vec<VerifiedCertificateV1> = dealer_messages
         .iter()
         .enumerate()
         .map(|(i, msg)| {
@@ -8862,7 +9552,9 @@ fn test_recover_current_dkg() {
                     )
                 })
                 .collect();
-            CertificateV1::Dkg(create_test_certificate(committee, msg, dealer_addr, sigs).unwrap())
+            VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+                create_test_certificate(committee, msg, dealer_addr, sigs).unwrap(),
+            ))
         })
         .collect();
 
@@ -8943,13 +9635,32 @@ fn test_recover_current_dkg() {
         "Suspicious must not commit current_output"
     );
 
-    // Hash mismatch (a stored message diverges from its certified hash) → Suspicious.
     let swap0 = |i: usize| if i == 0 { 1 } else { i };
     let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&swap0)))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
-        MpcOutputRecoveryOutcome::Suspicious(_)
+        MpcOutputRecoveryOutcome::NotApplicable
     ));
+
+    {
+        let guard = mgr.read().unwrap();
+        let context = crate::mpc::types::DkgReconstructionContext {
+            committee: &guard.committee,
+            nodes: &guard.mpc_config.nodes,
+            party_id: guard.party_id,
+            encryption_key: &guard.encryption_key,
+            output_threshold: guard.mpc_config.threshold,
+            output_max_faulty: guard.mpc_config.max_faulty,
+            epoch: guard.mpc_config.epoch,
+        };
+        assert!(
+            matches!(
+                guard.reconstruct_dkg_output(&context, &certificates, &HashMap::new()),
+                Err(MpcError::StoredMessageDiverged { .. })
+            ),
+            "the hash check, not a downstream AVSS failure, must reject the swapped message",
+        );
+    }
 
     // Missing local messages → NotApplicable (fall through to live).
     let mgr = Arc::new(RwLock::new(make_manager(Box::new(
@@ -8997,7 +9708,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         .collect();
 
     let committee = setup.committee();
-    let certificates: Vec<CertificateV1> = dealer_messages
+    let certificates: Vec<VerifiedCertificateV1> = dealer_messages
         .iter()
         .enumerate()
         .map(|(i, msg)| {
@@ -9015,7 +9726,9 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
                     )
                 })
                 .collect();
-            CertificateV1::Dkg(create_test_certificate(committee, msg, dealer_addr, sigs).unwrap())
+            VerifiedCertificateV1::new_unchecked(CertificateV1::Dkg(
+                create_test_certificate(committee, msg, dealer_addr, sigs).unwrap(),
+            ))
         })
         .collect();
 
@@ -9210,7 +9923,9 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             ],
         )
         .unwrap();
-        rotation_certificates.push(CertificateV1::Rotation(cert));
+        rotation_certificates.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
         rotation_messages_by_dealer.push((dealer_addr, rotation_messages));
     }
 
@@ -9417,7 +10132,9 @@ fn test_recover_current_rotation() {
             ],
         )
         .unwrap();
-        rotation_certificates.push(CertificateV1::Rotation(cert));
+        rotation_certificates.push(VerifiedCertificateV1::new_unchecked(
+            CertificateV1::Rotation(cert),
+        ));
         rotation_messages_by_dealer.push((dealer_addr, msgs));
     }
 
@@ -9671,7 +10388,9 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         matches!(
             MpcManager::reconstruct_current_rotation_output(
                 &mgr,
-                &[CertificateV1::Rotation(cert)],
+                &[VerifiedCertificateV1::new_unchecked(
+                    CertificateV1::Rotation(cert)
+                )],
                 &[],
                 &[0u8; 33]
             ),
@@ -10694,6 +11413,8 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
         cert(3, 1_500),
     ];
 
+    let certs = VerifiedNonceCerts(certs);
+
     mgr.mpc_config.nonce_accumulation_window_ms = 0;
     assert_eq!(mgr.window_certified_nonce_dealers(&certs).0.len(), 3);
 
@@ -10702,12 +11423,12 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
     assert_eq!(certified.len(), 4);
     assert!(certified.contains(&setup.address(3)));
 
-    let beyond = vec![
+    let beyond = VerifiedNonceCerts(vec![
         cert(0, 1_000),
         cert(1, 1_100),
         cert(2, 1_200),
         cert(3, 2_000),
-    ];
+    ]);
     assert_eq!(mgr.window_certified_nonce_dealers(&beyond).0.len(), 3);
 }
 
@@ -10719,12 +11440,12 @@ fn test_zero_accumulation_window_is_floor_only() {
     mgr.mpc_config.nonce_accumulation_window_ms = 0;
 
     let cert = |i: usize, timestamp_ms: u64| valid_dealer_submission(&setup, i, timestamp_ms);
-    let certs = vec![
+    let certs = VerifiedNonceCerts(vec![
         cert(0, 1_000),
         cert(1, 1_100),
         cert(2, 1_200),
         cert(3, 1_500),
-    ];
+    ]);
     assert_eq!(mgr.window_certified_nonce_dealers(&certs).0.len(), 3);
     assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), None);
 }
@@ -10737,7 +11458,7 @@ fn test_bare_zero_stamp_certs_force_floor_only_window() {
     mgr.mpc_config.nonce_accumulation_window_ms = 700;
 
     let cert = |i: usize| valid_dealer_submission(&setup, i, 0);
-    let certs = vec![cert(0), cert(1), cert(2), cert(3)];
+    let certs = VerifiedNonceCerts(vec![cert(0), cert(1), cert(2), cert(3)]);
 
     assert_eq!(mgr.window_certified_nonce_dealers(&certs).0.len(), 3);
     assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), None);
@@ -10756,13 +11477,25 @@ async fn test_verified_nonce_certs_drops_unverified() {
     certs[1].1.submission.signature.signature = certs[0].1.submission.signature.signature.clone();
 
     let mgr = Arc::new(RwLock::new(mgr));
-    let verified = MpcManager::verified_nonce_certs(&mgr, epoch, certs, &mut HashSet::new()).await;
+    let verified = MpcManager::verified_nonce_certs(
+        &mgr,
+        epoch,
+        certs,
+        &mut HashSet::new(),
+        &test_metrics(),
+    )
+    .await;
     assert_eq!(
-        verified.len(),
+        verified.as_slice().len(),
         3,
         "the forged cert is dropped before the walk"
     );
-    assert!(verified.iter().all(|(addr, _)| *addr != setup.address(1)));
+    assert!(
+        verified
+            .as_slice()
+            .iter()
+            .all(|(addr, _)| *addr != setup.address(1))
+    );
 
     let (certified, window) = mgr
         .read()
@@ -10781,14 +11514,14 @@ fn test_reconstruct_presignatures_rejects_below_floor_certs() {
 
     let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
     let Err(MpcError::NotEnoughParticipants { expected, got }) =
-        mgr.reconstruct_presignatures(0, &[cert(0), cert(1)])
+        mgr.reconstruct_presignatures(0, &VerifiedNonceCerts(vec![cert(0), cert(1)]))
     else {
         panic!("below-floor certs must be rejected");
     };
     assert_eq!((expected, got), (75, 50));
 
     let outcome = mgr
-        .reconstruct_presignatures(0, &[cert(0), cert(1), cert(2)])
+        .reconstruct_presignatures(0, &VerifiedNonceCerts(vec![cert(0), cert(1), cert(2)]))
         .unwrap();
     assert!(matches!(
         outcome,
@@ -10866,7 +11599,7 @@ async fn test_nonce_window_live_collection_past_floor() {
             let cutoff_ms = test_manager
                 .read()
                 .unwrap()
-                .window_certified_nonce_dealers(&tob_certs)
+                .window_certified_nonce_dealers(&VerifiedNonceCerts(tob_certs.clone()))
                 .1
                 .cutoff_ms();
             let mut tob = crate::communication::PrefetchedTobChannel::new(tob_certs);
@@ -12212,6 +12945,79 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
 }
 
 #[test]
+fn test_avid_optimistic_ingest_fails_closed_when_the_store_read_fails() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new_avid(5);
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let batch_index = 0u32;
+    let receiver_idx = 1;
+
+    let builder = dealer
+        .create_avid_nonce_dealer_builder(batch_index, &mut rng)
+        .unwrap();
+    let deal = dealer.avid_nonce_optimistic_messages(&builder, batch_index)[receiver_idx]
+        .1
+        .clone();
+
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_avid_round_state_reads = true;
+    let mut receiver = setup.create_manager_with_store(receiver_idx, Box::new(store));
+
+    let err = receiver
+        .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: deal })
+        .expect_err("an unreadable store must not be read as 'no round accepted yet'");
+    assert!(
+        matches!(err, MpcError::StorageError(_)),
+        "expected StorageError, got {err:?}"
+    );
+    assert!(
+        receiver.current_avid_round_state.is_empty(),
+        "nothing may be accepted when the guard could not see the stored round",
+    );
+}
+
+#[test]
+fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_avid_held_echoes_reads = true;
+    let mut receiver = setup.create_manager_with_store(1, Box::new(store));
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+
+    let err = receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .expect_err("an unreadable store must not be read as 'nothing held'");
+    assert!(
+        matches!(err, MpcError::StorageError(_)),
+        "expected StorageError, got {err:?}"
+    );
+    assert!(
+        receiver.avid_held_echoes.is_empty(),
+        "nothing may be held when the guard could not see the stored echoes",
+    );
+}
+
+#[test]
 fn test_handle_avid_echo_push_is_rejected() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
@@ -12933,7 +13739,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let mgr = setup.create_manager(0);
     let batch_index = 3u32;
     let total = mgr.mpc_config.nodes.total_weight() as u32;
-    let vote_quorum = total - mgr.mpc_config.max_faulty as u32;
+    let vote_quorum =
+        MpcManager::avid_vote_quorum(&mgr.mpc_config.nodes, mgr.mpc_config.max_faulty);
 
     let weight_of = |signers: &[usize]| -> u32 {
         signers
@@ -12982,7 +13789,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         make_cert(2, &all),
     ];
 
-    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs, None);
+    let (certified, weight) =
+        mgr.avid_certified_nonce_dealers_from_certs(&VerifiedNonceCerts(certs.clone()), None);
     assert!(
         !certified.contains(&setup.address(3)),
         "cert one weight below the vote quorum must not be counted by sizing"
@@ -13002,11 +13810,11 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         "sizing must reach the floor from admissible certs despite the skipped one"
     );
 
-    let (blind, _) = mgr.window_certified_nonce_dealers(&certs);
+    let (blind, _) = mgr.window_certified_nonce_dealers(&VerifiedNonceCerts(certs.clone()));
     assert!(blind.contains(&setup.address(3)));
 
     let (_, foreign_keyed) = make_cert(0, &all);
-    let rekeyed = vec![(setup.address(3), foreign_keyed)];
+    let rekeyed = VerifiedNonceCerts(vec![(setup.address(3), foreign_keyed)]);
     let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed, None);
     assert_eq!(
         certified,
@@ -13016,7 +13824,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 
     let (_, dup_a) = make_cert(0, &all);
     let (_, dup_b) = make_cert(0, &all);
-    let duplicated = vec![(setup.address(0), dup_a), (setup.address(3), dup_b)];
+    let duplicated =
+        VerifiedNonceCerts(vec![(setup.address(0), dup_a), (setup.address(3), dup_b)]);
     let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated, None);
     assert_eq!(certified, HashSet::from([setup.address(0)]));
     assert_eq!(
@@ -13073,12 +13882,12 @@ fn test_avid_sizing_counts_past_the_floor() {
         4 + 3 + 2 >= floor && floor > 4 + 3,
         "weights must cross the floor at dealer 2 or this test proves nothing"
     );
-    let certs = vec![
+    let certs = VerifiedNonceCerts(vec![
         make_cert(0, 1_000),
         make_cert(1, 1_000),
         make_cert(2, 1_000),
         make_cert(3, 5_000),
-    ];
+    ]);
 
     let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&certs, Some(5_000));
     assert_eq!(
@@ -13711,8 +14520,10 @@ fn test_avid_voter_state_survives_restart() {
         );
     }
     let common = restarted
-        .get_avid_round_common(batch_index, &dealer_addr)
-        .unwrap();
+        .get_avid_round_state(batch_index, &dealer_addr)
+        .unwrap()
+        .unwrap()
+        .common;
     let (outcome, _) = laggard
         .decode_avid_nonce_share(
             dealer_addr,
@@ -13893,6 +14704,38 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
     assert!(
         matches!(result, Err(MpcError::InvalidMessage { .. })),
         "AVID complaint must be rejected in a vanilla epoch: {result:?}"
+    );
+
+    let (blame_vote, _) = confirmers[0]
+        .avid_held_echoes
+        .get(&(batch_index, dealer_addr))
+        .unwrap()
+        .clone();
+    let blame_target = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: hash_avid_vote(&blame_vote),
+    };
+    let mut thin = BlsSignatureAggregator::new(setup.committee(), blame_target.clone());
+    thin.add_signature(setup.signing_keys[0].sign(setup.epoch(), setup.address(0), &blame_target))
+        .unwrap();
+    let blame_request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: thin.finish().unwrap(),
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = confirmers[1].handle_complain_request(victim, &blame_request);
+    assert!(
+        matches!(result, Err(MpcError::InvalidCertificate(_))),
+        "a blame complaint carrying a sub-quorum vote cert must be refused: {result:?}"
     );
 }
 
@@ -14727,6 +15570,275 @@ async fn exhausted_prefetched_stream_pre_floor_does_not_block() {
         "pre-floor exhaustion must close the window for the caller to judge"
     );
 }
+#[test]
+fn party_rejects_a_self_signed_cert() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let dealer_manager = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
+    let self_signature = setup.signing_keys[0].sign(
+        setup.epoch(),
+        dealer,
+        &DealerMessagesHash {
+            dealer_address: dealer,
+            messages_hash: compute_messages_hash(&messages),
+        },
+    );
+    let self_signed = CertificateV1::Dkg(
+        create_test_certificate(setup.committee(), &messages, dealer, vec![self_signature])
+            .unwrap(),
+    );
+
+    let party = setup.create_manager(1);
+    let quorum = party.key_generation_cert_quorum(setup.epoch()).unwrap();
+    assert_eq!(
+        quorum,
+        party.mpc_config.threshold as u32 + party.mpc_config.max_faulty as u32,
+        "key-generation certs are gated at t+f, the quorum dealers form them at"
+    );
+    assert!(
+        quorum > 1,
+        "the fixture must have a quorum a lone dealer cannot reach"
+    );
+    let err = party
+        .verify_certificate(self_signed)
+        .expect_err("a lone signer is below t + f");
+    assert!(
+        matches!(err, MpcError::InvalidCertificate(_)),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn cert_verification_context_rejects_unknown_epochs() {
+    let setup = TestSetup::new(4);
+    let party = setup.create_manager(1);
+    let epoch = setup.epoch();
+    assert!(party.cert_verification_context(epoch).is_ok());
+    assert!(party.cert_verification_context(epoch - 1).is_ok());
+    assert!(
+        party.cert_verification_context(epoch - 2).is_err(),
+        "an epoch below previous must not be treated as previous"
+    );
+    assert!(party.cert_verification_context(epoch + 1).is_err());
+}
+
+#[test]
+fn previous_epoch_certs_verify_against_previous_parameters() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash: compute_messages_hash(&messages),
+    };
+    let prev_epoch = setup.epoch() - 1;
+    let prev_committee = setup
+        .committee_set
+        .committees()
+        .get(&prev_epoch)
+        .expect("TestSetup installs a previous committee")
+        .clone();
+
+    let party = setup.create_manager(1);
+    let quorum = CertificateV1::Dkg(
+        create_test_certificate(
+            &prev_committee,
+            &messages,
+            dealer,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(prev_epoch, setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        quorum.epoch(),
+        prev_epoch,
+        "fixture must actually exercise the previous-epoch arm"
+    );
+    party
+        .verify_certificate(quorum)
+        .expect("a previous-epoch quorum cert must verify against the previous committee");
+
+    let single = CertificateV1::Dkg(
+        create_test_certificate(
+            &prev_committee,
+            &messages,
+            dealer,
+            vec![setup.signing_keys[0].sign(prev_epoch, setup.address(0), &target)],
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        party.certificate_rejection_reason(&single),
+        "weight",
+        "and the previous epoch's quorum must still be enforced on that arm"
+    );
+}
+
+#[test]
+fn dealer_skip_weight_ignores_unverifiable_certs() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let dealer_manager = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash: compute_messages_hash(&messages),
+    };
+
+    let self_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            vec![setup.signing_keys[0].sign(setup.epoch(), dealer, &target)],
+        )
+        .unwrap(),
+    );
+    let quorum_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let party = setup.create_manager(1);
+    let (weights, rejected) = party.verified_dealer_weight(&[(dealer, self_signed)]);
+    assert!(
+        weights.is_empty(),
+        "a self-signed cert must contribute no weight to the skip decision"
+    );
+    assert_eq!(
+        rejected,
+        [("dkg", "weight")],
+        "and be reported as a weight failure, not a signature one"
+    );
+    let (weights, rejected) = party.verified_dealer_weight(&[(dealer, quorum_signed)]);
+    assert_eq!(
+        weights.len(),
+        1,
+        "a properly certified dealer must still count"
+    );
+    assert!(rejected.is_empty(), "and must not be reported as rejected");
+}
+
+#[tokio::test]
+async fn self_signed_certs_do_not_suppress_the_dealer_phase() {
+    let setup = setup_run_test();
+    let threshold = setup.test_manager.read().unwrap().mpc_config.threshold;
+
+    let mut self_signed = Vec::new();
+    let mut unverified_weight = 0u16;
+    for (idx, messages) in setup.dealer_messages.iter().enumerate() {
+        let dealer_idx = idx + 1;
+        let dealer = setup.setup.address(dealer_idx);
+        let target = DealerMessagesHash {
+            dealer_address: dealer,
+            messages_hash: compute_messages_hash(messages),
+        };
+        let own = setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
+        let cert =
+            create_test_certificate(setup.setup.committee(), messages, dealer, vec![own]).unwrap();
+        self_signed.push((dealer, CertificateV1::Dkg(cert)));
+        let party_id = setup.setup.committee().index_of(&dealer).unwrap() as u16;
+        unverified_weight += setup
+            .test_manager
+            .read()
+            .unwrap()
+            .mpc_config
+            .nodes
+            .weight_of(party_id)
+            .unwrap();
+        if unverified_weight >= threshold {
+            break;
+        }
+    }
+    assert!(
+        unverified_weight >= threshold,
+        "fixture must be able to fake a skip: {unverified_weight} < {threshold}"
+    );
+
+    let mut mock_tob = MockOrderedBroadcastChannel::new(setup.certificates)
+        .with_override_certified_dealers(self_signed);
+
+    MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        mock_tob.published_count() > 0,
+        "self-signed certs must not convince the node to skip its dealer phase"
+    );
+}
+
+#[tokio::test]
+async fn party_phase_rejects_a_sub_quorum_cert() {
+    let setup = setup_run_test();
+
+    let sub_quorum: Vec<CertificateV1> = setup
+        .dealer_messages
+        .iter()
+        .enumerate()
+        .map(|(idx, messages)| {
+            let dealer_idx = idx + 1;
+            let dealer = setup.setup.address(dealer_idx);
+            let target = DealerMessagesHash {
+                dealer_address: dealer,
+                messages_hash: compute_messages_hash(messages),
+            };
+            let own =
+                setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
+            CertificateV1::Dkg(
+                create_test_certificate(setup.setup.committee(), messages, dealer, vec![own])
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        !sub_quorum.is_empty(),
+        "fixture must feed the party phase something to reject"
+    );
+
+    let mut mock_tob =
+        MockOrderedBroadcastChannel::new(sub_quorum).with_override_certified_dealers(vec![]);
+    let metrics = test_metrics();
+
+    let result = MpcManager::run_dkg(
+        &setup.test_manager,
+        &setup.mock_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a party must not complete DKG on certificates no dealer could have published"
+    );
+    assert!(
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[MPC_LABEL_DKG, "weight"])
+            .get()
+            >= 1,
+        "and must refuse them on weight, not merely fail to reach the threshold"
+    );
+}
 
 #[tokio::test]
 async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
@@ -14746,5 +15858,211 @@ async fn exhausted_prefetched_stream_in_window_closes_without_waiting() {
     assert!(
         matches!(outcome, WindowedNonceReceive::Closed),
         "an exhausted stream must close the window"
+    );
+}
+
+#[tokio::test]
+async fn recovery_drops_certs_the_live_path_would_reject() {
+    let setup = TestSetup::new(4);
+    let mut rng = rand::thread_rng();
+    let dealer = setup.address(0);
+    let dealer_manager = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash: compute_messages_hash(&messages),
+    };
+
+    let self_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            vec![setup.signing_keys[0].sign(setup.epoch(), dealer, &target)],
+        )
+        .unwrap(),
+    );
+    let quorum_signed = CertificateV1::Dkg(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            dealer,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let mgr = Arc::new(RwLock::new(setup.create_manager(1)));
+    let verified = crate::mpc::service::verify_fetched_certificates(
+        &mgr,
+        vec![self_signed, quorum_signed],
+        &test_metrics(),
+    )
+    .await;
+
+    assert_eq!(
+        verified.len(),
+        1,
+        "recovery must keep only the quorum-signed cert"
+    );
+    assert!(matches!(verified[0].inner(), CertificateV1::Dkg(_)));
+}
+
+#[test]
+fn formation_and_acceptance_quorums_agree() {
+    let setup = TestSetup::new(5);
+    let mut rng = rand::thread_rng();
+    let mut dealer = setup.create_manager(0);
+    let messages = Messages::Dkg(dealer.create_dealer_message(&mut rng));
+    let signature = dealer
+        .try_sign_dkg_message(setup.address(0), &messages)
+        .unwrap();
+
+    let formation = dealer
+        .build_dealer_flow_data(messages, signature)
+        .required_reduced_weight;
+    let acceptance = dealer.key_generation_cert_quorum(setup.epoch()).unwrap();
+    assert_eq!(
+        formation, acceptance,
+        "a dealer forming below the reader's quorum is excluded permanently"
+    );
+
+    let party = setup.create_manager(1);
+    assert_eq!(
+        party.nonce_cert_quorum(setup.epoch()).unwrap(),
+        acceptance,
+        "vanilla nonce certs are formed through the same dealer flow"
+    );
+}
+
+#[test]
+fn reduced_weights_are_stable_for_a_fixed_committee() {
+    const ALLOWED_DELTA: u16 = 1000;
+    let setup = TestSetup::new(4);
+    let stakes: [u64; 4] = [1000, 2500, 3000, 3500];
+    let members: Vec<_> = setup
+        .committee()
+        .members()
+        .iter()
+        .zip(stakes)
+        .map(|(m, stake)| {
+            CommitteeMember::new(
+                m.validator_address(),
+                m.public_key().clone(),
+                m.encryption_public_key().clone(),
+                stake,
+            )
+        })
+        .collect();
+    let weighted = Committee::new(
+        members,
+        setup.epoch(),
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0, // Vanilla
+    );
+
+    let (nodes, threshold, max_faulty) = build_reduced_nodes(
+        &weighted,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        ALLOWED_DELTA,
+        TEST_WEIGHT_DIVISOR,
+        TEST_CHAIN_ID,
+    )
+    .unwrap();
+
+    let weights: Vec<u16> = nodes.iter().map(|n| n.weight).collect();
+    assert_eq!(
+        weights,
+        vec![24, 60, 73, 85],
+        "per-node reduced weights moved"
+    );
+    assert_eq!(nodes.total_weight(), 242, "W moved");
+    assert_eq!(threshold, 82, "t moved");
+    assert_eq!(max_faulty, 49, "f moved");
+    assert!(
+        u32::from(threshold) + u32::from(max_faulty) <= u32::from(nodes.total_weight()),
+        "t + f must stay within W or no certificate can ever be formed"
+    );
+}
+
+#[test]
+fn an_inverted_faulty_bound_yields_an_unreachable_quorum() {
+    assert_eq!(MpcManager::fail_closed_sub(10, 3), 7);
+    assert_eq!(MpcManager::fail_closed_sub(10, 9), 1);
+    assert_eq!(
+        MpcManager::fail_closed_sub(10, 10),
+        u32::MAX,
+        "f == w must not yield a zero quorum"
+    );
+    assert_eq!(
+        MpcManager::fail_closed_sub(1, 1),
+        u32::MAX,
+        "weight-1 committee"
+    );
+    assert_eq!(MpcManager::fail_closed_sub(10, 11), u32::MAX);
+}
+
+#[test]
+fn a_dealer_outside_the_committee_does_not_self_quarantine() {
+    let setup = TestSetup::new(4);
+    let party = setup.create_manager(1);
+    let outsider = Address::new([200u8; 32]);
+    assert!(
+        party.committee.index_of(&outsider).is_none(),
+        "fixture must actually be outside the committee"
+    );
+
+    let err = MpcManager::certified_dealer_party_id(&party.committee, &outsider)
+        .expect_err("an out-of-committee dealer must not resolve to a party id");
+    assert!(
+        !matches!(
+            MpcManager::classify_reconstruction(Err(err)),
+            Err(MpcOutputRecoveryOutcome::Suspicious(_))
+        ),
+        "a certificate naming a dealer outside the committee must not self-quarantine the node"
+    );
+}
+
+#[test]
+fn departing_rotation_dealer_is_verified_not_rejected() {
+    let setup = TestSetup::new(4);
+    let party = setup.create_manager(1);
+    let mut rng = rand::thread_rng();
+
+    let departed = Address::new([200u8; 32]);
+    let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
+    let target = DealerMessagesHash {
+        dealer_address: departed,
+        messages_hash: compute_messages_hash(&messages),
+    };
+    let cert = CertificateV1::Rotation(
+        create_test_certificate(
+            setup.committee(),
+            &messages,
+            departed,
+            (0..4)
+                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let (verified, rejected) = party.verified_dealer_weight(&[(departed, cert)]);
+    assert!(
+        verified.contains_key(&departed),
+        "a quorum-signed cert must stay verified even when its dealer has no current weight"
+    );
+    assert_eq!(
+        verified[&departed], 0,
+        "and contribute no weight, rather than being dropped"
+    );
+    assert!(
+        rejected.is_empty(),
+        "and must not reach the metric that exists to surface Byzantine self-certification"
     );
 }

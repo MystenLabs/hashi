@@ -9,6 +9,12 @@ use tower::ServiceBuilder;
 
 use crate::Hashi;
 
+/// Marker for the app-level "signing manager not ready" unavailable
+/// response, shared with the p2p client so it can tell this apart from
+/// transport-generated `Unavailable` statuses (connection refused,
+/// REFUSED_STREAM, 503/504), which must keep counting as peer failures.
+pub(crate) const SIGNING_MANAGER_NOT_READY_MSG: &str = "SigningManager not available";
+
 mod client;
 pub use client::BoxedChannel;
 pub use client::Client;
@@ -165,7 +171,7 @@ impl HttpService {
     ) -> Result<Arc<crate::mpc::SigningManager>, tonic::Status> {
         self.inner.signing_manager_for(epoch).ok_or_else(|| {
             tonic::Status::unavailable(format!(
-                "SigningManager not available for epoch {epoch}; retry"
+                "{SIGNING_MANAGER_NOT_READY_MSG} for epoch {epoch}; retry"
             ))
         })
     }

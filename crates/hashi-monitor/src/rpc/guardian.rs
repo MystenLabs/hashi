@@ -7,9 +7,9 @@ use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_guardian::s3_reader::VerifiedLogRecord;
 use hashi_guardian::s3_reader::withdraw_cursor;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -27,7 +27,8 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
     type Error = anyhow::Error;
 
     fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
-        let LogMessage::Withdrawal(withdrawal_message) = log.message else {
+        let timestamp_ms = log.timestamp_ms();
+        let LogMessage::Withdrawal(withdrawal_message) = log.into_message() else {
             anyhow::bail!("non-withdrawal logs found");
         };
 
@@ -43,7 +44,7 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
                 Ok(VerifiedWithdrawal::Success(MonitorWithdrawalEvent {
                     event_type: WithdrawalEventType::E2GuardianApproved,
                     wid: request_data.wid,
-                    timestamp_secs: unix_millis_to_seconds(log.timestamp_ms),
+                    timestamp_secs: unix_millis_to_seconds(timestamp_ms),
                     btc_txid: txid,
                 }))
             }

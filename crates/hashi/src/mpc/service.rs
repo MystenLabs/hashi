@@ -22,7 +22,7 @@ use tracing::warn;
 
 use crate::Hashi;
 use crate::communication::PrefetchedTobChannel;
-use crate::communication::SuiTobChannel;
+use crate::communication::SuiTobSessionChannel;
 use crate::communication::fetch_certificates;
 use crate::communication::fetch_key_generation_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
@@ -30,11 +30,14 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_GENERATION;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
+use crate::metrics::Metrics;
 use crate::metrics::STALL_OUTCOME_ABSORBED;
 use crate::metrics::STALL_OUTCOME_FAILED;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
+use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
+use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
@@ -42,6 +45,7 @@ use crate::mpc::types::NonceCertTimestamp;
 use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
+use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
@@ -346,17 +350,15 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let certs = self
-            .bounded_cert_read(
-                MPC_LABEL_KEY_GENERATION,
-                &format!("reconfig cert read for epoch {epoch}"),
-                fetch_key_generation_certificates(&onchain_state, epoch),
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("failed to fetch reconfig certs for epoch {epoch}: {e}")
-            })?;
-        let is_key_rotation = matches!(certs.first(), Some((_, CertificateV1::Rotation(_))));
+        let earliest_committee_epoch = onchain_state
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .keys()
+            .next()
+            .copied();
+        let is_key_rotation = is_key_rotation_epoch(earliest_committee_epoch, epoch);
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
@@ -397,6 +399,7 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for DKG recovery"))?;
+        let certs = verify_fetched_certificates(&mpc_manager, certs, &self.inner.metrics).await;
         match MpcManager::reconstruct_current_dkg_output(&mpc_manager, &certs, onchain_mpc_key) {
             MpcOutputRecoveryOutcome::Recovered(output) => {
                 info!(
@@ -460,6 +463,10 @@ impl MpcService {
             .into_iter()
             .map(|(_, cert)| cert)
             .collect();
+        let current_certs =
+            verify_fetched_certificates(&mpc_manager, current_certs, &self.inner.metrics).await;
+        let previous_certs =
+            verify_fetched_certificates(&mpc_manager, previous_certs, &self.inner.metrics).await;
         match MpcManager::reconstruct_current_rotation_output(
             &mpc_manager,
             &current_certs,
@@ -497,7 +504,7 @@ impl MpcService {
             .expect("MpcManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_DKG);
-        let mut tob_channel = SuiTobChannel::new(
+        let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
             target_epoch,
@@ -549,7 +556,7 @@ impl MpcService {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GENERATION);
         let onchain_state_for_certs = onchain_state.clone();
-        let mut tob_channel = SuiTobChannel::new(
+        let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
             epoch,
@@ -599,20 +606,17 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             mgr.nonce_collection_cutoff_ms(&final_certs)
         };
-        let canonical: Vec<(sui_sdk_types::Address, CertificateV1)> = final_certs
-            .iter()
-            .filter_map(|(dealer, stamped)| {
-                let cert = stamped.to_dealer_certificate(epoch).ok()?;
-                Some((
-                    *dealer,
-                    CertificateV1::NonceGeneration {
-                        batch_index,
-                        cert,
-                        timestamp_ms: stamped.timestamp_ms,
-                    },
-                ))
-            })
-            .collect();
+        let canonical = final_certs.filter_map(|dealer, stamped| {
+            let cert = stamped.to_dealer_certificate(epoch).ok()?;
+            Some((
+                *dealer,
+                CertificateV1::NonceGeneration {
+                    batch_index,
+                    cert,
+                    timestamp_ms: stamped.timestamp_ms,
+                },
+            ))
+        });
         let served_weight = {
             let mgr = mpc_manager.read().unwrap();
             match mgr.mpc_config.nonce_generation_protocol {
@@ -623,7 +627,7 @@ impl MpcService {
                 NonceGenerationProtocol::Vanilla => None,
             }
         };
-        let mut party_channel = PrefetchedTobChannel::new(canonical);
+        let mut party_channel = PrefetchedTobChannel::new(canonical.into_inner());
         let nonce_result = MpcManager::run_nonce_party_phase(
             &mpc_manager,
             batch_index,
@@ -696,12 +700,14 @@ impl MpcService {
     async fn prepare_signing(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
         let (committee, presignatures) = self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
+        let share_owners = self.share_owners_for_epoch(epoch)?;
         let signing_manager = SigningManager::new(
             address,
             committee,
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
+            share_owners,
             presignatures,
             0, // batch_index
             0, // batch_start_index
@@ -710,6 +716,26 @@ impl MpcService {
         );
         self.inner.store_signing_manager(signing_manager);
         Ok(())
+    }
+
+    /// The authoritative share-index → owner map for `epoch`, from the MPC
+    /// manager's reduced node set.
+    fn share_owners_for_epoch(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<
+        std::collections::HashMap<fastcrypto_tbls::types::ShareIndex, sui_sdk_types::Address>,
+    > {
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
+        let owners = mpc_manager
+            .read()
+            .unwrap()
+            .share_owners_for_epoch(epoch)
+            .map_err(|e| anyhow::anyhow!("Failed to derive share owners for epoch {epoch}: {e}"))?;
+        Ok(owners)
     }
 
     fn bail_if_reconfig_pending(&self) -> anyhow::Result<()> {
@@ -858,12 +884,14 @@ impl MpcService {
         );
         let address = self.inner.config.validator_address()?;
         let retained_count = retained.len();
+        let share_owners = self.share_owners_for_epoch(epoch)?;
         let signing_manager = SigningManager::new_recovered(
             address,
             committee,
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
+            share_owners,
             retained,
             num_consumed,
             &pending,
@@ -913,6 +941,7 @@ impl MpcService {
                     epoch,
                     certs,
                     &mut HashSet::new(),
+                    &self.inner.metrics,
                 )
                 .await;
                 certified_nonce_weight(mpc_manager, &certs)
@@ -941,6 +970,7 @@ impl MpcService {
                     epoch,
                     certs,
                     &mut HashSet::new(),
+                    &self.inner.metrics,
                 )
                 .await;
                 let cutoff_ms = {
@@ -1187,12 +1217,7 @@ impl MpcService {
         batch_index: u32,
         wait_for_floor: bool,
         metrics: &crate::metrics::Metrics,
-    ) -> anyhow::Result<
-        Vec<(
-            sui_sdk_types::Address,
-            move_types::StampedDealerSubmissionV1,
-        )>,
-    > {
+    ) -> anyhow::Result<VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>> {
         let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
         let overall_deadline = tokio::time::Instant::now() + NONCE_WAIT_TOTAL_BUDGET;
         let mut best_weight = 0u32;
@@ -1261,9 +1286,14 @@ impl MpcService {
                 }
                 Ok(Err(e)) => return Err(e),
             };
-            let certs =
-                MpcManager::verified_nonce_certs(mpc_manager, epoch, certs, &mut already_verified)
-                    .await;
+            let certs = MpcManager::verified_nonce_certs(
+                mpc_manager,
+                epoch,
+                certs,
+                &mut already_verified,
+                metrics,
+            )
+            .await;
             let (floor_reached, cutoff_ms, window_ms, weight) = {
                 let mgr = mpc_manager.read().unwrap();
                 let window = mgr.window_certified_nonce_dealers(&certs).1;
@@ -1414,6 +1444,7 @@ impl MpcService {
             }
             NonceGenerationProtocol::Avid => {
                 let avid_certs: Vec<(sui_sdk_types::Address, CertificateV1)> = certs
+                    .as_slice()
                     .iter()
                     .filter_map(|(dealer, stamped)| {
                         let cert = stamped.to_dealer_certificate(epoch).ok()?;
@@ -1763,14 +1794,17 @@ impl MpcService {
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
+        let fetched = previous_certs.len();
+        let previous_certs =
+            verify_fetched_certificates(&mpc_manager, previous_certs, &self.inner.metrics).await;
         info!(
-            "run_key_rotation: fetched {} certs for previous_epoch={previous_epoch}",
+            "run_key_rotation: {} of {fetched} certs verified for previous_epoch={previous_epoch}",
             previous_certs.len(),
         );
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel =
             RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_KEY_ROTATION);
-        let mut tob_channel = SuiTobChannel::new(
+        let mut tob_channel = SuiTobSessionChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
             target_epoch,
@@ -2061,9 +2095,48 @@ pub(crate) fn presig_count(
     total_weight.saturating_sub(consumed) * batch_size_per_weight as usize
 }
 
+pub(crate) async fn verify_fetched_certificates(
+    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+    certs: Vec<CertificateV1>,
+    metrics: &Metrics,
+) -> Vec<VerifiedCertificateV1> {
+    let mgr = Arc::clone(mpc_manager);
+    let (verified, rejected) = spawn_blocking(move || {
+        let mgr = mgr.read().unwrap();
+        let mut verified = Vec::with_capacity(certs.len());
+        let mut rejected: Vec<(&'static str, &'static str)> = Vec::new();
+        for cert in certs {
+            let label = cert.protocol_label();
+            match mgr.verify_certificate(cert.clone()) {
+                Ok(cert) => verified.push(cert),
+                Err(e) => {
+                    warn!(
+                        "dropping unverifiable TOB certificate from {:?}: {e}",
+                        cert.dealer_address()
+                    );
+                    rejected.push((label, mgr.certificate_rejection_reason(&cert)));
+                }
+            }
+        }
+        (verified, rejected)
+    })
+    .await;
+    for (protocol, reason) in rejected {
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[protocol, reason])
+            .inc();
+    }
+    verified
+}
+
+fn is_key_rotation_epoch(earliest_committee_epoch: Option<u64>, epoch: u64) -> bool {
+    earliest_committee_epoch.is_some_and(|earliest| earliest < epoch)
+}
+
 fn certified_nonce_weight<T: NonceCertTimestamp>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, T)],
+    certs: &VerifiedNonceCerts<T>,
 ) -> u32 {
     mpc_manager
         .read()
@@ -2075,7 +2148,7 @@ fn certified_nonce_weight<T: NonceCertTimestamp>(
 
 fn avid_certified_nonce_weight(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &[(sui_sdk_types::Address, CertificateV1)],
+    certs: &VerifiedNonceCerts<CertificateV1>,
     cutoff_ms: Option<u64>,
 ) -> u32 {
     mpc_manager
@@ -2209,6 +2282,28 @@ mod presig_count_tests {
 
 fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) || current_epoch == target_epoch
+}
+
+#[cfg(test)]
+mod key_rotation_epoch_tests {
+    use super::is_key_rotation_epoch;
+
+    #[test]
+    fn the_earliest_committee_epoch_is_not_a_rotation() {
+        assert!(!is_key_rotation_epoch(Some(9), 9));
+        assert!(!is_key_rotation_epoch(Some(9), 5));
+    }
+
+    #[test]
+    fn an_epoch_after_the_first_committee_is_a_rotation() {
+        assert!(is_key_rotation_epoch(Some(9), 20));
+        assert!(is_key_rotation_epoch(Some(9), 32));
+    }
+
+    #[test]
+    fn an_empty_committee_history_answers_dkg() {
+        assert!(!is_key_rotation_epoch(None, 9));
+    }
 }
 
 #[cfg(test)]

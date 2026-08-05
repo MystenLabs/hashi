@@ -11,7 +11,7 @@ use anyhow::anyhow;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::ProvisionerRotateCertResponse;
@@ -160,18 +160,20 @@ pub async fn run(
         &guardian_pub_key,
         &mut thread_rng(),
     );
-    let signed_request = KpSigned::new(request, signing_cert, None)
+    let signed_request = KpSigned::sign(request, signing_cert, None)
         .context("sign the certificate-rotation request with the authorizing KP key")?;
     let response_pb = client
         .provisioner_rotate_cert(pb::SignedProvisionerRotateCertRequest::from(signed_request))
         .await
         .context("ProvisionerRotateCert RPC failed")?
         .into_inner();
-    let signed_response = GuardianSigned::<ProvisionerRotateCertResponse>::try_from(response_pb)
-        .map_err(|e| anyhow!("decode SignedProvisionerRotateCertResponse: {e:?}"))?;
+    let signed_response =
+        GuardianSignedResponse::<ProvisionerRotateCertResponse>::try_from(response_pb)
+            .map_err(|e| anyhow!("decode SignedProvisionerRotateCertResponse: {e:?}"))?;
     let response = signed_response
-        .verify(&signing_pub_key)
-        .map_err(|e| anyhow!("verify ProvisionerRotateCertResponse signature: {e}"))?;
+        .verify_into_data(&signing_pub_key)
+        .map_err(|e| anyhow!("verify ProvisionerRotateCertResponse signature: {e}"))?
+        .response;
     let expected_cert_seq = old_cert_seq.checked_add(1).context("cert_seq overflow")?;
     anyhow::ensure!(
         response.cert_seq == expected_cert_seq,

@@ -160,7 +160,15 @@ pub struct Config {
     /// transaction. The batch commits immediately once this many requests are
     /// ready, without waiting for `withdrawal_batching_delay_ms` to elapse.
     ///
-    /// Defaults to 40 (the algorithm's hard upper bound).
+    /// Defaults to 298 (the algorithm's hard upper bound, set by the Sui
+    /// commit transaction's runtime-object budget). Note that large batches
+    /// automatically shrink the input side: coin selection reserves the
+    /// commit object budget for requests first, so a full batch spends only
+    /// a handful of funding inputs and performs no consolidation.
+    ///
+    /// The leader only fills batches past 40 requests while the queue is
+    /// deeper than the available UTXO pool (drain mode); otherwise it caps
+    /// batches at 40 so each keeps its full consolidation budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
 
@@ -609,15 +617,24 @@ mod tests {
     #[test]
     fn test_withdrawal_max_batch_size_defaults_to_absolute_cap() {
         let config = Config::default();
-        assert_eq!(config.withdrawal_max_batch_size(), 40);
+        assert_eq!(config.withdrawal_max_batch_size(), 298);
     }
 
     #[test]
     fn test_withdrawal_max_batch_size_clamps_to_absolute_cap() {
         let config = Config {
+            withdrawal_max_batch_size: Some(1_000),
+            ..Config::default()
+        };
+        assert_eq!(config.withdrawal_max_batch_size(), 298);
+    }
+
+    #[test]
+    fn test_withdrawal_max_batch_size_accepts_values_below_the_cap() {
+        let config = Config {
             withdrawal_max_batch_size: Some(70),
             ..Config::default()
         };
-        assert_eq!(config.withdrawal_max_batch_size(), 40);
+        assert_eq!(config.withdrawal_max_batch_size(), 70);
     }
 }

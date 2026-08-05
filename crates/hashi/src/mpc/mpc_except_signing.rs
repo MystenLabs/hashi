@@ -62,6 +62,7 @@ pub use crate::mpc::types::SendMessagesRequest;
 pub use crate::mpc::types::SendMessagesResponse;
 pub use crate::mpc::types::SessionId;
 use crate::mpc::types::VerifiedAvidVoteCert;
+use crate::mpc::types::VerifiedCertificateV1;
 use crate::mpc::types::hash_avid_vote;
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
@@ -111,6 +112,7 @@ const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
+const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type AvidEchoAndVote = (
     BLS12381Signature,
@@ -186,6 +188,31 @@ pub struct MpcManager {
     pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), batch_avss_avid::ReceiverOutput>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
+}
+
+pub(crate) struct VerifiedNonceCerts<T>(Vec<(Address, T)>);
+
+impl<T> VerifiedNonceCerts<T> {
+    pub(crate) fn as_slice(&self) -> &[(Address, T)] {
+        &self.0
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Re-express verified certs in another form. The verification proof
+    /// carries over because every output is derived from a verified input.
+    pub(crate) fn filter_map<U>(
+        &self,
+        f: impl Fn(&Address, &T) -> Option<(Address, U)>,
+    ) -> VerifiedNonceCerts<U> {
+        VerifiedNonceCerts(self.0.iter().filter_map(|(a, t)| f(a, t)).collect())
+    }
+
+    pub(crate) fn into_inner(self) -> Vec<(Address, T)> {
+        self.0
+    }
 }
 
 impl MpcManager {
@@ -352,10 +379,6 @@ impl MpcManager {
     }
 
     // Only for devnet key recovery CLI tool
-    pub fn set_previous_epoch(&mut self, epoch: u64) {
-        self.previous_epoch = epoch;
-    }
-
     pub fn handle_send_messages_request(
         &mut self,
         sender: Address,
@@ -386,7 +409,7 @@ impl MpcManager {
             _ => None,
         };
         let existing =
-            self.get_dealer_messages(request.messages.protocol_type(), &sender, batch_index);
+            self.accepted_dealer_messages(request.messages.protocol_type(), &sender, batch_index)?;
         if let Some(existing_messages) = existing {
             let existing_hash = compute_messages_hash(&existing_messages);
             let incoming_hash = compute_messages_hash(&request.messages);
@@ -505,22 +528,25 @@ impl MpcManager {
                 "AVID retrieval serves the current epoch only".into(),
             ));
         }
-        let common = self.get_avid_round_common(batch_index, &request.dealer);
-        let (avid_vote, echo) = match &self.get_avid_held_echoes(batch_index, &request.dealer) {
-            Some((vote, echoes)) => {
-                let echo = echoes.iter().find_map(|(addr, msg)| {
-                    (*addr == requester).then(|| match msg {
-                        Messages::NonceGenerationAvid(AvidNonceMessage {
-                            kind: AvidNonceMessageKind::Echo { echo, .. },
-                            ..
-                        }) => echo.clone(),
-                        _ => unreachable!("held echoes are echo messages"),
-                    })
-                });
-                (Some(vote.clone()), echo)
-            }
-            None => (None, None),
-        };
+        let common = self
+            .get_avid_round_state(batch_index, &request.dealer)?
+            .map(|state| state.common);
+        let (avid_vote, echo) =
+            match &self.try_get_avid_held_echoes(batch_index, &request.dealer)? {
+                Some((vote, echoes)) => {
+                    let echo = echoes.iter().find_map(|(addr, msg)| {
+                        (*addr == requester).then(|| match msg {
+                            Messages::NonceGenerationAvid(AvidNonceMessage {
+                                kind: AvidNonceMessageKind::Echo { echo, .. },
+                                ..
+                            }) => echo.clone(),
+                            _ => unreachable!("held echoes are echo messages"),
+                        })
+                    });
+                    (Some(vote.clone()), echo)
+                }
+                None => (None, None),
+            };
         if common.is_none() && avid_vote.is_none() && echo.is_none() {
             return Err(MpcError::NotFound(format!(
                 "no AVID round state for dealer {:?}",
@@ -805,21 +831,12 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
         let certified = tob_channel.certified_dealers().await;
-        let (certified_reduced_weight, threshold) = {
-            let mgr = mpc_manager.read().unwrap();
-            let weight: u32 = certified
-                .iter()
-                .filter_map(|d| {
-                    let party_id = mgr.committee.index_of(d)? as u16;
-                    mgr.mpc_config
-                        .nodes
-                        .weight_of(party_id)
-                        .ok()
-                        .map(|w| w as u32)
-                })
+        let certified_reduced_weight: u32 =
+            Self::verified_dealer_weight_blocking(mpc_manager, certified, metrics)
+                .await
+                .into_values()
                 .sum();
-            (weight, mgr.mpc_config.threshold as u32)
-        };
+        let threshold = mpc_manager.read().unwrap().mpc_config.threshold as u32;
         if certified_reduced_weight < threshold
             && let Err(e) =
                 Self::run_dkg_as_dealer(mpc_manager, p2p_channel, tob_channel, metrics).await
@@ -836,7 +853,7 @@ impl MpcManager {
 
     pub async fn run_key_rotation(
         mpc_manager: &Arc<RwLock<Self>>,
-        previous_certificates: &[CertificateV1],
+        previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
@@ -876,6 +893,8 @@ impl MpcManager {
             && has_previous_shares
             && {
                 let certified = ordered_broadcast_channel.certified_dealers().await;
+                let verified =
+                    Self::verified_dealer_weight_blocking(mpc_manager, certified, metrics).await;
                 let mgr = mpc_manager.read().unwrap();
                 let prev_committee = mgr.previous_committee.as_ref().expect(
                     "previous_committee must be set when is_member_of_previous_committee is true",
@@ -883,8 +902,8 @@ impl MpcManager {
                 let prev_nodes = mgr.previous_nodes.as_ref().expect(
                     "previous_nodes must be set when is_member_of_previous_committee is true",
                 );
-                let certified_share_count: usize = certified
-                    .iter()
+                let certified_share_count: usize = verified
+                    .keys()
                     .filter_map(|d| {
                         let messages = mgr.current_rotation_messages.get(d)?;
                         if messages.is_empty() {
@@ -948,21 +967,12 @@ impl MpcManager {
     ) {
         Self::prune_nonce_state(mpc_manager, batch_index);
         let certified = tob_channel.certified_dealers().await;
-        let (certified_reduced_weight, required_reduced_weight) = {
-            let mgr = mpc_manager.read().unwrap();
-            let weight: u32 = certified
-                .iter()
-                .filter_map(|d| {
-                    let party_id = mgr.committee.index_of(d)? as u16;
-                    mgr.mpc_config
-                        .nodes
-                        .weight_of(party_id)
-                        .ok()
-                        .map(|w| w as u32)
-                })
+        let certified_reduced_weight: u32 =
+            Self::verified_dealer_weight_blocking(mpc_manager, certified, metrics)
+                .await
+                .into_values()
                 .sum();
-            (weight, mgr.required_nonce_weight())
-        };
+        let required_reduced_weight = mpc_manager.read().unwrap().required_nonce_weight();
         let protocol = {
             let mgr = mpc_manager.read().unwrap();
             mgr.mpc_config.nonce_generation_protocol
@@ -1074,10 +1084,10 @@ impl MpcManager {
         })
     }
 
-    pub fn reconstruct_presignatures(
+    pub(crate) fn reconstruct_presignatures(
         &self,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
+        certs: &VerifiedNonceCerts<hashi_types::move_types::StampedDealerSubmissionV1>,
     ) -> MpcResult<NonceReconstructionOutcome> {
         let (certified_dealers, window) = self.window_certified_nonce_dealers(certs);
         if !window.floor_reached() {
@@ -1125,18 +1135,18 @@ impl MpcManager {
 
     pub(crate) fn window_certified_nonce_dealers<T: NonceCertTimestamp>(
         &self,
-        certs: &[(Address, T)],
+        certs: &VerifiedNonceCerts<T>,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window())
     }
 
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
         &self,
-        certs: &[(Address, T)],
+        certs: &VerifiedNonceCerts<T>,
         mut window: NonceCollectionWindow,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         let mut certified = HashSet::new();
-        for (table_dealer, cert) in certs {
+        for (table_dealer, cert) in certs.as_slice() {
             let dealer = match cert.signed_dealer(self.mpc_config.epoch) {
                 Some(signed) => {
                     if signed != *table_dealer {
@@ -1169,15 +1179,15 @@ impl MpcManager {
 
     pub(crate) fn avid_certified_nonce_dealers_from_certs(
         &self,
-        certs: &[(Address, CertificateV1)],
+        certs: &VerifiedNonceCerts<CertificateV1>,
         cutoff_ms: Option<u64>,
     ) -> (HashSet<Address>, u32) {
         let mut window =
             NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms);
-        let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
-        let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
+        let vote_quorum_weight =
+            Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
         let mut certified = HashSet::new();
-        for (table_dealer, stamped) in certs {
+        for (table_dealer, stamped) in certs.as_slice() {
             let CertificateV1::NonceGeneration { cert, .. } = stamped else {
                 continue;
             };
@@ -1228,7 +1238,8 @@ impl MpcManager {
         epoch: u64,
         certs: Vec<(Address, T)>,
         already_verified: &mut HashSet<Vec<u8>>,
-    ) -> Vec<(Address, T)>
+        metrics: &Metrics,
+    ) -> VerifiedNonceCerts<T>
     where
         T: NonceCertToVerify,
     {
@@ -1237,9 +1248,13 @@ impl MpcManager {
             let dealer_cert = match cert.to_dealer_certificate(epoch) {
                 Ok(dealer_cert) => dealer_cert,
                 Err(e) => {
-                    tracing::info!(
+                    tracing::warn!(
                         "dropping malformed nonce cert from {dealer:?} for epoch {epoch}: {e}"
                     );
+                    metrics
+                        .mpc_certs_rejected_total
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "malformed"])
+                        .inc();
                     continue;
                 }
             };
@@ -1250,23 +1265,37 @@ impl MpcManager {
             }
             let mgr = Arc::clone(mpc_manager);
             let verification = spawn_blocking(move || {
-                mgr.read().unwrap().committee.verify_signature(&dealer_cert)
+                let mgr = mgr.read().unwrap();
+                mgr.verify_nonce_dealer_certificate(&dealer_cert)
+                    .map_err(|e| {
+                        let reason = mgr.rejection_reason(
+                            &dealer_cert,
+                            mgr.nonce_cert_quorum(dealer_cert.epoch()),
+                        );
+                        (e, reason)
+                    })
             })
             .await;
             match verification {
-                Ok(()) => {
+                Ok(_) => {
                     if let Some(key) = key {
                         already_verified.insert(key);
                     }
                     verified.push((dealer, cert));
                 }
-                Err(e) => tracing::info!(
-                    "dropping nonce cert with invalid signature from {dealer:?} for epoch \
-                     {epoch}: {e}"
-                ),
+                Err((e, reason)) => {
+                    tracing::warn!(
+                        "dropping nonce cert with invalid signature from {dealer:?} for epoch \
+                         {epoch}: {e}"
+                    );
+                    metrics
+                        .mpc_certs_rejected_total
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
+                        .inc();
+                }
             }
         }
-        verified
+        VerifiedNonceCerts(verified)
     }
 
     async fn run_dkg_as_dealer(
@@ -1290,14 +1319,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
-            dealer_data.reduced_weights,
-        );
+            &dealer_data.nodes,
+        )
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_DKG])
@@ -1319,7 +1349,7 @@ impl MpcManager {
                 Err(e) => tracing::info!("Failed to send message to {:?}: {}", addr, e),
             }
         }
-        if aggregator.reduced_weight() >= dealer_data.required_reduced_weight {
+        if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let dkg_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1380,12 +1410,23 @@ impl MpcManager {
                 let cert = dkg_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.verify_certificate(CertificateV1::Dkg(cert)).map(|_| ())
                 })
                 .await;
                 drop(_timer);
                 if let Err(e) = verified {
-                    tracing::info!("Invalid certificate signature from {:?}: {}", &dealer, e);
+                    tracing::warn!("Rejected DKG cert from {:?}: {}", &dealer, e);
+                    let reason = {
+                        let mgr = mpc_manager.read().unwrap();
+                        mgr.rejection_reason(
+                            &dkg_cert,
+                            mgr.key_generation_cert_quorum(dkg_cert.epoch()),
+                        )
+                    };
+                    metrics
+                        .mpc_certs_rejected_total
+                        .with_label_values(&[MPC_LABEL_DKG, reason])
+                        .inc();
                     continue;
                 }
             }
@@ -1463,9 +1504,9 @@ impl MpcManager {
                     .start_timer();
                 let (signers, epoch, message) = {
                     let mgr = mpc_manager.read().unwrap();
-                    let signers = dkg_cert
-                        .signers(&mgr.committee)
-                        .expect("certificate verified above");
+                    let signers = dkg_cert.signers(&mgr.committee).map_err(|e| {
+                        MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
+                    })?;
                     let message = mgr
                         .current_dkg_messages
                         .get(&dealer)
@@ -1505,15 +1546,23 @@ impl MpcManager {
                     tracing::warn!("No dealer output for {:?} after processing", dealer);
                     continue;
                 }
-                // Use the reduced weights, not the original committee weights.
-                let party_id = mgr
-                    .committee
-                    .index_of(&dealer)
-                    .expect("dealer must be in committee") as u16;
-                mgr.mpc_config
-                    .nodes
-                    .weight_of(party_id)
-                    .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
+                match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
+                    mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
+                        MpcError::InvalidCertificate(format!(
+                            "No reduced weight for certified dealer {dealer:?}"
+                        ))
+                    })
+                }) {
+                    Ok(weight) => weight,
+                    Err(e) => {
+                        tracing::warn!("Skipping certified dealer: {e}");
+                        metrics
+                            .mpc_certs_rejected_total
+                            .with_label_values(&[MPC_LABEL_DKG, "dealer"])
+                            .inc();
+                        continue;
+                    }
+                }
             };
             dealer_weight_sum += dealer_weight as u32;
             certified_dealers.insert(dealer);
@@ -1557,14 +1606,17 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
-            dealer_data.reduced_weights,
-        );
+            &dealer_data.nodes,
+        )
+        // Not a crypto failure: the local `nodes` do not match the committee
+        // they are being aggregated against.
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
@@ -1589,7 +1641,7 @@ impl MpcManager {
                 }
             }
         }
-        if aggregator.reduced_weight() >= dealer_data.required_reduced_weight {
+        if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let rotation_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1651,16 +1703,24 @@ impl MpcManager {
                 let cert = rotation_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.verify_certificate(CertificateV1::Rotation(cert))
+                        .map(|_| ())
                 })
                 .await;
                 drop(_timer);
                 if let Err(e) = verified {
-                    tracing::info!(
-                        "Invalid rotation certificate signature from {:?}: {}",
-                        &dealer,
-                        e
-                    );
+                    tracing::warn!("Rejected rotation cert from {:?}: {}", &dealer, e);
+                    let reason = {
+                        let mgr = mpc_manager.read().unwrap();
+                        mgr.rejection_reason(
+                            &rotation_cert,
+                            mgr.key_generation_cert_quorum(rotation_cert.epoch()),
+                        )
+                    };
+                    metrics
+                        .mpc_certs_rejected_total
+                        .with_label_values(&[MPC_LABEL_KEY_ROTATION, reason])
+                        .inc();
                     continue;
                 }
             }
@@ -1750,9 +1810,9 @@ impl MpcManager {
             }
             let (signers, epoch, rotation_msgs) = {
                 let mgr = mpc_manager.read().unwrap();
-                let signers = rotation_cert
-                    .signers(&mgr.committee)
-                    .expect("certificate verified above");
+                let signers = rotation_cert.signers(&mgr.committee).map_err(|e| {
+                    MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
+                })?;
                 let msgs = mgr
                     .current_rotation_messages
                     .get(&dealer)
@@ -1850,14 +1910,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
-            dealer_data.reduced_weights,
-        );
+            &dealer_data.nodes,
+        )
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -1879,7 +1940,7 @@ impl MpcManager {
                 Err(e) => tracing::info!("Failed to send nonce message to {:?}: {}", addr, e),
             }
         }
-        if aggregator.reduced_weight() >= dealer_data.required_reduced_weight {
+        if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let nonce_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1999,16 +2060,20 @@ impl MpcManager {
                 let cert = nonce_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.verify_nonce_dealer_certificate(&cert).map(|_| ())
                 })
                 .await;
                 drop(_timer);
                 if let Err(e) = verified {
-                    tracing::info!(
-                        "Invalid nonce certificate signature from {:?}: {}",
-                        &dealer,
-                        e
-                    );
+                    tracing::warn!("Rejected nonce cert from {:?}: {}", &dealer, e);
+                    let reason = {
+                        let mgr = mpc_manager.read().unwrap();
+                        mgr.rejection_reason(&nonce_cert, mgr.nonce_cert_quorum(nonce_cert.epoch()))
+                    };
+                    metrics
+                        .mpc_certs_rejected_total
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
+                        .inc();
                     continue;
                 }
             }
@@ -2091,9 +2156,9 @@ impl MpcManager {
                     .start_timer();
                 let (signers, epoch) = {
                     let mgr = mpc_manager.read().unwrap();
-                    let signers = nonce_cert
-                        .signers(&mgr.committee)
-                        .expect("certificate verified above");
+                    let signers = nonce_cert.signers(&mgr.committee).map_err(|e| {
+                        MpcError::InvalidCertificate(format!("cert signers unavailable: {e}"))
+                    })?;
                     (signers, mgr.mpc_config.epoch)
                 };
                 Self::recover_nonce_shares_via_complaint(
@@ -2117,14 +2182,23 @@ impl MpcManager {
                     local_skips += 1;
                     continue;
                 }
-                let party_id = mgr
-                    .committee
-                    .index_of(&dealer)
-                    .expect("dealer must be in committee") as u16;
-                mgr.mpc_config
-                    .nodes
-                    .weight_of(party_id)
-                    .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
+                match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
+                    mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
+                        MpcError::InvalidCertificate(format!(
+                            "No reduced weight for certified dealer {dealer:?}"
+                        ))
+                    })
+                }) {
+                    Ok(weight) => weight,
+                    Err(e) => {
+                        tracing::warn!("Skipping certified dealer: {e}");
+                        metrics
+                            .mpc_certs_rejected_total
+                            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "dealer"])
+                            .inc();
+                        continue;
+                    }
+                }
             };
             window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
@@ -2241,15 +2315,19 @@ impl MpcManager {
         Ok(())
     }
 
-    fn get_avid_held_echoes(&self, batch_index: u32, dealer: &Address) -> Option<HeldAvidEchoes> {
+    fn try_get_avid_held_echoes(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<Option<HeldAvidEchoes>> {
         self.avid_held_echoes
             .get(&(batch_index, *dealer))
             .cloned()
-            .or_else(|| {
+            .map(|echoes| Ok(Some(echoes)))
+            .unwrap_or_else(|| {
                 self.public_messages_store
                     .get_avid_held_echoes(self.mpc_config.epoch, batch_index, dealer)
-                    .ok()
-                    .flatten()
+                    .map_err(|e| MpcError::StorageError(e.to_string()))
             })
     }
 
@@ -2605,7 +2683,8 @@ impl MpcManager {
         confirm_cert: DealerCertificate,
     ) -> MpcResult<AvidEchoAndVote> {
         let own_common = self
-            .get_avid_round_common(batch_index, &dealer)
+            .get_avid_round_state(batch_index, &dealer)?
+            .map(|state| state.common)
             .ok_or_else(|| {
                 MpcError::NotReady("no verified common message for this AVID round".into())
             })?;
@@ -2718,10 +2797,18 @@ impl MpcManager {
                 vote_cert,
             } => {
                 let (held_vote, _) = self
-                    .get_avid_held_echoes(batch_index, &request.dealer)
+                    .try_get_avid_held_echoes(batch_index, &request.dealer)?
                     .ok_or_else(|| {
                         MpcError::NotFound("no held vote for the complained round".into())
                     })?;
+                if vote_cert.epoch() != self.mpc_config.epoch {
+                    return Err(MpcError::InvalidCertificate(format!(
+                        "vote cert epoch {} is not the current epoch {}",
+                        vote_cert.epoch(),
+                        self.mpc_config.epoch,
+                    )));
+                }
+                self.verify_nonce_dealer_certificate(vote_cert)?;
                 let cert = AvidCertificate::vote(
                     vote_cert.clone(),
                     held_vote,
@@ -2783,17 +2870,6 @@ impl MpcManager {
         Ok(())
     }
 
-    fn get_avid_round_common(
-        &self,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> Option<batch_avss_avid::AvssCommonMessage> {
-        self.get_avid_round_state(batch_index, dealer)
-            .ok()
-            .flatten()
-            .map(|s| s.common)
-    }
-
     fn get_avid_round_state(
         &self,
         batch_index: u32,
@@ -2847,8 +2923,8 @@ impl MpcManager {
         let batch_index = message.batch_index;
         match &message.kind {
             AvidNonceMessageKind::Optimistic(msg) => {
-                if let Some(common) = self.get_avid_round_common(batch_index, &sender)
-                    && common.hash() != msg.common.hash()
+                if let Some(state) = self.get_avid_round_state(batch_index, &sender)?
+                    && state.common.hash() != msg.common.hash()
                 {
                     return Err(MpcError::InvalidMessage {
                         sender,
@@ -2862,7 +2938,8 @@ impl MpcManager {
                 confirm_cert,
             } => {
                 let common = self
-                    .get_avid_round_common(batch_index, &sender)
+                    .get_avid_round_state(batch_index, &sender)?
+                    .map(|state| state.common)
                     .ok_or_else(|| {
                         MpcError::NotReady("no verified common message for this AVID round".into())
                     })?;
@@ -2874,7 +2951,7 @@ impl MpcManager {
                     confirm_cert.clone(),
                 )?;
                 let vote_hash = hash_avid_vote(&avid_vote);
-                if let Some((held_vote, _)) = self.get_avid_held_echoes(batch_index, &sender)
+                if let Some((held_vote, _)) = self.try_get_avid_held_echoes(batch_index, &sender)?
                     && hash_avid_vote(&held_vote) != vote_hash
                 {
                     return Err(MpcError::InvalidMessage {
@@ -2936,25 +3013,16 @@ impl MpcManager {
             dealer_address: self.address,
             messages_hash: MessageHash::from(own_avss.common.hash().digest),
         };
-        let reduced_weights: HashMap<Address, u16> = self
-            .committee
-            .members()
-            .iter()
-            .filter_map(|m| {
-                let party_id = self.committee.index_of(&m.validator_address())? as u16;
-                let weight = self.mpc_config.nodes.weight_of(party_id).ok()?;
-                Some((m.validator_address(), weight))
-            })
-            .collect();
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
-        let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
+        let vote_quorum_weight =
+            Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
         Ok(AvidDealerFlowData {
             builder,
             confirm_target,
             my_signature,
             recipient_messages: messages,
             committee: self.committee.clone(),
-            reduced_weights,
+            nodes: self.mpc_config.nodes.clone(),
             total_reduced_weight,
             vote_quorum_weight,
         })
@@ -2981,14 +3049,15 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.confirm_target.clone(),
-            dealer_data.reduced_weights.clone(),
-        );
+            &dealer_data.nodes,
+        )
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
             .add_signature(dealer_data.my_signature.clone())
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -3027,7 +3096,7 @@ impl MpcManager {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.mpc_config.max_faulty as u32,
-                (mgr.mpc_config.threshold + mgr.mpc_config.max_faulty) as u32,
+                mgr.mpc_config.threshold as u32 + mgr.mpc_config.max_faulty as u32,
                 mgr.address,
             )
         };
@@ -3082,14 +3151,17 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut vote_aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+        let mut vote_aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             vote_target,
-            dealer_data.reduced_weights.clone(),
-        );
+            &dealer_data.nodes,
+        )
+        // Not a crypto failure: the local `nodes` do not match the committee
+        // they are being aggregated against.
+        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         vote_aggregator
             .add_signature(my_vote)
-            .expect("first signature should always be valid");
+            .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -3135,20 +3207,211 @@ impl MpcManager {
     }
 
     fn reduced_weight_of_cert(&self, cert: &DealerCertificate) -> MpcResult<u32> {
-        let signers = cert
-            .signers(&self.committee)
-            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
-        Ok(signers
-            .iter()
-            .filter_map(|addr| {
-                let party_id = self.committee.index_of(addr)? as u16;
-                self.mpc_config
-                    .nodes
-                    .weight_of(party_id)
-                    .ok()
-                    .map(|w| w as u32)
+        cert.committee_signature()
+            .reduced_weight(&self.committee, &self.mpc_config.nodes)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+    }
+
+    fn cert_verification_context(
+        &self,
+        epoch: u64,
+    ) -> MpcResult<(&Committee, &Nodes<EncryptionGroupElement>, Parameters)> {
+        if epoch == self.mpc_config.epoch {
+            return Ok((
+                &self.committee,
+                &self.mpc_config.nodes,
+                Parameters {
+                    t: self.mpc_config.threshold,
+                    f: self.mpc_config.max_faulty,
+                },
+            ));
+        }
+        if epoch != self.previous_epoch {
+            return Err(MpcError::InvalidCertificate(format!(
+                "certificate epoch {epoch} is neither current ({}) nor previous ({})",
+                self.mpc_config.epoch, self.previous_epoch,
+            )));
+        }
+        let committee = self.previous_committee.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig("No previous committee for certificate verification".into())
+        })?;
+        let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig("No previous nodes for certificate verification".into())
+        })?;
+        let t = self.previous_reconfig_output_threshold.ok_or_else(|| {
+            MpcError::InvalidConfig("No previous threshold for certificate verification".into())
+        })?;
+        let f = self.previous_reconfig_output_max_faulty.ok_or_else(|| {
+            MpcError::InvalidConfig("No previous max_faulty for certificate verification".into())
+        })?;
+        Ok((committee, nodes, Parameters { t, f }))
+    }
+
+    fn verify_dealer_certificate(
+        &self,
+        cert: &DealerCertificate,
+        required_reduced_weight: u32,
+    ) -> MpcResult<u32> {
+        let (committee, nodes, _) = self.cert_verification_context(cert.epoch())?;
+        committee
+            .verify_signature_and_reduced_weight(cert, nodes, required_reduced_weight)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+    }
+
+    fn dealer_cert_quorum(params: Parameters) -> u32 {
+        params.t as u32 + params.f as u32
+    }
+
+    fn avid_vote_quorum(nodes: &Nodes<EncryptionGroupElement>, f: u16) -> u32 {
+        Self::fail_closed_sub(nodes.total_weight() as u32, f as u32)
+    }
+
+    fn fail_closed_sub(w: u32, f: u32) -> u32 {
+        if f >= w { u32::MAX } else { w - f }
+    }
+
+    fn certified_dealer_party_id(committee: &Committee, dealer: &Address) -> MpcResult<PartyId> {
+        committee
+            .index_of(dealer)
+            .map(|i| i as PartyId)
+            .ok_or_else(|| {
+                MpcError::InvalidCertificate(format!(
+                    "Certified dealer {dealer:?} is not in the committee"
+                ))
             })
-            .sum())
+    }
+
+    fn key_generation_cert_quorum(&self, epoch: u64) -> MpcResult<u32> {
+        let (_, _, params) = self.cert_verification_context(epoch)?;
+        Ok(Self::dealer_cert_quorum(params))
+    }
+
+    fn current_dealer_cert_quorum(&self) -> u32 {
+        Self::dealer_cert_quorum(Parameters {
+            t: self.mpc_config.threshold,
+            f: self.mpc_config.max_faulty,
+        })
+    }
+
+    fn nonce_cert_quorum(&self, epoch: u64) -> MpcResult<u32> {
+        let (committee, nodes, params) = self.cert_verification_context(epoch)?;
+        let protocol =
+            NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
+        Ok(match protocol {
+            NonceGenerationProtocol::Vanilla => Self::dealer_cert_quorum(params),
+            NonceGenerationProtocol::Avid => Self::avid_vote_quorum(nodes, params.f),
+        })
+    }
+
+    pub(crate) fn verify_nonce_dealer_certificate(
+        &self,
+        cert: &DealerCertificate,
+    ) -> MpcResult<u32> {
+        let required = self.nonce_cert_quorum(cert.epoch())?;
+        self.verify_dealer_certificate(cert, required)
+    }
+
+    async fn verified_dealer_weight_blocking(
+        mpc_manager: &Arc<RwLock<Self>>,
+        certified: Vec<(Address, CertificateV1)>,
+        metrics: &Metrics,
+    ) -> BTreeMap<Address, u32> {
+        let mgr = Arc::clone(mpc_manager);
+        let (verified, rejected) = spawn_blocking(move || {
+            let mgr = mgr.read().unwrap();
+            mgr.verified_dealer_weight(&certified)
+        })
+        .await;
+        for (protocol, reason) in rejected {
+            metrics
+                .mpc_certs_rejected_total
+                .with_label_values(&[protocol, reason])
+                .inc();
+        }
+        verified
+    }
+
+    pub(crate) fn verified_dealer_weight(
+        &self,
+        certified: &[(Address, CertificateV1)],
+    ) -> (BTreeMap<Address, u32>, Vec<(&'static str, &'static str)>) {
+        let mut weights = BTreeMap::new();
+        let mut rejected = Vec::new();
+        for (table_dealer, cert) in certified {
+            let dealer = cert.dealer_address();
+            if &dealer != table_dealer {
+                tracing::warn!(
+                    "Cert served under table key {table_dealer:?} but signed for \
+                     {dealer:?}; crediting the signed dealer"
+                );
+            }
+            if let Err(e) = self.verify_certificate(cert.clone()) {
+                tracing::warn!("Excluding unverifiable cert from {dealer:?}: {e}");
+                rejected.push((
+                    cert.protocol_label(),
+                    self.certificate_rejection_reason(cert),
+                ));
+                continue;
+            }
+            let weight = self
+                .cert_verification_context(cert.epoch())
+                .ok()
+                .and_then(|(committee, nodes, _)| {
+                    let party_id = committee.index_of(&dealer)? as u16;
+                    nodes.weight_of(party_id).ok().map(u32::from)
+                })
+                .unwrap_or(0);
+            weights.insert(dealer, weight);
+        }
+        (weights, rejected)
+    }
+
+    pub(crate) fn rejection_reason(
+        &self,
+        cert: &DealerCertificate,
+        required: MpcResult<u32>,
+    ) -> &'static str {
+        let required = match required {
+            Ok(required) => required,
+            Err(MpcError::InvalidConfig(_)) => return "config",
+            Err(_) => return "epoch",
+        };
+        let (committee, nodes, _) = match self.cert_verification_context(cert.epoch()) {
+            Ok(context) => context,
+            Err(MpcError::InvalidConfig(_)) => return "config",
+            Err(_) => return "epoch",
+        };
+        match cert.committee_signature().reduced_weight(committee, nodes) {
+            Err(_) => "provenance",
+            Ok(weight) if weight < required => "weight",
+            Ok(_) => "signature",
+        }
+    }
+
+    pub(crate) fn certificate_rejection_reason(&self, cert: &CertificateV1) -> &'static str {
+        match cert {
+            CertificateV1::Dkg(c) | CertificateV1::Rotation(c) => {
+                self.rejection_reason(c, self.key_generation_cert_quorum(c.epoch()))
+            }
+            CertificateV1::NonceGeneration { cert: c, .. } => {
+                self.rejection_reason(c, self.nonce_cert_quorum(c.epoch()))
+            }
+        }
+    }
+
+    pub fn verify_certificate(&self, cert: CertificateV1) -> MpcResult<VerifiedCertificateV1> {
+        match &cert {
+            CertificateV1::Dkg(dealer_cert) | CertificateV1::Rotation(dealer_cert) => {
+                let required = self.key_generation_cert_quorum(dealer_cert.epoch())?;
+                self.verify_dealer_certificate(dealer_cert, required)?;
+            }
+            CertificateV1::NonceGeneration {
+                cert: dealer_cert, ..
+            } => {
+                self.verify_nonce_dealer_certificate(dealer_cert)?;
+            }
+        }
+        Ok(VerifiedCertificateV1::new_unchecked(cert))
     }
 
     fn resolve_avid_cert_kind_locally(
@@ -3157,12 +3420,18 @@ impl MpcManager {
         dealer: &Address,
         digest: &MessageHash,
     ) -> Option<CertKind> {
-        if let Some(common) = self.get_avid_round_common(batch_index, dealer)
-            && MessageHash::from(common.hash().digest) == *digest
+        if let Some(state) = self
+            .get_avid_round_state(batch_index, dealer)
+            .ok()
+            .flatten()
+            && MessageHash::from(state.common.hash().digest) == *digest
         {
             return Some(CertKind::AvssVote);
         }
-        if let Some((vote, _)) = self.get_avid_held_echoes(batch_index, dealer)
+        if let Some((vote, _)) = self
+            .try_get_avid_held_echoes(batch_index, dealer)
+            .ok()
+            .flatten()
             && hash_avid_vote(&vote) == *digest
         {
             return Some(CertKind::AvidVote);
@@ -3457,7 +3726,7 @@ impl MpcManager {
             (
                 NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms),
                 total,
-                total - mgr.mpc_config.max_faulty as u32,
+                Self::avid_vote_quorum(&mgr.mpc_config.nodes, mgr.mpc_config.max_faulty),
             )
         };
         let mut certified_dealers = HashSet::new();
@@ -3494,16 +3763,30 @@ impl MpcManager {
                 let result = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
                     mgr.committee
-                        .verify_signature(&cert)
-                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
-                    mgr.reduced_weight_of_cert(&cert)
+                        .verify_signature_and_reduced_weight(
+                            &cert,
+                            &mgr.mpc_config.nodes,
+                            vote_quorum_weight,
+                        )
+                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
                 })
                 .await;
                 drop(_timer);
                 match result {
                     Ok(weight) => weight,
                     Err(e) => {
-                        tracing::info!("Invalid nonce certificate from {:?}: {}", dealer, e);
+                        tracing::warn!("Rejected AVID nonce cert from {:?}: {}", dealer, e);
+                        let reason = {
+                            let mgr = mpc_manager.read().unwrap();
+                            mgr.rejection_reason(
+                                &nonce_cert,
+                                mgr.nonce_cert_quorum(nonce_cert.epoch()),
+                            )
+                        };
+                        metrics
+                            .mpc_certs_rejected_total
+                            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
+                            .inc();
                         continue;
                     }
                 }
@@ -3556,6 +3839,10 @@ impl MpcManager {
                     required_cert_weight,
                     kind
                 );
+                metrics
+                    .mpc_certs_rejected_total
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "weight"])
+                    .inc();
                 continue;
             }
             let dealer_weight = {
@@ -3569,14 +3856,23 @@ impl MpcManager {
                     local_skips += 1;
                     continue;
                 }
-                let party_id = mgr
-                    .committee
-                    .index_of(&dealer)
-                    .expect("dealer must be in committee") as u16;
-                mgr.mpc_config
-                    .nodes
-                    .weight_of(party_id)
-                    .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
+                match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
+                    mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
+                        MpcError::InvalidCertificate(format!(
+                            "No reduced weight for certified dealer {dealer:?}"
+                        ))
+                    })
+                }) {
+                    Ok(weight) => weight,
+                    Err(e) => {
+                        tracing::warn!("Skipping certified dealer: {e}");
+                        metrics
+                            .mpc_certs_rejected_total
+                            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "dealer"])
+                            .inc();
+                        continue;
+                    }
+                }
             };
             tracing::info!(
                 "AVID nonce round consumed: dealer {:?}, batch_index={batch_index}, kind {:?}",
@@ -3866,11 +4162,7 @@ impl MpcManager {
         let outputs: HashMap<PartyId, avss::AvssOutput> = certified_dealers
             .into_iter()
             .map(|dealer| {
-                let dealer_party_id = self
-                    .committee
-                    .index_of(&dealer)
-                    .expect("certified dealer must be committee member")
-                    as u16;
+                let dealer_party_id = Self::certified_dealer_party_id(&self.committee, &dealer)?;
                 let output = self
                     .dealer_outputs
                     .get(&DealerOutputsKey::Dkg(dealer))
@@ -4120,17 +4412,7 @@ impl MpcManager {
             .map(|m| m.validator_address())
             .filter(|addr| *addr != self.address)
             .collect();
-        let required_reduced_weight = self.mpc_config.threshold + self.mpc_config.max_faulty;
-        let reduced_weights: HashMap<Address, u16> = self
-            .committee
-            .members()
-            .iter()
-            .filter_map(|m| {
-                let party_id = self.committee.index_of(&m.validator_address())? as u16;
-                let weight = self.mpc_config.nodes.weight_of(party_id).ok()?;
-                Some((m.validator_address(), weight))
-            })
-            .collect();
+        let required_reduced_weight = self.current_dealer_cert_quorum();
         let request = SendMessagesRequest { messages };
         DealerFlowData {
             request,
@@ -4139,7 +4421,7 @@ impl MpcManager {
             my_signature,
             required_reduced_weight,
             committee: self.committee.clone(),
-            reduced_weights,
+            nodes: self.mpc_config.nodes.clone(),
         }
     }
 
@@ -4320,10 +4602,7 @@ impl MpcManager {
                 protocol_type: ProtocolTypeIndicator::NonceGeneration,
                 epoch,
             };
-            let dealer_party_id = mgr
-                .committee
-                .index_of(dealer)
-                .expect("dealer must be in committee") as u16;
+            let dealer_party_id = Self::certified_dealer_party_id(&mgr.committee, dealer)?;
             let dealer_sid =
                 SessionId::nonce_dealer_session_id(&mgr.chain_id, epoch, batch_index, dealer);
             let receiver = batch_avss::Receiver::new(
@@ -4770,10 +5049,10 @@ impl MpcManager {
 
     pub fn reconstruct_previous_output(
         &self,
-        certificates: &[CertificateV1],
+        certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        match certificates.first() {
+        match certificates.first().map(VerifiedCertificateV1::inner) {
             Some(CertificateV1::Dkg(_)) | None => {
                 self.reconstruct_previous_dkg_output(certificates, complaint_cache)
             }
@@ -4790,7 +5069,7 @@ impl MpcManager {
 
     fn reconstruct_previous_dkg_output(
         &self,
-        certificates: &[CertificateV1],
+        certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let committee = self.previous_committee.as_ref().ok_or_else(|| {
@@ -4827,7 +5106,7 @@ impl MpcManager {
 
     pub fn reconstruct_current_dkg_output(
         mpc_manager: &Arc<RwLock<Self>>,
-        certificates: &[CertificateV1],
+        certificates: &[VerifiedCertificateV1],
         onchain_mpc_key: &[u8],
     ) -> MpcOutputRecoveryOutcome {
         if onchain_mpc_key.is_empty() {
@@ -4869,8 +5148,8 @@ impl MpcManager {
 
     pub fn reconstruct_current_rotation_output(
         mpc_manager: &Arc<RwLock<Self>>,
-        current_certificates: &[CertificateV1],
-        previous_certificates: &[CertificateV1],
+        current_certificates: &[VerifiedCertificateV1],
+        previous_certificates: &[VerifiedCertificateV1],
         onchain_mpc_key: &[u8],
     ) -> MpcOutputRecoveryOutcome {
         if onchain_mpc_key.is_empty() {
@@ -4939,6 +5218,9 @@ impl MpcManager {
             Err(MpcError::StorageError(_)) | Err(MpcError::NotEnoughApprovals { .. }) => {
                 Err(MpcOutputRecoveryOutcome::NotApplicable)
             }
+            Err(MpcError::StoredMessageDiverged { .. }) => {
+                Err(MpcOutputRecoveryOutcome::NotApplicable)
+            }
             Err(MpcError::ProtocolFailed(msg)) => Err(MpcOutputRecoveryOutcome::Suspicious(msg)),
             Err(_) => Err(MpcOutputRecoveryOutcome::NotApplicable),
         }
@@ -4947,7 +5229,7 @@ impl MpcManager {
     fn reconstruct_dkg_output(
         &self,
         context: &DkgReconstructionContext<'_>,
-        certificates: &[CertificateV1],
+        certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id = SessionId::new(&self.chain_id, context.epoch, &ProtocolType::Dkg);
@@ -4959,7 +5241,7 @@ impl MpcManager {
             if dealer_weight_sum >= context.output_threshold as u32 {
                 break;
             }
-            let CertificateV1::Dkg(dkg_cert) = cert else {
+            let CertificateV1::Dkg(dkg_cert) = cert.inner() else {
                 return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all DKG certificates".into(),
                 ));
@@ -4979,25 +5261,27 @@ impl MpcManager {
             let messages = Messages::Dkg(message.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
-                return Err(MpcError::ProtocolFailed(format!(
-                    "Message hash mismatch for dealer {:?}: stored message does not match certificate",
-                    dealer_address
-                )));
+                tracing::warn!(
+                    "Stored DKG message for dealer {:?} does not match its \
+                     certificate; not usable for reconstruction",
+                    dealer_address,
+                );
+                return Err(MpcError::StoredMessageDiverged {
+                    dealer: dealer_address,
+                });
             }
-            let dealer_party_id = context
-                .committee
-                .index_of(&dealer_address)
-                .expect("certified dealer must be in committee")
-                as PartyId;
+            let dealer_party_id =
+                Self::certified_dealer_party_id(context.committee, &dealer_address)?;
             let session_id = source_session_id
                 .dealer_session_id(&dealer_address)
                 .to_vec();
             if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
-                let dealer_weight = context
-                    .nodes
-                    .weight_of(dealer_party_id)
-                    .expect("party_id must be valid");
+                let dealer_weight = context.nodes.weight_of(dealer_party_id).map_err(|_| {
+                    MpcError::InvalidCertificate(format!(
+                        "No reduced weight for certified dealer {dealer_address:?}"
+                    ))
+                })?;
                 dealer_weight_sum += dealer_weight as u32;
                 continue;
             }
@@ -5024,10 +5308,11 @@ impl MpcManager {
                     });
                 }
             }
-            let dealer_weight = context
-                .nodes
-                .weight_of(dealer_party_id)
-                .expect("party_id must be valid");
+            let dealer_weight = context.nodes.weight_of(dealer_party_id).map_err(|_| {
+                MpcError::InvalidCertificate(format!(
+                    "No reduced weight for certified dealer {dealer_address:?}"
+                ))
+            })?;
             dealer_weight_sum += dealer_weight as u32;
         }
         if dealer_weight_sum < context.output_threshold as u32 {
@@ -5066,7 +5351,7 @@ impl MpcManager {
 
     fn reconstruct_previous_rotation_output(
         &self,
-        certificates: &[CertificateV1],
+        certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
@@ -5113,7 +5398,7 @@ impl MpcManager {
     fn reconstruct_rotation_output(
         &self,
         context: &RotationReconstructionContext<'_>,
-        certificates: &[CertificateV1],
+        certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
@@ -5123,7 +5408,7 @@ impl MpcManager {
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
-            let CertificateV1::Rotation(rotation_cert) = cert else {
+            let CertificateV1::Rotation(rotation_cert) = cert.inner() else {
                 return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all Rotation certificates".into(),
                 ));
@@ -5143,10 +5428,14 @@ impl MpcManager {
             let messages = Messages::Rotation(rotation_msgs.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
-                return Err(MpcError::ProtocolFailed(format!(
-                    "Message hash mismatch for dealer {:?}: stored message does not match certificate",
-                    dealer_address
-                )));
+                tracing::warn!(
+                    "Stored rotation message for dealer {:?} does not match its \
+                     certificate; not usable for reconstruction",
+                    dealer_address,
+                );
+                return Err(MpcError::StoredMessageDiverged {
+                    dealer: dealer_address,
+                });
             }
             for (share_index, message) in rotation_msgs {
                 if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
@@ -5308,7 +5597,7 @@ impl MpcManager {
 
     async fn prepare_previous_output(
         mpc_manager: &Arc<RwLock<Self>>,
-        previous_certificates: &[CertificateV1],
+        previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) -> MpcResult<(MpcOutput, bool)> {
@@ -5335,8 +5624,9 @@ impl MpcManager {
                     mpc_manager,
                     previous_certificates,
                     p2p_channel,
+                    metrics,
                 )
-                .await?;
+                .await;
                 drop(_retrieve_timer);
                 Self::reconstruct_with_complaint_recovery(
                     mpc_manager,
@@ -5397,7 +5687,7 @@ impl MpcManager {
     /// if cheating dealers' corrupted messages are encountered in DB.
     async fn reconstruct_with_complaint_recovery(
         mpc_manager: &Arc<RwLock<Self>>,
-        previous_certificates: &[CertificateV1],
+        previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
@@ -5540,7 +5830,7 @@ impl MpcManager {
 
     fn collect_signers_for_dealer(
         mgr: &Self,
-        previous_certificates: &[CertificateV1],
+        previous_certificates: &[VerifiedCertificateV1],
         dealer_address: &Address,
     ) -> Vec<Address> {
         let previous_committee = mgr
@@ -5550,13 +5840,13 @@ impl MpcManager {
         previous_certificates
             .iter()
             .filter_map(|c| {
-                let msg = match c {
+                let msg = match c.inner() {
                     CertificateV1::Dkg(dc) => dc.message(),
                     CertificateV1::Rotation(rc) => rc.message(),
                     _ => return None,
                 };
                 if msg.dealer_address == *dealer_address {
-                    c.signers(previous_committee).ok()
+                    c.inner().signers(previous_committee).ok()
                 } else {
                     None
                 }
@@ -5571,7 +5861,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
+        certs: &VerifiedNonceCerts<hashi_types::move_types::StampedDealerSubmissionV1>,
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         Self::retrieve_missing_nonce_messages(mpc_manager, batch_index, certs, p2p_channel).await?;
@@ -5601,6 +5891,7 @@ impl MpcManager {
                             ProtocolComplaint::BatchedAvss(complaint),
                         );
                         certs
+                            .as_slice()
                             .iter()
                             .find(|(_, cert)| {
                                 cert.submission.message.dealer_address == dealer_address
@@ -5635,14 +5926,14 @@ impl MpcManager {
     async fn retrieve_missing_nonce_messages(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
+        certs: &VerifiedNonceCerts<hashi_types::move_types::StampedDealerSubmissionV1>,
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<()> {
         let (certified_dealers, _) = mpc_manager
             .read()
             .unwrap()
             .window_certified_nonce_dealers(certs);
-        for (_table_dealer, cert) in certs {
+        for (_table_dealer, cert) in certs.as_slice() {
             let dealer = &cert.submission.message.dealer_address;
             if !certified_dealers.contains(dealer) {
                 continue;
@@ -5710,62 +6001,119 @@ impl MpcManager {
 
     async fn retrieve_missing_previous_messages(
         mpc_manager: &Arc<RwLock<Self>>,
-        previous_certificates: &[CertificateV1],
+        previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
-    ) -> MpcResult<()> {
+        metrics: &Metrics,
+    ) {
+        let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
+        let mut failed_repairs = 0usize;
         for cert in previous_certificates {
-            let (msg, certificate, protocol_type, needs_retrieval) = match cert {
+            let (msg, certificate, protocol_type, stored) = match cert.inner() {
                 CertificateV1::Dkg(dkg_cert) => {
                     let msg = dkg_cert.message();
-                    let missing = {
+                    let stored = {
                         let mgr = mpc_manager.read().unwrap();
                         mgr.public_messages_store
-                            .get_dealer_message(mgr.previous_epoch, &msg.dealer_address)
-                            .map_err(|e| MpcError::StorageError(e.to_string()))?
-                            .is_none()
+                            .get_dealer_message(previous_epoch, &msg.dealer_address)
+                            .map(|m| m.map(Messages::Dkg))
                     };
                     (
                         msg,
                         dkg_cert as &DealerCertificate,
                         ProtocolTypeIndicator::Dkg,
-                        missing,
+                        stored,
                     )
                 }
                 CertificateV1::Rotation(rotation_cert) => {
                     let msg = rotation_cert.message();
-                    let missing = {
+                    let stored = {
                         let mgr = mpc_manager.read().unwrap();
                         mgr.public_messages_store
-                            .get_rotation_messages(mgr.previous_epoch, &msg.dealer_address)
-                            .map_err(|e| MpcError::StorageError(e.to_string()))?
-                            .is_none()
+                            .get_rotation_messages(previous_epoch, &msg.dealer_address)
+                            .map(|m| m.map(Messages::Rotation))
                     };
                     (
                         msg,
                         rotation_cert as &DealerCertificate,
                         ProtocolTypeIndicator::KeyRotation,
-                        missing,
+                        stored,
                     )
                 }
                 _ => continue,
             };
-            if needs_retrieval {
-                tracing::info!(
-                    "Previous epoch {:?} message for dealer {:?} not in DB, retrieving from signers",
-                    protocol_type,
-                    msg.dealer_address
-                );
-                Self::retrieve_message_using_previous_committee(
-                    mpc_manager,
-                    msg,
-                    certificate,
-                    protocol_type,
-                    p2p_channel,
-                )
-                .await?;
+            let stored_hash = stored
+                .as_ref()
+                .ok()
+                .and_then(|m| m.as_ref())
+                .map(compute_messages_hash);
+            if stored_hash.as_ref() == Some(&msg.messages_hash) {
+                continue;
+            }
+            match (stored.as_ref().err(), &stored_hash) {
+                (Some(e), _) => {
+                    metrics
+                        .mpc_previous_message_unusable_total
+                        .with_label_values(&[cert.inner().protocol_label()])
+                        .inc();
+                    tracing::warn!(
+                        "Previous epoch {previous_epoch} {protocol_type:?} message for dealer \
+                         {:?} could not be read ({e})",
+                        msg.dealer_address,
+                    )
+                }
+                (None, None) => tracing::info!(
+                    "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} \
+                     not in DB",
+                    msg.dealer_address,
+                ),
+                (None, Some(stored_digest)) => {
+                    metrics
+                        .mpc_previous_message_unusable_total
+                        .with_label_values(&[cert.inner().protocol_label()])
+                        .inc();
+                    tracing::warn!(
+                        "Previous epoch {previous_epoch} {protocol_type:?} message for dealer \
+                         {:?} diverges from its certificate (stored {stored_digest}, certified \
+                         {})",
+                        msg.dealer_address,
+                        msg.messages_hash,
+                    )
+                }
+            }
+            let repair = Self::retrieve_message_using_previous_committee(
+                mpc_manager,
+                msg,
+                certificate,
+                protocol_type,
+                p2p_channel,
+            );
+            match tokio::time::timeout(PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT, repair).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    failed_repairs += 1;
+                    tracing::warn!(
+                        "Could not repair previous epoch {previous_epoch} {protocol_type:?} \
+                         message for dealer {:?}: {e}",
+                        msg.dealer_address,
+                    )
+                }
+                Err(_) => {
+                    failed_repairs += 1;
+                    tracing::warn!(
+                        "Repair of previous epoch {previous_epoch} {protocol_type:?} message for \
+                         dealer {:?} timed out after {PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT:?}",
+                        msg.dealer_address,
+                    )
+                }
             }
         }
-        Ok(())
+        if failed_repairs > 0 {
+            tracing::warn!(
+                "Could not repair {failed_repairs} previous epoch {previous_epoch} message(s); \
+                 reconstruction may fall back to the new-member path, leaving this node unable \
+                 to deal in the rotation",
+            );
+        }
     }
 
     async fn retrieve_message_using_previous_committee(
@@ -5816,10 +6164,14 @@ impl MpcManager {
             }
             Messages::NonceGeneration(_)
             | Messages::NonceGenerationAvid(_)
-            | Messages::AvidNonceRetrieval(_) => unreachable!(
-                "Hash matched previous-epoch certificate but got {:?}",
-                std::mem::discriminant(&messages)
-            ),
+            | Messages::AvidNonceRetrieval(_) => {
+                return Err(MpcError::ProtocolFailed(format!(
+                    "Retrieved non-key-generation message for dealer {:?} during previous-epoch \
+                     repair: {:?}",
+                    message.dealer_address,
+                    std::mem::discriminant(&messages)
+                )));
+            }
         }
         Ok(())
     }
@@ -5871,6 +6223,29 @@ impl MpcManager {
                 MpcError::InvalidConfig("No previous committee for cross-epoch complaint".into())
             })
         }
+    }
+
+    /// The owner of each reduced-domain share index for `epoch`, keyed by
+    /// share index and valued by validator address (party ids are
+    /// committee-member indices). Signing accepts a partial signature for a
+    /// share index only from that index's owner, which is what makes
+    /// bad-share attribution authoritative — a peer cannot claim (or
+    /// poison) another peer's shares.
+    pub fn share_owners_for_epoch(&self, epoch: u64) -> MpcResult<HashMap<ShareIndex, Address>> {
+        let (nodes, _, _) = self.config_for_epoch(epoch)?;
+        let committee = self.committee_for_epoch(epoch)?;
+        let mut owners = HashMap::new();
+        for (index, member) in committee.members().iter().enumerate() {
+            let share_ids = nodes.share_ids_of(index as PartyId).map_err(|e| {
+                MpcError::InvalidConfig(format!(
+                    "no share ids for committee member {index} in epoch {epoch}: {e}"
+                ))
+            })?;
+            for share_id in share_ids {
+                owners.insert(share_id, member.validator_address());
+            }
+        }
+        Ok(owners)
     }
 
     fn accuser_party_id(&self, epoch: u64, caller: &Address) -> MpcResult<PartyId> {
@@ -5996,9 +6371,57 @@ impl MpcManager {
         }
     }
 
+    fn accepted_dealer_messages(
+        &self,
+        protocol_type: ProtocolTypeIndicator,
+        dealer: &Address,
+        batch_index: Option<u32>,
+    ) -> MpcResult<Option<Messages>> {
+        if let Some(cached) = self.get_dealer_messages(protocol_type, dealer, batch_index) {
+            return Ok(Some(cached));
+        }
+        let epoch = self.mpc_config.epoch;
+        let stored = match protocol_type {
+            // Only the nonce generation arm can be reached today: `MpcManager::new`
+            // rehydrates the dkg and rotation maps via `load_stored_messages`, so
+            // the in-memory probe above always hits for them. Kept so the guard
+            // stays correct on its own rather than by way of startup ordering.
+            ProtocolTypeIndicator::Dkg => self
+                .public_messages_store
+                .get_dealer_message(epoch, dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(Messages::Dkg),
+            ProtocolTypeIndicator::KeyRotation => self
+                .public_messages_store
+                .get_rotation_messages(epoch, dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(Messages::Rotation),
+            ProtocolTypeIndicator::NonceGeneration => {
+                let Some(batch_index) = batch_index else {
+                    return Err(MpcError::InvalidMessage {
+                        sender: *dealer,
+                        reason: "nonce generation messages must carry a batch index".to_string(),
+                    });
+                };
+                self.public_messages_store
+                    .get_nonce_message(epoch, batch_index, dealer)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .map(|message| {
+                        Messages::NonceGeneration(NonceMessage {
+                            batch_index,
+                            message,
+                        })
+                    })
+            }
+        };
+        Ok(stored)
+    }
+
     pub(crate) fn required_nonce_weight(&self) -> u32 {
-        let max_faulty = self.mpc_config.max_faulty as u32;
-        self.mpc_config.nodes.total_weight() as u32 - max_faulty
+        Self::fail_closed_sub(
+            self.mpc_config.nodes.total_weight() as u32,
+            self.mpc_config.max_faulty as u32,
+        )
     }
 
     fn nonce_collection_window(&self) -> NonceCollectionWindow {
@@ -6010,7 +6433,7 @@ impl MpcManager {
 
     pub(crate) fn nonce_collection_cutoff_ms<T: NonceCertTimestamp>(
         &self,
-        certs: &[(Address, T)],
+        certs: &VerifiedNonceCerts<T>,
     ) -> Option<u64> {
         self.window_certified_nonce_dealers(certs).1.cutoff_ms()
     }

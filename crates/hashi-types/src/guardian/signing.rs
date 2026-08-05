@@ -1,17 +1,19 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The guardian-signed envelope and its intent-based domain separation.
+//! Guardian- and KP-signed envelopes with intent-based domain separation.
 //!
-//! `IntentType` is a registry: each signable type maps to exactly one intent
-//! value, and `GuardianSigned::{new,verify}` mix that value into the signed
-//! bytes so a signature over one type can never be replayed as another.
+//! [`GuardianSigned`] uses Ed25519 signatures produced by the Guardian, while
+//! [`KpSigned`] uses detached OpenPGP signatures produced by key provisioners.
+//! Both serialize a payload together with its signing intent so a signature for
+//! one payload type cannot be replayed as another.
 
 use super::CryptoVerificationError;
 use super::CryptoVerificationResult;
 use super::GuardianError::InternalError;
 use super::GuardianInfo;
 use super::GuardianResult;
+use super::LogEntry;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
@@ -34,53 +36,24 @@ use std::path::Path;
 /// Using an enum ensures no two types can accidentally share the same intent value.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IntentType {
-    /// Intent for key-bound guardian log records.
-    LogMessage = 0,
-    /// Intent for SetupNewKeyResponse
+pub enum GuardianSigningIntentType {
+    /// Intent for LogEntry.
+    LogEntry = 0,
+    /// Intent for SetupNewKeyResponse.
     SetupNewKeyResponse = 1,
-    /// Intent for StandardWithdrawalResponse
+    /// Intent for StandardWithdrawalResponse.
     StandardWithdrawalResponse = 2,
-    /// Intent for GuardianInfo
+    /// Intent for GuardianInfo.
     GuardianInfo = 3,
-    /// Intent for RotateKpsResponse
+    /// Intent for RotateKpsResponse.
     RotateKpsResponse = 4,
-    /// Intent for ProvisionerRotateCertResponse
+    /// Intent for ProvisionerRotateCertResponse.
     ProvisionerRotateCertResponse = 5,
 }
 
-/// Trait for types that can be signed, providing domain separation via an intent.
-pub trait SigningIntent {
-    const INTENT: IntentType;
-
-    /// Canonical bytes covered by this guardian signature. Most payloads use
-    /// the standard `(intent, data, timestamp)` layout; routing-sensitive
-    /// payloads may override this while retaining the central intent registry.
-    fn signing_bytes(&self, timestamp_ms: UnixMillis) -> Vec<u8>
-    where
-        Self: Serialize,
-    {
-        bcs::to_bytes(&(Self::INTENT, self, timestamp_ms)).expect("serialization should not fail")
-    }
-}
-
-pub(crate) fn sign_intent<T: Serialize + SigningIntent>(
-    data: &T,
-    timestamp_ms: UnixMillis,
-    signing_key: &SigningKey,
-) -> GuardianSignature {
-    signing_key.sign(&data.signing_bytes(timestamp_ms))
-}
-
-pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
-    data: &T,
-    timestamp_ms: UnixMillis,
-    signature: &GuardianSignature,
-    pub_key: &VerificationKey,
-) -> CryptoVerificationResult<()> {
-    pub_key
-        .verify(signature, &data.signing_bytes(timestamp_ms))
-        .map_err(|_| CryptoVerificationError::new("signature invalid"))
+/// Guardian-signed payloads and their intent-based domain separation.
+pub trait GuardianSigningIntent: Serialize {
+    const INTENT: GuardianSigningIntentType;
 }
 
 /// All possible KP signing intent types.
@@ -92,89 +65,169 @@ pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KpSigningIntentType {
-    /// One KP's share submission to the provisioning relay.
-    ProvisionerInitRelaySubmission = 0,
-    /// One KP's request to replace one certificate wrapping its committed share.
+    /// Intent for SingleProvisionerInitRequest.
+    SingleProvisionerInitRequest = 0,
+    /// Intent for ProvisionerRotateCertRequest.
     ProvisionerRotateCertRequest = 1,
 }
 
-/// Trait for KP-submitted request payloads that need detached signatures.
-pub trait KpSigningIntent {
+/// KP-signed payloads and their intent-based domain separation.
+pub trait KpSigningIntent: Serialize {
     const INTENT: KpSigningIntentType;
-}
-
-impl SigningIntent for SetupNewKeyResponse {
-    const INTENT: IntentType = IntentType::SetupNewKeyResponse;
-}
-
-impl SigningIntent for StandardWithdrawalResponse {
-    const INTENT: IntentType = IntentType::StandardWithdrawalResponse;
-}
-
-impl SigningIntent for GuardianInfo {
-    const INTENT: IntentType = IntentType::GuardianInfo;
-}
-
-impl SigningIntent for RotateKpsResponse {
-    const INTENT: IntentType = IntentType::RotateKpsResponse;
-}
-
-impl SigningIntent for ProvisionerRotateCertResponse {
-    const INTENT: IntentType = IntentType::ProvisionerRotateCertResponse;
-}
-
-impl KpSigningIntent for SingleProvisionerInitRequest {
-    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerInitRelaySubmission;
-}
-
-impl KpSigningIntent for ProvisionerRotateCertRequest {
-    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateCertRequest;
 }
 
 /// KP-signed wrapper - adds signer cert and detached OpenPGP signature to any
 /// KP-submitted request payload.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KpSigned<T> {
-    pub data: T,
+    data: T,
     pub signer_cert: PgpPublicCert,
     pub signature: String,
 }
 
-/// Guardian-signed wrapper - adds timestamp and signature to any data
+/// A timestamped response produced by the Guardian.
+///
+/// The timestamp is response metadata rather than a property of every
+/// Guardian-signed payload. Wrapping this value in [`GuardianSigned`] keeps the
+/// timestamp authenticated.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct GuardianSigned<T> {
-    pub data: T,
+pub struct GuardianResponse<T> {
+    pub response: T,
     /// Milliseconds since Unix epoch.
     pub timestamp_ms: UnixMillis,
+}
+
+/// A signed, timestamped response produced by the Guardian.
+pub type GuardianSignedResponse<T> = GuardianSigned<GuardianResponse<T>>;
+
+/// Guardian-signed wrapper - adds a signature to any signable payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct GuardianSigned<T> {
+    data: T,
     pub signature: GuardianSignature,
 }
 
-/// Methods for `Signed<T>` wrapper - signing and verification
-impl<T: Serialize + SigningIntent> GuardianSigned<T> {
-    /// Create a new signed payload (used by enclave)
-    /// Includes intent byte for domain separation to prevent cross-type signature attacks
-    pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let signature = sign_intent(&data, timestamp_ms, signing_key);
+impl GuardianSigningIntent for LogEntry {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::LogEntry;
+}
+
+impl GuardianSigningIntent for GuardianResponse<SetupNewKeyResponse> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::SetupNewKeyResponse;
+}
+
+impl GuardianSigningIntent for GuardianResponse<StandardWithdrawalResponse> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::StandardWithdrawalResponse;
+}
+
+impl GuardianSigningIntent for GuardianResponse<GuardianInfo> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::GuardianInfo;
+}
+
+impl GuardianSigningIntent for GuardianResponse<RotateKpsResponse> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpsResponse;
+}
+
+impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
+    const INTENT: GuardianSigningIntentType =
+        GuardianSigningIntentType::ProvisionerRotateCertResponse;
+}
+
+impl KpSigningIntent for SingleProvisionerInitRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::SingleProvisionerInitRequest;
+}
+
+impl KpSigningIntent for ProvisionerRotateCertRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateCertRequest;
+}
+
+impl<T> GuardianResponse<T> {
+    pub fn new(response: T, timestamp_ms: UnixMillis) -> Self {
+        Self {
+            response,
+            timestamp_ms,
+        }
+    }
+}
+
+// Guardian unchecked access is intentionally narrow: LogRecord's custom wire
+// handling and node/proxy/CLI paths that establish trust independently.
+// KpSigned has no unchecked extraction; production KP payloads are always
+// verified before access.
+impl<T> GuardianSigned<T> {
+    pub fn from_parts(data: T, signature: GuardianSignature) -> Self {
+        Self { data, signature }
+    }
+
+    fn signed_bytes(data: &T) -> Vec<u8>
+    where
+        T: GuardianSigningIntent,
+    {
+        bcs::to_bytes(&(T::INTENT, data)).expect("serialization should not fail")
+    }
+
+    /// Sign a payload with intent-based domain separation.
+    pub fn sign(data: T, signing_key: &SigningKey) -> Self
+    where
+        T: GuardianSigningIntent,
+    {
+        let signature = signing_key.sign(&Self::signed_bytes(&data));
+        Self { data, signature }
+    }
+
+    /// Verify the Guardian signature and borrow the authenticated payload.
+    pub fn verify_signature(&self, pub_key: &VerificationKey) -> CryptoVerificationResult<&T>
+    where
+        T: GuardianSigningIntent,
+    {
+        pub_key
+            .verify(&self.signature, &Self::signed_bytes(&self.data))
+            .map_err(|_| CryptoVerificationError::new("signature invalid"))?;
+        Ok(&self.data)
+    }
+
+    /// Verify the Guardian signature and move out the authenticated payload.
+    pub fn verify_into_data(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T>
+    where
+        T: GuardianSigningIntent,
+    {
+        self.verify_signature(pub_key)?;
+        Ok(self.data)
+    }
+
+    /// Borrow the payload WITHOUT verifying the signature.
+    pub(crate) fn data_unchecked(&self) -> &T {
+        &self.data
+    }
+
+    #[cfg(test)]
+    pub(crate) fn data_unchecked_mut(&mut self) -> &mut T {
+        &mut self.data
+    }
+
+    /// Move out the payload WITHOUT verifying the signature.
+    /// The caller must establish trust in the payload independently.
+    pub fn into_data_unchecked(self) -> T {
+        self.data
+    }
+
+    pub(crate) fn into_parts(self) -> (T, GuardianSignature) {
+        (self.data, self.signature)
+    }
+}
+
+impl<T: KpSigningIntent> KpSigned<T> {
+    pub fn from_parts(data: T, signer_cert: PgpPublicCert, signature: String) -> Self {
         Self {
             data,
-            timestamp_ms,
+            signer_cert,
             signature,
         }
     }
 
-    /// Verify signature and extract payload
-    /// Checks intent byte to ensure signature is for the correct type
-    pub fn verify(self, pub_key: &VerificationKey) -> CryptoVerificationResult<T> {
-        verify_intent(&self.data, self.timestamp_ms, &self.signature, pub_key)?;
-        Ok(self.data)
-    }
-}
-
-impl<T: Serialize + KpSigningIntent> KpSigned<T> {
-    /// Create a new signed KP payload by invoking `gpg --detach-sign` for the
+    /// Sign a KP payload by invoking `gpg --detach-sign` for the
     /// signer certificate's fingerprint. Includes the KP intent in the signed
     /// bytes; payload types carry any request-specific replay-binding fields.
-    pub fn new(
+    pub fn sign(
         data: T,
         signer_cert: PgpPublicCert,
         gpg_home: Option<&Path>,
@@ -197,32 +250,27 @@ impl<T: Serialize + KpSigningIntent> KpSigned<T> {
         bcs::to_bytes(&tuple).expect("serialization should not fail")
     }
 
-    /// Verify the signature without consuming the signed request.
+    /// Verify the signature and borrow the authenticated request.
     /// Checks the intent byte to ensure the signature is for this request type.
-    pub fn verify_signature(&self) -> CryptoVerificationResult<()> {
+    pub fn verify_signature(&self) -> CryptoVerificationResult<&T> {
         let msg_bytes = Self::signed_bytes(&self.data);
         verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert).map_err(|e| {
             CryptoVerificationError::new(format!("KP signature verification failed: {e}"))
         })?;
-        Ok(())
+        Ok(&self.data)
     }
 
-    /// Verify the signature and extract the payload.
-    pub fn verify(self) -> CryptoVerificationResult<T> {
+    /// Verify the KP signature and move out the authenticated payload.
+    pub fn verify_into_data(self) -> CryptoVerificationResult<T> {
         self.verify_signature()?;
         Ok(self.data)
     }
 
+    pub(crate) fn into_parts(self) -> (T, PgpPublicCert, String) {
+        (self.data, self.signer_cert, self.signature)
+    }
+
     pub fn signer_fingerprint(&self) -> Fingerprint {
         self.signer_cert.fingerprint()
-    }
-}
-
-impl<T> GuardianSigned<T> {
-    /// Move out the payload WITHOUT verifying the signature. The node uses this
-    /// on guardian responses it has already authenticated over TLS; the ed25519
-    /// signing key is verified only by KPs/monitors on the S3 audit logs.
-    pub fn into_data_unchecked(self) -> T {
-        self.data
     }
 }

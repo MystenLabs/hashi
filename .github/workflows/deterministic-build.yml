@@ -42,14 +42,14 @@ jobs:
           echo "${HASH}  ${{ matrix.image.name }}" > "out/${{ matrix.image.name }}.sha256"
 
       - name: Upload sha256
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
         with:
           name: ${{ matrix.image.name }}-${{ matrix.os }}-sha256
           if-no-files-found: error
           path: out/${{ matrix.image.name }}.sha256
 
       - name: Upload binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
         with:
           name: ${{ matrix.image.name }}-${{ matrix.os }}-binary
           if-no-files-found: error
@@ -64,13 +64,13 @@ jobs:
         image: ${{ fromJSON(inputs.hashi_only && '["hashi"]' || '["hashi","hashi-screener","hashi-guardian"]') }}
     steps:
       - name: Download ubuntu-latest hash
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
           name: ${{ matrix.image }}-ubuntu-latest-sha256
           path: hash-latest
 
       - name: Download ubuntu-22.04 hash
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
           name: ${{ matrix.image }}-ubuntu-22.04-sha256
           path: hash-22

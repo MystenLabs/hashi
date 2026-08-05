@@ -6,7 +6,9 @@ use super::Ciphertext;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
+use super::GuardianResponse;
 use super::GuardianSigned;
+use super::GuardianSignedResponse;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
@@ -21,11 +23,13 @@ use super::NitroAttestation;
 use super::OperatorInitRequest;
 use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
+use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
 use super::S3Config;
 use super::SecretSharingInstance;
+use super::SessionID;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -52,6 +56,7 @@ use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
 use crate::committee::EncryptionPublicKey;
+use crate::pgp::PgpPublicCert;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::hashes::Hash as _;
@@ -81,12 +86,9 @@ const TEST_SIGNER_ADDRESS: SuiAddress = SuiAddress::new([1u8; 32]);
 /// Deterministic committee signing key material used across tests.
 const TEST_HASHI_BLS_SK_BYTES: [u8; Bls12381PrivateKey::LENGTH] = [9u8; Bls12381PrivateKey::LENGTH];
 
-impl GetGuardianInfoResponse {
+impl GuardianInfo {
     pub fn mock_for_testing() -> Self {
-        let signing_key = ed25519_consensus::SigningKey::from([1u8; 32]);
-        let signing_pub_key = signing_key.verification_key();
-
-        let info = GuardianInfo {
+        Self {
             lifecycle: WithdrawStage::OperatorInitialized.into(),
             secret_sharing_instance: None,
             bucket_info: Some(super::S3BucketInfo {
@@ -102,12 +104,22 @@ impl GetGuardianInfoResponse {
             limiter_config: None,
             current_committee_epoch: None,
             mpc_master_g: None,
-        };
+        }
+    }
+}
+
+impl GetGuardianInfoResponse {
+    pub fn mock_for_testing() -> Self {
+        let signing_key = ed25519_consensus::SigningKey::from([1u8; 32]);
+        let signing_pub_key = signing_key.verification_key();
 
         GetGuardianInfoResponse::new(
             NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
-            GuardianSigned::new(info, &signing_key, 1234),
+            GuardianSigned::sign(
+                GuardianResponse::new(GuardianInfo::mock_for_testing(), 1234),
+                &signing_key,
+            ),
         )
     }
 }
@@ -156,43 +168,66 @@ fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
     .unwrap()
 }
 
-impl GuardianSigned<SetupNewKeyResponse> {
+impl SetupNewKeyResponse {
     pub fn mock_for_testing() -> Self {
-        let resp = SetupNewKeyResponse {
+        Self {
             encrypted_shares: dummy_encrypted_shares(),
             secret_sharing_instance: dummy_secret_sharing_instance(),
             btc_master_pubkey: crate::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
                 &k256::SecretKey::from_slice(&[7u8; 32]).expect("valid k256 sk"),
             ),
-        };
-
-        let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, 0)
+        }
     }
 }
 
-impl GuardianSigned<RotateKpsResponse> {
+impl GuardianSignedResponse<SetupNewKeyResponse> {
     pub fn mock_for_testing() -> Self {
-        let resp = RotateKpsResponse {
+        let signing_kp = SigningKey::from([1u8; 32]);
+        GuardianSigned::sign(
+            GuardianResponse::new(SetupNewKeyResponse::mock_for_testing(), 0),
+            &signing_kp,
+        )
+    }
+}
+
+impl RotateKpsResponse {
+    pub fn mock_for_testing() -> Self {
+        Self {
             encrypted_shares: dummy_encrypted_shares(),
-        };
-        let signing_kp = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, 0)
+        }
     }
 }
 
-impl GuardianSigned<ProvisionerRotateCertResponse> {
+impl GuardianSignedResponse<RotateKpsResponse> {
     pub fn mock_for_testing() -> Self {
-        let response = ProvisionerRotateCertResponse {
+        let signing_kp = SigningKey::from([1u8; 32]);
+        GuardianSigned::sign(
+            GuardianResponse::new(RotateKpsResponse::mock_for_testing(), 0),
+            &signing_kp,
+        )
+    }
+}
+
+impl ProvisionerRotateCertResponse {
+    pub fn mock_for_testing() -> Self {
+        Self {
             cert_seq: 7,
             encrypted_shares: dummy_encrypted_shares()
                 .into_vec()
                 .into_iter()
                 .next()
                 .expect("dummy shares should be non-empty"),
-        };
+        }
+    }
+}
+
+impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
+    pub fn mock_for_testing() -> Self {
         let signing_key = SigningKey::from([1u8; 32]);
-        GuardianSigned::new(response, &signing_key, 0)
+        GuardianSigned::sign(
+            GuardianResponse::new(ProvisionerRotateCertResponse::mock_for_testing(), 0),
+            &signing_key,
+        )
     }
 }
 
@@ -212,8 +247,7 @@ impl OperatorInitRequest {
     }
 }
 
-impl ProvisionerInitRequest {
-    // NOTE: Incorrect encryption is used. Fix later if needed.
+impl SingleProvisionerInitRequest {
     pub fn mock_for_testing() -> Self {
         let encrypted_share = GuardianEncryptedShare {
             id: NonZeroU16::new(1).unwrap(),
@@ -222,18 +256,37 @@ impl ProvisionerInitRequest {
                 aes_ciphertext: vec![0u8; 32],
             },
         };
+        Self::new("mock-session".into(), [7u8; 32], None, encrypted_share)
+    }
+}
+
+impl ProvisionerInitRequest {
+    // NOTE: Incorrect encryption is used. Fix later if needed.
+    pub fn mock_for_testing() -> Self {
         let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
-        let request = SingleProvisionerInitRequest::new(
-            "mock-session".into(),
-            [7u8; 32],
-            None,
+        ProvisionerInitRequest(vec![KpSigned::from_parts(
+            SingleProvisionerInitRequest::mock_for_testing(),
+            crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+            "mock-signature".into(),
+        )])
+    }
+}
+
+impl ProvisionerRotateCertRequest {
+    pub fn from_encrypted_share_for_testing(
+        expected_session_id: SessionID,
+        expected_cert_seq: u64,
+        target_kp_pgp_fingerprint: String,
+        new_kp_pgp_cert: PgpPublicCert,
+        encrypted_share: GuardianEncryptedShare,
+    ) -> Self {
+        Self::from_encrypted_share(
+            expected_session_id,
+            expected_cert_seq,
+            target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
             encrypted_share,
-        );
-        ProvisionerInitRequest(vec![KpSigned {
-            data: request,
-            signer_cert: crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
-            signature: "mock-signature".into(),
-        }])
+        )
     }
 }
 
@@ -400,16 +453,22 @@ impl StandardWithdrawalRequest {
     }
 }
 
-impl GuardianSigned<StandardWithdrawalResponse> {
+impl StandardWithdrawalResponse {
     pub fn mock_for_testing() -> Self {
         let kp = create_btc_keypair_for_test(&[3u8; 32]);
         let msg = Message::from_digest([5u8; 32]);
         let enclave_signatures = sign_btc_tx(&[msg], &kp);
+        Self { enclave_signatures }
+    }
+}
 
-        let resp = StandardWithdrawalResponse { enclave_signatures };
-
+impl GuardianSignedResponse<StandardWithdrawalResponse> {
+    pub fn mock_for_testing() -> Self {
         let signing_kp = SigningKey::from([4u8; 32]);
-        GuardianSigned::new(resp, &signing_kp, 0)
+        GuardianSigned::sign(
+            GuardianResponse::new(StandardWithdrawalResponse::mock_for_testing(), 0),
+            &signing_kp,
+        )
     }
 }
 

@@ -103,9 +103,9 @@ impl BatchAuditor {
     }
 
     pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
-        let errors = self.inner.ingest_batch(events);
-        log_findings("batch", "ingest", &errors);
-        if !errors.is_empty() {
+        let findings = self.inner.ingest_batch(events);
+        log_findings("batch", "ingest", &findings);
+        if !findings.is_empty() {
             self.violation_found = true;
         }
     }

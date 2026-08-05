@@ -30,7 +30,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::sync::Arc;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
@@ -565,6 +564,14 @@ pub enum CertificateV1 {
 }
 
 impl CertificateV1 {
+    pub(crate) fn protocol_label(&self) -> &'static str {
+        match self {
+            CertificateV1::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
+            CertificateV1::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
+            CertificateV1::NonceGeneration { .. } => crate::metrics::MPC_LABEL_NONCE_GENERATION,
+        }
+    }
+
     pub fn new(
         protocol_type: hashi_types::move_types::ProtocolType,
         batch_index: Option<u32>,
@@ -662,6 +669,19 @@ impl CertificateV1 {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VerifiedCertificateV1(CertificateV1);
+
+impl VerifiedCertificateV1 {
+    pub(crate) fn new_unchecked(cert: CertificateV1) -> Self {
+        Self(cert)
+    }
+
+    pub fn inner(&self) -> &CertificateV1 {
+        &self.0
+    }
+}
+
 pub(crate) fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessageHash {
     let bytes = bcs::to_bytes(vote).expect("AvidVote is serializable");
     MessageHash::from(Blake2b256::digest(&bytes).digest)
@@ -693,7 +713,7 @@ impl<P: Clone> Certificate for AvidCertificate<P> {
         // Constructors pin `payload` to `dealer_cert`, so the committee signature over the
         // dealer cert authenticates `payload` too.
         self.committee
-            .verify_signature(&self.dealer_cert)
+            .verify_signature_any_weight(&self.dealer_cert)
             .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
     }
 }
@@ -788,6 +808,9 @@ pub enum MpcError {
     #[error("Pairwise communication error: {0}")]
     PairwiseCommunicationError(String),
 
+    #[error("Stored message for dealer {dealer} does not match its certificate")]
+    StoredMessageDiverged { dealer: Address },
+
     #[error("Storage error: {0}")]
     StorageError(String),
 
@@ -821,9 +844,9 @@ pub struct DealerFlowData {
     pub recipients: Vec<Address>,
     pub messages_hash: DealerMessagesHash,
     pub my_signature: MemberSignature,
-    pub required_reduced_weight: u16,
+    pub required_reduced_weight: u32,
     pub committee: Committee,
-    pub reduced_weights: HashMap<Address, u16>,
+    pub nodes: Nodes<EncryptionGroupElement>,
 }
 
 pub(crate) struct AvidDealerFlowData {
@@ -833,7 +856,7 @@ pub(crate) struct AvidDealerFlowData {
     /// Per-recipient optimistic messages, excluding the dealer's own.
     pub(crate) recipient_messages: Vec<(Address, Messages)>,
     pub(crate) committee: Committee,
-    pub(crate) reduced_weights: HashMap<Address, u16>,
+    pub(crate) nodes: Nodes<EncryptionGroupElement>,
     pub(crate) total_reduced_weight: u32,
     /// `W − f` in reduced weight.
     pub(crate) vote_quorum_weight: u32,

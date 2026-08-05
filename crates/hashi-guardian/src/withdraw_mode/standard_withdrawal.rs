@@ -9,7 +9,7 @@ use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
@@ -25,7 +25,7 @@ use tracing::info;
 pub async fn standard_withdrawal(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
-) -> GuardianResult<GuardianSigned<StandardWithdrawalResponse>> {
+) -> GuardianResult<GuardianSignedResponse<StandardWithdrawalResponse>> {
     info!("/standard_withdrawal - Received request.");
 
     let unsigned_request = StandardWithdrawalRequestWire::from(signed_request.message().clone()); // for logging
@@ -293,14 +293,14 @@ mod tests {
         );
         let success: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         assert_eq!(captured[0].0, success.object_key());
-        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = success.message else {
+        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = success.message() else {
             panic!("expected V2 withdrawal record");
         };
         let WithdrawalLogMessage::Success {
             request_data,
             post_state,
             ..
-        } = *message
+        } = message.as_ref()
         else {
             panic!("expected successful withdrawal record");
         };
@@ -310,18 +310,18 @@ mod tests {
 
         let failure: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
         assert_eq!(captured[1].0, failure.object_key());
-        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = failure.message else {
+        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = failure.message() else {
             panic!("expected V2 withdrawal record");
         };
         let WithdrawalLogMessage::Failure {
             request_data,
             error,
             ..
-        } = *message
+        } = message.as_ref()
         else {
             panic!("expected failed withdrawal record");
         };
         assert_eq!(request_data.seq, 1);
-        assert_eq!(error, GuardianError::RateLimitExceeded.to_string());
+        assert_eq!(error, &GuardianError::RateLimitExceeded.to_string());
     }
 }

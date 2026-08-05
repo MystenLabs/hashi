@@ -64,6 +64,53 @@ fn next_signing_chunk(unsigned: &[u64], chunk_size: usize) -> Vec<u64> {
     unsigned.iter().take(chunk_size.max(1)).copied().collect()
 }
 
+/// Delay before retrying a chunk attempt that made no on-chain progress.
+/// Sized for the common cause: committee members whose mirrors have not
+/// indexed the `WithdrawalTransaction` (or its latest chunk) yet and answer
+/// "not found on-chain" — a few seconds of watcher lag, not a hard failure.
+const CHUNK_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// How long the chunk loop may go without on-chain progress before the
+/// signing task gives up and leaves resumption to a later checkpoint tick.
+/// A wall-clock budget rather than an attempt count: attempts vary wildly
+/// in duration (a fast "not found on-chain" rejection fails in about a
+/// second, a timed-out attempt takes a minute), so a fixed number of
+/// attempts would mean anywhere from seconds to many minutes of tolerance.
+const CHUNK_PROGRESS_STALL_LIMIT: Duration = Duration::from_secs(90);
+
+/// Upper bound on one signing task's lifetime, progress or not. Committed
+/// chunks are durable and the next tick resumes from them, so exiting is
+/// cheap — and a bounded lifetime keeps one huge transaction from pinning
+/// the signing slot with ever-staler task state.
+const MAX_SIGNING_TASK_DURATION: Duration = Duration::from_secs(600);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkStep {
+    /// The refreshed state shows fewer unsigned inputs; sign the next chunk
+    /// immediately.
+    NextChunk,
+    /// No progress yet, but within the stall budget; retry after
+    /// [`CHUNK_RETRY_DELAY`].
+    Retry,
+    /// The stall budget is spent; fail the task and let a later tick resume
+    /// from the durable chunks.
+    GiveUp,
+}
+
+/// Decides how the chunk-signing loop proceeds after one attempt. Progress
+/// is measured on chain rather than by the attempt's own result: a "failed"
+/// attempt whose commit actually landed counts as progress, and a
+/// "successful" one whose write is not visible yet does not.
+fn chunk_step_after_attempt(made_progress: bool, stalled_for: Duration) -> ChunkStep {
+    if made_progress {
+        ChunkStep::NextChunk
+    } else if stalled_for < CHUNK_PROGRESS_STALL_LIMIT {
+        ChunkStep::Retry
+    } else {
+        ChunkStep::GiveUp
+    }
+}
+
 /// Derives the x-only verifying key the MPC signature for input `idx` must
 /// validate against (the master key derived by the input's path), mirroring the
 /// per-input check the committee re-runs at the commit cert
@@ -267,20 +314,13 @@ impl LeaderService {
             let inner = self.inner.clone();
 
             self.inflight_withdrawal_signings.insert(txn_id);
+            // No blanket timeout here: the chunk loop inside is bounded per
+            // phase (each chunk attempt and the finalize step get
+            // LEADER_TASK_TIMEOUT individually), so total runtime scales
+            // with the transaction's input count instead of being cut off
+            // after one fixed window.
             self.withdrawal_signing_tasks.spawn(async move {
-                let result = tokio::time::timeout(
-                    LEADER_TASK_TIMEOUT,
-                    Self::process_unsigned_withdrawal_txn(inner, txn),
-                )
-                .await;
-
-                let result = match result {
-                    Ok(result) => result,
-                    Err(_) => Err(anyhow::anyhow!(
-                        "withdrawal signing for {txn_id} timed out after {LEADER_TASK_TIMEOUT:?}"
-                    )),
-                };
-
+                let result = Self::process_unsigned_withdrawal_txn(inner, txn).await;
                 (txn_id, result)
             });
         }
@@ -302,11 +342,13 @@ impl LeaderService {
         Self::log_task_result("withdrawal_signing", mapped);
     }
 
-    /// Drives one withdrawal's signing forward by one step: reallocate stale
-    /// presigs, record the next chunk(s) of MPC signatures, or — once every input
+    /// Drives one withdrawal's signing: reallocate stale presigs, loop the
+    /// remaining chunks of MPC signatures to completion, or — once every input
     /// is MPC-signed — finalize with the one-shot guardian signatures. Each chunk
     /// is durable on-chain, so timeouts / rotation / restart resume from on-chain
-    /// state rather than restarting from scratch.
+    /// state rather than restarting from scratch. Each phase is individually
+    /// bounded by `LEADER_TASK_TIMEOUT`; the task as a whole is not, so signing
+    /// time scales with the transaction's input count.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn process_unsigned_withdrawal_txn(
         inner: Arc<Hashi>,
@@ -322,10 +364,19 @@ impl LeaderService {
                 "Withdrawal signing batch from epoch {} (current {}); reallocating pending presigs",
                 txn.signing.epoch, current_epoch,
             );
-            let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
-            executor.execute_reallocate_presigs(&txn.id).await?;
-            info!("Pending presigs reallocated; will sign on next checkpoint");
-            return Ok(());
+            return tokio::time::timeout(LEADER_TASK_TIMEOUT, async {
+                let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+                executor.execute_reallocate_presigs(&txn.id).await?;
+                info!("Pending presigs reallocated; will sign on next checkpoint");
+                Ok(())
+            })
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "presig reallocation for {} timed out after {LEADER_TASK_TIMEOUT:?}",
+                    txn.id
+                )
+            })?;
         }
 
         let members = inner
@@ -333,12 +384,34 @@ impl LeaderService {
             .current_committee_members()
             .expect("No current committee members");
 
-        // If any input is still unsigned, collect and commit the next chunk.
+        // If any input is still unsigned, drive the remaining chunks to
+        // completion in this task; finalization follows on a later tick.
         if !unsigned.is_empty() {
-            return Self::sign_withdrawal_chunks(&inner, &txn, &members, unsigned).await;
+            return Self::sign_withdrawal_chunks(&inner, txn, &members).await;
         }
 
-        // Every input is MPC-signed: finalize with the guardian (one shot).
+        tokio::time::timeout(
+            LEADER_TASK_TIMEOUT,
+            Self::finalize_fully_signed_withdrawal(&inner, &txn, &members),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "withdrawal finalize for {} timed out after {LEADER_TASK_TIMEOUT:?}",
+                txn.id
+            )
+        })?
+    }
+
+    /// Finalizes a fully MPC-signed withdrawal with the one-shot guardian
+    /// signatures: validates the local limiter, obtains the guardian half of
+    /// the 2-of-2 witness, collects the committee certificate over both
+    /// signature arrays, and submits `finalize_withdrawal`.
+    async fn finalize_fully_signed_withdrawal(
+        inner: &Arc<Hashi>,
+        txn: &WithdrawalTransaction,
+        members: &[CommitteeMember],
+    ) -> anyhow::Result<()> {
         info!("All inputs MPC-signed; finalizing withdrawal with guardian");
 
         // Fresh per-attempt timestamp from the leader's current checkpoint;
@@ -348,7 +421,7 @@ impl LeaderService {
 
         // Fail fast before MPC if our own limiter would reject.
         let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
-            let amount_sats = crate::withdrawals::withdrawal_limiter_consumption_amount(&txn);
+            let amount_sats = crate::withdrawals::withdrawal_limiter_consumption_amount(txn);
             let next_seq = limiter.next_seq();
             let result = limiter.validate_consume(next_seq, timestamp_secs, amount_sats);
             inner.metrics.record_limiter_validate(
@@ -407,9 +480,9 @@ impl LeaderService {
             match (inner.guardian_client(), expected_limiter_seq) {
                 (Some(guardian), Some(seq)) => {
                     let sigs = Self::finalize_withdrawal_through_guardian(
-                        &inner,
-                        &txn,
-                        &members,
+                        inner,
+                        txn,
+                        members,
                         guardian,
                         timestamp_secs,
                         seq,
@@ -451,6 +524,7 @@ impl LeaderService {
         for member in members {
             let inner = inner.clone();
             let proto_request = proto_request.clone();
+            let member = member.clone();
             sig_tasks.spawn(async move {
                 Self::request_withdrawal_tx_signing_signature(&inner, proto_request, &member).await
             });
@@ -480,7 +554,7 @@ impl LeaderService {
         // broadcast gate). Broadcast + confirm happen via
         // process_signed_withdrawal_txns on a later tick.
         let included_checkpoint_seq = Self::submit_finalize_withdrawal(
-            &inner,
+            inner,
             &txn.id,
             &txn.request_ids.clone(),
             &guardian_signatures,
@@ -526,16 +600,119 @@ impl LeaderService {
         Ok(())
     }
 
-    /// Collects MPC signatures for the still-unsigned inputs and commits them in
-    /// cert-gated chunks of up to `Config::mpc_signing_chunk_size`. Each chunk is durable
-    /// on-chain (`commit_input_signatures`); the next checkpoint resumes from
+    /// Drives MPC chunk signing for one withdrawal to completion within a
+    /// single task: sign a chunk, commit it, wait for watcher visibility, and
+    /// resume from the refreshed on-chain state — instead of paying a
+    /// checkpoint tick per chunk. Failed attempts (typically peers whose
+    /// mirrors have not indexed the `WithdrawalTransaction` yet and answer
+    /// "not found on-chain") retry in-task after a short delay. The loop
+    /// stops cleanly when leadership rotates away or the epoch changes, and
+    /// gives up only after several attempts without on-chain progress —
+    /// committed chunks are durable, so a later tick resumes where this task
+    /// left off.
+    async fn sign_withdrawal_chunks(
+        inner: &Arc<Hashi>,
+        mut txn: WithdrawalTransaction,
+        members: &[CommitteeMember],
+    ) -> anyhow::Result<()> {
+        let txn_id = txn.id;
+        // Pin the epoch this task was launched under. `txn` is refreshed
+        // every iteration, so comparing the current epoch against the
+        // refreshed txn.signing.epoch would race: after an epoch flip,
+        // another node's presig reallocation updates both sides of that
+        // comparison while `members` still holds the old committee. Any
+        // deviation from the pinned epoch exits; the next tick re-derives
+        // members and everything else from fresh state.
+        let task_epoch = txn.signing.epoch;
+        let started = tokio::time::Instant::now();
+        let mut last_progress = started;
+        loop {
+            if started.elapsed() >= MAX_SIGNING_TASK_DURATION {
+                info!(
+                    withdrawal_txn_id = %txn_id,
+                    "Signing task reached its lifetime bound ({MAX_SIGNING_TASK_DURATION:?}); \
+                     a later tick resumes from the committed chunks"
+                );
+                return Ok(());
+            }
+            let checkpoint_height = inner.onchain_state().latest_checkpoint_height();
+            if !super::LeaderService::node_is_leader(inner, checkpoint_height) {
+                info!(
+                    withdrawal_txn_id = %txn_id,
+                    "No longer the leader; stopping the chunk-signing loop"
+                );
+                return Ok(());
+            }
+            if inner.onchain_state().epoch() != task_epoch || txn.signing.epoch != task_epoch {
+                info!(
+                    withdrawal_txn_id = %txn_id,
+                    task_epoch,
+                    "Epoch changed mid-signing; a later tick continues with fresh state"
+                );
+                return Ok(());
+            }
+            let unsigned = txn.signing.unsigned_indices();
+            if unsigned.is_empty() {
+                info!(
+                    withdrawal_txn_id = %txn_id,
+                    "All inputs MPC-signed; finalization follows on a later tick"
+                );
+                return Ok(());
+            }
+
+            let attempt = tokio::time::timeout(
+                LEADER_TASK_TIMEOUT,
+                Self::sign_one_withdrawal_chunk(inner, &txn, members, &unsigned),
+            )
+            .await;
+            match attempt {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(
+                    withdrawal_txn_id = %txn_id,
+                    "Chunk signing attempt failed: {e:#}"
+                ),
+                Err(_) => warn!(
+                    withdrawal_txn_id = %txn_id,
+                    "Chunk signing attempt timed out after {LEADER_TASK_TIMEOUT:?}"
+                ),
+            }
+
+            // Resume from the durable on-chain state — even a failed attempt
+            // may have landed signatures before erroring out.
+            let Some(refreshed) = inner.onchain_state().withdrawal_txn(&txn_id) else {
+                info!(
+                    withdrawal_txn_id = %txn_id,
+                    "Withdrawal transaction no longer in on-chain state; stopping"
+                );
+                return Ok(());
+            };
+            let unsigned_after = refreshed.signing.unsigned_indices().len();
+            let made_progress = unsigned_after < unsigned.len();
+            match chunk_step_after_attempt(made_progress, last_progress.elapsed()) {
+                ChunkStep::NextChunk => last_progress = tokio::time::Instant::now(),
+                ChunkStep::Retry => {
+                    tokio::time::sleep(CHUNK_RETRY_DELAY).await;
+                }
+                ChunkStep::GiveUp => anyhow::bail!(
+                    "no signing progress for withdrawal {txn_id} in \
+                     {CHUNK_PROGRESS_STALL_LIMIT:?} ({unsigned_after} input(s) still \
+                     unsigned); a later tick resumes from the committed chunks",
+                ),
+            }
+            txn = refreshed;
+        }
+    }
+
+    /// Collects MPC signatures for the still-unsigned inputs and commits one
+    /// cert-gated chunk of up to `Config::mpc_signing_chunk_size`. The chunk is durable
+    /// on-chain (`commit_input_signatures`); the caller's loop resumes from
     /// on-chain state, so a single failing input or a leader change only costs
     /// the in-flight chunk, never the whole withdrawal.
-    async fn sign_withdrawal_chunks(
+    async fn sign_one_withdrawal_chunk(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
         members: &[CommitteeMember],
-        unsigned: Vec<u64>,
+        unsigned: &[u64],
     ) -> anyhow::Result<()> {
         // The rate limiter is no longer checked per signing pass — signing is
         // driven unconditionally and the committee re-validates the limit once at
@@ -544,10 +721,10 @@ impl LeaderService {
         // on-chain write batch here. They're separable in principle — the collect
         // is window-bound (how much fits in one signing pass) and the commit is
         // PTB-bound (Sui's 16 KiB pure-arg limit) — but one knob is enough for
-        // now: collect one chunk, commit it immediately, then let a later tick
-        // resume from the durable on-chain state.
+        // now: collect one chunk, commit it immediately, then let the caller's
+        // loop resume from the durable on-chain state.
         let chunk_size = inner.config.mpc_signing_chunk_size();
-        let chunk_indices = next_signing_chunk(&unsigned, chunk_size);
+        let chunk_indices = next_signing_chunk(unsigned, chunk_size);
         info!(
             unsigned = unsigned.len(),
             chunk_size = chunk_indices.len(),
@@ -576,7 +753,8 @@ impl LeaderService {
 
         // The collect returns at most one chunk's worth of inputs (≤ M), unioned
         // across members; commit whatever it gathered in a single cert-gated PTB.
-        // Any inputs not covered this tick resume from on-chain state next tick.
+        // Any inputs not covered by this pass resume from on-chain state on
+        // the caller's next loop pass.
         let indices: Vec<u64> = sigs_by_index.iter().map(|(i, _)| *i).collect();
         let signatures: Vec<Vec<u8>> = sigs_by_index
             .iter()
@@ -640,8 +818,9 @@ impl LeaderService {
                 .inc();
         })?;
 
-        // Wait for our watcher to observe the last committed chunk so the next
-        // tick resumes from fresh on-chain state (and doesn't re-sign it).
+        // Wait for our watcher to observe the last committed chunk so the
+        // caller's loop resumes from fresh on-chain state (and doesn't
+        // re-sign it).
         const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
         if last_checkpoint > 0
             && tokio::time::timeout(
@@ -667,7 +846,7 @@ impl LeaderService {
     /// Each candidate is verified against its sighash before being unioned, so a
     /// single bad/buggy member cannot poison the chunk's commit cert. Returns the
     /// (possibly partial) union, or `None` if not a single valid signature was
-    /// collected (the next tick retries).
+    /// collected (the caller's chunk loop retries).
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
@@ -1470,6 +1649,37 @@ mod tests {
     #[test]
     fn next_signing_chunk_treats_zero_size_as_one() {
         assert_eq!(next_signing_chunk(&[7, 8], 0), vec![7]);
+    }
+
+    #[test]
+    fn chunk_loop_continues_on_progress_regardless_of_staleness() {
+        // Progress resets the stall clock, even progress recorded by an
+        // attempt that itself reported failure and even at the edge of the
+        // stall budget.
+        assert_eq!(
+            chunk_step_after_attempt(true, Duration::ZERO),
+            ChunkStep::NextChunk
+        );
+        assert_eq!(
+            chunk_step_after_attempt(true, CHUNK_PROGRESS_STALL_LIMIT),
+            ChunkStep::NextChunk
+        );
+    }
+
+    #[test]
+    fn chunk_loop_retries_stalls_until_the_time_budget_is_spent() {
+        assert_eq!(
+            chunk_step_after_attempt(false, Duration::ZERO),
+            ChunkStep::Retry
+        );
+        assert_eq!(
+            chunk_step_after_attempt(false, CHUNK_PROGRESS_STALL_LIMIT - Duration::from_millis(1)),
+            ChunkStep::Retry
+        );
+        assert_eq!(
+            chunk_step_after_attempt(false, CHUNK_PROGRESS_STALL_LIMIT),
+            ChunkStep::GiveUp
+        );
     }
 
     // Valid 64-byte BIP-340 Schnorr signatures lifted from fastcrypto's own

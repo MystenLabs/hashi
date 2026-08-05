@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
+use anyhow::ensure;
 use clap::Parser;
 use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::Scalar as ScalarTrait;
@@ -125,6 +126,14 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         .committees()
         .get(&previous_epoch)
         .expect("previous_epoch was just inserted by build_recovery_committee_set");
+    ensure!(
+        recovery_committee_set
+            .previous_committee_for_target(reconstruction_epoch)
+            .map(|(epoch, _)| epoch)
+            == Some(previous_epoch),
+        "recovery committee set resolves a previous committee other than epoch \
+         {previous_epoch}; certificates from that epoch cannot be verified"
+    );
 
     println!(
         "Previous epoch {previous_epoch}: {} validators, fetching certificates...",
@@ -181,7 +190,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         // what reconstruction reads. Pass it as both `encryption_key` (unused
         // here) and `previous_encryption_key`.
         let metrics = hashi::metrics::Metrics::new_default();
-        let mut manager = MpcManager::new(
+        let manager = MpcManager::new(
             validator_address,
             &recovery_committee_set,
             reconstruction_epoch,
@@ -198,15 +207,26 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         )
         .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?;
 
-        // Override previous_epoch to match the backed-up DB's epoch, since
-        // the on-chain epoch may have advanced past the backup.
-        manager.set_previous_epoch(previous_epoch);
+        let verified: Vec<_> = certificates
+            .iter()
+            .filter_map(|cert| match manager.verify_certificate(cert.clone()) {
+                Ok(verified) => Some(verified),
+                Err(e) => {
+                    println!("  Warning: dropping unverifiable certificate: {e}");
+                    None
+                }
+            })
+            .collect();
+        if verified.len() != certificates.len() {
+            println!(
+                "  {} of {} certificates verified",
+                verified.len(),
+                certificates.len()
+            );
+        }
 
-        // Pass an empty complaint cache: the recovery tool runs reconstruction
-        // once without retrying through complaint recovery, so there are no
-        // recovered outputs to reuse across attempts.
         let outcome = manager
-            .reconstruct_previous_output(&certificates, &std::collections::HashMap::new())
+            .reconstruct_previous_output(&verified, &std::collections::HashMap::new())
             .map_err(|e| anyhow!("reconstruction failed: {e}"))?;
 
         match outcome {

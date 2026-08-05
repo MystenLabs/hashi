@@ -355,10 +355,28 @@ impl CoinSelectionParams {
     /// including both funding inputs and consolidation inputs.
     pub const DEFAULT_MAX_INPUTS: usize = 400;
 
-    /// Maximum number of withdrawal requests per batch. In the production
-    /// flow, the per-request input budget limits this to 400 inputs, leaving
-    /// room under Bitcoin's 101 kvB descendant-size budget for a direct child.
-    pub const MAX_WITHDRAWAL_REQUESTS: usize = 40;
+    /// Maximum number of withdrawal requests per batch, derived from the
+    /// Sui commit transaction's runtime-object budget: at 3 runtime objects
+    /// per request, `(922 budget - 12 fixed - 16 reserved funding inputs) /
+    /// 3 = 298`. The reserve keeps room for the largest-first funding
+    /// inputs when a batch is at this cap (a compile-time assertion in
+    /// `withdrawals.rs` ties this value to those constants); the descending
+    /// retry loop in `build_withdrawal_tx_commitment` shrinks the batch if
+    /// even the reserve is not enough.
+    ///
+    /// Bitcoin-side limits do not bind here: a 298-output batch with 16
+    /// taproot script-path inputs is ~58 kWU, well under the 400 kWU
+    /// standardness cap, and leaves ample room under the 101 kvB mempool
+    /// cluster budget for a direct child.
+    ///
+    /// Together with the per-request input budget this makes the batch
+    /// shape adapt to load. A shallow queue produces small batches with up
+    /// to `input_budget` consolidation inputs per request (optimizing the
+    /// UTXO pool); a deep queue fills the batch with requests, and the
+    /// commit budget in `safe_withdrawal_flow_max_inputs` automatically
+    /// squeezes the input side down toward the funding reserve (optimizing
+    /// withdrawal throughput).
+    pub const MAX_WITHDRAWAL_REQUESTS: usize = 298;
 
     /// Default minimum fee rate floor (3 sat/vB), deliberately above
     /// Bitcoin Core's 1 sat/vB relay minimum.
@@ -1195,7 +1213,7 @@ impl<'a> TransactionBuilder<'a> {
 /// - 253–0xFFFF: 3 bytes
 /// - 0x10000–0xFFFFFFFF: 5 bytes
 /// - 0x100000000–: 9 bytes
-fn varint_weight(n: u64) -> Weight {
+pub(crate) fn varint_weight(n: u64) -> Weight {
     let bytes = match n {
         0..=252 => 1u64,
         253..=0xFFFF => 3,

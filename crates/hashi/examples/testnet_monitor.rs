@@ -143,20 +143,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Parse the OutPoint
                 match bitcoin::OutPoint::from_str(input) {
                     Ok(outpoint) => {
-                        info!("Confirming deposit for OutPoint: {}", outpoint);
+                        info!("Checking deposit for OutPoint: {}", outpoint);
 
-                        // Spawn a task to confirm the deposit
+                        // Spawn a task to check the deposit at the current Bitcoin tip.
                         let client = monitor_client.clone();
                         let confirmations = args.confirmations;
                         tokio::spawn(async move {
                             match client.confirm_deposit(outpoint, confirmations).await {
-                                Ok(txout) => {
+                                Ok(hashi::btc_monitor::monitor::DepositConfirmation::Confirmed(
+                                    txout,
+                                )) => {
                                     info!("✓ Deposit confirmed for {}", outpoint);
                                     info!("  Value: {} sats", txout.value.to_sat());
                                     info!("  Script: {}", txout.script_pubkey);
                                 }
+                                Ok(hashi::btc_monitor::monitor::DepositConfirmation::NotFound) => {
+                                    info!("Deposit transaction not found for {}", outpoint);
+                                }
+                                Ok(hashi::btc_monitor::monitor::DepositConfirmation::InMempool) => {
+                                    info!("Deposit transaction is in the mempool for {}", outpoint);
+                                }
+                                Ok(
+                                    hashi::btc_monitor::monitor::DepositConfirmation::InsufficientConfirmations {
+                                        confirmations,
+                                    },
+                                ) => {
+                                    info!(
+                                        "Deposit has {confirmations} confirmations for {}",
+                                        outpoint
+                                    );
+                                }
                                 Err(e) => {
-                                    error!("✗ Failed to confirm deposit for {}: {}", outpoint, e);
+                                    error!("✗ Failed to check deposit for {}: {}", outpoint, e);
                                 }
                             }
                         });

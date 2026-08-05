@@ -58,6 +58,25 @@ impl RpcP2PChannel {
     }
 }
 
+/// Preserves the one status distinction callers care about: the app-level
+/// "signing manager not ready" response means the peer is up but still
+/// reconciling (e.g. right after an epoch change) and should be retried
+/// shortly rather than treated as failed. The check is deliberately narrow —
+/// tonic also maps transport failures (connection refused, REFUSED_STREAM,
+/// 503/504) to `Code::Unavailable`, and those must keep counting as peer
+/// failures or dead peers would never be cooled or surfaced in metrics.
+fn map_status(status: tonic::Status) -> ChannelError {
+    if status.code() == tonic::Code::Unavailable
+        && status
+            .message()
+            .contains(crate::grpc::SIGNING_MANAGER_NOT_READY_MSG)
+    {
+        ChannelError::NotReady(status.to_string())
+    } else {
+        ChannelError::RequestFailed(status.to_string())
+    }
+}
+
 #[async_trait]
 impl P2PChannel for RpcP2PChannel {
     async fn send_messages(
@@ -71,7 +90,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .send_messages(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         SendMessagesResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -87,7 +106,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .retrieve_messages(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         RetrieveMessagesResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -103,7 +122,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .complain(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         ComplaintResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -119,7 +138,7 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .get_public_mpc_output(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         GetPublicMpcOutputResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -135,8 +154,36 @@ impl P2PChannel for RpcP2PChannel {
             .mpc_service_client()
             .get_partial_signatures(proto_request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
+            .map_err(map_status)?;
         GetPartialSignaturesResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_status_treats_only_the_not_ready_response_as_not_ready() {
+        let not_ready = tonic::Status::unavailable(format!(
+            "{} for epoch 7; retry",
+            crate::grpc::SIGNING_MANAGER_NOT_READY_MSG
+        ));
+        assert!(matches!(map_status(not_ready), ChannelError::NotReady(_)));
+
+        // Transport failures also surface as Code::Unavailable; they must
+        // keep counting as failures so dead peers get cooled and surfaced.
+        let refused = tonic::Status::unavailable("error trying to connect: connection refused");
+        assert!(matches!(
+            map_status(refused),
+            ChannelError::RequestFailed(_)
+        ));
+
+        let not_found = tonic::Status::not_found("WithdrawalTransaction not found on-chain");
+        assert!(matches!(
+            map_status(not_found),
+            ChannelError::RequestFailed(_)
+        ));
     }
 }

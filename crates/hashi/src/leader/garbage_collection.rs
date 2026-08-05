@@ -70,6 +70,8 @@ impl LeaderService {
         }
 
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
+        // Approved deposits are awaiting confirmation and must not expire.
+        deposit_requests.retain(|r| r.approval_cert.is_none());
         deposit_requests.sort_by_key(|r| r.created_timestamp_ms);
 
         let Some(oldest_request) = deposit_requests.first() else {

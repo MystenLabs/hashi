@@ -29,6 +29,7 @@ use futures::future::OptionFuture;
 use hashi_types::committee::MemberSignature;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +56,7 @@ pub(crate) struct LeaderService {
     // Background tasks currently confirming approved Bitcoin deposits.
     approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
     // Deposit requests loaded from Bitcoin/on-chain state and waiting for approval processing.
-    pending_unapproved_deposit_requests: Vec<DepositRequest>,
+    pending_unapproved_deposit_requests: VecDeque<DepositRequest>,
     // Last hashi epoch processed by the checkpoint-triggered deposit path.
     last_unapproved_deposit_epoch: Option<u64>,
     // Deposit IDs that should not be retried by this leader process.
@@ -134,7 +135,7 @@ impl LeaderService {
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             unapproved_deposit_tasks: JoinSet::new(),
             approved_deposit_tasks: JoinSet::new(),
-            pending_unapproved_deposit_requests: Vec::new(),
+            pending_unapproved_deposit_requests: VecDeque::new(),
             last_unapproved_deposit_epoch: None,
             never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),
@@ -373,23 +374,30 @@ impl LeaderService {
     }
 
     fn is_current_leader(&self, checkpoint_height: u64) -> bool {
-        if self.inner.onchain_state().state().hashi().config.paused() {
+        Self::node_is_leader(&self.inner, checkpoint_height)
+    }
+
+    /// Whether this node is the leader for the given checkpoint. An
+    /// associated function (rather than a method) so long-running leader
+    /// tasks can re-check leadership mid-flight and stop driving work that
+    /// has rotated to another node.
+    pub(super) fn node_is_leader(inner: &Arc<Hashi>, checkpoint_height: u64) -> bool {
+        if inner.onchain_state().state().hashi().config.paused() {
             debug!("Bridge is paused, not acting as leader");
             return false;
         }
 
-        match self.inner.config.force_run_as_leader() {
+        match inner.config.force_run_as_leader() {
             ForceRunAsLeader::Always => return true,
             ForceRunAsLeader::Never => return false,
             ForceRunAsLeader::Default => (),
         }
 
-        let Some(committee) = self.inner.onchain_state().current_committee() else {
+        let Some(committee) = inner.onchain_state().current_committee() else {
             // TODO: do we need to do anything when bootstrapping? At genesis there is no committee.
             return false;
         };
-        let this_validator_address = self
-            .inner
+        let this_validator_address = inner
             .config
             .validator_address()
             .expect("No configured validator address");

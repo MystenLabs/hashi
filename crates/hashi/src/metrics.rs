@@ -118,6 +118,17 @@ pub struct Metrics {
 
     pub mpc_sign_duration_seconds: HistogramVec,
     pub mpc_sign_failures_total: IntCounterVec,
+    /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
+    /// Each failure also puts the peer in a short poll cooldown, so this is
+    /// the per-validator health signal for the MPC signing path.
+    pub mpc_partial_sig_poll_failures_total: IntCounterVec,
+    /// Provably bad partial signatures by contributing peer, identified by
+    /// re-evaluating the RS-recovered polynomial at each contributed share
+    /// index. A blamed peer is excluded from partial-signature polling for
+    /// the rest of the epoch.
+    pub mpc_bad_partial_sigs_total: IntCounterVec,
+    /// Reader-side rejections of certificates read from TOB.
+    pub mpc_certs_rejected_total: IntCounterVec,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
     /// Ticks where no DB encryption key matched the current committee record
@@ -166,6 +177,7 @@ pub struct Metrics {
     pub mpc_prepare_previous_reconstruct_duration_seconds: HistogramVec,
     pub mpc_prepare_previous_complaint_recovery_duration_seconds: HistogramVec,
     pub mpc_prepare_previous_complaint_recovery_total: IntCounterVec,
+    pub mpc_previous_message_unusable_total: IntCounterVec,
     pub mpc_prepare_previous_fetch_public_output_duration_seconds: HistogramVec,
     pub mpc_sign_partial_gen_duration_seconds: HistogramVec,
     pub mpc_sign_collection_duration_seconds: HistogramVec,
@@ -751,6 +763,21 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_partial_sig_poll_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_partial_sig_poll_failures_total",
+                "Failed get_partial_signatures polls by peer (the peer is then cooled down)",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            mpc_bad_partial_sigs_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_bad_partial_sigs_total",
+                "Provably bad partial signatures by contributing peer (the peer is then \
+                 excluded from polling for the rest of the epoch)",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
             mpc_avid_rounds_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_avid_rounds_total",
                 "AVID nonce rounds consumed, by resolved certificate kind",
@@ -761,6 +788,13 @@ impl Metrics {
             mpc_avid_complaints_recovered_total: register_int_counter_with_registry!(
                 "hashi_mpc_avid_complaints_recovered_total",
                 "AVID nonce shares recovered via the complaint protocol",
+                registry,
+            )
+            .unwrap(),
+            mpc_certs_rejected_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_certs_rejected_total",
+                "Reader-side rejections of TOB certificates; per-cert multiplier varies by node, excludes peer-driven blame refusals",
+                &["protocol", "reason"],
                 registry,
             )
             .unwrap(),
@@ -1013,6 +1047,13 @@ impl Metrics {
             mpc_prepare_previous_complaint_recovery_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_prepare_previous_complaint_recovery_total",
                 "Total complaint recoveries performed inside prepare_previous_output.",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_previous_message_unusable_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_previous_message_unusable_total",
+                "Previous-epoch dealer messages whose local copy was unusable during reconfig.",
                 &["protocol"],
                 registry,
             )

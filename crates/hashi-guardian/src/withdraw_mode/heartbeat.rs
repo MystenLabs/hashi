@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(captured.len(), 1, "heartbeat tick should write one record");
         let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         assert_eq!(captured[0].0, record.object_key());
-        let VersionedLogMessage::V2(LogMessage::Heartbeat(message)) = record.message else {
+        let VersionedLogMessage::V2(LogMessage::Heartbeat(message)) = record.message() else {
             panic!("expected V2 heartbeat record");
         };
         assert_eq!(message.seq, 0);

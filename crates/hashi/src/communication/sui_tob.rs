@@ -19,6 +19,7 @@ use super::OrderedBroadcastChannel;
 use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
+use crate::mpc::types::MessageHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SuiTxExecutor;
 
@@ -59,7 +60,7 @@ impl From<TobError> for ChannelError {
     }
 }
 
-pub struct SuiTobChannel {
+pub struct SuiTobSessionChannel {
     hashi_ids: HashiIds,
     onchain_state: OnchainState,
     epoch: u64,
@@ -79,7 +80,7 @@ pub struct SuiTobChannel {
 
 type PendingFetch = tokio::task::JoinHandle<Result<Vec<(Address, CertificateV1)>, TobError>>;
 
-impl SuiTobChannel {
+impl SuiTobSessionChannel {
     pub fn new(
         hashi_ids: HashiIds,
         onchain_state: OnchainState,
@@ -142,7 +143,7 @@ impl SuiTobChannel {
     }
 }
 
-impl Drop for SuiTobChannel {
+impl Drop for SuiTobSessionChannel {
     fn drop(&mut self) {
         if let Some((fetch, _)) = &self.pending_fetch {
             fetch.abort();
@@ -218,17 +219,13 @@ pub async fn fetch_certificates(
 }
 
 pub struct PrefetchedTobChannel {
-    certs: VecDeque<CertificateV1>,
-    dealers: Vec<Address>,
+    certs: Vec<(Address, CertificateV1)>,
+    next: usize,
 }
 
 impl PrefetchedTobChannel {
     pub fn new(certs: Vec<(Address, CertificateV1)>) -> Self {
-        let dealers = certs.iter().map(|(dealer, _)| *dealer).collect();
-        Self {
-            certs: certs.into_iter().map(|(_, cert)| cert).collect(),
-            dealers,
-        }
+        Self { certs, next: 0 }
     }
 }
 
@@ -241,11 +238,13 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        self.certs.pop_front().ok_or(ChannelError::Exhausted)
+        let (_, cert) = self.certs.get(self.next).ok_or(ChannelError::Exhausted)?;
+        self.next += 1;
+        Ok(cert.clone())
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
-        self.dealers.clone()
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
+        self.certs.clone()
     }
 }
 
@@ -262,9 +261,9 @@ pub async fn fetch_key_generation_certificates(
 }
 
 #[async_trait]
-impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
+impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
-        let dealer = cert.dealer_address();
+        let ours = cert.message();
         let fetched = tokio::time::timeout(
             DEDUP_READ_TIMEOUT,
             fetch_certificates(
@@ -299,8 +298,29 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 Vec::new()
             }
         };
-        if existing.iter().any(|(d, _)| *d == dealer) {
-            return Ok(());
+        let published: Vec<(Address, MessageHash)> = existing
+            .iter()
+            .map(|(d, c)| (*d, c.message().messages_hash))
+            .collect();
+        match classify_published_cert(&published, &ours.dealer_address, ours.messages_hash) {
+            PublishedCert::Same => return Ok(()),
+            PublishedCert::Diverged { on_chain } => {
+                tracing::warn!(
+                    "{:?} epoch {} batch {:?}: dealer {} already has a certificate over \
+                     different messages (on chain {}, ours {}); regenerated messages or an \
+                     AVID optimistic/pessimistic flip",
+                    self.protocol_type,
+                    self.epoch,
+                    self.batch_index,
+                    ours.dealer_address,
+                    hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(&on_chain)),
+                    hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                        &ours.messages_hash
+                    )),
+                );
+                return Ok(());
+            }
+            PublishedCert::Absent => {}
         }
 
         let mut executor = self.create_executor();
@@ -434,7 +454,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         }
     }
 
-    async fn certified_dealers(&mut self) -> Vec<Address> {
+    async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
         match tokio::time::timeout(
             FETCH_STALL_TIMEOUT,
             fetch_certificates(
@@ -447,35 +467,61 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         .await
         {
             Ok(Ok(all_certs)) => {
-                for (dealer, cert) in all_certs {
-                    if !self.seen_dealers.contains(&dealer) {
-                        self.seen_dealers.insert(dealer);
-                        self.pending_certs.push_back(cert);
+                for (dealer, cert) in &all_certs {
+                    if !self.seen_dealers.contains(dealer) {
+                        self.seen_dealers.insert(*dealer);
+                        self.pending_certs.push_back(cert.clone());
                     }
                 }
+                all_certs
             }
-            Ok(Err(e)) => tracing::warn!(
-                "{:?} certified_dealers fetch for epoch {} batch {:?} failed: {e}; \
-                 reporting {} dealers seen so far",
-                self.protocol_type,
-                self.epoch,
-                self.batch_index,
-                self.seen_dealers.len(),
-            ),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "{:?} certified_dealers fetch for epoch {} batch {:?} failed: {e}; \
+                     reporting none certified",
+                    self.protocol_type,
+                    self.epoch,
+                    self.batch_index,
+                );
+                vec![]
+            }
             Err(_) => {
                 self.record_stall(false);
                 tracing::warn!(
                     "{:?} certified_dealers fetch for epoch {} batch {:?} stalled >{:?}; \
-                     reporting {} dealers seen so far",
+                     reporting none certified",
                     self.protocol_type,
                     self.epoch,
                     self.batch_index,
                     FETCH_STALL_TIMEOUT,
-                    self.seen_dealers.len(),
                 );
+                vec![]
             }
         }
-        self.seen_dealers.iter().copied().collect()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PublishedCert {
+    Absent,
+    Same,
+    Diverged { on_chain: MessageHash },
+}
+
+fn classify_published_cert(
+    existing: &[(Address, MessageHash)],
+    dealer: &Address,
+    ours: MessageHash,
+) -> PublishedCert {
+    let Some((_, on_chain)) = existing.iter().find(|(d, _)| d == dealer) else {
+        return PublishedCert::Absent;
+    };
+    if *on_chain == ours {
+        PublishedCert::Same
+    } else {
+        PublishedCert::Diverged {
+            on_chain: *on_chain,
+        }
     }
 }
 
@@ -552,6 +598,51 @@ mod tests {
         ));
     }
     use super::*;
+
+    fn addr(b: u8) -> Address {
+        Address::new([b; 32])
+    }
+
+    fn hash(b: u8) -> MessageHash {
+        let mut bytes = [0xAB; 32];
+        bytes[17] = b;
+        MessageHash::new(bytes)
+    }
+
+    #[test]
+    fn republishing_the_same_messages_is_not_a_divergence() {
+        let existing = [(addr(1), hash(9)), (addr(2), hash(8))];
+        assert_eq!(
+            classify_published_cert(&existing, &addr(1), hash(9)),
+            PublishedCert::Same
+        );
+    }
+
+    #[test]
+    fn different_messages_under_our_dealer_address_diverge() {
+        let existing = [(addr(1), hash(9))];
+        assert_eq!(
+            classify_published_cert(&existing, &addr(1), hash(7)),
+            PublishedCert::Diverged { on_chain: hash(9) }
+        );
+    }
+
+    #[test]
+    fn only_our_own_dealer_slot_is_compared() {
+        let existing = [(addr(2), hash(7)), (addr(3), hash(6))];
+        assert_eq!(
+            classify_published_cert(&existing, &addr(1), hash(9)),
+            PublishedCert::Absent
+        );
+    }
+
+    #[test]
+    fn an_empty_tob_slot_is_absent() {
+        assert_eq!(
+            classify_published_cert(&[], &addr(1), hash(9)),
+            PublishedCert::Absent
+        );
+    }
 
     #[test]
     fn nonce_wait_superseded_only_by_other_reconfig_or_passed_epoch() {

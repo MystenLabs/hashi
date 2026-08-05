@@ -899,6 +899,14 @@ mod tests {
 
         let nonces_for_dealer = mock_nonces_for_dealers(&mut rng, n, batch_size_per_weight, t, n);
 
+        // Authoritative share ownership across the fleet: each node owns the
+        // share ids the real DKG assigned it.
+        let share_owners: std::collections::HashMap<ShareIndex, sui_sdk_types::Address> =
+            node_infos
+                .iter()
+                .flat_map(|info| info.share_ids.iter().map(|&sid| (sid, info.address)))
+                .collect();
+
         for (node_idx, node) in nodes.iter().enumerate() {
             let info = &node_infos[node_idx];
             let shares_source = if corrupt_node_indices.contains(&node_idx) {
@@ -934,6 +942,7 @@ mod tests {
                 t,
                 key_shares,
                 vk,
+                share_owners.clone(),
                 presignatures,
                 0,
                 0,
