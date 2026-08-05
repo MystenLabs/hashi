@@ -188,8 +188,11 @@ pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
 /// height past Taproot activation works; it maps to the Taproot checkpoint.
 const DEFAULT_START_HEIGHT: u32 = 800_000;
 
-/// Height the Hashi Signet deployment launched from; no bridge deposit predates
-/// it, so Signet nodes anchor here instead of re-syncing from genesis.
+/// Signet tip when Hashi moved from testnet4 to Signet, and the height
+/// sui-operations pins for every Signet deployment. No Hashi Signet deposit
+/// predates it, so nodes anchor here instead of re-syncing from genesis.
+/// Only ever lower this: the anchor is a floor, and deposits below it are
+/// invisible to the light client.
 const SIGNET_DEFAULT_START_HEIGHT: u32 = 297_756;
 
 pub fn default_start_height(network: Network) -> u32 {
