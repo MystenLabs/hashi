@@ -41,9 +41,11 @@ use crate::state_machine::BtcFetchOutcome;
 use crate::state_machine::DepositStateMachine;
 use crate::state_machine::WithdrawalStateMachine;
 pub use batch::BatchAuditor;
+use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
+use std::fmt;
 
 pub trait AuditWindow {
     fn in_window(&self, timestamp_secs: UnixSeconds) -> bool;
@@ -73,11 +75,47 @@ pub fn log_findings(source: &'static str, phase: &'static str, findings: &[Monit
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ProgressWatermarks {
     pub verified_up_to_withdrawals: UnixSeconds,
     pub verified_up_to_deposits: UnixSeconds,
     pub restart_start: UnixSeconds,
+    withdrawal_blockers: Vec<WithdrawalProgressBlocker>,
+}
+
+impl ProgressWatermarks {
+    fn withdrawal_blockers_summary(&self) -> String {
+        if self.withdrawal_blockers.is_empty() {
+            return "none".to_string();
+        }
+
+        self.withdrawal_blockers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WithdrawalProgressBlocker {
+    wid: WithdrawalID,
+    btc_txid: Txid,
+    guardian_approved_at: UnixSeconds,
+    waiting_for: Vec<WithdrawalEventType>,
+}
+
+impl fmt::Display for WithdrawalProgressBlocker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "wid={}, btc_txid={}, guardian_approved_at={}, waiting_for={:?}",
+            self.wid,
+            self.btc_txid,
+            utc_timestamp(self.guardian_approved_at),
+            self.waiting_for,
+        )
+    }
 }
 
 pub struct AuditorCore {
@@ -286,13 +324,25 @@ impl AuditorCore {
 
     pub fn progress_watermarks(&self, window: &impl AuditWindow) -> ProgressWatermarks {
         let mut verified_up_to_withdrawals = self.get_guardian_cursor();
+        let mut withdrawal_blockers = Vec::new();
         for sm in self.pending_withdrawals.values() {
             if !sm.is_in_audit_window(window) || !sm.is_expecting_events() {
                 continue;
             }
 
             if let Some(e2) = sm.get(WithdrawalEventType::E2GuardianApproved) {
-                verified_up_to_withdrawals = verified_up_to_withdrawals.min(e2.timestamp_secs);
+                if e2.timestamp_secs < verified_up_to_withdrawals {
+                    verified_up_to_withdrawals = e2.timestamp_secs;
+                    withdrawal_blockers.clear();
+                }
+                if e2.timestamp_secs == verified_up_to_withdrawals {
+                    withdrawal_blockers.push(WithdrawalProgressBlocker {
+                        wid: sm.wid(),
+                        btc_txid: sm.btc_txid(),
+                        guardian_approved_at: e2.timestamp_secs,
+                        waiting_for: sm.expected_event_types(),
+                    });
+                }
             } else {
                 tracing::debug!(
                     wid = %sm.wid(),
@@ -315,6 +365,7 @@ impl AuditorCore {
             verified_up_to_withdrawals,
             verified_up_to_deposits,
             restart_start: verified_up_to_withdrawals.min(verified_up_to_deposits),
+            withdrawal_blockers,
         }
     }
 

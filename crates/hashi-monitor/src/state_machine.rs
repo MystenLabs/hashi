@@ -107,6 +107,13 @@ impl WithdrawalStateMachine {
         !self.expected_events.is_empty()
     }
 
+    pub fn expected_event_types(&self) -> Vec<WithdrawalEventType> {
+        self.expected_events
+            .iter()
+            .map(|(event_type, _, _)| *event_type)
+            .collect()
+    }
+
     // TODO: If we fully move to strict guardian-led audits, this can be relaxed to only include
     // withdrawals with guardian E2 in the user window.
     pub fn is_in_audit_window(&self, window: &impl AuditWindow) -> bool {

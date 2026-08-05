@@ -113,10 +113,11 @@ impl ContinuousAuditor {
 
         let progress = self.inner.progress_watermarks(&self.window);
         tracing::info!(
-            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  verified_up_to_withdrawals={}\n  verified_up_to_deposits={}\n  restart_start={}",
+            "continuous progress checkpoint:\n  guardian_cursor={}\n  sui_cursor={}\n  verified_up_to_withdrawals={}\n  withdrawal_blockers={}\n  verified_up_to_deposits={}\n  restart_start={}",
             utc_timestamp(self.inner.get_guardian_cursor()),
             utc_timestamp(self.inner.get_sui_cursor()),
             utc_timestamp(progress.verified_up_to_withdrawals),
+            progress.withdrawal_blockers_summary(),
             utc_timestamp(progress.verified_up_to_deposits),
             utc_timestamp(progress.restart_start),
         );

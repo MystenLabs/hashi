@@ -224,8 +224,9 @@ impl BatchAuditor {
         let progress = self.inner.progress_watermarks(&self.audit_window);
 
         tracing::info!(
-            "batch progress watermarks:\n  verified_up_to_withdrawals={}\n  verified_up_to_deposits={}\n  next_start={}",
+            "batch progress watermarks:\n  verified_up_to_withdrawals={}\n  withdrawal_blockers={}\n  verified_up_to_deposits={}\n  next_start={}",
             utc_timestamp(progress.verified_up_to_withdrawals),
+            progress.withdrawal_blockers_summary(),
             utc_timestamp(progress.verified_up_to_deposits),
             utc_timestamp(progress.restart_start),
         );
