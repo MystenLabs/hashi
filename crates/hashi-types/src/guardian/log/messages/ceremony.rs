@@ -31,6 +31,11 @@ pub enum CeremonyLogMessage {
 }
 
 impl CeremonyLogMessage {
+    /// The slash-terminated prefix containing ceremony records.
+    pub fn object_key_dir() -> String {
+        format!("{S3_DIR_CEREMONY}/")
+    }
+
     /// Consume the ceremony result. `NewKey` yields its initial instance;
     /// `Rotate` yields the new instance after verifying that it advances exactly
     /// one `sharing_seq` from the consumed instance.
@@ -69,7 +74,8 @@ impl CeremonyLogMessage {
 
     pub fn object_key(&self, session_id: &str) -> String {
         format!(
-            "{S3_DIR_CEREMONY}/{:020}-{session_id}.json",
+            "{}{:020}-{session_id}.json",
+            Self::object_key_dir(),
             self.sharing_seq(),
         )
     }

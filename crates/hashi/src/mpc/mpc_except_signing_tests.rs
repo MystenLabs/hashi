@@ -564,6 +564,7 @@ struct MockOrderedBroadcastChannel {
     override_certified_dealers: Option<Vec<(Address, CertificateV1)>>,
     /// If set, publish() will fail with this error message.
     fail_on_publish: Option<String>,
+    publish_outcome: PublishOutcome,
 }
 
 impl MockOrderedBroadcastChannel {
@@ -573,7 +574,13 @@ impl MockOrderedBroadcastChannel {
             published: std::sync::Mutex::new(Vec::new()),
             override_certified_dealers: None,
             fail_on_publish: None,
+            publish_outcome: PublishOutcome::Landed,
         }
+    }
+
+    fn with_publish_outcome(mut self, outcome: PublishOutcome) -> Self {
+        self.publish_outcome = outcome;
+        self
     }
 
     fn with_override_certified_dealers(mut self, dealers: Vec<(Address, CertificateV1)>) -> Self {
@@ -597,16 +604,15 @@ impl MockOrderedBroadcastChannel {
 
 #[async_trait::async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
-    async fn publish(&self, message: CertificateV1) -> ChannelResult<()> {
+    async fn publish(&self, message: CertificateV1) -> ChannelResult<PublishOutcome> {
         if let Some(ref error_msg) = self.fail_on_publish {
-            return Err(crate::communication::ChannelError::RequestFailed(
-                error_msg.clone(),
-            ));
+            return Err(ChannelError::RequestFailed(error_msg.clone()));
         }
-        self.published.lock().unwrap().push(message.clone());
-        // Also add to certificates so it's available for receive
-        self.certificates.lock().unwrap().push_back(message);
-        Ok(())
+        if self.publish_outcome == PublishOutcome::Landed {
+            self.published.lock().unwrap().push(message.clone());
+            self.certificates.lock().unwrap().push_back(message);
+        }
+        Ok(self.publish_outcome)
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
@@ -614,11 +620,7 @@ impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or_else(|| {
-                crate::communication::ChannelError::RequestFailed(
-                    "No more certificates".to_string(),
-                )
-            })
+            .ok_or_else(|| ChannelError::RequestFailed("No more certificates".to_string()))
     }
 
     async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
@@ -1000,13 +1002,13 @@ struct FailingOrderedBroadcastChannel {
 
 #[async_trait::async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for FailingOrderedBroadcastChannel {
-    async fn publish(&self, _message: CertificateV1) -> ChannelResult<()> {
+    async fn publish(&self, _message: CertificateV1) -> ChannelResult<PublishOutcome> {
         if self.fail_on_publish {
             Err(crate::communication::ChannelError::RequestFailed(
                 self.error_message.clone(),
             ))
         } else {
-            Ok(())
+            Ok(PublishOutcome::Landed)
         }
     }
 
@@ -2216,11 +2218,12 @@ async fn test_run_dealer_failure_party_still_executes() {
         .with_override_certified_dealers(vec![])
         .with_fail_on_publish("simulated publish failure");
 
+    let metrics = test_metrics();
     let output = MpcManager::run_dkg(
         &setup.test_manager,
         &setup.mock_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await
     .unwrap();
@@ -2231,6 +2234,21 @@ async fn test_run_dealer_failure_party_still_executes() {
     // Verify warning was logged
     assert!(logs_contain("Dealer phase failed"));
     assert!(logs_contain("simulated publish failure"));
+
+    assert_eq!(
+        metrics
+            .mpc_cert_publish_total
+            .with_label_values(&[MPC_LABEL_DKG, "request_failed"])
+            .get(),
+        1,
+    );
+    assert_eq!(
+        metrics
+            .mpc_cert_publish_total
+            .with_label_values(&[MPC_LABEL_DKG, "ok"])
+            .get(),
+        0,
+    );
 }
 
 #[tokio::test]
@@ -2250,12 +2268,27 @@ async fn test_run_as_dealer_success() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
     // Call run_as_dealer()
+    let metrics = test_metrics();
     let result =
-        MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &test_metrics())
-            .await;
+        MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &metrics).await;
 
     // Verify success
     assert!(result.is_ok());
+
+    assert_eq!(
+        metrics
+            .mpc_cert_publish_total
+            .with_label_values(&[MPC_LABEL_DKG, "ok"])
+            .get(),
+        1,
+    );
+    assert_eq!(
+        metrics
+            .mpc_cert_publish_total
+            .with_label_values(&[MPC_LABEL_DKG, "request_failed"])
+            .get(),
+        0,
+    );
 
     // Verify own dealer output is stored
     // DKG: outputs keyed by dealer address
@@ -16203,4 +16236,66 @@ fn departing_rotation_dealer_is_verified_not_rejected() {
         rejected.is_empty(),
         "and must not reach the metric that exists to surface Byzantine self-certification"
     );
+}
+
+#[test]
+fn publish_outcome_labels_are_distinct_and_stable() {
+    use crate::communication::ChannelError;
+
+    let cases: [(ChannelError, &str); 7] = [
+        (ChannelError::RequestFailed(String::new()), "request_failed"),
+        (ChannelError::NotReady(String::new()), "not_ready"),
+        (
+            ChannelError::ClientNotFound(Address::ZERO),
+            "client_not_found",
+        ),
+        (ChannelError::Timeout, "timeout"),
+        (ChannelError::Superseded(String::new()), "superseded"),
+        (ChannelError::Closed, "closed"),
+        (ChannelError::Other(String::new()), "other"),
+    ];
+
+    for (err, expected) in &cases {
+        assert_eq!(&publish_outcome_label(err), expected);
+    }
+}
+
+#[tokio::test]
+async fn test_publish_outcomes_are_counted_separately() {
+    for (outcome, expected_label) in [
+        (PublishOutcome::Diverged, "diverged"),
+        (PublishOutcome::AlreadyPresent, "already_present"),
+    ] {
+        let num_validators = 5;
+        let setup = TestSetup::new(num_validators);
+        let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+        let other_managers: HashMap<_, _> = (1..num_validators)
+            .map(|i| (setup.address(i), setup.create_manager(i)))
+            .collect();
+        let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+        let mut mock_tob =
+            MockOrderedBroadcastChannel::new(Vec::new()).with_publish_outcome(outcome);
+
+        let metrics = test_metrics();
+        let result =
+            MpcManager::run_dkg_as_dealer(&test_manager, &mock_p2p, &mut mock_tob, &metrics).await;
+
+        assert!(result.is_ok(), "{outcome:?} should not fail the dealer");
+        assert_eq!(
+            metrics
+                .mpc_cert_publish_total
+                .with_label_values(&[MPC_LABEL_DKG, expected_label])
+                .get(),
+            1,
+            "{outcome:?} should count as {expected_label}",
+        );
+        assert_eq!(
+            metrics
+                .mpc_cert_publish_total
+                .with_label_values(&[MPC_LABEL_DKG, "ok"])
+                .get(),
+            0,
+            "{outcome:?} must not be counted as ok",
+        );
+    }
 }

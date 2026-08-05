@@ -13,7 +13,8 @@ use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::VersionedLogMessage;
+use hashi_types::guardian::VersionedLogMessage::V1;
+use hashi_types::guardian::VersionedLogMessage::V2;
 
 /// A session's verified guardian info: the attestation-anchored signing key,
 /// the signed [`GuardianInfo`], and the build PCRs proven by attestation.
@@ -25,7 +26,7 @@ pub struct VerifiedSessionInfo {
 }
 
 impl VerifiedSessionInfo {
-    pub(super) async fn new(
+    pub(super) async fn read_from_s3(
         s3: &GuardianS3Client,
         session_id: &str,
         allowlist: &PcrAllowlist,
@@ -34,16 +35,15 @@ impl VerifiedSessionInfo {
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
         let attestation_record = s3.get_log_record(&att_key).await?;
-        let attestation_message =
-            match validate_into_entry(attestation_record, None)?.into_message() {
-                VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
-                VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
-                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
-                    return Err(InvalidS3Log(format!(
-                        "expected OIAttestationUnsigned at key {att_key}"
-                    )));
-                }
-            };
+        let attestation_message = match attestation_record.validate_into_entry(None)?.into_message()
+        {
+            V1(LogMessageV1::Init(message)) | V2(LogMessageV2::Init(message)) => message,
+            V1(_) | V2(_) => {
+                return Err(InvalidS3Log(format!(
+                    "expected OIAttestationUnsigned at key {att_key}"
+                )));
+            }
+        };
         let InitLogMessage::OIAttestationUnsigned {
             attestation,
             signing_public_key: signing_pubkey,
@@ -57,16 +57,17 @@ impl VerifiedSessionInfo {
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
         let info_record = s3.get_log_record(&info_key).await?;
-        let info_message =
-            match validate_into_entry(info_record, Some(&signing_pubkey))?.into_message() {
-                VersionedLogMessage::V1(LogMessageV1::Init(message)) => message,
-                VersionedLogMessage::V2(LogMessageV2::Init(message)) => message,
-                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
-                    return Err(InvalidS3Log(format!(
-                        "expected OIGuardianInfo at key {info_key}"
-                    )));
-                }
-            };
+        let info_message = match info_record
+            .validate_into_entry(Some(&signing_pubkey))?
+            .into_message()
+        {
+            V1(LogMessageV1::Init(message)) | V2(LogMessageV2::Init(message)) => message,
+            V1(_) | V2(_) => {
+                return Err(InvalidS3Log(format!(
+                    "expected OIGuardianInfo at key {info_key}"
+                )));
+            }
+        };
         let InitLogMessage::OIGuardianInfo(info) = *info_message else {
             return Err(InvalidS3Log(format!(
                 "expected OIGuardianInfo at key {info_key}"
@@ -90,6 +91,15 @@ impl VerifiedSessionInfo {
         })
     }
 
+    /// Verify a record with this session's attestation-anchored signing key.
+    pub(super) fn verify_record(&self, record: LogRecord) -> GuardianResult<VerifiedLogRecord> {
+        let entry = record.validate_into_entry(Some(&self.signing_pubkey))?;
+        Ok(VerifiedLogRecord {
+            entry,
+            build_pcrs: self.build_pcrs.clone(),
+        })
+    }
+
     pub fn signing_pubkey(&self) -> &GuardianPubKey {
         &self.signing_pubkey
     }
@@ -100,10 +110,6 @@ impl VerifiedSessionInfo {
 
     pub fn build_pcrs(&self) -> &BuildPcrs {
         &self.build_pcrs
-    }
-
-    pub fn into_info(self) -> GuardianInfo {
-        self.info
     }
 }
 
@@ -117,17 +123,6 @@ pub struct VerifiedLogRecord {
 }
 
 impl VerifiedLogRecord {
-    pub(super) fn new(
-        record: LogRecord,
-        session_info: &VerifiedSessionInfo,
-    ) -> GuardianResult<Self> {
-        let entry = validate_into_entry(record, Some(&session_info.signing_pubkey))?;
-        Ok(Self {
-            entry,
-            build_pcrs: session_info.build_pcrs.clone(),
-        })
-    }
-
     #[cfg(test)]
     pub(super) fn new_for_test(entry: LogEntry, build_pcrs: BuildPcrs) -> Self {
         Self { entry, build_pcrs }
@@ -144,12 +139,4 @@ impl VerifiedLogRecord {
     pub fn into_entry(self) -> LogEntry {
         self.entry
     }
-}
-
-fn validate_into_entry(
-    record: LogRecord,
-    signing_public_key: Option<&GuardianPubKey>,
-) -> GuardianResult<LogEntry> {
-    record.validate(signing_public_key)?;
-    Ok(record.into_entry_unchecked())
 }

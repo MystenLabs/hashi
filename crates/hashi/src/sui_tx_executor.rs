@@ -188,14 +188,17 @@ fn uleb128_len(value: usize) -> usize {
 use sui_crypto::SuiSigner;
 use sui_crypto::simple::SimpleKeypair;
 use sui_rpc::Client;
+use sui_rpc::client::ExecuteAndWaitError;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
+use sui_rpc::proto::sui::rpc::v2::ChangedObject;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_rpc::proto::sui::rpc::v2::ExecutionStatus;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
+use sui_rpc::proto::sui::rpc::v2::changed_object::IdOperation;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -284,6 +287,55 @@ pub enum TxOutcome {
     Serialized(String),
 }
 
+/// What is known about the certificate's on-chain fate. Only `Rejected` and `NotSubmitted` are
+/// conclusive; the other two mean the entry may or may not exist, so a retry must re-read rather
+/// than assume.
+#[derive(Debug, thiserror::Error)]
+pub enum SubmitCertError {
+    #[error("certificate submission rejected: {0:?}")]
+    Rejected(Box<ExecutionStatus>),
+    #[error("certificate submission failed, on-chain effect unknown: {0}")]
+    SubmitFailed(anyhow::Error),
+    #[error("certificate submission executed but was not confirmed: {0}")]
+    Unconfirmed(anyhow::Error),
+    #[error("certificate not submitted: {0}")]
+    NotSubmitted(anyhow::Error),
+}
+
+fn created_any(changed: &[ChangedObject]) -> bool {
+    changed
+        .iter()
+        .any(|o| o.id_operation() == IdOperation::Created)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TxFailure {
+    #[error("transaction not submitted: {0}")]
+    NotSubmitted(anyhow::Error),
+    #[error("transaction submission failed: {0}")]
+    Submit(#[source] Box<ExecuteAndWaitError>),
+}
+
+impl SubmitCertError {
+    fn classify(e: anyhow::Error) -> Self {
+        match e.downcast_ref::<TxFailure>() {
+            // Untagged errors are treated as pre-submit: every path in `finalize` that runs after
+            // the submit call tags itself, so an untagged error can only come from before it.
+            Some(TxFailure::NotSubmitted(_)) | None => Self::NotSubmitted(e),
+            Some(TxFailure::Submit(inner)) => match **inner {
+                // Both a failed subscribe (nothing sent) and a failed execute call (possibly
+                // already forwarded to validators) arrive as `RpcError`, indistinguishable here.
+                ExecuteAndWaitError::RpcError(_) => Self::SubmitFailed(e),
+                ExecuteAndWaitError::MissingTransaction
+                | ExecuteAndWaitError::ProtoConversionError(_) => Self::NotSubmitted(e),
+                // `ExecuteAndWaitError` is `#[non_exhaustive]`; assume an unknown variant may have
+                // landed rather than report a certificate that exists as absent.
+                _ => Self::Unconfirmed(e),
+            },
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{function} transaction failed: {status:?}")]
 pub(crate) struct TransactionExecutionError {
@@ -340,10 +392,17 @@ pub async fn finalize(
         }
         TxMode::Execute => {
             let signer = signer.ok_or_else(|| {
-                anyhow::anyhow!("cannot execute transaction: no keypair configured")
+                TxFailure::NotSubmitted(anyhow::anyhow!(
+                    "cannot execute transaction: no keypair configured"
+                ))
             })?;
-            let transaction = builder.build(client).await?;
-            let signature = signer.sign_transaction(&transaction)?;
+            let transaction = builder
+                .build(client)
+                .await
+                .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
+            let signature = signer
+                .sign_transaction(&transaction)
+                .map_err(|e| TxFailure::NotSubmitted(e.into()))?;
             let response = client
                 .execute_transaction_and_wait_for_checkpoint(
                     ExecuteTransactionRequest::new(transaction.into())
@@ -351,7 +410,8 @@ pub async fn finalize(
                         .with_read_mask(FieldMask::from_str("*")),
                     timeout,
                 )
-                .await?
+                .await
+                .map_err(|e| TxFailure::Submit(Box::new(e)))?
                 .into_inner();
             Ok(TxOutcome::Executed(Box::new(response)))
         }
@@ -1198,7 +1258,10 @@ impl SuiTxExecutor {
         skip_all,
         fields(cert_kind = tracing::field::Empty),
     )]
-    pub async fn execute_submit_certificate(&mut self, cert: &CertificateV1) -> anyhow::Result<()> {
+    pub async fn execute_submit_certificate(
+        &mut self,
+        cert: &CertificateV1,
+    ) -> Result<bool, SubmitCertError> {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
@@ -1249,14 +1312,16 @@ impl SuiTxExecutor {
             args,
         );
 
-        let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "Certificate submission failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let response = self
+            .execute(builder)
+            .await
+            .map_err(SubmitCertError::classify)?;
+        let effects = response.transaction().effects();
+        let status = effects.status();
+        if !status.success() {
+            return Err(SubmitCertError::Rejected(Box::new(status.clone())));
         }
-        Ok(())
+        Ok(created_any(effects.changed_objects()))
     }
 
     /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
@@ -2324,5 +2389,50 @@ mod tests {
         assert_eq!(uleb128_len(128), 2);
         assert_eq!(uleb128_len(16383), 2);
         assert_eq!(uleb128_len(16384), 3);
+    }
+
+    #[test]
+    fn created_any_detects_only_created_ids() {
+        let mutated = ChangedObject::default().with_id_operation(IdOperation::None);
+        let deleted = ChangedObject::default().with_id_operation(IdOperation::Deleted);
+        let created = ChangedObject::default().with_id_operation(IdOperation::Created);
+        let unset = ChangedObject::default();
+
+        assert!(!created_any(&[]));
+        assert!(!created_any(&[mutated.clone(), deleted.clone()]));
+        assert!(!created_any(&[unset]));
+        assert!(created_any(&[mutated, created]));
+    }
+
+    #[test]
+    fn classify_reports_how_far_the_submission_got() {
+        let prepare = TxFailure::NotSubmitted(anyhow::anyhow!("simulate failed"));
+        assert!(matches!(
+            SubmitCertError::classify(prepare.into()),
+            SubmitCertError::NotSubmitted(_)
+        ));
+
+        let untagged = anyhow::anyhow!("some error with no stage tag");
+        assert!(matches!(
+            SubmitCertError::classify(untagged),
+            SubmitCertError::NotSubmitted(_)
+        ));
+
+        let rpc = TxFailure::Submit(Box::new(ExecuteAndWaitError::RpcError(
+            tonic::Status::unavailable("fullnode down"),
+        )));
+        assert!(matches!(
+            SubmitCertError::classify(rpc.into()),
+            SubmitCertError::SubmitFailed(_)
+        ));
+
+        let executed = TxFailure::Submit(Box::new(ExecuteAndWaitError::CheckpointStreamError {
+            response: tonic::Response::new(ExecuteTransactionResponse::default()),
+            error: tonic::Status::aborted("checkpoint stream ended unexpectedly"),
+        }));
+        assert!(matches!(
+            SubmitCertError::classify(executed.into()),
+            SubmitCertError::Unconfirmed(_)
+        ));
     }
 }

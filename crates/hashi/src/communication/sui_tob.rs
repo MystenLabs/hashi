@@ -16,11 +16,13 @@ use thiserror::Error;
 use super::ChannelError;
 use super::ChannelResult;
 use super::OrderedBroadcastChannel;
+use super::PublishOutcome;
 use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
 use crate::mpc::types::MessageHash;
 use crate::onchain::OnchainState;
+use crate::sui_tx_executor::SubmitCertError;
 use crate::sui_tx_executor::SuiTxExecutor;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -231,7 +233,7 @@ impl PrefetchedTobChannel {
 
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
-    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
+    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<PublishOutcome> {
         Err(ChannelError::Other(
             "replayed certificate stream is receive-only".into(),
         ))
@@ -274,7 +276,7 @@ fn key_generation_protocol(earliest_committee_epoch: Option<u64>, epoch: u64) ->
 
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
-    async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
+    async fn publish(&self, cert: CertificateV1) -> ChannelResult<PublishOutcome> {
         let ours = cert.message();
         let fetched = tokio::time::timeout(
             DEDUP_READ_TIMEOUT,
@@ -314,32 +316,71 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))
             .collect();
-        match classify_published_cert(&published, &ours.dealer_address, ours.messages_hash) {
-            PublishedCert::Same => return Ok(()),
-            PublishedCert::Diverged { on_chain } => {
-                tracing::warn!(
-                    "{:?} epoch {} batch {:?}: dealer {} already has a certificate over \
-                     different messages (on chain {}, ours {}); regenerated messages or an \
-                     AVID optimistic/pessimistic flip",
-                    self.protocol_type,
-                    self.epoch,
-                    self.batch_index,
-                    ours.dealer_address,
-                    hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(&on_chain)),
-                    hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
-                        &ours.messages_hash
-                    )),
-                );
-                return Ok(());
-            }
-            PublishedCert::Absent => {}
+        let classified =
+            classify_published_cert(&published, &ours.dealer_address, ours.messages_hash);
+        if let PublishedCert::Diverged { on_chain } = &classified {
+            tracing::warn!(
+                "{:?} epoch {} batch {:?}: dealer {} already has a certificate over \
+                 different messages (on chain {}, ours {}); regenerated messages or an \
+                 AVID optimistic/pessimistic flip",
+                self.protocol_type,
+                self.epoch,
+                self.batch_index,
+                ours.dealer_address,
+                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(on_chain)),
+                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                    &ours.messages_hash
+                )),
+            );
         }
-
+        if let Some(outcome) = short_circuit_outcome(&classified) {
+            return Ok(outcome);
+        }
         let mut executor = self.create_executor();
-        executor
+        let inserted = executor
             .execute_submit_certificate(&cert)
             .await
-            .map_err(|e| ChannelError::Other(e.to_string()))
+            // Only `Rejected` is the chain's answer; the rest are failures reaching it or reading
+            // the result back, and must not share a bucket with a conclusive rejection.
+            .map_err(|e| match &e {
+                SubmitCertError::Rejected(_) => ChannelError::Other(e.to_string()),
+                SubmitCertError::NotSubmitted(_)
+                | SubmitCertError::SubmitFailed(_)
+                | SubmitCertError::Unconfirmed(_) => ChannelError::RequestFailed(e.to_string()),
+            })?;
+        if inserted {
+            return Ok(PublishOutcome::Landed);
+        }
+        let settled = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
+        )
+        .await
+        .map_err(ChannelError::from)?;
+        let settled: Vec<(Address, MessageHash)> = settled
+            .iter()
+            .map(|(d, c)| (*d, c.message().messages_hash))
+            .collect();
+        let outcome = raced_outcome(&classify_published_cert(
+            &settled,
+            &ours.dealer_address,
+            ours.messages_hash,
+        ));
+        tracing::warn!(
+            "{:?} epoch {} batch {:?}: this submission for dealer {} inserted nothing; a \
+             certificate already held the slot (ours {}), outcome {:?}",
+            self.protocol_type,
+            self.epoch,
+            self.batch_index,
+            ours.dealer_address,
+            hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                &ours.messages_hash
+            )),
+            outcome,
+        );
+        Ok(outcome)
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
@@ -520,6 +561,21 @@ enum PublishedCert {
     Diverged { on_chain: MessageHash },
 }
 
+fn raced_outcome(classified: &PublishedCert) -> PublishOutcome {
+    match classified {
+        PublishedCert::Same => PublishOutcome::AlreadyPresent,
+        PublishedCert::Diverged { .. } | PublishedCert::Absent => PublishOutcome::Diverged,
+    }
+}
+
+fn short_circuit_outcome(classified: &PublishedCert) -> Option<PublishOutcome> {
+    match classified {
+        PublishedCert::Same => Some(PublishOutcome::AlreadyPresent),
+        PublishedCert::Diverged { .. } => Some(PublishOutcome::Diverged),
+        PublishedCert::Absent => None,
+    }
+}
+
 fn classify_published_cert(
     existing: &[(Address, MessageHash)],
     dealer: &Address,
@@ -619,6 +675,35 @@ mod tests {
         let mut bytes = [0xAB; 32];
         bytes[17] = b;
         MessageHash::new(bytes)
+    }
+
+    #[test]
+    fn raced_outcome_maps_each_classification() {
+        assert_eq!(
+            raced_outcome(&PublishedCert::Same),
+            PublishOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            raced_outcome(&PublishedCert::Absent),
+            PublishOutcome::Diverged
+        );
+        assert_eq!(
+            raced_outcome(&PublishedCert::Diverged { on_chain: hash(1) }),
+            PublishOutcome::Diverged
+        );
+    }
+
+    #[test]
+    fn short_circuit_outcome_maps_each_classification() {
+        assert_eq!(
+            short_circuit_outcome(&PublishedCert::Same),
+            Some(PublishOutcome::AlreadyPresent)
+        );
+        assert_eq!(
+            short_circuit_outcome(&PublishedCert::Diverged { on_chain: hash(1) }),
+            Some(PublishOutcome::Diverged)
+        );
+        assert_eq!(short_circuit_outcome(&PublishedCert::Absent), None);
     }
 
     #[test]

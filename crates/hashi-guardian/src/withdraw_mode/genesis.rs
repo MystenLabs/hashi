@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::s3_reader::BuildPolicy;
 use crate::Enclave;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
@@ -11,11 +10,7 @@ use hashi_types::guardian::GuardianResult;
 pub(super) async fn ensure_no_serving_committee(enclave: &Enclave) -> GuardianResult<()> {
     let mut reader = enclave.new_guardian_reader()?;
 
-    if reader
-        .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?
-        .is_some()
-    {
+    if reader.read_latest_committee().await?.is_some() {
         return Err(InvalidInputs(
             "genesis bootstrap is rejected after a serving committee exists".into(),
         ));

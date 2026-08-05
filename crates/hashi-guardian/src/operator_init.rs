@@ -8,7 +8,6 @@
 
 use crate::attestation::get_attestation;
 use crate::enclave::TemporaryInitState;
-use crate::s3_reader::BuildPolicy;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
@@ -64,7 +63,7 @@ impl OIWithdrawModeInstall {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
         let ceremony_state = reader
-            .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
+            .read_latest_ceremony_state()
             .await?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
