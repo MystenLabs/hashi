@@ -110,7 +110,9 @@ struct Inner {
     /// The state watermark: the checkpoint through which the object
     /// mirror has applied every Hashi transaction. Never reported ahead
     /// of what has been applied; drives `wait_until_checkpoint`.
-    state_watermark: watch::Sender<u64>,
+    /// `None` when no mirror runs, which is not the same as covering
+    /// nothing yet — there is no claim to make at all.
+    state_watermark: watch::Sender<Option<u64>>,
     state: RwLock<State>,
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
@@ -226,9 +228,8 @@ impl OnchainState {
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
-        // No seed means no floor to claim; 0 makes a waiter block rather
-        // than see coverage no mirror is maintaining.
-        let (state_watermark, _) = watch::channel(seed.as_ref().map_or(0, |seed| seed.floor));
+        // No seed means no mirror, so there is no floor to claim.
+        let (state_watermark, _) = watch::channel(seed.as_ref().map(|seed| seed.floor));
         let state = Inner {
             ids,
             client,
@@ -279,8 +280,8 @@ impl OnchainState {
     }
 
     /// The checkpoint through which the object mirror has applied every
-    /// Hashi transaction.
-    pub fn state_watermark(&self) -> u64 {
+    /// Hashi transaction, or `None` when no mirror runs.
+    pub fn state_watermark(&self) -> Option<u64> {
         *self.0.state_watermark.borrow()
     }
 
@@ -288,10 +289,10 @@ impl OnchainState {
     /// calls this, from server coverage claims and applied transactions.
     fn advance_state_watermark(&self, covered: u64) {
         self.0.state_watermark.send_if_modified(|current| {
-            if covered <= *current {
+            if current.is_some_and(|current| covered <= current) {
                 return false;
             }
-            *current = covered;
+            *current = Some(covered);
             true
         });
         self.observe_state_watermark();
@@ -307,24 +308,26 @@ impl OnchainState {
     /// idempotent applies.
     fn reset_state_watermark(&self, covered: u64) {
         self.0.state_watermark.send_if_modified(|current| {
-            if covered < *current {
+            if let Some(current) = *current
+                && covered < current
+            {
                 tracing::warn!(
-                    from = *current,
+                    from = current,
                     to = covered,
                     "state watermark reset backwards: the re-bootstrap scrape is older than \
                      the mirror was"
                 );
             }
-            std::mem::replace(current, covered) != covered
+            current.replace(covered) != Some(covered)
         });
         self.observe_state_watermark();
     }
 
     fn observe_state_watermark(&self) {
-        if let Some(metrics) = &self.0.metrics {
-            metrics
-                .watcher_state_watermark
-                .set(self.state_watermark() as i64);
+        if let Some(metrics) = &self.0.metrics
+            && let Some(watermark) = self.state_watermark()
+        {
+            metrics.watcher_state_watermark.set(watermark as i64);
         }
     }
 
@@ -338,10 +341,15 @@ impl OnchainState {
     /// matching transaction in it has been delivered (or a later
     /// transaction proves it by arriving). Waiters never observe a
     /// checkpoint whose Hashi transactions are still in flight.
+    ///
+    /// With no mirror there is nothing to advance the watermark, so this
+    /// blocks until the caller's timeout rather than answering from a
+    /// coverage claim no one maintains.
     pub async fn wait_until_checkpoint(&self, target_seq: u64) {
         let mut rx = self.0.state_watermark.subscribe();
         loop {
-            if *rx.borrow_and_update() >= target_seq {
+            let covered = *rx.borrow_and_update();
+            if covered.is_some_and(|covered| covered >= target_seq) {
                 return;
             }
             if rx.changed().await.is_err() {

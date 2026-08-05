@@ -1739,8 +1739,8 @@ mod tests {
         // Positive control: the outage must have been real.
         let severed_watermark = proxied.onchain_state().state_watermark();
         assert!(
-            severed_watermark < last_checkpoint,
-            "the severed node's watermark ({severed_watermark}) covers the outage \
+            severed_watermark.is_none_or(|covered| covered < last_checkpoint),
+            "the severed node's watermark ({severed_watermark:?}) covers the outage \
              transactions (checkpoint {last_checkpoint}); the outage was not effective"
         );
         {
