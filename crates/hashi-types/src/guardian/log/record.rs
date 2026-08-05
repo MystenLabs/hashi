@@ -28,7 +28,6 @@ use crate::guardian::now_timestamp_ms;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::Error as _;
-use serde::ser::Error as _;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -64,13 +63,24 @@ pub enum LogRecord {
     Unsigned(LogEntry),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct LogRecordWire {
     schema_version: u64,
     object_key: String,
     session_id: SessionID,
     timestamp_ms: UnixMillis,
     message: Value,
+    #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
+    signature: Option<GuardianSignature>,
+}
+
+#[derive(Serialize)]
+struct LogRecordWireRef<'a, M> {
+    schema_version: u64,
+    object_key: &'a str,
+    session_id: &'a SessionID,
+    timestamp_ms: UnixMillis,
+    message: &'a M,
     #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
     signature: Option<GuardianSignature>,
 }
@@ -84,16 +94,37 @@ impl Serialize for LogRecord {
             Self::Signed(signed) => (signed.data_unchecked(), Some(signed.signature)),
             Self::Unsigned(unsigned) => (unsigned, None),
         };
-        LogRecordWire {
-            schema_version: data.schema_version,
-            object_key: data.object_key.clone(),
-            session_id: data.session_id.clone(),
-            timestamp_ms: data.timestamp_ms,
-            message: serde_json::to_value(&data.message).map_err(S::Error::custom)?,
-            signature,
+
+        match &data.message {
+            VersionedLogMessage::V1(message) => {
+                serialize_log_record(data, message, signature, serializer)
+            }
+            VersionedLogMessage::V2(message) => {
+                serialize_log_record(data, message, signature, serializer)
+            }
         }
-        .serialize(serializer)
     }
+}
+
+fn serialize_log_record<S, M>(
+    data: &LogEntry,
+    message: &M,
+    signature: Option<GuardianSignature>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    M: Serialize,
+{
+    LogRecordWireRef {
+        schema_version: data.schema_version,
+        object_key: &data.object_key,
+        session_id: &data.session_id,
+        timestamp_ms: data.timestamp_ms,
+        message,
+        signature,
+    }
+    .serialize(serializer)
 }
 
 impl<'de> Deserialize<'de> for LogRecord {
