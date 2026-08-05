@@ -24,6 +24,7 @@ use crate::config::Config;
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
 const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
+const MIN_CONFIRMATIONS: u64 = 6;
 
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
@@ -51,11 +52,35 @@ struct JsonRpcError {
 #[derive(Deserialize)]
 struct RawTransactionInfo {
     blockhash: Option<String>,
+    #[serde(default)]
+    confirmations: u64,
 }
 
 #[derive(Deserialize)]
 struct RawBlockHeader {
     time: u64,
+}
+
+impl RawTransactionInfo {
+    fn sufficiently_confirmed_block_hash(self, txid: Txid) -> anyhow::Result<Option<BlockHash>> {
+        let Some(block_hash) = self.blockhash else {
+            debug!(%txid, "bitcoin tx found but not mined yet");
+            return Ok(None);
+        };
+        if self.confirmations < MIN_CONFIRMATIONS {
+            debug!(
+                %txid,
+                confirmations = self.confirmations,
+                required_confirmations = MIN_CONFIRMATIONS,
+                "bitcoin tx has insufficient confirmation depth"
+            );
+            return Ok(None);
+        }
+
+        BlockHash::from_str(&block_hash)
+            .with_context(|| format!("invalid bitcoin block hash for {txid}"))
+            .map(Some)
+    }
 }
 
 impl BtcRpcClient {
@@ -188,12 +213,9 @@ impl HttpJsonRpcTransport {
                 .context("bitcoin getrawtransaction response is missing its result")?,
         )
         .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-        let Some(block_hash) = tx_info.blockhash else {
-            debug!(%txid, "bitcoin tx found but not mined yet");
+        let Some(block_hash) = tx_info.sufficiently_confirmed_block_hash(txid)? else {
             return Ok(None);
         };
-        let block_hash = BlockHash::from_str(&block_hash)
-            .with_context(|| format!("invalid bitcoin block hash for {txid}"))?;
 
         let response = self.call(
             "getblockheader",
@@ -278,13 +300,7 @@ impl HttpJsonRpcTransport {
                     .context("bitcoin getrawtransaction batch response is missing its result")?,
             )
             .with_context(|| format!("failed to parse transaction info for {txid}"))?;
-            let block_hash = info
-                .blockhash
-                .map(|hash| {
-                    BlockHash::from_str(&hash)
-                        .with_context(|| format!("invalid bitcoin block hash for {txid}"))
-                })
-                .transpose()?;
+            let block_hash = info.sufficiently_confirmed_block_hash(txid)?;
             block_hashes.insert(txid, block_hash);
         }
         anyhow::ensure!(
@@ -410,6 +426,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::BtcRpcClient;
+    use super::MIN_CONFIRMATIONS;
     use crate::config::BtcConfig;
     use crate::config::Config;
     use crate::config::NextEventDelays;
@@ -492,6 +509,15 @@ mod tests {
         assert!(unconfirmed.is_none(), "expected unconfirmed transaction");
 
         node.generate_blocks(1)?;
+        btc_rpc_client.clear_confirmation_cache();
+
+        let insufficiently_confirmed = btc_rpc_client.lookup_confirmation(txid)?;
+        assert!(
+            insufficiently_confirmed.is_none(),
+            "expected one-confirmation transaction to remain pending"
+        );
+
+        node.generate_blocks(MIN_CONFIRMATIONS - 1)?;
         btc_rpc_client.clear_confirmation_cache();
 
         let confirmed = btc_rpc_client.lookup_confirmation(txid)?;
