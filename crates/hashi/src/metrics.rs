@@ -118,6 +118,8 @@ pub struct Metrics {
 
     pub mpc_sign_duration_seconds: HistogramVec,
     pub mpc_sign_failures_total: IntCounterVec,
+    /// Dealer rounds that ended without publishing a certificate.
+    pub mpc_dealer_cert_shortfall_total: IntCounterVec,
     /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
     /// Each failure also puts the peer in a short poll cooldown, so this is
     /// the per-validator health signal for the MPC signing path.
@@ -723,6 +725,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_dealer_cert_shortfall_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_dealer_cert_shortfall_total",
+                "Dealer rounds that ended without publishing a certificate",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
             mpc_partial_sig_poll_failures_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_partial_sig_poll_failures_total",
                 "Failed get_partial_signatures polls by peer (the peer is then cooled down)",
@@ -831,7 +840,7 @@ impl Metrics {
             .unwrap(),
             mpc_p2p_broadcast_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_p2p_broadcast_duration_seconds",
-                "Duration of send_to_many",
+                "Dealer fan-out duration.",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
