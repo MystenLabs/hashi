@@ -390,8 +390,7 @@ pub struct UnresolvedS3Config {
     pub region: String,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
-    // TODO: Should this be replaced by, or derived from, a
-    // repository-wide Hashi network identifier?
+    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
     pub retention_environment: S3RetentionEnvironment,
 }
 
