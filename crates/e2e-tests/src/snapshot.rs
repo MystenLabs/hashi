@@ -110,7 +110,7 @@ fn rebase_runtime_to_zero(module: &mut CompiledModule, runtime: AccountAddress) 
 /// Every snapshot module is self-addressed at the deployed package's
 /// runtime/original id. We derive it from the first module's bytecode
 /// (matching `MovePackage::original_package_id`) rather than trusting the
-/// manifest, then assert every module agrees.
+/// manifest, and assert every module agrees.
 fn read_runtime_id(modules: &[CompiledModule]) -> Result<AccountAddress> {
     let runtime = module_self_address(
         modules
@@ -121,6 +121,14 @@ fn read_runtime_id(modules: &[CompiledModule]) -> Result<AccountAddress> {
         runtime != AccountAddress::ZERO,
         "snapshot modules unexpectedly carry a 0x0 self-address"
     );
+    for module in modules {
+        let addr = module_self_address(module)?;
+        anyhow::ensure!(
+            addr == runtime,
+            "module `{}` self-address is {addr}, expected snapshot runtime id {runtime}",
+            module.identifier_at(module.self_handle().name),
+        );
+    }
     Ok(runtime)
 }
 
