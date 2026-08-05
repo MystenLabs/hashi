@@ -24,9 +24,6 @@ use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::InitLogMessage;
-use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::VerifiedSessionInfo;
 use serde::Serialize;
 use tracing::info;
 use tracing::warn;
@@ -632,61 +629,6 @@ impl GuardianS3Client {
         self.get_log_record_inner(key, LockCheck::Required, HistoryCheck::Required)
             .await
     }
-
-    /// Resolve a session's [`VerifiedSessionInfo`]: read the AWS-self-signed
-    /// attestation (anchoring the signing pubkey), then the signed `GuardianInfo`,
-    /// and pin the attestation's PCR0 against the `allowlist` entry named by the
-    /// info's reported build. No caller needs the raw attestation bytes.
-    pub(crate) async fn get_verified_session_info(
-        &self,
-        session_id: &str,
-        allowlist: &PcrAllowlist,
-    ) -> GuardianResult<VerifiedSessionInfo> {
-        // 1. Attestation (unsigned: authenticated by AWS, not the enclave key) →
-        //    the signing pubkey it commits to.
-        let att_key = InitLogMessage::attestation_object_key(session_id);
-        let attestation_record = self.get_log_record(&att_key).await?;
-        let (_, _, attestation_message) = attestation_record.validate(None)?;
-        let (attestation, signing_pubkey) = attestation_message
-            .into_init_log()
-            .and_then(|x| match x {
-                InitLogMessage::OIAttestationUnsigned {
-                    attestation,
-                    signing_public_key,
-                } => Some((attestation, signing_public_key)),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                InvalidS3Log(format!("expected OIAttestationUnsigned at key {att_key}"))
-            })?;
-
-        // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
-        let info_key = InitLogMessage::guardian_info_object_key(session_id);
-        let info_record = self.get_log_record(&info_key).await?;
-        let (_, _, info_message) = info_record.validate(Some(&signing_pubkey))?;
-        let info = info_message
-            .into_init_log()
-            .and_then(|x| match x {
-                InitLogMessage::OIGuardianInfo(info) => Some(*info),
-                _ => None,
-            })
-            .ok_or_else(|| InvalidS3Log(format!("expected OIGuardianInfo at key {info_key}")))?;
-
-        // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
-        //    reported build. This replays a logged attestation whose short-lived
-        //    leaf cert has typically expired, so the chain is checked at the
-        //    document's own signed timestamp, not now.
-        let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
-        attestation
-            .verify_replay(&signing_pubkey, &build_pcrs)
-            .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
-
-        Ok(VerifiedSessionInfo {
-            signing_pubkey,
-            info,
-            build_pcrs,
-        })
-    }
 }
 
 // TODO(testnet-wipe): Once legacy seven-day logs are gone, also verify that the
@@ -725,6 +667,7 @@ mod tests {
     use aws_smithy_mocks::RuleMode;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
+    use hashi_types::guardian::InitLogMessage;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::SessionID;

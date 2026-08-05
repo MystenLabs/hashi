@@ -142,9 +142,9 @@ pub async fn run(cfg: Config) -> Result<()> {
     let verified_session = reader
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
-    let attested_signing_pub_key = verified_session.signing_pubkey;
+    let attested_signing_pub_key = verified_session.signing_pubkey();
     ensure!(
-        attested_signing_pub_key == signing_pub_key,
+        attested_signing_pub_key == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     info!(
