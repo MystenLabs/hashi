@@ -9,7 +9,6 @@ use anyhow::ensure;
 use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::MAX_S3_WRITE_FAILURE_INTERVAL;
 use hashi_guardian::OTHER_SESSION_QUIET_PERIOD;
-use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
@@ -124,9 +123,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         session_id = %session_id,
         "verifying OI GuardianInfo matches the live guardian identity/config",
     );
-    let verified_session = reader
-        .get_session_info(&session_id, BuildPolicy::Current)
-        .await?;
+    let verified_session = reader.get_current_session_info(&session_id).await?;
     ensure!(
         verified_session.signing_pubkey() == &signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
@@ -152,7 +149,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "reading latest committee and recovering limiter state",
     );
     let move_committee = reader
-        .read_latest_committee(BuildPolicy::AnyAllowlisted)
+        .read_latest_committee()
         .await?
         .context("no committee-update or genesis record found")?;
     let committee_epoch = move_committee.epoch;

@@ -34,7 +34,8 @@ use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
-use hashi_types::guardian::VersionedLogMessage;
+use hashi_types::guardian::VersionedLogMessage::V1;
+use hashi_types::guardian::VersionedLogMessage::V2;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
@@ -52,7 +53,7 @@ impl GuardianReader {
         &mut self,
         limiter_config: &LimiterConfig,
     ) -> GuardianResult<LimiterState> {
-        let Some(mut cursor) = find_latest_success_bucket(self.s3()).await? else {
+        let Some(mut cursor) = find_latest_success_bucket(&self.s3).await? else {
             // The search covers the complete S3 withdrawal history, so this
             // branch is reachable only if no withdrawal has ever succeeded.
             info!("no successful withdrawal logs found; using genesis limiter state");
@@ -135,9 +136,10 @@ fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
     logs.into_iter()
         .filter_map(|log| {
             let boxed = match log.into_entry().into_message() {
-                VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) => message,
-                VersionedLogMessage::V2(LogMessageV2::Withdrawal(message)) => message,
-                VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => return None,
+                V1(LogMessageV1::Withdrawal(message)) | V2(LogMessageV2::Withdrawal(message)) => {
+                    message
+                }
+                V1(_) | V2(_) => return None,
             };
             match *boxed {
                 WithdrawalLogMessage::Success { post_state, .. } => Some(post_state),

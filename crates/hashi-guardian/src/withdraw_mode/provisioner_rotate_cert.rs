@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use crate::s3_reader::BuildPolicy;
 use crate::Enclave;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
@@ -50,7 +49,7 @@ pub async fn provisioner_rotate_cert(
     let mut reader = enclave.new_guardian_reader()?;
 
     let latest_state = reader
-        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
+        .read_latest_ceremony_state()
         .await?
         .ok_or_else(|| InvalidInputs("no ceremony log found during cert rotation".into()))?;
     let enclave_btc_pubkey = enclave.config.enclave_btc_pubkey()?;
