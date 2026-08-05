@@ -2,8 +2,7 @@ name: Deploy Hashi Devnet
 run-name: Deploy Hashi devnet (${{ github.sha }})
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   actions: read
