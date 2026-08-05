@@ -61,6 +61,57 @@ impl fmt::Display for UtcTimestamp {
     }
 }
 
+/// Seconds rendered as a compact human-readable duration.
+pub struct HumanDuration(UnixSeconds);
+
+pub fn human_duration(seconds: UnixSeconds) -> HumanDuration {
+    HumanDuration(seconds)
+}
+
+impl fmt::Display for HumanDuration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hours = self.0 / 3_600;
+        let minutes = (self.0 % 3_600) / 60;
+        let seconds = self.0 % 60;
+
+        if hours > 0 {
+            write!(formatter, "{hours}h")?;
+        }
+        if minutes > 0 || hours > 0 {
+            write!(formatter, "{minutes}m")?;
+        }
+        write!(formatter, "{seconds}s")
+    }
+}
+
+/// Signed difference between two Unix timestamps, rendered compactly.
+pub struct HumanTimestampDelta(i128);
+
+pub fn human_timestamp_delta(later: UnixSeconds, earlier: UnixSeconds) -> HumanTimestampDelta {
+    HumanTimestampDelta(i128::from(later) - i128::from(earlier))
+}
+
+impl fmt::Display for HumanTimestampDelta {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 < 0 {
+            formatter.write_str("-")?;
+        }
+
+        let total_seconds = self.0.unsigned_abs();
+        let hours = total_seconds / 3_600;
+        let minutes = (total_seconds % 3_600) / 60;
+        let seconds = total_seconds % 60;
+
+        if hours > 0 {
+            write!(formatter, "{hours}h")?;
+        }
+        if minutes > 0 || hours > 0 {
+            write!(formatter, "{minutes}m")?;
+        }
+        write!(formatter, "{seconds}s")
+    }
+}
+
 /// Parse the monitor's sole public timestamp format: whole-second UTC RFC 3339.
 pub fn parse_utc_timestamp(value: &str) -> Result<UnixSeconds, String> {
     if !value.ends_with('Z') {
@@ -238,5 +289,13 @@ mod tests {
         assert!(parse_utc_timestamp("1785872738").is_err());
         assert!(parse_utc_timestamp("2026-08-04T19:45:38+00:00").is_err());
         assert!(parse_utc_timestamp("2026-08-04T19:45:38.000Z").is_err());
+    }
+
+    #[test]
+    fn duration_uses_compact_human_readable_format() {
+        assert_eq!(human_duration(0).to_string(), "0s");
+        assert_eq!(human_duration(191).to_string(), "3m11s");
+        assert_eq!(human_duration(4_028).to_string(), "1h7m8s");
+        assert_eq!(human_timestamp_delta(100, 120).to_string(), "-20s");
     }
 }

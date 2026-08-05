@@ -21,6 +21,8 @@ use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::PollOutcome;
 use crate::domain::WithdrawalEventType;
+use crate::domain::human_timestamp_delta;
+use crate::domain::utc_timestamp;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -242,7 +244,24 @@ impl AuditorCore {
                 continue;
             }
             if !sm.is_expecting_events() {
-                tracing::info!(%wid, "withdrawal flow is complete");
+                let e1 = sm
+                    .get(WithdrawalEventType::E1HashiApproved)
+                    .expect("completed withdrawal has E1");
+                let e2 = sm
+                    .get(WithdrawalEventType::E2GuardianApproved)
+                    .expect("completed withdrawal has E2");
+                let e3 = sm
+                    .get(WithdrawalEventType::E3BtcConfirmed)
+                    .expect("completed withdrawal has E3");
+                tracing::info!(
+                    %wid,
+                    e1_at = %utc_timestamp(e1.timestamp_secs),
+                    e2_at = %utc_timestamp(e2.timestamp_secs),
+                    e3_at = %utc_timestamp(e3.timestamp_secs),
+                    e1_to_e2 = %human_timestamp_delta(e2.timestamp_secs, e1.timestamp_secs),
+                    e2_to_e3 = %human_timestamp_delta(e3.timestamp_secs, e2.timestamp_secs),
+                    "withdrawal flow is complete"
+                );
                 completed_withdrawals.push(*wid);
             }
         }

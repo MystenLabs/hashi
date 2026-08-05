@@ -3,27 +3,10 @@
 
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorEventType;
+use crate::domain::human_duration;
 use crate::domain::utc_timestamp;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use std::fmt;
-
-struct HumanDuration(UnixSeconds);
-
-impl fmt::Display for HumanDuration {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hours = self.0 / 3_600;
-        let minutes = (self.0 % 3_600) / 60;
-        let seconds = self.0 % 60;
-
-        if hours > 0 {
-            write!(f, "{hours}h")?;
-        }
-        if minutes > 0 || hours > 0 {
-            write!(f, "{minutes}m")?;
-        }
-        write!(f, "{seconds}s")
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EventRelation {
@@ -100,7 +83,7 @@ impl fmt::Display for MonitorFinding {
                 "EventOccurredAfterDeadline(event={event}, relation={relation:?}, deadline={}, occurred_at={}, late_by={})",
                 utc_timestamp(*deadline),
                 utc_timestamp(*occurred_at),
-                HumanDuration(occurred_at.saturating_sub(*deadline)),
+                human_duration(occurred_at.saturating_sub(*deadline)),
             ),
             Self::ExpectedEventMissing {
                 event_type,
