@@ -121,8 +121,8 @@ pub struct Metrics {
     /// Dealer rounds that ended without publishing a certificate.
     pub mpc_dealer_cert_shortfall_total: IntCounterVec,
     pub mpc_dealer_collection_stops_total: IntCounterVec,
-    /// Reduced weight a dealer collected above the threshold it was waiting
-    /// for, recorded only when that threshold was met.
+    /// Reduced weight a dealer collected above its stopping threshold,
+    /// recorded only when that threshold was met.
     pub mpc_dealer_collected_margin_weight: HistogramVec,
     /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
     /// Each failure also puts the peer in a short poll cooldown, so this is
@@ -752,7 +752,7 @@ impl Metrics {
             .unwrap(),
             mpc_dealer_collected_margin_weight: register_histogram_vec_with_registry!(
                 "hashi_mpc_dealer_collected_margin_weight",
-                "Reduced weight collected above the threshold the dealer was waiting for",
+                "Reduced weight collected above the dealer's stopping threshold.",
                 &["protocol"],
                 REDUCED_WEIGHT_BUCKETS.to_vec(),
                 registry,
