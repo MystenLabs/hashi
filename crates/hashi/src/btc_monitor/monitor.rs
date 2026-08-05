@@ -211,6 +211,8 @@ pub struct Monitor {
     rpc_workers: JoinSet<()>,
     deposit_lookup_cache: SharedDepositLookupCache,
     deposit_observation_cache: HashMap<bitcoin::OutPoint, CachedDepositEntry>,
+    /// Endless rotation of `config.trusted_peers`; yields `None` when it's empty.
+    trusted_peer_rotation: std::iter::Cycle<std::vec::IntoIter<kyoto::TrustedPeer>>,
 }
 
 /// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
@@ -234,8 +236,8 @@ impl Monitor {
             .add_peers(config.trusted_peers.iter().cloned())
             // Only connect to the configured trusted peers. Prevents Kyoto from
             // discovering additional peers via DNS seeding or addr gossip.
-            // If all peers disconnect, the node exits with NoReachablePeers
-            // and the supervision loop rebuilds it.
+            // `replenish_trusted_peers` keeps the whitelist stocked; if it still
+            // drains, the node exits and the supervision loop rebuilds it.
             .whitelist_only()
             .maximum_connection_time(Duration::MAX)
             .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
@@ -325,6 +327,7 @@ impl Monitor {
 
                 let start_checkpoint = Self::resolve_start_checkpoint(&bitcoind_rpc, &config).await;
                 let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config, start_checkpoint);
+                let trusted_peer_rotation = config.trusted_peers.clone().into_iter().cycle();
 
                 let mut monitor = Monitor {
                     config,
@@ -340,6 +343,7 @@ impl Monitor {
                     rpc_workers: JoinSet::new(),
                     deposit_lookup_cache: SharedDepositLookupCache::new(metrics),
                     deposit_observation_cache: HashMap::new(),
+                    trusted_peer_rotation,
                 };
 
                 monitor
@@ -433,6 +437,18 @@ impl Monitor {
         }
     }
 
+    /// Kyoto pops a whitelist entry per dial and never refills it, so a
+    /// `whitelist_only` node eventually exits with `NoReachablePeers`. It warns
+    /// once per dial, so one peer per warning refills it at the rate it drains.
+    fn replenish_trusted_peers(&mut self) {
+        let Some(peer) = self.trusted_peer_rotation.next() else {
+            return;
+        };
+        if let Err(e) = self.requester.add_peer(peer) {
+            debug!("Could not return a trusted peer to Kyoto's whitelist: {e}");
+        }
+    }
+
     /// Map a Kyoto `Warning` variant to a short label for metrics.
     fn warning_label(warning: &Warning) -> &'static str {
         match warning {
@@ -485,6 +501,7 @@ impl Monitor {
                     if let Warning::NeedConnections { connected, required } = &warning {
                         self.metrics.kyoto_connected_peers.set(*connected as i64);
                         required_peers = *required;
+                        self.replenish_trusted_peers();
                     }
 
                     let is_connectivity_failure = matches!(
