@@ -21,7 +21,6 @@ use hashi::mpc::MpcManager;
 use hashi::mpc::types::CertificateV1;
 use hashi::mpc::types::ProtocolType;
 use hashi::mpc::types::ReconstructionOutcome;
-use hashi::mpc::types::SessionId;
 use hashi::onchain::OnchainState;
 use hashi::onchain::types::CommitteeSet;
 use hashi::storage::EpochPublicMessagesStore;
@@ -185,7 +184,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         println!("  Validator address: {validator_address}");
 
         let store = EpochPublicMessagesStore::new(db.clone(), previous_epoch);
-        let session_id = SessionId::new(chain_id, reconstruction_epoch, &ProtocolType::KeyRotation);
         // `encryption_key` decrypted `previous_epoch`'s AVSS messages, which is
         // what reconstruction reads. Pass it as both `encryption_key` (unused
         // here) and `previous_encryption_key`.
@@ -194,7 +192,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             validator_address,
             &recovery_committee_set,
             reconstruction_epoch,
-            session_id,
+            ProtocolType::KeyRotation,
             encryption_key.clone(),
             Some(encryption_key),
             dummy_signing_key.clone(),

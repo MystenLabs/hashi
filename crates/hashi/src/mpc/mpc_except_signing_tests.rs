@@ -273,16 +273,11 @@ impl TestSetup {
         store: Box<dyn PublicMessagesStore>,
     ) -> MpcManager {
         let address = Address::new([validator_index as u8; 32]);
-        let session_id = SessionId::new(
-            TEST_CHAIN_ID,
-            self.committee_set.epoch(),
-            &ProtocolType::Dkg,
-        );
         MpcManager::new(
             address,
             &self.committee_set,
             self.committee_set.epoch(),
-            session_id,
+            ProtocolType::Dkg,
             self.encryption_keys[validator_index].clone(),
             None,
             self.signing_keys[validator_index].clone(),
@@ -1011,13 +1006,12 @@ fn test_mpc_manager_new_from_committee_set() {
     let encryption_key = setup.encryption_keys[0].clone();
     let signing_key = setup.signing_keys[0].clone();
     let address = setup.address(0);
-    let session_id = setup.session_id();
 
     let manager = MpcManager::new(
         address,
         &setup.committee_set,
         setup.epoch(),
-        session_id,
+        ProtocolType::Dkg,
         encryption_key,
         None,
         signing_key,
@@ -1077,12 +1071,11 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         .set_members(members)
         .set_committees(BTreeMap::new()); // Empty!
 
-    let session_id = SessionId::new("test", epoch, &ProtocolType::Dkg);
     let result = MpcManager::new(
         Address::new([0; 32]),
         &committee_set,
         epoch,
-        session_id,
+        ProtocolType::Dkg,
         encryption_keys[0].clone(),
         None,
         signing_keys[0].clone(),
@@ -1114,7 +1107,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         setup.address(0),
         &setup.committee_set,
         setup.epoch(),
-        setup.session_id(),
+        ProtocolType::Dkg,
         wrong_encryption_key,
         None,
         setup.signing_keys[0].clone(),
@@ -1197,12 +1190,11 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         .set_members(member_infos)
         .set_committees(committees);
 
-    let session_id = SessionId::new(TEST_CHAIN_ID, 33, &ProtocolType::KeyRotation);
     let manager = MpcManager::new(
         Address::new([0u8; 32]),
         &committee_set,
         33,
-        session_id,
+        ProtocolType::KeyRotation,
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
@@ -1283,12 +1275,11 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         .set_members(member_infos)
         .set_committees(committees);
 
-    let session_id = SessionId::new(TEST_CHAIN_ID, 5, &ProtocolType::KeyRotation);
     let manager = MpcManager::new(
         Address::new([0u8; 32]),
         &committee_set,
         5, // <-- explicit caller epoch; old recompute would have used 10
-        session_id,
+        ProtocolType::KeyRotation,
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
@@ -6227,14 +6218,10 @@ impl RotationTestSetup {
     }
 
     fn switch_to_rotation(&self, manager: &mut MpcManager) {
-        manager.session_id = SessionId::new(
-            TEST_CHAIN_ID,
-            self.setup.epoch(),
-            &ProtocolType::KeyRotation,
-        );
+        manager.protocol_type = ProtocolType::KeyRotation;
     }
 
-    fn prepare_for_rotation(&self, manager: &mut MpcManager) {
+    fn install_previous_committee(&self, manager: &mut MpcManager) {
         let previous_committee = self
             .setup
             .committee_set
@@ -6281,7 +6268,7 @@ impl RotationTestSetup {
         receiver_manager.dealer_outputs.clear();
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut receiver_manager);
+        self.install_previous_committee(&mut receiver_manager);
         self.switch_to_rotation(&mut receiver_manager);
 
         (receiver_manager, dkg_output)
@@ -6312,7 +6299,7 @@ impl RotationTestSetup {
         receiver_manager.dealer_outputs.clear();
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut receiver_manager);
+        self.install_previous_committee(&mut receiver_manager);
         self.switch_to_rotation(&mut receiver_manager);
 
         (receiver_manager, dkg_output)
@@ -6340,7 +6327,7 @@ impl RotationTestSetup {
         dealer_manager.dealer_outputs.clear();
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut dealer_manager);
+        self.install_previous_committee(&mut dealer_manager);
         self.switch_to_rotation(&mut dealer_manager);
 
         // Create rotation messages and store for reuse
@@ -6381,7 +6368,7 @@ impl RotationTestSetup {
         dealer_manager.dealer_outputs.clear();
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut dealer_manager);
+        self.install_previous_committee(&mut dealer_manager);
         self.switch_to_rotation(&mut dealer_manager);
 
         // Create rotation messages and store for reuse
@@ -7304,7 +7291,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         .unwrap();
     let (_, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &cheating_dealer_mgr.session_id,
+        &cheating_dealer_mgr.current_session_id(),
         &cheating_dealer_addr,
         share_value,
         first_share_index,
@@ -7493,12 +7480,11 @@ async fn test_prepare_previous_output_for_new_member() {
         .set_committees(committees);
 
     // Create new member's MpcManager
-    let session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg);
     let new_member_manager = MpcManager::new(
         new_member_addr,
         &new_committee_set,
         epoch,
-        session_id,
+        ProtocolType::Dkg,
         new_member_encryption_key,
         None,
         new_member_signing_key,
@@ -7729,10 +7715,6 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
 
-    // Override session ID to KeyRotation so rotation messages match
-    // what reconstruct_previous_rotation_output expects.
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
-
     // Create rotation dealers with KeyRotation session ID.
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -7740,7 +7722,6 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -7835,7 +7816,6 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
 async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -7843,7 +7823,6 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -7972,7 +7951,6 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
 async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -7980,7 +7958,6 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -8074,7 +8051,6 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
 async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -8082,7 +8058,6 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -8272,7 +8247,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         .unwrap();
     let cheating_msg = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &receiver_manager.session_id,
+        &receiver_manager.current_session_id(),
         &rotation_dealer_addr,
         share3_value,
         share3_index,
@@ -8280,7 +8255,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         &mut rng,
     );
     let session_id = receiver_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&rotation_dealer_addr, share3_index);
     let receiver = avss::Receiver::new(
         receiver_manager.mpc_config.nodes.clone(),
@@ -8403,7 +8378,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     // Use the test_manager's session_id which is the base session_id for rotation
     let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &test_manager.session_id,
+        &test_manager.current_session_id(),
         &dealer_addr,
         share_value,
         first_share_index,
@@ -8427,7 +8402,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
 
     // Test party processes cheating message with their CORRECT key, generating a complaint
     let session_id = test_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, first_share_index);
     let receiver = avss::Receiver::new(
         test_manager.mpc_config.nodes.clone(),
@@ -8607,7 +8582,7 @@ fn test_handle_complain_request_success() {
     // Create a cheating rotation message that corrupts the share for victim
     let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &victim_manager.session_id,
+        &victim_manager.current_session_id(),
         &dealer_addr,
         share_value,
         first_share_index,
@@ -8622,7 +8597,7 @@ fn test_handle_complain_request_success() {
 
     // Victim processes cheating message and generates a complaint
     let session_id = victim_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, first_share_index);
     let commitment = victim_dkg_output
         .commitments
@@ -8938,7 +8913,8 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         // Clear DKG state to prepare for rotation
         dealer_manager.current_dkg_messages.clear();
         dealer_manager.dealer_outputs.clear();
-        rotation_setup.prepare_for_rotation(&mut dealer_manager);
+        rotation_setup.install_previous_committee(&mut dealer_manager);
+        rotation_setup.switch_to_rotation(&mut dealer_manager);
 
         // Create and store rotation messages
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -8972,7 +8948,8 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         .unwrap();
     new_dealer_manager.current_dkg_messages.clear();
     new_dealer_manager.dealer_outputs.clear();
-    rotation_setup.prepare_for_rotation(&mut new_dealer_manager);
+    rotation_setup.install_previous_committee(&mut new_dealer_manager);
+    rotation_setup.switch_to_rotation(&mut new_dealer_manager);
 
     // Load rotation messages from store (simulating restart recovery)
     let stored_messages = shared_store
@@ -9084,7 +9061,9 @@ fn test_party_restart_uses_stored_rotation_messages() {
     let mut party_manager = rotation_setup
         .setup
         .create_manager_with_store(party_index, Box::new(shared_store.clone()));
-    rotation_setup.prepare_for_rotation(&mut party_manager);
+    // No `switch_to_rotation`: this manager runs DKG below, which derives
+    // against the Dkg base. Verified — switching here fails the test.
+    rotation_setup.install_previous_committee(&mut party_manager);
 
     // Verify rotation messages were loaded from store
     for dealer_addr in rotation_messages_map.keys() {
@@ -9122,7 +9101,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
                 continue;
             }
             let session_id = party_manager
-                .session_id
+                .current_session_id()
                 .rotation_session_id(dealer_addr, *share_index)
                 .to_vec();
             party_manager
@@ -9271,12 +9250,11 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     }
 
     // Create MpcManager for the shifted member with the target committee.
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager = MpcManager::new(
         shifted_addr,
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::Dkg,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
@@ -9451,12 +9429,11 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     }
 
     // Create manager for member 4 at target epoch.
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager = MpcManager::new(
         setup.address(target_index),
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::Dkg,
         setup.encryption_keys[target_index].clone(),
         Some(setup.encryption_keys[target_index].clone()),
         setup.signing_keys[target_index].clone(),
@@ -9587,12 +9564,11 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
 
     let prev_key = setup.encryption_keys[target_index].clone();
     // With `previous_encryption_key = Some(prev_key)`: reconstruction succeeds.
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager_with_prev = MpcManager::new(
         setup.address(target_index),
         &committee_set,
         target_epoch,
-        session_id.clone(),
+        ProtocolType::Dkg,
         prev_key.clone(),
         Some(prev_key.clone()),
         setup.signing_keys[target_index].clone(),
@@ -9620,7 +9596,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         setup.address(target_index),
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::Dkg,
         prev_key,
         None,
         setup.signing_keys[target_index].clone(),
@@ -9725,7 +9701,7 @@ fn test_recover_current_dkg() {
             setup.address(target_index),
             &committee_set,
             epoch,
-            SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg),
+            ProtocolType::Dkg,
             setup.encryption_keys[target_index].clone(),
             None, // genesis: no previous encryption key
             setup.signing_keys[target_index].clone(),
@@ -9897,7 +9873,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         setup.address(target_index),
         &committee_set,
         epoch,
-        SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg),
+        ProtocolType::Dkg,
         setup.encryption_keys[target_index].clone(),
         None,
         setup.signing_keys[target_index].clone(),
@@ -9987,13 +9963,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
 
     for &dealer_idx in &dealer_indices {
         let dealer_addr = rotation_setup.setup.address(dealer_idx);
-        let rotation_session_id =
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
         let mut dealer_manager = MpcManager::new(
             dealer_addr,
             &rotation_committee_set,
             rotation_epoch,
-            rotation_session_id.clone(),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             None,
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
@@ -10022,13 +9996,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         // Get another validator's signature
         let other_idx = if dealer_idx == 0 { 1 } else { 0 };
         let other_addr = rotation_setup.setup.address(other_idx);
-        let other_rotation_session_id =
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
         let mut other_manager = MpcManager::new(
             other_addr,
             &rotation_committee_set,
             rotation_epoch,
-            other_rotation_session_id,
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             None,
             rotation_setup.setup.signing_keys[other_idx].clone(),
@@ -10137,12 +10109,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     }
 
     // Create MpcManager for the shifted member at epoch 102
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::KeyRotation);
     let manager = MpcManager::new(
         shifted_addr,
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::KeyRotation,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
@@ -10228,7 +10199,7 @@ fn test_recover_current_rotation() {
             rotation_setup.setup.address(idx),
             &committee_set,
             rotation_epoch,
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             rotation_setup.setup.signing_keys[idx].clone(),
@@ -10305,7 +10276,7 @@ fn test_recover_current_rotation() {
             rotation_setup.setup.address(receiver_index),
             &committee_set,
             rotation_epoch,
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[receiver_index].clone(),
             Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
             rotation_setup.setup.signing_keys[receiver_index].clone(),
@@ -10426,7 +10397,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             rotation_setup.setup.address(idx),
             &committee_set,
             rotation_epoch,
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             rotation_setup.setup.signing_keys[idx].clone(),
@@ -10506,7 +10477,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         receiver_addr,
         &committee_set,
         rotation_epoch,
-        base_session_id,
+        ProtocolType::KeyRotation,
         rotation_setup.setup.encryption_keys[receiver_index].clone(),
         Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
         rotation_setup.setup.signing_keys[receiver_index].clone(),
@@ -10940,7 +10911,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
 
     // Build a complaint using wrong key
     let session_id = receiver
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
     let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
     let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
@@ -11006,7 +10977,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
 
     // Build complaint
     let session_id = receiver
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
     let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
     let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
@@ -11082,7 +11053,7 @@ fn test_handle_complain_request_rotation_caches_response() {
 
     let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &victim_manager.session_id,
+        &victim_manager.current_session_id(),
         &dealer_addr,
         share_value,
         first_share_index,
@@ -11096,7 +11067,7 @@ fn test_handle_complain_request_rotation_caches_response() {
 
     // Victim builds complaint
     let session_id = victim_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, first_share_index);
     let commitment = victim_dkg_output
         .commitments
