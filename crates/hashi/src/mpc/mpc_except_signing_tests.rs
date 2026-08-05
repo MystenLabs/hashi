@@ -678,14 +678,14 @@ impl P2PChannel for FailingP2PChannel {
 }
 
 struct SucceedingP2PChannel {
-    managers: std::sync::Arc<std::sync::Mutex<HashMap<Address, MpcManager>>>,
+    managers: Arc<std::sync::Mutex<HashMap<Address, MpcManager>>>,
     current_sender: Address,
 }
 
 impl SucceedingP2PChannel {
     fn new(managers: HashMap<Address, MpcManager>, current_sender: Address) -> Self {
         Self {
-            managers: std::sync::Arc::new(std::sync::Mutex::new(managers)),
+            managers: Arc::new(std::sync::Mutex::new(managers)),
             current_sender,
         }
     }
@@ -743,6 +743,76 @@ impl P2PChannel for SucceedingP2PChannel {
         _request: &GetPartialSignaturesRequest,
     ) -> ChannelResult<GetPartialSignaturesResponse> {
         unimplemented!("SucceedingP2PChannel does not implement get_partial_signatures")
+    }
+}
+
+struct FlakyP2PChannel<P> {
+    inner: P,
+    hangs: HashMap<Address, usize>,
+    attempts: std::sync::Mutex<HashMap<Address, usize>>,
+}
+
+impl<P> FlakyP2PChannel<P> {
+    const HANG: Duration = Duration::from_secs(86_400);
+
+    fn new(inner: P, hangs: HashMap<Address, usize>) -> Self {
+        Self {
+            inner,
+            hangs,
+            attempts: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<P: P2PChannel> P2PChannel for FlakyP2PChannel<P> {
+    async fn send_messages(
+        &self,
+        recipient: &Address,
+        request: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse> {
+        let attempt = {
+            let mut attempts = self.attempts.lock().unwrap();
+            let seen = attempts.entry(*recipient).or_insert(0);
+            *seen += 1;
+            *seen
+        };
+        if attempt <= self.hangs.get(recipient).copied().unwrap_or(0) {
+            tokio::time::sleep(Self::HANG).await;
+        }
+        self.inner.send_messages(recipient, request).await
+    }
+
+    async fn retrieve_messages(
+        &self,
+        party: &Address,
+        request: &RetrieveMessagesRequest,
+    ) -> ChannelResult<RetrieveMessagesResponse> {
+        self.inner.retrieve_messages(party, request).await
+    }
+
+    async fn complain(
+        &self,
+        party: &Address,
+        request: &ComplainRequest,
+    ) -> ChannelResult<ComplaintResponse> {
+        self.inner.complain(party, request).await
+    }
+
+    async fn get_public_mpc_output(
+        &self,
+        party: &Address,
+        request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        self.inner.get_public_mpc_output(party, request).await
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        party: &Address,
+        request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        self.inner.get_partial_signatures(party, request).await
     }
 }
 
@@ -2571,14 +2641,88 @@ async fn test_run_as_dealer_p2p_send_error() {
     };
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
+    let metrics = test_metrics();
     let result =
-        MpcManager::run_dkg_as_dealer(&test_manager, &failing_p2p, &mut mock_tob, &test_metrics())
-            .await;
+        MpcManager::run_dkg_as_dealer(&test_manager, &failing_p2p, &mut mock_tob, &metrics).await;
 
     assert!(result.is_ok());
     assert_eq!(mock_tob.published_count(), 0);
     assert!(logs_contain("Failed to send message"));
     assert!(logs_contain("network error"));
+    assert!(logs_contain("insufficient signatures"));
+    assert_eq!(
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[crate::metrics::MPC_LABEL_DKG])
+            .get(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dealer_waits_past_any_fixed_cutoff_to_reach_its_quorum() {
+    let setup = TestSetup::new(5);
+    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let other_managers: HashMap<_, _> = (1..setup.num_validators())
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let hangs = other_managers.keys().map(|addr| (*addr, 3)).collect();
+    let slow_p2p = FlakyP2PChannel::new(
+        SucceedingP2PChannel::new(other_managers, setup.address(0)),
+        hangs,
+    );
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let metrics = test_metrics();
+    let started = tokio::time::Instant::now();
+
+    MpcManager::run_dkg_as_dealer(&test_manager, &slow_p2p, &mut mock_tob, &metrics)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock_tob.published_count(),
+        1,
+        "peers that only answer late must still count toward the quorum"
+    );
+    assert_eq!(
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[crate::metrics::MPC_LABEL_DKG])
+            .get(),
+        0
+    );
+    assert!(
+        started.elapsed() > Duration::from_secs(60),
+        "test no longer exercises a late quorum: finished in {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dealer_stops_waiting_shortly_after_its_quorum_is_met() {
+    let setup = TestSetup::new(5);
+    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let other_managers: HashMap<_, _> = (1..setup.num_validators())
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let hangs = HashMap::from([(setup.address(1), usize::MAX)]);
+    let slow_p2p = FlakyP2PChannel::new(
+        SucceedingP2PChannel::new(other_managers, setup.address(0)),
+        hangs,
+    );
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let started = tokio::time::Instant::now();
+
+    MpcManager::run_dkg_as_dealer(&test_manager, &slow_p2p, &mut mock_tob, &test_metrics())
+        .await
+        .unwrap();
+
+    assert_eq!(mock_tob.published_count(), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "dealer waited {:?} on a peer it did not need",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
