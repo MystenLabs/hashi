@@ -93,3 +93,5 @@ tracing-test = "0.2"
 http-body = "1"
 # Paused-clock tests (`start_paused`) for deadline/cooldown behavior.
 tokio = { workspace = true, features = ["test-util"] }
+move-binary-format = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
+move-core-types = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
