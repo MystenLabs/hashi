@@ -75,12 +75,12 @@ struct LogRecordWire {
 }
 
 #[derive(Serialize)]
-struct LogRecordWireRef<'a, M> {
+struct LogRecordWireRef<'a> {
     schema_version: u64,
     object_key: &'a str,
     session_id: &'a SessionID,
     timestamp_ms: UnixMillis,
-    message: &'a M,
+    message: &'a VersionedLogMessage,
     #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
     signature: Option<GuardianSignature>,
 }
@@ -95,36 +95,16 @@ impl Serialize for LogRecord {
             Self::Unsigned(unsigned) => (unsigned, None),
         };
 
-        match &data.message {
-            VersionedLogMessage::V1(message) => {
-                serialize_log_record(data, message, signature, serializer)
-            }
-            VersionedLogMessage::V2(message) => {
-                serialize_log_record(data, message, signature, serializer)
-            }
+        LogRecordWireRef {
+            schema_version: data.schema_version,
+            object_key: &data.object_key,
+            session_id: &data.session_id,
+            timestamp_ms: data.timestamp_ms,
+            message: &data.message,
+            signature,
         }
+        .serialize(serializer)
     }
-}
-
-fn serialize_log_record<S, M>(
-    data: &LogEntry,
-    message: &M,
-    signature: Option<GuardianSignature>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-    M: Serialize,
-{
-    LogRecordWireRef {
-        schema_version: data.schema_version,
-        object_key: &data.object_key,
-        session_id: &data.session_id,
-        timestamp_ms: data.timestamp_ms,
-        message,
-        signature,
-    }
-    .serialize(serializer)
 }
 
 impl<'de> Deserialize<'de> for LogRecord {
