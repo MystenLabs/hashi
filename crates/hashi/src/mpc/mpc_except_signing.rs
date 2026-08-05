@@ -4,8 +4,8 @@
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
-use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
+use crate::communication::with_timeout_and_retry_budget;
 use crate::constants::is_production_sui_chain;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
@@ -105,13 +105,17 @@ const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed"
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
 const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
+/// Per-call budget for pulling AVID dispersal artifacts from a cert's signers.
+const AVID_RETRIEVAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+const AVID_RETRIEVAL_CALL_RETRIES: usize = 2;
+
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long the AVID optimistic leg keeps waiting for unanimity once the
+/// How long the first phase of batch AVSS keeps waiting for unanimity once the
 /// pessimistic fallback is already assured.
-const AVID_CONFIRM_GRACE: Duration = Duration::from_secs(90);
+const BATCH_AVSS_VOTES_GRACE: Duration = Duration::from_secs(90);
 
 /// Backstop on a dealer's whole collection, for the case where the stopping
 /// threshold is never reached.
@@ -2933,7 +2937,7 @@ impl MpcManager {
             &mut aggregator,
             requests,
             decided_weight,
-            AVID_CONFIRM_GRACE,
+            BATCH_AVSS_VOTES_GRACE,
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
             metrics,
@@ -3317,9 +3321,16 @@ impl MpcManager {
             (request, signers)
         };
         let complaint_signers = signers.clone();
-        let results = send_to_many(signers, request, |addr, req| async move {
-            p2p_channel.retrieve_messages(&addr, &req).await
-        })
+        let request = &request;
+        let results = futures::future::join_all(signers.into_iter().map(|addr| async move {
+            let result = with_timeout_and_retry_budget(
+                || p2p_channel.retrieve_messages(&addr, request),
+                AVID_RETRIEVAL_CALL_TIMEOUT,
+                AVID_RETRIEVAL_CALL_RETRIES,
+            )
+            .await;
+            (addr, result)
+        }))
         .await;
         let bundles: Vec<(Address, AvidNonceRetrievalMessage)> = results
             .into_iter()
