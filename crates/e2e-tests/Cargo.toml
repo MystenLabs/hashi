@@ -27,10 +27,9 @@ sui-crypto.workspace = true
 sui-sdk-types.workspace = true
 sui-transaction-builder.workspace = true
 # Needed by src/snapshot.rs to deserialize/rebase/re-serialize the checked-in
-# Move bytecode snapshot before publishing it. Pinned to the same sui rev as the
-# hashi crate's move-binary-format/move-core-types dev-deps.
-move-binary-format = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
-move-core-types = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
+# Move bytecode snapshot before publishing it.
+move-binary-format.workspace = true
+move-core-types.workspace = true
 base64ct.workspace = true
 serde_yaml.workspace = true
 serde.workspace = true
