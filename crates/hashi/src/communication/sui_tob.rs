@@ -211,21 +211,21 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
             .await
             .map_err(|e| match &e {
                 SubmitCertError::Rejected(_) => ChannelError::Other(e.to_string()),
-                SubmitCertError::Submit(_) => ChannelError::RequestFailed(e.to_string()),
+                SubmitCertError::NotSubmitted(_) => ChannelError::RequestFailed(e.to_string()),
+                SubmitCertError::Unreachable(_) => ChannelError::RequestFailed(e.to_string()),
+                SubmitCertError::Unconfirmed(_) => ChannelError::Other(e.to_string()),
             })?;
         if inserted {
             return Ok(PublishOutcome::Landed);
         }
-        let Ok(settled) = fetch_certificates(
+        let settled = fetch_certificates(
             &self.onchain_state,
             self.epoch,
             self.batch_index,
             self.protocol_type,
         )
         .await
-        else {
-            return Ok(PublishOutcome::Diverged);
-        };
+        .map_err(ChannelError::from)?;
         let settled: Vec<(Address, MessageHash)> = settled
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))

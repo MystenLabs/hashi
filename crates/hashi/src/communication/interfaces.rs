@@ -88,12 +88,13 @@ pub trait P2PChannel: Send + Sync {
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishOutcome {
-    /// This call submitted; insertion is confirmed unless the follow-up read failed.
+    /// This call's transaction created the entry.
     Landed,
     /// A message with the same hash was already present when this call checked. An earlier
     /// attempt of this same call may have been the one that submitted it.
     AlreadyPresent,
-    /// A different message from this sender is already present and cannot be replaced.
+    /// This call created nothing and the slot is not holding our message: either a different one
+    /// from this sender, or an entry this node could not read back.
     Diverged,
 }
 
