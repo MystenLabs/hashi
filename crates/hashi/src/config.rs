@@ -630,7 +630,7 @@ mod tests {
             bitcoin_start_height: None,
             ..Config::default()
         };
-        assert_eq!(signet.bitcoin_start_height(), 297_756);
+        assert_eq!(signet.bitcoin_start_height(), 300_000);
 
         // Unset on Mainnet keeps the existing default.
         let mainnet = Config {

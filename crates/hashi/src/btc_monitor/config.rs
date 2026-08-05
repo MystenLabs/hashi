@@ -188,12 +188,14 @@ pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
 /// height past Taproot activation works; it maps to the Taproot checkpoint.
 const DEFAULT_START_HEIGHT: u32 = 800_000;
 
-/// Signet tip when Hashi moved from testnet4 to Signet, and the height
-/// sui-operations pins for every Signet deployment. No Hashi Signet deposit
-/// predates it, so nodes anchor here instead of re-syncing from genesis.
+/// Anchor for the Hashi Testnet deployment on Signet, which launched around
+/// height 313343. Nodes start here instead of re-syncing from genesis.
+///
 /// Only ever lower this: the anchor is a floor, and deposits below it are
-/// invisible to the light client.
-const SIGNET_DEFAULT_START_HEIGHT: u32 = 297_756;
+/// invisible to the light client. It sits above the 2026-03-30 testnet4-to-
+/// Signet migration (297756), so it does not cover the Signet deployments that
+/// predate Testnet; those pass `bitcoin-start-height` explicitly.
+const SIGNET_DEFAULT_START_HEIGHT: u32 = 300_000;
 
 pub fn default_start_height(network: Network) -> u32 {
     match network {
@@ -232,7 +234,7 @@ mod tests {
 
     #[test]
     fn default_start_height_is_network_aware() {
-        assert_eq!(default_start_height(Network::Signet), 297_756);
+        assert_eq!(default_start_height(Network::Signet), 300_000);
         assert_eq!(default_start_height(Network::Bitcoin), 800_000);
         assert_eq!(default_start_height(Network::Testnet4), 800_000);
         assert_eq!(default_start_height(Network::Regtest), 800_000);
