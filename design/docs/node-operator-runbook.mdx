@@ -1211,11 +1211,15 @@ Lost connectivity to Bitcoin peers after 15 consecutive failures. Restarting Kyo
 
 ---
 
-**Symptom:** the light client syncs normally, but early deposits are never detected.
+**Symptom:** `hashi_kyoto_best_height` sits far below your Bitcoin node's height and climbs from near zero, dropping back to near zero after every light client restart. The log shows:
 
-**Likely cause:** `bitcoin-start-height` defaults to `800000`, a Mainnet-oriented height. On Signet this skips the entire range where your test deposits live.
+```
+Start height 800000 is beyond bitcoind's tip; anchoring Kyoto at genesis
+```
 
-**Fix:** set `bitcoin-start-height` to a height at or below your first relevant deposit, as noted in [1.5](#15-bitcoin-node).
+**Likely cause:** the light client could not read a block at `bitcoin-start-height` from your Bitcoin node, so it anchored at genesis. Either the height is past your node's tip, or the node is still syncing and has not reached it yet. No deposits are missed — genesis is the conservative fallback — but the client replays the whole chain, and replays it again every time its supervision loop rebuilds it.
+
+**Fix:** leave `bitcoin-start-height` unset to take the per-network default, or set it to a height at or below your first relevant deposit, as noted in [1.5](#15-bitcoin-node). If your Bitcoin node is still syncing, let it pass the configured height and then restart Hashi — the anchor is resolved once at startup, so a running node will not pick it up on its own. A healthy start logs `Anchoring Kyoto at start height <height> (<hash>)` instead.
 
 ---
 
