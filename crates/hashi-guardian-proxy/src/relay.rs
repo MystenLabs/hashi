@@ -366,6 +366,60 @@ mod tests {
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;
 
+    use crate::widlog::test_store::MemStore;
+    use std::sync::atomic::Ordering;
+
+    /// A share log naming exactly one recipient, in the `kp-shares/` layout the
+    /// enclave writes today.
+    fn shares_record_for(fp_hex: &str) -> (String, Vec<u8>) {
+        let record = serde_json::json!({
+            "session_id": "s",
+            "timestamp_ms": 0,
+            "message": { "KpShareState": { "sharing_seq": 0, "cert_seq": 0, "encrypted_shares": [
+                { "id": 1, "recipient_fingerprint": fp_hex, "armored_ciphertext": "" }
+            ]}},
+            "signature": null,
+        });
+        let key = "kp-shares/00000000000000000000/00000000000000000000-s.json".to_string();
+        (key, serde_json::to_vec(&record).unwrap())
+    }
+
+    #[tokio::test]
+    async fn roster_cache_reads_membership_from_the_share_log() {
+        let (cert_armored, _) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let store = MemStore::default();
+        let (key, bytes) = shares_record_for(&cert.fingerprint().to_hex());
+        store.insert(key, bytes);
+
+        let roster = RosterCache::new(store).get().await.unwrap();
+        assert!(roster.contains(&cert.fingerprint()));
+        assert_eq!(roster.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn roster_cache_serves_the_cached_roster_within_the_ttl() {
+        let store = MemStore::default();
+        let (key, bytes) = shares_record_for("AAAABBBBCCCCDDDDEEEE11112222333344445555");
+        store.insert(key, bytes);
+        let cache = RosterCache::new(store);
+
+        let first = cache.get().await.unwrap();
+        // The store now fails hard; a fresh read would error, the cache must not.
+        cache.store.fail_lists.store(true, Ordering::SeqCst);
+        let second = cache.get().await.unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn missing_share_log_fails_closed() {
+        let err = RosterCache::new(MemStore::default())
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
     fn submission(id: u32) -> proto::SignedSingleProvisionerInitRequest {
         proto::SignedSingleProvisionerInitRequest {
             encrypted_share: Some(proto::GuardianEncryptedShare {
