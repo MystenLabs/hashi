@@ -243,9 +243,13 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
 ///
 /// Asserts:
 /// - v1 publishes from the snapshot and forms a committee (DKG completes).
+/// - a deposit confirms against the snapshot bytecode, establishing real
+///   v1-initialized on-chain state before the upgrade.
 /// - the governance upgrade to current source succeeds (effects success).
 /// - the new package id differs from v1's.
 /// - all nodes' watchers pick up the new package version.
+/// - a post-upgrade deposit confirms through the full validator path, on top
+///   of the state the snapshot bytecode initialized.
 /// - a v2-only module (`upgrade_canary::version`) is callable post-upgrade.
 #[tokio::test]
 async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
@@ -267,6 +271,23 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
         .wait_for_mpc_key(Duration::from_secs(120))
         .await?;
 
+    // ── Pre-upgrade: deposit against the snapshot bytecode ──────────────
+    //
+    // Establishes real on-chain state *initialized by the deployed v1
+    // bytecode* (UTXO pool entries, deposit records, hBTC supply), so the
+    // post-upgrade assertions below exercise the upgraded package against
+    // v1-created state — not a fresh object graph.
+    info!("depositing 100k sats against the snapshot bytecode...");
+    let hbtc_recipient = create_deposit_and_wait(&mut networks, 100_000).await?;
+    let balance_before = get_hbtc_balance(
+        &mut networks.sui_network.client,
+        hashi_ids.package_id,
+        hbtc_recipient,
+    )
+    .await?;
+    assert_eq!(balance_before, 100_000);
+    info!("pre-upgrade balance: {balance_before} sats");
+
     // ── Upgrade the deployed bytecode to the current source ─────────────
     let new_package_id = upgrade_flow::execute_full_upgrade(&mut networks).await?;
     info!("upgraded snapshot v1 -> current source: new package {new_package_id}");
@@ -277,6 +298,25 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
 
     // ── All nodes' watchers must pick up the new package version ─────────
     wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
+
+    // ── Post-upgrade: deposit on top of v1-initialized state ────────────
+    //
+    // The full validator confirmation path (observe DepositRequested, build
+    // the BLS certificate, approve, time-delay, confirm) must work against
+    // the upgraded package operating on state the snapshot bytecode created.
+    info!("depositing 50k sats post-upgrade (full validator confirmation path)...");
+    create_deposit_and_wait(&mut networks, 50_000).await?;
+    let balance_after = get_hbtc_balance(
+        &mut networks.sui_network.client,
+        hashi_ids.package_id,
+        hbtc_recipient,
+    )
+    .await?;
+    assert_eq!(
+        balance_after, 150_000,
+        "post-upgrade deposit should confirm on top of snapshot-initialized state"
+    );
+    info!("post-upgrade deposit confirmed, balance: {balance_after} sats");
 
     // ── v2-only canary module must be callable post-upgrade ─────────────
     //
