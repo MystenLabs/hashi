@@ -653,13 +653,17 @@ impl MpcManager {
         };
         let responses = match messages {
             Messages::Dkg(message) => {
-                let partial_output =
-                    self.get_or_derive_dkg_output(&request.dealer, &message, request.epoch)?;
                 let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
                 let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
                 let session_id = self
                     .base_session_id_for_epoch(request.epoch, &ProtocolType::Dkg)
                     .dealer_session_id(&request.dealer);
+                let partial_output = self.get_or_derive_dkg_output(
+                    &request.dealer,
+                    &message,
+                    request.epoch,
+                    &session_id,
+                )?;
                 let receiver = avss::Receiver::new(
                     nodes,
                     party_id,
@@ -696,15 +700,15 @@ impl MpcManager {
                     })?;
                 let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
                 let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
-                let complained_output = self.get_or_derive_rotation_output(
-                    &request.dealer,
-                    complained_share_index,
-                    complained_message,
-                    request.epoch,
-                )?;
                 let session_id = self
                     .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
                     .rotation_session_id(&request.dealer, complained_share_index);
+                let complained_output = self.get_or_derive_rotation_output(
+                    complained_share_index,
+                    complained_message,
+                    request.epoch,
+                    &session_id,
+                )?;
                 let receiver = avss::Receiver::new(
                     nodes,
                     party_id,
@@ -2228,18 +2232,18 @@ impl MpcManager {
             }
         };
         let dealer_session_id = self.current_session_id().dealer_session_id(&dealer);
-        let receiver = avss::Receiver::new(
+        let result = process_avss_message(
+            &self.encryption_key,
             self.mpc_config.nodes.clone(),
             self.party_id,
             Parameters {
                 t: self.mpc_config.threshold,
                 f: self.mpc_config.max_faulty,
             },
-            dealer_session_id.to_vec(),
+            &dealer_session_id,
+            message,
             None, // commitment: None for initial DKG
-            self.encryption_key.clone(),
         )?;
-        let result = receiver.process_message(message, &mut rand::thread_rng())?;
         match result {
             avss::ProcessedMessage::Valid(output) => {
                 self.dealer_outputs
@@ -3831,15 +3835,12 @@ impl MpcManager {
             .get(&dealer)
             .ok_or_else(|| MpcError::NotFound("No DKG message for dealer".into()))?
             .clone();
-        let session_id = self
-            .current_session_id()
-            .dealer_session_id(&dealer)
-            .to_vec();
+        let session_id = self.current_session_id().dealer_session_id(&dealer);
         self.process_and_store_message(
             self.mpc_config.nodes.clone(),
             self.party_id,
             self.mpc_config.threshold,
-            session_id,
+            &session_id,
             &message,
             None,
             output_key,
@@ -3920,13 +3921,13 @@ impl MpcManager {
             {
                 continue;
             }
-            let session_id = base_sid.rotation_session_id(dealer, share_index).to_vec();
+            let session_id = base_sid.rotation_session_id(dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             self.process_and_store_message(
                 self.mpc_config.nodes.clone(),
                 self.party_id,
                 self.mpc_config.threshold,
-                session_id,
+                &session_id,
                 &message,
                 commitment,
                 output_key,
@@ -3949,7 +3950,7 @@ impl MpcManager {
         nodes: Nodes<EncryptionGroupElement>,
         party_id: u16,
         threshold: u16,
-        session_id: Vec<u8>,
+        session_id: &SessionId,
         message: &avss::Message,
         commitment: Option<G>,
         output_key: DealerOutputsKey,
@@ -4778,18 +4779,18 @@ impl MpcManager {
             }
             let session_id = base_sid.rotation_session_id(&dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
-            let receiver = avss::Receiver::new(
+            match process_avss_message(
+                &self.encryption_key,
                 self.mpc_config.nodes.clone(),
                 self.party_id,
                 Parameters {
                     t: self.mpc_config.threshold,
                     f: self.mpc_config.max_faulty,
                 },
-                session_id.to_vec(),
+                &session_id,
+                message,
                 commitment,
-                self.encryption_key.clone(),
-            )?;
-            match receiver.process_message(message, &mut rand::thread_rng())? {
+            )? {
                 avss::ProcessedMessage::Valid(output) => {
                     outputs.push((DealerOutputsKey::Rotation(share_index), output));
                 }
@@ -5104,9 +5105,7 @@ impl MpcManager {
             }
             let dealer_party_id =
                 Self::certified_dealer_party_id(context.committee, &dealer_address)?;
-            let session_id = source_session_id
-                .dealer_session_id(&dealer_address)
-                .to_vec();
+            let session_id = source_session_id.dealer_session_id(&dealer_address);
             if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
                 let dealer_weight = context.nodes.weight_of(dealer_party_id).map_err(|_| {
@@ -5125,7 +5124,7 @@ impl MpcManager {
                     t: context.output_threshold,
                     f: context.output_max_faulty,
                 },
-                session_id,
+                &session_id,
                 &message,
                 None,
             )? {
@@ -5281,9 +5280,8 @@ impl MpcManager {
                     certified_share_indices.push(share_index);
                     continue;
                 }
-                let session_id = source_session_id
-                    .rotation_session_id(&dealer_address, share_index)
-                    .to_vec();
+                let session_id =
+                    source_session_id.rotation_session_id(&dealer_address, share_index);
                 match process_avss_message(
                     context.encryption_key,
                     context.nodes.clone(),
@@ -5292,7 +5290,7 @@ impl MpcManager {
                         t: context.output_threshold,
                         f: context.output_max_faulty,
                     },
-                    session_id,
+                    &session_id,
                     &message,
                     None,
                 )? {
@@ -6115,20 +6113,19 @@ impl MpcManager {
         dealer: &Address,
         message: &avss::Message,
         epoch: u64,
+        session_id: &SessionId,
     ) -> MpcResult<avss::AvssOutput> {
         if let Some(output) = self.dealer_outputs.get(&DealerOutputsKey::Dkg(*dealer)) {
             return Ok(output.clone());
         }
         // Cross-epoch fallback: re-derive from message
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
-        let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::Dkg);
-        let session_id = base_sid.dealer_session_id(dealer);
         match process_avss_message(
             self.encryption_key_for_epoch(epoch)?,
             nodes,
             party_id,
             params,
-            session_id.to_vec(),
+            session_id,
             message,
             None,
         )? {
@@ -6141,10 +6138,10 @@ impl MpcManager {
 
     fn get_or_derive_rotation_output(
         &self,
-        dealer: &Address,
         share_index: ShareIndex,
         message: &avss::Message,
         epoch: u64,
+        session_id: &SessionId,
     ) -> MpcResult<avss::AvssOutput> {
         if epoch == self.mpc_config.epoch
             && let Some(output) = self
@@ -6154,14 +6151,12 @@ impl MpcManager {
             return Ok(output.clone());
         }
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
-        let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation);
-        let session_id = base_sid.rotation_session_id(dealer, share_index);
         match process_avss_message(
             self.encryption_key_for_epoch(epoch)?,
             nodes,
             party_id,
             params,
-            session_id.to_vec(),
+            session_id,
             message,
             None,
         )? {
@@ -6444,7 +6439,7 @@ fn process_avss_message(
     nodes: Nodes<EncryptionGroupElement>,
     party_id: u16,
     params: Parameters,
-    session_id: Vec<u8>,
+    session_id: &SessionId,
     message: &avss::Message,
     commitment: Option<G>,
 ) -> MpcResult<avss::ProcessedMessage> {
@@ -6452,6 +6447,7 @@ fn process_avss_message(
         .as_ref()
         .map(|c| hex::encode(c.to_byte_array()))
         .unwrap_or_else(|| "None".to_string());
+    let session_id = session_id.to_vec();
     let session_id_hex = hex::encode(&session_id);
     let total_weight = nodes.total_weight();
     let num_nodes = nodes.num_nodes();
