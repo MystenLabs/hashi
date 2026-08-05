@@ -111,13 +111,9 @@ pub struct MonitorDepositEvent {
 pub enum DepositEventType {
     /// deposit confirmed event on btc
     E1BtcConfirmed,
-    /// `DepositApproved` on Sui.
-    ///
-    /// This event carries its approval timestamp and lets the monitor detect a
-    /// Bitcoin mismatch before hBTC is minted. `DepositConfirmed` is also a
-    /// natural monitoring point because it is unique per deposit and directly
-    /// represents hBTC minting, but it does not carry a timestamp of its own.
-    E2HashiApproved,
+    /// `DepositConfirmed` on Sui. Its timestamp is the containing checkpoint's
+    /// timestamp, supplied with the transaction by Sui gRPC.
+    E2HashiDeposited,
 }
 
 impl WithdrawalEventType {

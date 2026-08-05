@@ -16,15 +16,14 @@ use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::proto_to_timestamp_ms;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::Event;
-use sui_rpc::proto::sui::rpc::v2::EventFilter;
-use sui_rpc::proto::sui::rpc::v2::EventLiteral;
-use sui_rpc::proto::sui::rpc::v2::EventTerm;
-use sui_rpc::proto::sui::rpc::v2::EventTypeFilter;
+use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
 use sui_rpc::proto::sui::rpc::v2::GetCheckpointRequest;
-use sui_rpc::proto::sui::rpc::v2::ListEventsRequest;
+use sui_rpc::proto::sui::rpc::v2::ListTransactionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Ordering;
 use sui_rpc::proto::sui::rpc::v2::QueryEndReason;
 use sui_rpc::proto::sui::rpc::v2::QueryOptions;
+use sui_rpc::proto::sui::rpc::v2::TransactionFilter;
+use sui_rpc::proto::sui::rpc::v2::filter::transaction as tx_filter;
 use sui_sdk_types::Address;
 
 use crate::config::SuiConfig;
@@ -41,13 +40,13 @@ const PAGE_SIZE: u32 = 1_000;
 const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
 
 pub struct SuiEventsPoller {
-    /// Sui v2 gRPC client used for checkpoint and event requests.
+    /// Sui v2 gRPC client used for checkpoint and transaction requests.
     client: sui_rpc::Client,
     /// Deployed package versions used to decode Hashi event BCS.
     package_versions: PackageVersions,
-    /// Current Hashi package used to construct server-side event type filters.
+    /// Current Hashi package used to construct server-side transaction filters.
     package_id: String,
-    /// Latest timestamp through which the poller has completely scanned events.
+    /// Latest timestamp through which the poller has completely scanned transactions.
     cursor_seconds: UnixSeconds,
     /// First checkpoint not yet scanned, once the initial timestamp lookup completes.
     next_checkpoint_to_scan: Option<u64>,
@@ -84,10 +83,12 @@ impl SuiEventsPoller {
 
     /// Scan through the checkpoint covering `up_to`, or the observed chain head.
     ///
-    /// The timestamp cursor advances only after `ListEvents` reports that the
-    /// complete requested range was scanned. The server stream handles its own
-    /// item and scan limits with resumable cursors. A partial response caused by
-    /// an RPC failure is discarded; that range is retried and may be split.
+    /// The timestamp cursor advances only after `ListTransactions` reports that
+    /// the complete requested range was scanned. Transactions provide the
+    /// checkpoint timestamp needed by `DepositConfirmed`, while their nested
+    /// events provide the Hashi payloads. The server stream handles its own item
+    /// and scan limits with resumable cursors. A partial response caused by an
+    /// RPC failure is discarded; that range is retried and may be split.
     pub async fn poll(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
         if up_to <= self.cursor_seconds {
             return Ok(PollOutcome::CursorUnmoved);
@@ -126,18 +127,18 @@ impl SuiEventsPoller {
         }
 
         let mut retry_same_range = true;
-        let raw_events = loop {
+        let raw_transactions = loop {
             match self
-                .list_events_in_range(start_checkpoint, end_checkpoint)
+                .list_transactions_in_range(start_checkpoint, end_checkpoint)
                 .await
             {
-                Ok(events) => break events,
+                Ok(transactions) => break transactions,
                 Err(error) if retry_same_range => {
                     tracing::warn!(
                         start_checkpoint,
                         end_checkpoint,
                         ?error,
-                        "Sui event scan failed; retrying range"
+                        "Sui transaction scan failed; retrying range"
                     );
                     retry_same_range = false;
                     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -145,7 +146,7 @@ impl SuiEventsPoller {
                 Err(error) => {
                     let checkpoint_count = end_checkpoint.saturating_sub(start_checkpoint);
                     if checkpoint_count <= MIN_CHECKPOINTS_PER_RETRY {
-                        return Err(error).context("Sui event scan failed after retries");
+                        return Err(error).context("Sui transaction scan failed after retries");
                     }
                     end_checkpoint = start_checkpoint + checkpoint_count / 2;
                     let scanned_through = end_checkpoint
@@ -156,17 +157,15 @@ impl SuiEventsPoller {
                         start_checkpoint,
                         end_checkpoint,
                         ?error,
-                        "Sui event scan failed twice; retrying a smaller range"
+                        "Sui transaction scan failed twice; retrying a smaller range"
                     );
                     retry_same_range = true;
                 }
             }
         };
-        let mut events = Vec::with_capacity(raw_events.len());
-        for event in raw_events {
-            if let Some(event) = self.parse_event(event)? {
-                events.push(event);
-            }
+        let mut events = Vec::with_capacity(raw_transactions.len());
+        for transaction in raw_transactions {
+            events.extend(self.parse_transaction(transaction)?);
         }
 
         self.next_checkpoint_to_scan = Some(end_checkpoint);
@@ -228,9 +227,9 @@ impl SuiEventsPoller {
 
         // Resolve the exact adjacent checkpoint boundary. A previously capped
         // interpolation could leave a very wide but technically safe bracket
-        // for historical timestamps, forcing ListEvents to scan many unrelated
-        // checkpoint ranges. Binary search keeps the lookup logarithmic even
-        // when checkpoint production has varied over time.
+        // for historical timestamps, forcing ListTransactions to scan many
+        // unrelated checkpoint ranges. Binary search keeps the lookup
+        // logarithmic even when checkpoint production has varied over time.
         while high_sequence > low_sequence.saturating_add(1) {
             let midpoint = low_sequence + (high_sequence - low_sequence) / 2;
             let midpoint_timestamp = self.checkpoint_timestamp(midpoint).await?;
@@ -311,19 +310,23 @@ impl SuiEventsPoller {
         Ok((sequence_number, timestamp_secs))
     }
 
-    async fn list_events_in_range(
+    async fn list_transactions_in_range(
         &mut self,
         start_checkpoint: u64,
         end_checkpoint: u64,
-    ) -> anyhow::Result<Vec<Event>> {
+    ) -> anyhow::Result<Vec<ExecutedTransaction>> {
         if start_checkpoint >= end_checkpoint {
             return Ok(Vec::new());
         }
 
-        let filter = self.event_filter();
+        let filter = self.transaction_filter();
         let mut after = None;
-        let mut all_events = Vec::new();
-        tracing::info!(start_checkpoint, end_checkpoint, "starting Sui event scan");
+        let mut all_transactions = Vec::new();
+        tracing::info!(
+            start_checkpoint,
+            end_checkpoint,
+            "starting Sui transaction scan"
+        );
 
         loop {
             let mut options = QueryOptions::default()
@@ -332,8 +335,12 @@ impl SuiEventsPoller {
             if let Some(cursor) = after.clone() {
                 options = options.with_after(cursor);
             }
-            let request = ListEventsRequest::default()
-                .with_read_mask(FieldMask::from_paths(["event_type", "contents"]))
+            let request = ListTransactionsRequest::default()
+                .with_read_mask(FieldMask::from_paths([
+                    "timestamp",
+                    "events.events.event_type",
+                    "events.events.contents",
+                ]))
                 .with_start_checkpoint(start_checkpoint)
                 .with_end_checkpoint(end_checkpoint)
                 .with_filter(filter.clone())
@@ -342,22 +349,22 @@ impl SuiEventsPoller {
             let mut stream = self
                 .client
                 .ledger_client()
-                .list_events(request)
+                .list_transactions(request)
                 .await
-                .context("failed to list Sui events")?
+                .context("failed to list Sui transactions")?
                 .into_inner();
             let mut end_reason = None;
             let mut page_cursor = None;
 
             while let Some(frame) = stream.next().await {
-                let frame = frame.context("Sui ListEvents stream failed")?;
+                let frame = frame.context("Sui ListTransactions stream failed")?;
                 if let Some(watermark) = &frame.watermark
                     && let Some(cursor) = watermark.cursor.clone()
                 {
                     page_cursor = Some(cursor);
                 }
-                if let Some(event) = frame.event {
-                    all_events.push(event);
+                if let Some(transaction) = frame.transaction {
+                    all_transactions.push(transaction);
                 }
                 if let Some(end) = frame.end {
                     end_reason = end
@@ -367,55 +374,75 @@ impl SuiEventsPoller {
                 }
             }
 
-            let end_reason = end_reason.context("Sui ListEvents ended without QueryEnd")?;
+            let end_reason = end_reason.context("Sui ListTransactions ended without QueryEnd")?;
             match end_reason {
-                QueryEndReason::CheckpointBound => return Ok(all_events),
+                QueryEndReason::CheckpointBound | QueryEndReason::LedgerTip => {
+                    return Ok(all_transactions);
+                }
                 QueryEndReason::ItemLimit | QueryEndReason::ScanLimit => {
                     tracing::info!(
                         start_checkpoint,
                         end_checkpoint,
-                        events = all_events.len(),
+                        transactions = all_transactions.len(),
                         ?end_reason,
-                        "Sui event scan progress"
+                        "Sui transaction scan progress"
                     );
-                    let next = page_cursor
-                        .context("Sui ListEvents reached a page limit without a resume cursor")?;
+                    let next = page_cursor.context(
+                        "Sui ListTransactions reached a page limit without a resume cursor",
+                    )?;
                     anyhow::ensure!(
                         after.as_ref() != Some(&next),
-                        "Sui ListEvents resume cursor did not advance"
+                        "Sui ListTransactions resume cursor did not advance"
                     );
                     after = Some(next);
                 }
                 reason => anyhow::bail!(
-                    "Sui ListEvents stopped before checkpoint {end_checkpoint}: {reason:?}"
+                    "Sui ListTransactions stopped before checkpoint {end_checkpoint}: {reason:?}"
                 ),
             }
         }
     }
 
-    fn event_filter(&self) -> EventFilter {
+    fn transaction_filter(&self) -> TransactionFilter {
         let event_types = [
             format!(
                 "{}::withdrawal_queue::WithdrawalPickedForProcessing",
                 self.package_id
             ),
-            format!("{}::deposit::DepositApproved", self.package_id),
+            format!("{}::deposit::DepositConfirmed", self.package_id),
         ];
-        EventFilter::default().with_terms(
-            event_types
-                .into_iter()
-                .map(|event_type| {
-                    EventTerm::default().with_literals(vec![
-                        EventLiteral::default().with_event_type(
-                            EventTypeFilter::default().with_event_type(event_type),
-                        ),
-                    ])
-                })
-                .collect(),
-        )
+        TransactionFilter::any(event_types.into_iter().map(tx_filter::event_type))
     }
 
-    fn parse_event(&self, event: Event) -> anyhow::Result<Option<MonitorEvent>> {
+    fn parse_transaction(
+        &self,
+        transaction: ExecutedTransaction,
+    ) -> anyhow::Result<Vec<MonitorEvent>> {
+        let timestamp = transaction
+            .timestamp
+            .context("Sui transaction is missing checkpoint timestamp")?;
+        let timestamp_ms =
+            proto_to_timestamp_ms(timestamp).context("invalid Sui transaction timestamp")?;
+        let timestamp_secs = unix_millis_to_seconds(timestamp_ms);
+        let events = transaction
+            .events
+            .context("filtered Sui transaction is missing events")?
+            .events;
+
+        let mut parsed = Vec::new();
+        for event in events {
+            if let Some(event) = self.parse_event(event, timestamp_secs)? {
+                parsed.push(event);
+            }
+        }
+        Ok(parsed)
+    }
+
+    fn parse_event(
+        &self,
+        event: Event,
+        transaction_timestamp_secs: UnixSeconds,
+    ) -> anyhow::Result<Option<MonitorEvent>> {
         let contents = event
             .contents
             .context("Sui event is missing BCS contents")?;
@@ -431,10 +458,13 @@ impl SuiEventsPoller {
                     btc_txid: event.txid.into(),
                 }))
             }
-            Some(HashiEvent::DepositApproved(event)) => {
+            Some(HashiEvent::DepositConfirmed(event)) => {
                 Some(MonitorEvent::Deposit(MonitorDepositEvent {
-                    event_type: DepositEventType::E2HashiApproved,
-                    timestamp_secs: unix_millis_to_seconds(event.approved_timestamp_ms),
+                    event_type: DepositEventType::E2HashiDeposited,
+                    // DepositConfirmed has no timestamp in its Move payload.
+                    // ListTransactions supplies the containing checkpoint's
+                    // timestamp alongside the nested events.
+                    timestamp_secs: transaction_timestamp_secs,
                     btc_txid: event.utxo.id.txid.into(),
                     btc_vout: event.utxo.id.vout,
                 }))
