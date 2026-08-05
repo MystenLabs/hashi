@@ -247,7 +247,7 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     // v1 = the checked-in deployed bytecode snapshot, NOT a source build.
     let mut networks = TestNetworksBuilder::new()
         .with_nodes(4)
-        .with_v1_from_snapshot(snapshot::default_snapshot_dir())
+        .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
         .build()
         .await?;
 

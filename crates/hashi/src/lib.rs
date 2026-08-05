@@ -30,6 +30,7 @@ pub mod metrics_push;
 pub mod mpc;
 pub mod onchain;
 pub mod publish;
+pub mod published;
 pub mod storage;
 pub mod sui_rpc_client;
 pub mod sui_tx_executor;

@@ -43,17 +43,32 @@ use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
 use sui_sdk_types::Address;
 
-/// Default snapshot directory, resolved relative to the `e2e-tests` crate:
-/// `../hashi/tests/move_upgrade_snapshots/testnet/v1`. This is the same
-/// snapshot the compat CI gate checks against.
-pub fn default_snapshot_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// Default snapshot directory: the deployed `testnet` package's snapshot,
+/// `../hashi/tests/move_upgrade_snapshots/testnet/v<version>`, with the
+/// version taken from `packages/hashi/Published.toml` — the same source of
+/// truth the compat CI gate derives its snapshot locations from. A deployment
+/// bumps `Published.toml`, so this test follows it to the new snapshot
+/// instead of silently exercising stale bytecode.
+pub fn default_snapshot_dir() -> Result<PathBuf> {
+    let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let published = crates_dir
         .join("..")
+        .join("packages")
+        .join("hashi")
+        .join("Published.toml");
+    let entries = hashi::published::published_entries(&published)?;
+    let entry = entries.get("testnet").ok_or_else(|| {
+        anyhow::anyhow!(
+            "no `testnet` entry in {} — the snapshot tests exercise the testnet deployment",
+            published.display()
+        )
+    })?;
+    Ok(crates_dir
         .join("hashi")
         .join("tests")
         .join("move_upgrade_snapshots")
         .join("testnet")
-        .join("v1")
+        .join(format!("v{}", entry.version)))
 }
 
 /// The self-address a module declares in its bytecode.
