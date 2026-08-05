@@ -967,7 +967,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsigned_log_replay_reaches_canonical_key_validation() {
+    async fn unsigned_log_replay_is_rejected_during_deserialization() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let record = LogRecord::new_at_timestamp(
@@ -994,13 +994,10 @@ mod tests {
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_copied]);
         let logger = mk_logger_with_client(client);
 
-        let record = logger
+        let error = logger
             .get_log_record_inner("init/copied-attestation.json", ImmutabilityCheck::Skipped)
             .await
-            .expect("the embedded key matches the actual S3 key");
-        let error = record
-            .validate(None)
-            .expect_err("the copied key must still fail canonical validation");
+            .expect_err("the copied key must fail canonical validation during deserialization");
 
         assert!(
             matches!(error, InvalidS3Log(message) if message.contains("non-canonical S3 object key"))

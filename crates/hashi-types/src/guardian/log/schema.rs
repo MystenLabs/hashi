@@ -87,8 +87,6 @@ pub enum LogMessageV2 {
 pub type LogMessage = LogMessageV2;
 
 trait LogMessageSchema {
-    fn is_allowed_unsigned(&self) -> bool;
-
     fn log_type(&self) -> LogType;
 
     fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern;
@@ -97,17 +95,6 @@ trait LogMessageSchema {
 macro_rules! impl_log_message_schema {
     ($schema:ty) => {
         impl LogMessageSchema for $schema {
-            fn is_allowed_unsigned(&self) -> bool {
-                matches!(
-                    self,
-                    Self::Init(init_message)
-                        if matches!(
-                            **init_message,
-                            InitLogMessage::OIAttestationUnsigned { .. }
-                        )
-                )
-            }
-
             fn log_type(&self) -> LogType {
                 match self {
                     Self::Heartbeat(..) => LogType::Heartbeat,
@@ -157,15 +144,18 @@ impl VersionedLogMessage {
         }
     }
 
-    pub fn is_allowed_unsigned(&self) -> bool {
-        match self {
-            Self::V1(message) => message.is_allowed_unsigned(),
-            Self::V2(message) => message.is_allowed_unsigned(),
-        }
+    pub fn as_attestation_log(&self) -> Option<&InitLogMessage> {
+        let init = match self {
+            Self::V1(LogMessageV1::Init(init)) | Self::V2(LogMessageV2::Init(init)) => {
+                init.as_ref()
+            }
+            _ => return None,
+        };
+        matches!(init, InitLogMessage::OIAttestationUnsigned { .. }).then_some(init)
     }
 
-    pub fn must_be_signed(&self) -> bool {
-        !self.is_allowed_unsigned()
+    pub fn is_unsigned(&self) -> bool {
+        self.as_attestation_log().is_some()
     }
 
     pub(super) fn log_type(&self) -> LogType {
