@@ -66,6 +66,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
+use hashi::published::PublishedEntry;
 use move_binary_format::CompiledModule;
 use move_binary_format::compatibility::Compatibility;
 use move_binary_format::normalized;
@@ -290,37 +291,12 @@ fn write_throwaway_client_config() -> Result<(tempfile::TempDir, PathBuf)> {
     Ok((dir, client_yaml))
 }
 
-/// One `[published.<network>]` entry of `packages/hashi/Published.toml` —
-/// the Move tooling's record of where (and at what version) the package is
-/// deployed. This is the source of truth the gate derives its snapshot
-/// locations from, so bumping the version there without capturing a matching
-/// snapshot fails the gate instead of silently checking an obsolete package.
-#[derive(serde_derive::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct PublishedEntry {
-    published_at: String,
-    original_id: String,
-    version: u64,
-}
-
-#[derive(serde_derive::Deserialize)]
-struct PublishedFile {
-    published: std::collections::BTreeMap<String, PublishedEntry>,
-}
-
-/// Parse `packages/hashi/Published.toml` into its per-network entries.
+/// Parse `packages/hashi/Published.toml` into its per-network entries. This
+/// is the source of truth the gate derives its snapshot locations from, so
+/// bumping the version there without capturing a matching snapshot fails the
+/// gate instead of silently checking an obsolete package.
 fn published_entries() -> Result<std::collections::BTreeMap<String, PublishedEntry>> {
-    let path = workspace_package_path().join("Published.toml");
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed: PublishedFile =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    anyhow::ensure!(
-        !parsed.published.is_empty(),
-        "{} declares no published environments — the gate has nothing to check against",
-        path.display()
-    );
-    Ok(parsed.published)
+    hashi::published::published_entries(&workspace_package_path().join("Published.toml"))
 }
 
 /// Root of the checked-in snapshots: `tests/move_upgrade_snapshots/`.

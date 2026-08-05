@@ -24,6 +24,7 @@ pub mod e2e_flow;
 pub mod guardian_harness;
 pub mod hashi_network;
 mod publish;
+pub mod snapshot;
 pub mod sui_network;
 pub mod tcp_proxy;
 pub mod test_helpers;
@@ -133,6 +134,12 @@ pub struct TestNetworksBuilder {
     /// When set, publish + point nodes at this external guardian instead of the
     /// in-process harness (and skip its finalize). See [`ExternalGuardian`].
     external_guardian: Option<ExternalGuardian>,
+    /// When set, bootstrap the local net by publishing the deployed **bytecode
+    /// snapshot** in this directory as v1, instead of a fresh source build of
+    /// `packages/hashi`. Enables the "deployed v1 → current source" upgrade
+    /// e2e test. `None` (default) keeps the source-publish behavior. See
+    /// [`crate::snapshot`].
+    v1_snapshot_dir: Option<std::path::PathBuf>,
 }
 
 impl TestNetworksBuilder {
@@ -151,7 +158,25 @@ impl TestNetworksBuilder {
             bitcoin_builder: BitcoinNodeBuilder::new(),
             onchain_config_overrides,
             external_guardian: None,
+            v1_snapshot_dir: None,
         }
+    }
+
+    /// Bootstrap the local net by publishing the deployed **bytecode snapshot**
+    /// as v1 instead of a fresh source build of `packages/hashi`.
+    ///
+    /// The snapshot directory holds the `*.mv` files of the deployed package
+    /// (self-addressed at its runtime id); [`crate::snapshot`] rebases them to
+    /// `0x0` and publishes them through the normal publish path. The rest of
+    /// the bootstrap (genesis, DKG, committee formation) is unchanged, so a
+    /// subsequent [`crate::upgrade_flow::execute_full_upgrade`] exercises a
+    /// real "deployed bytecode → current source" upgrade.
+    ///
+    /// Pass [`crate::snapshot::default_snapshot_dir`] for the checked-in
+    /// testnet v1 snapshot.
+    pub fn with_v1_from_snapshot(mut self, snapshot_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.v1_snapshot_dir = Some(snapshot_dir.into());
+        self
     }
 
     /// Publish + point the nodes at an externally-run guardian (the dockerized
@@ -322,12 +347,18 @@ impl TestNetworksBuilder {
             .unwrap_or(hashi_builder.num_nodes)
             > 0;
 
-        let publish_output = publish(
-            dir.as_ref(),
-            &mut sui_network.client,
-            sui_network.user_keys.first().unwrap(),
-        )
-        .await?;
+        let publisher_key = sui_network.user_keys.first().unwrap();
+        let publish_output = match &self.v1_snapshot_dir {
+            Some(snapshot_dir) => {
+                tracing::info!(
+                    dir = %snapshot_dir.display(),
+                    "bootstrapping v1 from checked-in bytecode snapshot"
+                );
+                snapshot::publish_snapshot(snapshot_dir, &mut sui_network.client, publisher_key)
+                    .await?
+            }
+            None => publish(dir.as_ref(), &mut sui_network.client, publisher_key).await?,
+        };
 
         let hashi_network = hashi_builder
             .build(
