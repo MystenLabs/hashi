@@ -287,12 +287,15 @@ pub enum TxOutcome {
     Serialized(String),
 }
 
+/// What is known about the certificate's on-chain fate. Only `Rejected` and `NotSubmitted` are
+/// conclusive; the other two mean the entry may or may not exist, so a retry must re-read rather
+/// than assume.
 #[derive(Debug, thiserror::Error)]
 pub enum SubmitCertError {
     #[error("certificate submission rejected: {0:?}")]
     Rejected(Box<ExecutionStatus>),
-    #[error("certificate submission could not reach the chain: {0}")]
-    Unreachable(anyhow::Error),
+    #[error("certificate submission failed, on-chain effect unknown: {0}")]
+    SubmitFailed(anyhow::Error),
     #[error("certificate submission executed but was not confirmed: {0}")]
     Unconfirmed(anyhow::Error),
     #[error("certificate not submitted: {0}")]
@@ -316,9 +319,17 @@ pub enum TxFailure {
 impl SubmitCertError {
     fn classify(e: anyhow::Error) -> Self {
         match e.downcast_ref::<TxFailure>() {
+            // Untagged errors are treated as pre-submit: every path in `finalize` that runs after
+            // the submit call tags itself, so an untagged error can only come from before it.
             Some(TxFailure::NotSubmitted(_)) | None => Self::NotSubmitted(e),
             Some(TxFailure::Submit(inner)) => match **inner {
-                ExecuteAndWaitError::RpcError(_) => Self::Unreachable(e),
+                // Both a failed subscribe (nothing sent) and a failed execute call (possibly
+                // already forwarded to validators) arrive as `RpcError`, indistinguishable here.
+                ExecuteAndWaitError::RpcError(_) => Self::SubmitFailed(e),
+                ExecuteAndWaitError::MissingTransaction
+                | ExecuteAndWaitError::ProtoConversionError(_) => Self::NotSubmitted(e),
+                // `ExecuteAndWaitError` is `#[non_exhaustive]`; assume an unknown variant may have
+                // landed rather than report a certificate that exists as absent.
                 _ => Self::Unconfirmed(e),
             },
         }
@@ -2378,5 +2389,37 @@ mod tests {
         assert!(!created_any(&[mutated.clone(), deleted.clone()]));
         assert!(!created_any(&[unset]));
         assert!(created_any(&[mutated, created]));
+    }
+
+    #[test]
+    fn classify_reports_how_far_the_submission_got() {
+        let prepare = TxFailure::NotSubmitted(anyhow::anyhow!("simulate failed"));
+        assert!(matches!(
+            SubmitCertError::classify(prepare.into()),
+            SubmitCertError::NotSubmitted(_)
+        ));
+
+        let untagged = anyhow::anyhow!("some error with no stage tag");
+        assert!(matches!(
+            SubmitCertError::classify(untagged),
+            SubmitCertError::NotSubmitted(_)
+        ));
+
+        let rpc = TxFailure::Submit(Box::new(ExecuteAndWaitError::RpcError(
+            tonic::Status::unavailable("fullnode down"),
+        )));
+        assert!(matches!(
+            SubmitCertError::classify(rpc.into()),
+            SubmitCertError::SubmitFailed(_)
+        ));
+
+        let executed = TxFailure::Submit(Box::new(ExecuteAndWaitError::CheckpointStreamError {
+            response: tonic::Response::new(ExecuteTransactionResponse::default()),
+            error: tonic::Status::aborted("checkpoint stream ended unexpectedly"),
+        }));
+        assert!(matches!(
+            SubmitCertError::classify(executed.into()),
+            SubmitCertError::Unconfirmed(_)
+        ));
     }
 }

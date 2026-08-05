@@ -209,11 +209,13 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         let inserted = executor
             .execute_submit_certificate(&cert)
             .await
+            // Only `Rejected` is the chain's answer; the rest are failures reaching it or reading
+            // the result back, and must not share a bucket with a conclusive rejection.
             .map_err(|e| match &e {
                 SubmitCertError::Rejected(_) => ChannelError::Other(e.to_string()),
-                SubmitCertError::NotSubmitted(_) => ChannelError::RequestFailed(e.to_string()),
-                SubmitCertError::Unreachable(_) => ChannelError::RequestFailed(e.to_string()),
-                SubmitCertError::Unconfirmed(_) => ChannelError::Other(e.to_string()),
+                SubmitCertError::NotSubmitted(_)
+                | SubmitCertError::SubmitFailed(_)
+                | SubmitCertError::Unconfirmed(_) => ChannelError::RequestFailed(e.to_string()),
             })?;
         if inserted {
             return Ok(PublishOutcome::Landed);

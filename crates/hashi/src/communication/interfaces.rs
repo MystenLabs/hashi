@@ -93,8 +93,8 @@ pub enum PublishOutcome {
     /// A message with the same hash was already present when this call checked. An earlier
     /// attempt of this same call may have been the one that submitted it.
     AlreadyPresent,
-    /// This call created nothing and the slot is not holding our message: either a different one
-    /// from this sender, or an entry this node could not read back.
+    /// This call created nothing and a re-read did not find our message in the slot: either a
+    /// different one from this sender, or nothing at all.
     Diverged,
 }
 
