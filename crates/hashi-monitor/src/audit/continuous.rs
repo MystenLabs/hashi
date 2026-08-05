@@ -77,8 +77,8 @@ impl ContinuousAuditor {
     }
 
     pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
-        let errors = self.inner.ingest_batch(events);
-        log_findings("continuous", "ingest", &errors);
+        let findings = self.inner.ingest_batch(events);
+        log_findings("continuous", "ingest", &findings);
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
@@ -97,8 +97,8 @@ impl ContinuousAuditor {
 
     /// Throws an error if BTC RPC infra fails.
     fn tick_btc(&mut self) -> anyhow::Result<()> {
-        let errors = self.inner.fetch_btc_info(&self.window)?;
-        log_findings("continuous", "btc", &errors);
+        let findings = self.inner.fetch_btc_info(&self.window)?;
+        log_findings("continuous", "btc", &findings);
         Ok(())
     }
 

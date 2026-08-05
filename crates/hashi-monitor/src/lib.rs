@@ -16,7 +16,7 @@ pub mod rpc;
 /// CLI config types.
 pub mod config;
 
-/// Error types
-pub mod errors;
+/// Domain findings emitted by the monitor.
+pub mod findings;
 
 pub use hashi_types::bitcoin::ExternalOutputUTXOWire as OutputUTXO;
