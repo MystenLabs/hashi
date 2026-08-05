@@ -12,6 +12,7 @@ use super::LogType;
 const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const THIRTY_DAYS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const NINETY_DAYS: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+const SIX_MONTHS: Duration = Duration::from_secs(182 * 24 * 60 * 60);
 const TEN_YEARS: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 
 /// Object-lock retention policy for Guardian S3 logs.
@@ -57,9 +58,12 @@ pub const MAINNET_S3_OBJECT_LOCK_POLICY: S3ObjectLockPolicy = S3ObjectLockPolicy
     short_lived: THIRTY_DAYS,
 };
 
-/// Testnet is a durable deployment and uses the mainnet retention policy.
+/// Testnet is re-keyed periodically, so its long-lived records only need to
+/// outlive a key generation, not mainnet's audit window. Records must be
+/// re-locked (or the deployment re-keyed) before this elapses: the reader
+/// rejects a record whose Compliance lock has lapsed.
 pub const TESTNET_S3_OBJECT_LOCK_POLICY: S3ObjectLockPolicy = S3ObjectLockPolicy {
-    long_lived: TEN_YEARS,
+    long_lived: SIX_MONTHS,
     short_lived: THIRTY_DAYS,
 };
 
