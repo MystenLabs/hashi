@@ -173,13 +173,17 @@ sequenceDiagram
 
     Note over Onchain,Guardian: Withdrawal signing
     MPC->>Onchain: Read pending withdrawal transaction
-    MPC->>MPC: Collect committee cert for withdrawal
-    MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
+    MPC->>MPC: Produce MPC signatures for each Bitcoin input
+    MPC->>Onchain: commit_input_signatures(MPC signature chunks)
+    MPC->>MPC: Collect committee cert for Guardian request
+    MPC->>Proxy: StandardWithdrawal(cert, wid, utxos, seq, timestamp)
+    Proxy->>Guardian: Forward StandardWithdrawal
     Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
     Guardian->>S3: log(withdraw success or failure)
-    Guardian-->>MPC: Guardian BTC signatures
-    MPC->>MPC: Produce MPC signatures and combine witnesses
-    MPC->>Onchain: sign_withdrawal(guardian signatures + MPC signatures)
+    Guardian-->>Proxy: Guardian BTC signatures
+    Proxy-->>MPC: Guardian BTC signatures
+    MPC->>MPC: Collect committee cert binding MPC + Guardian signatures
+    MPC->>Onchain: finalize_withdrawal(guardian signatures)
     MPC->>Bitcoin: Broadcast fully signed transaction
 
     Note over Onchain,Guardian: Committee handoff catch-up
