@@ -109,13 +109,12 @@ const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long a dealer keeps folding straggler signatures after its quorum is
-/// already met. Must exceed `CALL_TIMEOUT`, or it admits no peer that is a
-/// retry behind, which is the population it exists for.
-const DEALER_STRAGGLER_GRACE: Duration = Duration::from_secs(35);
+/// How long the AVID optimistic leg keeps waiting for unanimity once the
+/// pessimistic fallback is already assured.
+const AVID_CONFIRM_GRACE: Duration = Duration::from_secs(90);
 
-/// Backstop on a dealer's whole collection, for the case where the quorum is
-/// never reached and `DEALER_STRAGGLER_GRACE` therefore never arms.
+/// Backstop on a dealer's whole collection, for the case where the stopping
+/// threshold is never reached.
 const DEALER_COLLECTION_CEILING: Duration = Duration::from_secs(240);
 
 type AvidEchoAndVote = (
@@ -1246,6 +1245,7 @@ impl MpcManager {
             &mut aggregator,
             requests,
             dealer_data.required_reduced_weight,
+            Duration::ZERO,
             p2p_channel,
             MPC_LABEL_DKG,
             metrics,
@@ -1544,6 +1544,7 @@ impl MpcManager {
             &mut aggregator,
             requests,
             dealer_data.required_reduced_weight,
+            Duration::ZERO,
             p2p_channel,
             MPC_LABEL_KEY_ROTATION,
             metrics,
@@ -1852,6 +1853,7 @@ impl MpcManager {
             &mut aggregator,
             requests,
             dealer_data.required_reduced_weight,
+            Duration::ZERO,
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
             metrics,
@@ -2931,6 +2933,7 @@ impl MpcManager {
             &mut aggregator,
             requests,
             decided_weight,
+            AVID_CONFIRM_GRACE,
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
             metrics,
@@ -3024,6 +3027,7 @@ impl MpcManager {
             &mut vote_aggregator,
             requests,
             dealer_data.vote_quorum_weight,
+            Duration::ZERO,
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
             metrics,
@@ -6313,7 +6317,8 @@ fn verify_complaint_response_from_signer(
 async fn collect_dealer_signatures<P: P2PChannel>(
     aggregator: &mut BlsSignatureAggregator<'_, DealerMessagesHash, ReducedWeight<'_>>,
     requests: Vec<(Address, Arc<SendMessagesRequest>)>,
-    grace_threshold: u32,
+    stop_threshold: u32,
+    grace: Duration,
     p2p_channel: &P,
     protocol: &'static str,
     metrics: &Metrics,
@@ -6327,8 +6332,8 @@ async fn collect_dealer_signatures<P: P2PChannel>(
         })
         .collect();
     let ceiling = tokio::time::Instant::now() + DEALER_COLLECTION_CEILING;
-    let mut grace_deadline = (u32::from(aggregator.reduced_weight()) >= grace_threshold)
-        .then(|| tokio::time::Instant::now() + DEALER_STRAGGLER_GRACE);
+    let mut grace_deadline = (u32::from(aggregator.reduced_weight()) >= stop_threshold)
+        .then(|| tokio::time::Instant::now() + grace);
     let stop_reason = loop {
         let deadline = grace_deadline.map_or(ceiling, |grace| grace.min(ceiling));
         let next = match tokio::time::timeout_at(deadline, in_flight.next()).await {
@@ -6352,8 +6357,8 @@ async fn collect_dealer_signatures<P: P2PChannel>(
             }
             Err(e) => tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e),
         }
-        if grace_deadline.is_none() && u32::from(aggregator.reduced_weight()) >= grace_threshold {
-            grace_deadline = Some(tokio::time::Instant::now() + DEALER_STRAGGLER_GRACE);
+        if grace_deadline.is_none() && u32::from(aggregator.reduced_weight()) >= stop_threshold {
+            grace_deadline = Some(tokio::time::Instant::now() + grace);
         }
     };
     metrics
@@ -6361,11 +6366,11 @@ async fn collect_dealer_signatures<P: P2PChannel>(
         .with_label_values(&[protocol, stop_reason])
         .inc();
     let collected = u32::from(aggregator.reduced_weight());
-    if collected >= grace_threshold {
+    if collected >= stop_threshold {
         metrics
             .mpc_dealer_collected_margin_weight
             .with_label_values(&[protocol])
-            .observe(f64::from(collected - grace_threshold));
+            .observe(f64::from(collected - stop_threshold));
     }
 }
 
