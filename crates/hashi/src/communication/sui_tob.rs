@@ -22,6 +22,7 @@ use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
 use crate::mpc::types::MessageHash;
 use crate::onchain::OnchainState;
+use crate::sui_tx_executor::SubmitCertError;
 use crate::sui_tx_executor::SuiTxExecutor;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -209,8 +210,32 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         executor
             .execute_submit_certificate(&cert)
             .await
-            .map_err(|e| ChannelError::Other(e.to_string()))?;
-        Ok(PublishOutcome::Landed)
+            .map_err(|e| match &e {
+                SubmitCertError::Rejected(_) => ChannelError::Other(e.to_string()),
+                SubmitCertError::Submit(_) => ChannelError::RequestFailed(e.to_string()),
+            })?;
+
+        // Our transaction executed, so a failed confirmation read must not turn a success into a
+        // reported failure.
+        let Ok(settled) = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
+        )
+        .await
+        else {
+            return Ok(PublishOutcome::Landed);
+        };
+        let settled: Vec<(Address, MessageHash)> = settled
+            .iter()
+            .map(|(d, c)| (*d, c.message().messages_hash))
+            .collect();
+        Ok(settled_outcome(&classify_published_cert(
+            &settled,
+            &ours.dealer_address,
+            ours.messages_hash,
+        )))
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
@@ -316,6 +341,13 @@ enum PublishedCert {
     Diverged { on_chain: MessageHash },
 }
 
+fn settled_outcome(classified: &PublishedCert) -> PublishOutcome {
+    match classified {
+        PublishedCert::Same | PublishedCert::Absent => PublishOutcome::Landed,
+        PublishedCert::Diverged { .. } => PublishOutcome::Diverged,
+    }
+}
+
 fn short_circuit_outcome(classified: &PublishedCert) -> Option<PublishOutcome> {
     match classified {
         PublishedCert::Same => Some(PublishOutcome::AlreadyPresent),
@@ -371,6 +403,22 @@ mod tests {
         let mut bytes = [0xAB; 32];
         bytes[17] = b;
         MessageHash::new(bytes)
+    }
+
+    #[test]
+    fn settled_outcome_maps_each_classification() {
+        assert_eq!(
+            settled_outcome(&PublishedCert::Same),
+            PublishOutcome::Landed
+        );
+        assert_eq!(
+            settled_outcome(&PublishedCert::Absent),
+            PublishOutcome::Landed
+        );
+        assert_eq!(
+            settled_outcome(&PublishedCert::Diverged { on_chain: hash(1) }),
+            PublishOutcome::Diverged
+        );
     }
 
     #[test]

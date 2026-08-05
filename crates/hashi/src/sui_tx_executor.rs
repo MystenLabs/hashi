@@ -285,6 +285,14 @@ pub enum TxOutcome {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum SubmitCertError {
+    #[error("certificate submission rejected: {0:?}")]
+    Rejected(Box<ExecutionStatus>),
+    #[error(transparent)]
+    Submit(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
 #[error("{function} transaction failed: {status:?}")]
 pub(crate) struct TransactionExecutionError {
     function: &'static str,
@@ -1193,7 +1201,10 @@ impl SuiTxExecutor {
         skip_all,
         fields(cert_kind = tracing::field::Empty),
     )]
-    pub async fn execute_submit_certificate(&mut self, cert: &CertificateV1) -> anyhow::Result<()> {
+    pub async fn execute_submit_certificate(
+        &mut self,
+        cert: &CertificateV1,
+    ) -> Result<(), SubmitCertError> {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
@@ -1237,11 +1248,9 @@ impl SuiTxExecutor {
         );
 
         let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "Certificate submission failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(SubmitCertError::Rejected(Box::new(status.clone())));
         }
         Ok(())
     }
