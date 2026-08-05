@@ -1120,8 +1120,9 @@ impl Metrics {
             });
         self.paused.set(if hashi.config.paused() { 1 } else { 0 });
         self.deposit_queue_size
-            .set(hashi.deposit_queue.requests().len() as i64);
+            .set(hashi.bitcoin().deposit_queue.requests().len() as i64);
         let (requested, approved) = hashi
+            .bitcoin()
             .withdrawal_queue
             .requests()
             .values()
@@ -1134,7 +1135,7 @@ impl Metrics {
         let mut signed = Vec::new();
         let mut signing = Vec::new();
         let mut pending = Vec::new();
-        for w in hashi.withdrawal_queue.withdrawal_txns().values() {
+        for w in hashi.bitcoin().withdrawal_queue.withdrawal_txns().values() {
             if w.is_fully_signed() {
                 signed.push(w);
             } else if w.signing.signed_count() > 0 {
@@ -1205,7 +1206,7 @@ impl Metrics {
         let mut available_value = 0u64;
         let mut unconfirmed_change_value = 0u64;
         let mut locked_value = 0u64;
-        for record in hashi.utxo_pool.utxo_records().values() {
+        for record in hashi.bitcoin().utxo_pool.utxo_records().values() {
             if record.spent_by.is_some() {
                 locked_count += 1;
                 locked_value += record.utxo.amount;
