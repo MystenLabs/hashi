@@ -120,6 +120,10 @@ pub struct Metrics {
     pub mpc_sign_failures_total: IntCounterVec,
     /// Dealer rounds that ended without publishing a certificate.
     pub mpc_dealer_cert_shortfall_total: IntCounterVec,
+    pub mpc_dealer_collection_stops_total: IntCounterVec,
+    /// Reduced weight a dealer collected above the threshold it was waiting
+    /// for, recorded only when that threshold was met.
+    pub mpc_dealer_collected_margin_weight: HistogramVec,
     /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
     /// Each failure also puts the peer in a short poll cooldown, so this is
     /// the per-validator health signal for the MPC signing path.
@@ -192,6 +196,10 @@ pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "4",
     "5",
     "6_plus",
+];
+
+const REDUCED_WEIGHT_BUCKETS: &[f64] = &[
+    0., 1., 2., 5., 10., 25., 50., 100., 250., 500., 1000., 2500., 5000.,
 ];
 
 const MESSAGE_SIZE_BYTES_BUCKETS: &[f64] = &[
@@ -730,8 +738,26 @@ impl Metrics {
             .unwrap(),
             mpc_dealer_cert_shortfall_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_dealer_cert_shortfall_total",
-                "Dealer rounds that ended without publishing a certificate",
+                "Dealer rounds that fell short of their cert quorum. Excludes rounds that reached \
+                 quorum and then failed to publish, which return an error and are not counted here",
                 &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_dealer_collection_stops_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_dealer_collection_stops_total",
+                "Why a dealer stopped collecting: drained (every send resolved, including \
+                 peers that failed every retry), grace (straggler window expired after the \
+                 threshold), ceiling (hit the hard cap, quorum reached or not)",
+                &["protocol", "reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_dealer_collected_margin_weight: register_histogram_vec_with_registry!(
+                "hashi_mpc_dealer_collected_margin_weight",
+                "Reduced weight collected above the threshold the dealer was waiting for",
+                &["protocol"],
+                REDUCED_WEIGHT_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),

@@ -569,6 +569,10 @@ impl MockOrderedBroadcastChannel {
         self.published.lock().unwrap().len()
     }
 
+    fn published(&self) -> Vec<CertificateV1> {
+        self.published.lock().unwrap().clone()
+    }
+
     fn pending_messages(&self) -> Option<usize> {
         Some(self.certificates.lock().unwrap().len())
     }
@@ -2660,7 +2664,7 @@ async fn test_run_as_dealer_p2p_send_error() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_dealer_waits_past_any_fixed_cutoff_to_reach_its_quorum() {
+async fn a_dealer_waits_minutes_not_seconds_to_reach_its_quorum() {
     let setup = TestSetup::new(5);
     let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
     let other_managers: HashMap<_, _> = (1..setup.num_validators())
@@ -2719,10 +2723,41 @@ async fn a_dealer_stops_waiting_shortly_after_its_quorum_is_met() {
 
     assert_eq!(mock_tob.published_count(), 1);
     assert!(
-        started.elapsed() < Duration::from_secs(30),
+        started.elapsed() < Duration::from_secs(60),
         "dealer waited {:?} on a peer it did not need",
         started.elapsed()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_grace_admits_a_straggler_that_is_one_retry_behind() {
+    let setup = TestSetup::new(5);
+    let test_manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let other_managers: HashMap<_, _> = (1..setup.num_validators())
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let hangs = HashMap::from([(setup.address(1), 1), (setup.address(4), usize::MAX)]);
+    let slow_p2p = FlakyP2PChannel::new(
+        SucceedingP2PChannel::new(other_managers, setup.address(0)),
+        hangs,
+    );
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+    MpcManager::run_dkg_as_dealer(&test_manager, &slow_p2p, &mut mock_tob, &test_metrics())
+        .await
+        .unwrap();
+
+    let published = mock_tob.published();
+    let CertificateV1::Dkg(cert) = published.first().expect("a cert must be published") else {
+        panic!("expected a DKG cert");
+    };
+    let signers = cert.signers(setup.committee()).unwrap();
+    assert_eq!(
+        signers.len(),
+        4,
+        "the late peer must be folded in, leaving margin above the bare quorum"
+    );
+    assert!(signers.contains(&setup.address(1)));
 }
 
 #[tokio::test]
