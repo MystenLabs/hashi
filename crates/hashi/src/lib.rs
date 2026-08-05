@@ -571,7 +571,6 @@ impl Hashi {
         let state = self.onchain_state().state();
         let hashi = state.hashi();
         let committee_set = &hashi.committees;
-        let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let validator_address = self.config.validator_address()?;
         let encryption_key = self.find_encryption_key_for_committee(
             committee_set
@@ -619,7 +618,7 @@ impl Hashi {
             address,
             committee_set,
             epoch,
-            session_id,
+            protocol_type,
             encryption_key,
             previous_encryption_key,
             signing_key,

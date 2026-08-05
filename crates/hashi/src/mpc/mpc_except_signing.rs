@@ -140,7 +140,7 @@ pub struct MpcManager {
     pub party_id: PartyId,
     pub address: Address,
     pub mpc_config: MpcConfig,
-    pub session_id: SessionId,
+    protocol_type: ProtocolType,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
     pub signing_key: Bls12381PrivateKey,
@@ -196,7 +196,7 @@ impl MpcManager {
         address: Address,
         committee_set: &CommitteeSet,
         epoch: u64,
-        session_id: SessionId,
+        protocol_type: ProtocolType,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
         signing_key: Bls12381PrivateKey,
@@ -317,7 +317,7 @@ impl MpcManager {
             party_id,
             address,
             mpc_config,
-            session_id,
+            protocol_type,
             encryption_key,
             previous_encryption_key,
             signing_key,
@@ -2069,7 +2069,7 @@ impl MpcManager {
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> avss::Message {
-        let dealer_session_id = self.session_id.dealer_session_id(&self.address);
+        let dealer_session_id = self.current_session_id().dealer_session_id(&self.address);
         let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
         let dealer = avss::Dealer::new(
             None,
@@ -2227,7 +2227,7 @@ impl MpcManager {
                 panic!("try_sign_dkg_message called with non-DKG messages")
             }
         };
-        let dealer_session_id = self.session_id.dealer_session_id(&dealer);
+        let dealer_session_id = self.current_session_id().dealer_session_id(&dealer);
         let receiver = avss::Receiver::new(
             self.mpc_config.nodes.clone(),
             self.party_id,
@@ -3831,7 +3831,10 @@ impl MpcManager {
             .get(&dealer)
             .ok_or_else(|| MpcError::NotFound("No DKG message for dealer".into()))?
             .clone();
-        let session_id = self.session_id.dealer_session_id(&dealer).to_vec();
+        let session_id = self
+            .current_session_id()
+            .dealer_session_id(&dealer)
+            .to_vec();
         self.process_and_store_message(
             self.mpc_config.nodes.clone(),
             self.party_id,
@@ -3908,6 +3911,7 @@ impl MpcManager {
             .get(dealer)
             .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?
             .clone();
+        let base_sid = self.current_session_id();
         for (share_index, message) in rotation_messages {
             let output_key = DealerOutputsKey::Rotation(share_index);
             let complaint_key = ComplaintsToProcessKey::Rotation(*dealer, share_index);
@@ -3916,10 +3920,7 @@ impl MpcManager {
             {
                 continue;
             }
-            let session_id = self
-                .session_id
-                .rotation_session_id(dealer, share_index)
-                .to_vec();
+            let session_id = base_sid.rotation_session_id(dealer, share_index).to_vec();
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             self.process_and_store_message(
                 self.mpc_config.nodes.clone(),
@@ -4679,14 +4680,13 @@ impl MpcManager {
         previous_dkg_output: &MpcOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> RotationMessages {
+        let base_sid = self.current_session_id();
         previous_dkg_output
             .key_shares
             .shares
             .iter()
             .map(|share| {
-                let sid = self
-                    .session_id
-                    .rotation_session_id(&self.address, share.index);
+                let sid = base_sid.rotation_session_id(&self.address, share.index);
                 let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
                 let dealer = avss::Dealer::new(
                     Some(share.value),
@@ -4759,6 +4759,7 @@ impl MpcManager {
             .into_iter()
             .collect();
         let mut outputs = Vec::with_capacity(rotation_messages.len());
+        let base_sid = self.current_session_id();
         for (&share_index, message) in rotation_messages {
             if !dealer_share_indices.contains(&share_index) {
                 return Err(MpcError::InvalidMessage {
@@ -4775,7 +4776,7 @@ impl MpcManager {
                     reason: format!("Share index {} already processed", share_index),
                 });
             }
-            let session_id = self.session_id.rotation_session_id(&dealer, share_index);
+            let session_id = base_sid.rotation_session_id(&dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
                 self.mpc_config.nodes.clone(),
@@ -5063,7 +5064,7 @@ impl MpcManager {
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        let source_session_id = SessionId::new(&self.chain_id, context.epoch, &ProtocolType::Dkg);
+        let source_session_id = self.base_session_id_for_epoch(context.epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::AvssOutput> = HashMap::new();
         let mut dealer_weight_sum = 0u32;
         for cert in certificates {
@@ -5233,7 +5234,7 @@ impl MpcManager {
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
-            SessionId::new(&self.chain_id, context.epoch, &ProtocolType::KeyRotation);
+            self.base_session_id_for_epoch(context.epoch, &ProtocolType::KeyRotation);
         // Each dealer only rotates their own shares from the previous epoch, so share indices
         // are unique across dealers (no duplicates in `certified_share_indices`).
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
@@ -6000,12 +6001,12 @@ impl MpcManager {
         Ok(())
     }
 
+    fn current_session_id(&self) -> SessionId {
+        self.base_session_id_for_epoch(self.mpc_config.epoch, &self.protocol_type)
+    }
+
     fn base_session_id_for_epoch(&self, epoch: u64, protocol_type: &ProtocolType) -> SessionId {
-        if epoch == self.mpc_config.epoch {
-            self.session_id.clone()
-        } else {
-            SessionId::new(&self.chain_id, self.previous_epoch, protocol_type)
-        }
+        SessionId::new(&self.chain_id, epoch, protocol_type)
     }
 
     fn config_for_epoch(
