@@ -317,15 +317,7 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let earliest_committee_epoch = onchain_state
-            .state()
-            .hashi()
-            .committees
-            .committees()
-            .keys()
-            .next()
-            .copied();
-        let is_key_rotation = is_key_rotation_epoch(earliest_committee_epoch, epoch);
+        let is_key_rotation = onchain_state.is_key_rotation_epoch(epoch);
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
             "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
@@ -1770,10 +1762,6 @@ pub(crate) async fn verify_fetched_certificates(
     verified
 }
 
-fn is_key_rotation_epoch(earliest_committee_epoch: Option<u64>, epoch: u64) -> bool {
-    earliest_committee_epoch.is_some_and(|earliest| earliest < epoch)
-}
-
 fn certified_nonce_weight<T>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
     certs: &VerifiedNonceCerts<T>,
@@ -1920,28 +1908,6 @@ mod presig_count_tests {
 
 fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) || current_epoch == target_epoch
-}
-
-#[cfg(test)]
-mod key_rotation_epoch_tests {
-    use super::is_key_rotation_epoch;
-
-    #[test]
-    fn the_earliest_committee_epoch_is_not_a_rotation() {
-        assert!(!is_key_rotation_epoch(Some(9), 9));
-        assert!(!is_key_rotation_epoch(Some(9), 5));
-    }
-
-    #[test]
-    fn an_epoch_after_the_first_committee_is_a_rotation() {
-        assert!(is_key_rotation_epoch(Some(9), 20));
-        assert!(is_key_rotation_epoch(Some(9), 32));
-    }
-
-    #[test]
-    fn an_empty_committee_history_answers_dkg() {
-        assert!(!is_key_rotation_epoch(None, 9));
-    }
 }
 
 #[cfg(test)]
