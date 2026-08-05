@@ -160,6 +160,7 @@ pub struct Metrics {
     pub mpc_prepare_previous_reconstruct_duration_seconds: HistogramVec,
     pub mpc_prepare_previous_complaint_recovery_duration_seconds: HistogramVec,
     pub mpc_prepare_previous_complaint_recovery_total: IntCounterVec,
+    pub mpc_previous_message_unusable_total: IntCounterVec,
     pub mpc_prepare_previous_fetch_public_output_duration_seconds: HistogramVec,
     pub mpc_sign_partial_gen_duration_seconds: HistogramVec,
     pub mpc_sign_collection_duration_seconds: HistogramVec,
@@ -936,6 +937,13 @@ impl Metrics {
             mpc_prepare_previous_complaint_recovery_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_prepare_previous_complaint_recovery_total",
                 "Total complaint recoveries performed inside prepare_previous_output.",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_previous_message_unusable_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_previous_message_unusable_total",
+                "Previous-epoch dealer messages whose local copy was unusable during reconfig.",
                 &["protocol"],
                 registry,
             )

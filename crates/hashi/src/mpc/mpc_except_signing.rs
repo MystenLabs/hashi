@@ -108,6 +108,7 @@ const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
+const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type AvidEchoAndVote = (
     BLS12381Signature,
@@ -5020,6 +5021,9 @@ impl MpcManager {
             Err(MpcError::StorageError(_)) | Err(MpcError::NotEnoughApprovals { .. }) => {
                 Err(MpcOutputRecoveryOutcome::NotApplicable)
             }
+            Err(MpcError::StoredMessageDiverged { .. }) => {
+                Err(MpcOutputRecoveryOutcome::NotApplicable)
+            }
             Err(MpcError::ProtocolFailed(msg)) => Err(MpcOutputRecoveryOutcome::Suspicious(msg)),
             Err(_) => Err(MpcOutputRecoveryOutcome::NotApplicable),
         }
@@ -5060,10 +5064,14 @@ impl MpcManager {
             let messages = Messages::Dkg(message.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
-                return Err(MpcError::ProtocolFailed(format!(
-                    "Message hash mismatch for dealer {:?}: stored message does not match certificate",
-                    dealer_address
-                )));
+                tracing::warn!(
+                    "Stored DKG message for dealer {:?} does not match its \
+                     certificate; not usable for reconstruction",
+                    dealer_address,
+                );
+                return Err(MpcError::StoredMessageDiverged {
+                    dealer: dealer_address,
+                });
             }
             let dealer_party_id =
                 Self::certified_dealer_party_id(context.committee, &dealer_address)?;
@@ -5223,10 +5231,14 @@ impl MpcManager {
             let messages = Messages::Rotation(rotation_msgs.clone());
             let actual_hash = compute_messages_hash(&messages);
             if actual_hash != msg.messages_hash {
-                return Err(MpcError::ProtocolFailed(format!(
-                    "Message hash mismatch for dealer {:?}: stored message does not match certificate",
-                    dealer_address
-                )));
+                tracing::warn!(
+                    "Stored rotation message for dealer {:?} does not match its \
+                     certificate; not usable for reconstruction",
+                    dealer_address,
+                );
+                return Err(MpcError::StoredMessageDiverged {
+                    dealer: dealer_address,
+                });
             }
             for (share_index, message) in rotation_msgs {
                 if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
@@ -5415,8 +5427,9 @@ impl MpcManager {
                     mpc_manager,
                     previous_certificates,
                     p2p_channel,
+                    metrics,
                 )
-                .await?;
+                .await;
                 drop(_retrieve_timer);
                 Self::reconstruct_with_complaint_recovery(
                     mpc_manager,
@@ -5786,60 +5799,117 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
-    ) -> MpcResult<()> {
+        metrics: &Metrics,
+    ) {
+        let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
+        let mut failed_repairs = 0usize;
         for cert in previous_certificates {
-            let (msg, certificate, protocol_type, needs_retrieval) = match cert.inner() {
+            let (msg, certificate, protocol_type, stored) = match cert.inner() {
                 CertificateV1::Dkg(dkg_cert) => {
                     let msg = dkg_cert.message();
-                    let missing = {
+                    let stored = {
                         let mgr = mpc_manager.read().unwrap();
                         mgr.public_messages_store
-                            .get_dealer_message(mgr.previous_epoch, &msg.dealer_address)
-                            .map_err(|e| MpcError::StorageError(e.to_string()))?
-                            .is_none()
+                            .get_dealer_message(previous_epoch, &msg.dealer_address)
+                            .map(|m| m.map(Messages::Dkg))
                     };
                     (
                         msg,
                         dkg_cert as &DealerCertificate,
                         ProtocolTypeIndicator::Dkg,
-                        missing,
+                        stored,
                     )
                 }
                 CertificateV1::Rotation(rotation_cert) => {
                     let msg = rotation_cert.message();
-                    let missing = {
+                    let stored = {
                         let mgr = mpc_manager.read().unwrap();
                         mgr.public_messages_store
-                            .get_rotation_messages(mgr.previous_epoch, &msg.dealer_address)
-                            .map_err(|e| MpcError::StorageError(e.to_string()))?
-                            .is_none()
+                            .get_rotation_messages(previous_epoch, &msg.dealer_address)
+                            .map(|m| m.map(Messages::Rotation))
                     };
                     (
                         msg,
                         rotation_cert as &DealerCertificate,
                         ProtocolTypeIndicator::KeyRotation,
-                        missing,
+                        stored,
                     )
                 }
                 _ => continue,
             };
-            if needs_retrieval {
-                tracing::info!(
-                    "Previous epoch {:?} message for dealer {:?} not in DB, retrieving from signers",
-                    protocol_type,
-                    msg.dealer_address
-                );
-                Self::retrieve_message_using_previous_committee(
-                    mpc_manager,
-                    msg,
-                    certificate,
-                    protocol_type,
-                    p2p_channel,
-                )
-                .await?;
+            let stored_hash = stored
+                .as_ref()
+                .ok()
+                .and_then(|m| m.as_ref())
+                .map(compute_messages_hash);
+            if stored_hash.as_ref() == Some(&msg.messages_hash) {
+                continue;
+            }
+            match (stored.as_ref().err(), &stored_hash) {
+                (Some(e), _) => {
+                    metrics
+                        .mpc_previous_message_unusable_total
+                        .with_label_values(&[cert.inner().protocol_label()])
+                        .inc();
+                    tracing::warn!(
+                        "Previous epoch {previous_epoch} {protocol_type:?} message for dealer \
+                         {:?} could not be read ({e})",
+                        msg.dealer_address,
+                    )
+                }
+                (None, None) => tracing::info!(
+                    "Previous epoch {previous_epoch} {protocol_type:?} message for dealer {:?} \
+                     not in DB",
+                    msg.dealer_address,
+                ),
+                (None, Some(stored_digest)) => {
+                    metrics
+                        .mpc_previous_message_unusable_total
+                        .with_label_values(&[cert.inner().protocol_label()])
+                        .inc();
+                    tracing::warn!(
+                        "Previous epoch {previous_epoch} {protocol_type:?} message for dealer \
+                         {:?} diverges from its certificate (stored {stored_digest}, certified \
+                         {})",
+                        msg.dealer_address,
+                        msg.messages_hash,
+                    )
+                }
+            }
+            let repair = Self::retrieve_message_using_previous_committee(
+                mpc_manager,
+                msg,
+                certificate,
+                protocol_type,
+                p2p_channel,
+            );
+            match tokio::time::timeout(PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT, repair).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    failed_repairs += 1;
+                    tracing::warn!(
+                        "Could not repair previous epoch {previous_epoch} {protocol_type:?} \
+                         message for dealer {:?}: {e}",
+                        msg.dealer_address,
+                    )
+                }
+                Err(_) => {
+                    failed_repairs += 1;
+                    tracing::warn!(
+                        "Repair of previous epoch {previous_epoch} {protocol_type:?} message for \
+                         dealer {:?} timed out after {PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT:?}",
+                        msg.dealer_address,
+                    )
+                }
             }
         }
-        Ok(())
+        if failed_repairs > 0 {
+            tracing::warn!(
+                "Could not repair {failed_repairs} previous epoch {previous_epoch} message(s); \
+                 reconstruction may fall back to the new-member path, leaving this node unable \
+                 to deal in the rotation",
+            );
+        }
     }
 
     async fn retrieve_message_using_previous_committee(
@@ -5890,10 +5960,14 @@ impl MpcManager {
             }
             Messages::NonceGeneration(_)
             | Messages::NonceGenerationAvid(_)
-            | Messages::AvidNonceRetrieval(_) => unreachable!(
-                "Hash matched previous-epoch certificate but got {:?}",
-                std::mem::discriminant(&messages)
-            ),
+            | Messages::AvidNonceRetrieval(_) => {
+                return Err(MpcError::ProtocolFailed(format!(
+                    "Retrieved non-key-generation message for dealer {:?} during previous-epoch \
+                     repair: {:?}",
+                    message.dealer_address,
+                    std::mem::discriminant(&messages)
+                )));
+            }
         }
         Ok(())
     }

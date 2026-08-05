@@ -666,6 +666,9 @@ pub enum MpcError {
     #[error("Pairwise communication error: {0}")]
     PairwiseCommunicationError(String),
 
+    #[error("Stored message for dealer {dealer} does not match its certificate")]
+    StoredMessageDiverged { dealer: Address },
+
     #[error("Storage error: {0}")]
     StorageError(String),
 
