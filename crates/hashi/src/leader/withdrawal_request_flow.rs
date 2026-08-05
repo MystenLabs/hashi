@@ -490,8 +490,10 @@ impl LeaderService {
         // the full batching window.
         let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
             let timestamp_secs = checkpoint_timestamp_ms / 1000;
-            let max_bucket = limiter.config().max_bucket_capacity;
-            let capacity = limiter.capacity_at(timestamp_secs);
+            // One read: a rotation landing mid-loop must not mix the two.
+            let view = limiter.view();
+            let max_bucket = view.config.max_bucket_capacity;
+            let capacity = view.capacity_at(timestamp_secs);
 
             let mut batch: Vec<WithdrawalRequest> = Vec::new();
             let mut cumulative = 0u64;
