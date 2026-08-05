@@ -127,6 +127,17 @@ impl WithdrawalStateMachine {
     ///
     /// The return value contains every resulting finding. An empty vector means
     /// the event was accepted without one.
+    ///
+    /// TODO: Represent a missing neighbor with its full allowed timestamp
+    /// interval, and apply both bounds regardless of event ingestion order. For
+    /// consecutive events `E_i` and `E_{i+1}`, observing `E_i` should constrain
+    /// `E_{i+1}` to `[E_i - clock_skew, E_i + next_event_delay]`; observing
+    /// `E_{i+1}` first should impose the equivalent inverse interval on `E_i`.
+    /// The current single-deadline representation checks only one side of that
+    /// interval, so timing findings can depend on which event is ingested first.
+    /// Before applying this uniformly to E2/E3, account for a Bitcoin block
+    /// header's timestamp being an approximate miner-provided time rather than
+    /// the wall-clock time at which the transaction was confirmed.
     pub fn add_event(
         &mut self,
         new_event: MonitorWithdrawalEvent,

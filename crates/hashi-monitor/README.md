@@ -11,9 +11,7 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 ### Deposits (BTC → Sui)
 - **E1**: Deposit confirmed on Bitcoin.
-- **E2**: `DepositApproved` on Sui. The monitor checks the committee's
-  security-critical approval against Bitcoin; it does not track whether that
-  approval later progresses to `DepositConfirmed`.
+- **E2**: `DepositApproved` on Sui.
 
 ### Checks
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
