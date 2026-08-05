@@ -3657,11 +3657,6 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
 
     // Create rotation messages and store in DB only.
-    manager.session_id = SessionId::new(
-        TEST_CHAIN_ID,
-        rotation_setup.setup.epoch(),
-        &ProtocolType::KeyRotation,
-    );
     let rotation_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
     manager
         .public_messages_store
@@ -3995,11 +3990,6 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
-    manager.session_id = SessionId::new(
-        TEST_CHAIN_ID,
-        rotation_setup.setup.epoch(),
-        &ProtocolType::KeyRotation,
-    );
 
     let flow1 = manager
         .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
@@ -4034,11 +4024,6 @@ fn test_prepare_rotation_dealer_flow_survives_same_process_retry() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
-    manager.session_id = SessionId::new(
-        TEST_CHAIN_ID,
-        rotation_setup.setup.epoch(),
-        &ProtocolType::KeyRotation,
-    );
 
     let flow1 = manager
         .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
@@ -6241,6 +6226,14 @@ impl RotationTestSetup {
         result
     }
 
+    fn switch_to_rotation(&self, manager: &mut MpcManager) {
+        manager.session_id = SessionId::new(
+            TEST_CHAIN_ID,
+            self.setup.epoch(),
+            &ProtocolType::KeyRotation,
+        );
+    }
+
     fn prepare_for_rotation(&self, manager: &mut MpcManager) {
         let previous_committee = self
             .setup
@@ -6289,6 +6282,7 @@ impl RotationTestSetup {
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
         self.prepare_for_rotation(&mut receiver_manager);
+        self.switch_to_rotation(&mut receiver_manager);
 
         (receiver_manager, dkg_output)
     }
@@ -6319,6 +6313,7 @@ impl RotationTestSetup {
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
         self.prepare_for_rotation(&mut receiver_manager);
+        self.switch_to_rotation(&mut receiver_manager);
 
         (receiver_manager, dkg_output)
     }
@@ -6346,6 +6341,7 @@ impl RotationTestSetup {
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
         self.prepare_for_rotation(&mut dealer_manager);
+        self.switch_to_rotation(&mut dealer_manager);
 
         // Create rotation messages and store for reuse
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -6386,6 +6382,7 @@ impl RotationTestSetup {
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
         self.prepare_for_rotation(&mut dealer_manager);
+        self.switch_to_rotation(&mut dealer_manager);
 
         // Create rotation messages and store for reuse
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -8550,6 +8547,24 @@ async fn test_recover_rotation_shares_via_complaint_success() {
             "recover_rotation_shares_via_complaints must leave the complaint for the caller to clear atomically"
         );
     }
+}
+
+#[test]
+fn base_session_id_for_epoch_honours_both_arguments() {
+    let setup = TestSetup::new(4);
+    let manager = setup.create_manager(0);
+    let epoch = manager.mpc_config.epoch;
+
+    assert_eq!(
+        manager.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation),
+        SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation),
+        "the manager's cached Dkg id must not stand in for another protocol"
+    );
+    assert_eq!(
+        manager.base_session_id_for_epoch(epoch + 7, &ProtocolType::Dkg),
+        SessionId::new(TEST_CHAIN_ID, epoch + 7, &ProtocolType::Dkg),
+        "a non-current epoch must use the epoch passed, not previous_epoch"
+    );
 }
 
 #[test]

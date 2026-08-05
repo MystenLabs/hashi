@@ -5079,7 +5079,7 @@ impl MpcManager {
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        let source_session_id = SessionId::new(&self.chain_id, context.epoch, &ProtocolType::Dkg);
+        let source_session_id = self.base_session_id_for_epoch(context.epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::AvssOutput> = HashMap::new();
         let mut dealer_weight_sum = 0u32;
         for cert in certificates {
@@ -5249,7 +5249,7 @@ impl MpcManager {
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
-            SessionId::new(&self.chain_id, context.epoch, &ProtocolType::KeyRotation);
+            self.base_session_id_for_epoch(context.epoch, &ProtocolType::KeyRotation);
         // Each dealer only rotates their own shares from the previous epoch, so share indices
         // are unique across dealers (no duplicates in `certified_share_indices`).
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
@@ -6017,11 +6017,7 @@ impl MpcManager {
     }
 
     fn base_session_id_for_epoch(&self, epoch: u64, protocol_type: &ProtocolType) -> SessionId {
-        if epoch == self.mpc_config.epoch {
-            self.session_id.clone()
-        } else {
-            SessionId::new(&self.chain_id, self.previous_epoch, protocol_type)
-        }
+        SessionId::new(&self.chain_id, epoch, protocol_type)
     }
 
     fn config_for_epoch(
