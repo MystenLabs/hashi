@@ -83,6 +83,11 @@ impl ProxyMetrics {
         self.requests.with_label_values(&[outcome]).inc();
     }
 
+    /// The registry behind `/metrics`, for the remote-write pusher.
+    pub fn registry(&self) -> Registry {
+        self.registry.clone()
+    }
+
     fn render(&self) -> String {
         let mut buf = Vec::new();
         TextEncoder::new()
