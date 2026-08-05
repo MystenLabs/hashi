@@ -9,6 +9,7 @@
 //! - Package ID routing updates correctly in OnchainState
 
 use anyhow::Result;
+use e2e_tests::TestNetworks;
 use e2e_tests::TestNetworksBuilder;
 use e2e_tests::snapshot;
 use e2e_tests::test_helpers::create_deposit_and_wait;
@@ -23,6 +24,43 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::info;
+
+/// Poll until every node's watcher reports `package_id` as the active
+/// package — the PackageUpgraded handler in watcher.rs must update
+/// OnchainState's package_versions map on all nodes. Prints per-node
+/// diagnostics before failing on timeout.
+async fn wait_for_package_convergence(
+    networks: &TestNetworks,
+    package_id: Address,
+    max_wait: Duration,
+) -> Result<()> {
+    info!("waiting for all nodes to detect the new package version...");
+    let wait_start = std::time::Instant::now();
+    loop {
+        let all_updated = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .all(|node| node.hashi().onchain_state().package_id() == Some(package_id));
+        if all_updated {
+            return Ok(());
+        }
+        if wait_start.elapsed() > max_wait {
+            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+                let latest = node.hashi().onchain_state().package_id();
+                let versions = node
+                    .hashi()
+                    .onchain_state()
+                    .state()
+                    .package_versions()
+                    .clone();
+                info!("node {i}: package_id={latest:?}, versions={versions:?}");
+            }
+            anyhow::bail!("timeout: not all nodes detected the new package version");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
 
 /// Test the full upgrade lifecycle, exercising real cascading effects.
 ///
@@ -59,38 +97,7 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     assert_ne!(new_package_id, hashi_ids.package_id);
 
     // ── Cascading effect 1: Watcher picks up new package ────────────────
-    //
-    // The PackageUpgraded handler in watcher.rs should update
-    // OnchainState's package_versions map. Poll until all nodes see the
-    // new package — this proves the watcher correctly processes the event.
-    info!("waiting for all nodes to detect the new package version...");
-    let wait_start = std::time::Instant::now();
-    let max_wait = Duration::from_secs(30);
-    loop {
-        let all_updated = networks
-            .hashi_network
-            .nodes()
-            .iter()
-            .all(|node| node.hashi().onchain_state().package_id() == Some(new_package_id));
-        if all_updated {
-            break;
-        }
-        if wait_start.elapsed() > max_wait {
-            // Print diagnostic info before failing
-            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
-                let latest = node.hashi().onchain_state().package_id();
-                let versions = node
-                    .hashi()
-                    .onchain_state()
-                    .state()
-                    .package_versions()
-                    .clone();
-                info!("node {i}: package_id={latest:?}, versions={versions:?}");
-            }
-            anyhow::bail!("timeout: not all nodes detected the new package version");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
 
     // ── Cascading effect 2: Package ID routing ──────────────────────────
     //
@@ -269,27 +276,7 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     );
 
     // ── All nodes' watchers must pick up the new package version ─────────
-    info!("waiting for all nodes to detect the new package version...");
-    let wait_start = std::time::Instant::now();
-    let max_wait = Duration::from_secs(30);
-    loop {
-        let all_updated = networks
-            .hashi_network
-            .nodes()
-            .iter()
-            .all(|node| node.hashi().onchain_state().package_id() == Some(new_package_id));
-        if all_updated {
-            break;
-        }
-        if wait_start.elapsed() > max_wait {
-            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
-                let latest = node.hashi().onchain_state().package_id();
-                info!("node {i}: package_id={latest:?}");
-            }
-            anyhow::bail!("timeout: not all nodes detected the new package version");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
 
     // ── v2-only canary module must be callable post-upgrade ─────────────
     //
