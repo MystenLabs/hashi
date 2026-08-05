@@ -31,13 +31,10 @@ prev_builds: []
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
+  package_id: "0x..."
 
 btc:
-  rpc_url: "http://localhost:8332"
-  rpc_auth:
-    type: none
-    # type: user_pass
-    # username: "rpcuser"
-    # password: "rpcpassword"
-    # type: cookie_file
-    # path: "/path/to/.cookie"
+  # Prefix with env: to keep provider API keys out of YAML.
+  rpc_url: "env:HASHI_BITCOIN_RPC_URL"
+  # Optional provider-specific headers.
+  http_headers: {}

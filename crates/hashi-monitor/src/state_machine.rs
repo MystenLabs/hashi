@@ -389,9 +389,10 @@ impl DepositStateMachine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::BtcConfig;
-    use crate::config::BtcRpcAuth;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use bitcoin::hashes::Hash as _;
@@ -430,10 +431,11 @@ mod tests {
             .expect("valid PCR allowlist"),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
+                package_id: format!("0x{}", "11".repeat(32)),
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
-                rpc_auth: BtcRpcAuth::None,
+                http_headers: BTreeMap::new(),
             },
         }
     }
