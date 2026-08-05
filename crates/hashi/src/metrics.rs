@@ -135,6 +135,8 @@ pub struct Metrics {
     pub mpc_bad_partial_sigs_total: IntCounterVec,
     /// Reader-side rejections of certificates read from TOB.
     pub mpc_certs_rejected_total: IntCounterVec,
+    /// Writer-side outcome of publishing a dealer certificate to the TOB.
+    pub mpc_cert_publish_total: IntCounterVec,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
     /// Ticks where no DB encryption key matched the current committee record
@@ -796,6 +798,14 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_cert_publish_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_cert_publish_total",
+                "Outcome of publishing a dealer certificate to the TOB. Counted once per publish \
+                 operation, not once per retry within it.",
+                &["protocol", "outcome"],
+                registry,
+            )
+            .unwrap(),
             mpc_recovery_suspicious_total: register_int_counter_with_registry!(
                 "hashi_mpc_recovery_suspicious_total",
                 "Post-restart key recoveries where local state contradicted the on-chain key \
@@ -877,7 +887,7 @@ impl Metrics {
             .unwrap(),
             mpc_cert_publish_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_cert_publish_duration_seconds",
-                "Duration of tob_channel.publish",
+                "Duration of a dealer-certificate publish, covering the whole retry loop.",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,

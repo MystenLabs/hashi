@@ -19,6 +19,7 @@ pub use interfaces::ChannelError;
 pub use interfaces::ChannelResult;
 pub use interfaces::OrderedBroadcastChannel;
 pub use interfaces::P2PChannel;
+pub use interfaces::PublishOutcome;
 pub use sui_tob::PrefetchedTobChannel;
 pub use sui_tob::SuiTobSessionChannel;
 pub use sui_tob::fetch_certificates;

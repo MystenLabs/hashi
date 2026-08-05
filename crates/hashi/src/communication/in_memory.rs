@@ -5,6 +5,7 @@
 
 use crate::communication::interfaces::ChannelResult;
 use crate::communication::interfaces::OrderedBroadcastChannel;
+use crate::communication::interfaces::PublishOutcome;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -57,12 +58,12 @@ impl<M> OrderedBroadcastChannel<M> for InMemoryOrderedBroadcastChannel<M>
 where
     M: Clone + Send + Sync + 'static,
 {
-    async fn publish(&self, message: M) -> ChannelResult<()> {
+    async fn publish(&self, message: M) -> ChannelResult<PublishOutcome> {
         // In a real implementation, this would go through consensus to establish ordering
         // For testing, we simulate ordering by adding to a single shared queue
         let mut queue = self.shared_queue.lock().await;
         queue.push_back(message);
-        Ok(())
+        Ok(PublishOutcome::Landed)
     }
 
     async fn receive(&mut self) -> ChannelResult<M> {
@@ -123,7 +124,7 @@ mod tests {
                 id: i as u32,
                 data: format!("message from {}", i),
             };
-            channels.get(sender).unwrap().publish(msg).await.unwrap();
+            let _ = channels.get(sender).unwrap().publish(msg).await.unwrap();
         }
 
         // All validators should receive messages in the same order
@@ -162,7 +163,7 @@ mod tests {
             data: "test".to_string(),
         };
 
-        channels
+        let _ = channels
             .get(&validators[0])
             .unwrap()
             .publish(msg)
