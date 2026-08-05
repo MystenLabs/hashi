@@ -48,6 +48,12 @@ run-debug: out/nitro.eif
 		--debug-mode \
 		--attach-console
 
+# Regenerate the pruned lock the enclave build uses (see the Containerfile).
+# Run this whenever a workspace dependency changes, and commit the result.
+.PHONY: enclave-lock
+enclave-lock:
+	./scripts/gen-enclave-lock.sh
+
 .PHONY: clean
 clean:
 	rm -rf out/

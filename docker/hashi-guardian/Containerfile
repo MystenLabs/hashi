@@ -143,7 +143,26 @@ RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 
 ENV GIT_REVISION=${GIT_REVISION}
 COPY crates /crates
 COPY Cargo.toml /Cargo.toml
-COPY Cargo.lock /Cargo.lock
+# Keep test-only code out of the enclave build. `-p hashi-guardian` does not
+# narrow dependency resolution: cargo resolves every workspace member's
+# dependencies, dev-dependencies included, so the whole workspace has to
+# resolve here. `move-binary-format` and `move-core-types` live in the sui repo
+# under paths its root workspace `exclude`s, and this build's cargo will not
+# resolve a git package excluded that way — it fails with "no matching package
+# named `move-binary-format` found" even though the fetched checkout does
+# contain the manifest. Nothing dropped below is an enclave input: e2e-tests and
+# hashi-monitor are test-only crates (hashi-monitor is here solely because its
+# `path` dev-dependency on e2e-tests must exist on disk to load), and the two
+# deps are used only by crates/hashi's tests, which this build never compiles.
+# Dropping them also keeps the enclave's build inputs minimal.
+RUN rm -rf /crates/e2e-tests /crates/hashi-monitor \
+ && sed -i '/^move-binary-format\.workspace/d; /^move-core-types\.workspace/d' /crates/hashi/Cargo.toml
+# Lock for the pruned workspace above, so the build stays `--locked`. It is the
+# root lock minus the entries only those crates needed — same versions, same
+# checksums, nothing re-resolved — so the enclave still compiles exactly what
+# the workspace resolves to. Regenerate with `make enclave-lock` and keep it in
+# sync; CI (guardian-enclave-lock) fails if it drifts.
+COPY docker/hashi-guardian/enclave-Cargo.lock /Cargo.lock
 
 WORKDIR /
 ENV OPENSSL_STATIC=true
