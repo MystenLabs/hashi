@@ -1000,9 +1000,20 @@ impl Hashi {
         if !self.verify_and_pin_guardian_btc_pubkey(info.enclave_btc_pubkey) {
             return None;
         }
-        let config = info.limiter_config?;
-        let state = info.limiter_state?;
-        Some((limiter, config, state))
+        match (info.limiter_config, info.limiter_state) {
+            (Some(config), Some(state)) => Some((limiter, config, state)),
+            // The enclave installs the config at operator_init and builds the
+            // limiter from it at operator_activate, so state can never outrun
+            // config. Say so rather than stalling every reconcile in silence.
+            (None, Some(_)) => {
+                tracing::warn!(
+                    "Guardian reported limiter state without a config; skipping reconcile"
+                );
+                None
+            }
+            // Provisioned but not yet activated — ordinary mid-rotation.
+            _ => None,
+        }
     }
 
     /// Adopt the guardian's limiter policy when a re-provision changed it. The
