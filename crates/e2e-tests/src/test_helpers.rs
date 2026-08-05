@@ -26,6 +26,7 @@ use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::GetBalanceRequest;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
+use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::bcs::FromBcs;
@@ -215,66 +216,95 @@ pub fn extract_witness_program(address: &BitcoinAddress) -> Result<Vec<u8>> {
     }
 }
 
-/// Subscribe to checkpoints and return the first `WithdrawalConfirmed` event,
-/// or error on timeout. Confirmation is the terminal on-chain milestone of a
-/// withdrawal: it fires only after the committee has generated presignatures,
-/// threshold-signed the BTC transaction, the guardian co-signed, and the leader
-/// observed the mined tx — so waiting on it exercises the whole signing path.
-pub async fn wait_for_withdrawal_confirmation(
-    sui_client: &mut sui_rpc::Client,
-    timeout: Duration,
-) -> Result<WithdrawalConfirmed> {
-    info!("Waiting for withdrawal confirmation...");
+/// A live checkpoint subscription to be consumed by
+/// [`WithdrawalConfirmations::wait_for`].
+///
+/// Two-phase on purpose: open the subscription with
+/// [`subscribe_withdrawal_confirmations`] BEFORE kicking off whatever
+/// produces the confirmation (the background miner), so an early event
+/// cannot land in the gap before the stream exists and be missed.
+pub struct WithdrawalConfirmations {
+    subscription: tonic::Streaming<SubscribeCheckpointsResponse>,
+}
 
-    let start = std::time::Instant::now();
+/// Open a checkpoint subscription for awaiting `WithdrawalConfirmed` events.
+pub async fn subscribe_withdrawal_confirmations(
+    sui_client: &mut sui_rpc::Client,
+) -> Result<WithdrawalConfirmations> {
     let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
         .transactions()
         .events()
         .events()
         .contents()
         .finish()]);
-    let mut subscription = sui_client
+    let subscription = sui_client
         .subscription_client()
         .subscribe_checkpoints(
             SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
         )
         .await?
         .into_inner();
+    Ok(WithdrawalConfirmations { subscription })
+}
 
-    while let Some(item) = subscription.next().await {
-        if start.elapsed() > timeout {
-            return Err(anyhow!(
-                "Timeout waiting for withdrawal confirmation after {:?}",
-                timeout
-            ));
-        }
+impl WithdrawalConfirmations {
+    /// Return the `WithdrawalConfirmed` event covering `request_id`, or error
+    /// on timeout. Confirmation is the terminal on-chain milestone of a
+    /// withdrawal: it fires only after the committee has generated
+    /// presignatures, threshold-signed the BTC transaction, the guardian
+    /// co-signed, and the leader observed the mined tx — so waiting on it
+    /// exercises the whole signing path. Confirmations for other requests are
+    /// skipped, so concurrent withdrawals cannot satisfy the wait.
+    pub async fn wait_for(
+        mut self,
+        request_id: Address,
+        timeout: Duration,
+    ) -> Result<WithdrawalConfirmed> {
+        info!("Waiting for confirmation of withdrawal request {request_id}...");
 
-        let checkpoint = match item {
-            Ok(checkpoint) => checkpoint,
-            Err(e) => {
-                debug!("Error in checkpoint stream: {}", e);
-                continue;
-            }
-        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Deadline the stream read itself: a stalled subscription must
+            // fail the wait, not hang it.
+            let item = tokio::time::timeout_at(deadline, self.subscription.next())
+                .await
+                .map_err(|_| {
+                    anyhow!("Timeout waiting for withdrawal confirmation after {timeout:?}")
+                })?
+                .ok_or_else(|| anyhow!("Checkpoint subscription ended unexpectedly"))?;
 
-        debug!(
-            "Received checkpoint {}, checking for WithdrawalConfirmed...",
-            checkpoint.cursor()
-        );
+            let checkpoint = match item {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {}", e);
+                    continue;
+                }
+            };
 
-        for txn in checkpoint.checkpoint().transactions() {
-            for event in txn.events().events() {
-                let event_type = event.contents().name();
+            debug!(
+                "Received checkpoint {}, checking for WithdrawalConfirmed...",
+                checkpoint.cursor()
+            );
 
-                if event_type.contains("WithdrawalConfirmed") {
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    if !event.contents().name().contains("WithdrawalConfirmed") {
+                        continue;
+                    }
                     match WithdrawalConfirmed::from_bcs(event.contents().value()) {
-                        Ok(event_data) => {
+                        Ok(event_data) if event_data.request_ids.contains(&request_id) => {
                             info!(
                                 withdrawal_txn_id = %event_data.withdrawal_txn_id,
                                 txid = %event_data.txid,
                                 "Withdrawal confirmed!"
                             );
                             return Ok(event_data);
+                        }
+                        Ok(event_data) => {
+                            debug!(
+                                withdrawal_txn_id = %event_data.withdrawal_txn_id,
+                                "WithdrawalConfirmed for other requests, still waiting"
+                            );
                         }
                         Err(e) => {
                             debug!("Failed to parse WithdrawalConfirmed: {}", e);
@@ -283,10 +313,7 @@ pub async fn wait_for_withdrawal_confirmation(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-
-    Err(anyhow!("Checkpoint subscription ended unexpectedly"))
 }
 
 /// Request a withdrawal of `amount_sats` to a fresh regtest address and wait
@@ -306,6 +333,11 @@ pub async fn create_withdrawal_and_wait(
     let destination_bytes = extract_witness_program(&btc_destination)?;
     info!("Requesting withdrawal of {amount_sats} sats to {btc_destination}");
 
+    // Subscribe before creating the request or mining, so the confirmation
+    // cannot land before the stream exists.
+    let confirmations =
+        subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+
     let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
         .with_signer(user_key.clone().into());
     let withdrawal_request_id = executor
@@ -316,11 +348,9 @@ pub async fn create_withdrawal_and_wait(
     // Mine in the background so the signed BTC transaction confirms and the
     // leader's block-driven loop reports the withdrawal on Sui.
     let _miner = BackgroundMiner::start(&networks.bitcoin_node);
-    let confirmed = wait_for_withdrawal_confirmation(
-        &mut networks.sui_network.client,
-        Duration::from_secs(300),
-    )
-    .await?;
+    let confirmed = confirmations
+        .wait_for(withdrawal_request_id, Duration::from_secs(300))
+        .await?;
     info!("Withdrawal confirmed on Sui");
 
     Ok(confirmed)

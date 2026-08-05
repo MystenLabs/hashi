@@ -33,10 +33,10 @@ mod tests {
     use crate::test_helpers::get_hbtc_balance;
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
+    use crate::test_helpers::subscribe_withdrawal_confirmations;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
-    use crate::test_helpers::wait_for_withdrawal_confirmation;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -516,6 +516,9 @@ mod tests {
             withdrawal_amount_sats, btc_destination
         );
 
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
                 .with_signer(user_key.clone().into());
@@ -526,11 +529,9 @@ mod tests {
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
-        let confirmed_event = wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let confirmed_event = confirmations
+            .wait_for(withdrawal_request_id, Duration::from_secs(60))
+            .await?;
         info!("Withdrawal confirmed on Sui");
 
         drop(miner);
@@ -615,19 +616,19 @@ mod tests {
     ) -> Result<()> {
         let btc_destination = networks.bitcoin_node.get_new_address()?;
         let destination_bytes = extract_witness_program(&btc_destination)?;
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
             .with_signer(signer.into());
-        executor
+        let withdrawal_request_id = executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
-        let confirmed = wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let confirmed = confirmations
+            .wait_for(withdrawal_request_id, Duration::from_secs(60))
+            .await?;
 
         drop(miner);
 
@@ -1071,10 +1072,13 @@ mod tests {
             .current_epoch()
             .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
 
+        let confirmations =
+            subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
                 .with_signer(user_key.clone().into());
-        withdrawal_executor
+        let withdrawal_request_id = withdrawal_executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
 
@@ -1098,11 +1102,9 @@ mod tests {
         }
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
-        wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(180),
-        )
-        .await?;
+        confirmations
+            .wait_for(withdrawal_request_id, Duration::from_secs(180))
+            .await?;
         drop(miner);
 
         Ok(())
