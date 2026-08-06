@@ -733,13 +733,6 @@ impl Hashi {
                 self.config.bitcoin_rpc_auth(),
             )
             .trusted_peers(self.config.bitcoin_trusted_peers()?)
-            .data_dir(
-                self.config
-                    .db
-                    .as_deref()
-                    .expect("Db path is not set")
-                    .join("btc-monitor"),
-            )
             .build();
         let (client, service) =
             crate::btc_monitor::monitor::Monitor::run(monitor_config, self.metrics.clone())

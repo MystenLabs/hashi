@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use kyoto::FeeRate;
@@ -39,6 +40,9 @@ const KYOTO_MAX_RESTART_DELAY_JITTER: Duration = Duration::from_secs(30);
 /// How many Bitcoin blocks a deposit observation can go without being
 /// refreshed before it's dropped from the confirmation-metrics cache.
 const STALE_OBSERVATION_BLOCKS: u32 = 10;
+
+/// Ceiling on a single round-trip through the monitor loop.
+const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
@@ -230,7 +234,7 @@ impl Monitor {
         config: &MonitorConfig,
         checkpoint: HashCheckpoint,
     ) -> (kyoto::Node, kyoto::Client) {
-        let mut builder = kyoto::Builder::new(config.network)
+        kyoto::Builder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
             // Only connect to the configured trusted peers. Prevents Kyoto from
             // discovering additional peers via DNS seeding or addr gossip.
@@ -238,15 +242,8 @@ impl Monitor {
             // and the supervision loop rebuilds it.
             .whitelist_only()
             .maximum_connection_time(Duration::MAX)
-            .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
-
-        // No-op as of bip157 0.6.3: the builder takes the path and `Node::new`
-        // discards it. Kept for when upstream implements persistence.
-        if let Some(data_dir) = &config.data_dir {
-            builder = builder.data_dir(data_dir.clone());
-        }
-
-        builder.build()
+            .chain_state(kyoto::ChainState::Checkpoint(checkpoint))
+            .build()
     }
 
     /// Kyoto re-syncs from its checkpoint on every build, so anchoring at genesis
@@ -275,9 +272,9 @@ impl Monitor {
         height: u32,
     ) -> HashCheckpoint {
         const RETRY_DELAY: Duration = Duration::from_secs(2);
-        const LOG_EVERY: u32 = 15;
+        const LOG_INTERVAL: Duration = Duration::from_secs(30);
 
-        let mut attempt: u32 = 0;
+        let mut next_log = Instant::now();
         loop {
             match btc_rpc_call(bitcoind_rpc, move |rpc| rpc.get_block_hash(height as u64)).await {
                 Ok(raw) => match raw.into_model() {
@@ -288,19 +285,17 @@ impl Monitor {
                     Err(e) => error!("Failed to parse getblockhash({height}) response: {e}"),
                 },
                 Err(e) => {
-                    if attempt.is_multiple_of(LOG_EVERY) {
+                    if Instant::now() >= next_log {
+                        next_log = Instant::now() + LOG_INTERVAL;
                         match Self::bitcoind_height(bitcoind_rpc).await {
                             Some(blocks) => warn!(
                                 "Waiting for bitcoind to reach start height {height}; it is at {blocks}"
                             ),
-                            None => warn!(
-                                "Waiting for a block at start height {height} from bitcoind: {e}"
-                            ),
+                            None => warn!("Waiting for a block at start height {height}: {e}"),
                         }
                     }
                 }
             }
-            attempt = attempt.wrapping_add(1);
             tokio::time::sleep(RETRY_DELAY).await;
         }
     }
@@ -1205,31 +1200,47 @@ impl MonitorClient {
         })?
     }
 
-    pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
+    /// Round-trip a request through the monitor loop, bounded so callers fail
+    /// rather than block while the loop is still resolving its start checkpoint.
+    async fn request<T>(
+        &self,
+        message: impl FnOnce(oneshot::Sender<Result<T>>) -> MonitorMessage,
+        what: &str,
+    ) -> Result<T> {
         let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(MonitorMessage::GetRecentFeeRate(conf_target, tx))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        tokio::time::timeout(MONITOR_REQUEST_TIMEOUT, async {
+            self.tx
+                .send(message(tx))
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            rx.await.map_err(|e| anyhow::anyhow!(e))?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("{what} timed out waiting for the Bitcoin monitor"))?
+    }
+
+    pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
+        self.request(
+            |tx| MonitorMessage::GetRecentFeeRate(conf_target, tx),
+            "get_recent_fee_rate",
+        )
+        .await
     }
 
     pub async fn broadcast_transaction(&self, transaction: bitcoin::Transaction) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(MonitorMessage::BroadcastTransaction(transaction, tx))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        self.request(
+            |tx| MonitorMessage::BroadcastTransaction(transaction, tx),
+            "broadcast_transaction",
+        )
+        .await
     }
 
     pub async fn get_transaction_status(&self, txid: bitcoin::Txid) -> Result<TxStatus> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(MonitorMessage::GetTransactionStatus(txid, tx))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        self.request(
+            |tx| MonitorMessage::GetTransactionStatus(txid, tx),
+            "get_transaction_status",
+        )
+        .await
     }
 }
 
