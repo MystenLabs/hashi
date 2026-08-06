@@ -9,6 +9,7 @@ use hashi_guardian_proxy::forward::Forwarding;
 use hashi_guardian_proxy::info;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::relay::Relay;
+use hashi_guardian_proxy::remote_write;
 use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -30,7 +31,7 @@ async fn main() -> Result<()> {
 
     abort_on_panic();
 
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
     info!(
         backend = %config.backend_url,
         listen = %config.listen_addr,
@@ -61,6 +62,10 @@ async fn main() -> Result<()> {
             }
         }
     });
+    match config.remote_write.take() {
+        Some(remote_write) => remote_write::start(remote_write, metrics.registry())?,
+        None => warn!("MIMIR_URL is unset: guardian_proxy_* metrics will not leave this task."),
+    }
 
     // Lazy channel to the enclave guardian, shared by forwarder, relay, and the
     // /info reader. Mirrors the node-side client
