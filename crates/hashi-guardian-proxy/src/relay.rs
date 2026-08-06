@@ -387,9 +387,17 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
             }
             Err(e) => {
                 // A racing batch or out-of-band ProvisionerInit may have provisioned
-                // the guardian since our status read; re-check before erroring.
+                // the guardian since our status read; re-check before erroring —
+                // against the same pins, so this stays the only way to reach
+                // `done()` and a backend that moved under us can't turn a failed
+                // batch into a success.
                 match self.backend_status().await {
-                    Ok(s) if s.provisioned => {
+                    Ok(s)
+                        if matches!(
+                            match_backend(verified_request, &s),
+                            Ok(Matched::Provisioned)
+                        ) =>
+                    {
                         acc.completed = true;
                         Ok(done())
                     }
