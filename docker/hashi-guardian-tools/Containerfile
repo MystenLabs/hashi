@@ -1,0 +1,100 @@
+# syntax=docker/dockerfile:1
+
+# The guardian binaries the deploy pipeline's CI ceremony runs, built once here
+# instead of three times from a cold cargo cache on GitHub runners
+# (sui-operations scripts/hashi/{guardian-ceremony,bootstrap-guardian}.sh).
+#
+# Both carry `non-enclave-dev`: the guardian emits a mock attestation document
+# and init accepts one, which is what lets a runner-local ceremony verify
+# against dev stacks whose EIF sets eif-features=non-enclave-dev. That is the
+# ONLY thing this image is for — the `-dev` suffix on the packaged names is
+# deliberate, so these can never be mistaken for enclave-grade builds in the
+# bucket they share with the real hashi CLI.
+#
+# Deliberately separate from docker/hashi/Containerfile rather than another
+# stage in it. Cargo unifies features per invocation, so building these
+# alongside the `hashi` CLI would silently ship a CLI whose attestation
+# verification is a no-op. Separate images make that impossible.
+#
+# The sibling docker/hashi-guardian/Containerfile is the Nitro enclave build
+# and produces an EIF, not a runnable binary — do not conflate the two.
+
+FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
+FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
+FROM stagex/core-filesystem@sha256:da28831927652291b0fa573092fd41c8c96ca181ea224df7bff40e1833c3db13 AS core-filesystem
+
+#
+# Deps stage: fetch and compile external dependencies (cached until Cargo.toml/Cargo.lock change)
+#
+FROM pallet-rust AS deps
+
+# Shell needed by cc-based build scripts (blst, ring, etc.)
+COPY --from=busybox . /
+
+# Copy only manifests. hashi-guardian-init pulls in hashi and hashi-guardian,
+# so all four members are needed for the workspace glob to resolve.
+COPY Cargo.toml Cargo.lock /src/
+COPY crates/hashi/Cargo.toml /src/crates/hashi/Cargo.toml
+COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
+COPY crates/hashi-guardian/Cargo.toml /src/crates/hashi-guardian/Cargo.toml
+COPY crates/hashi-guardian-init/Cargo.toml /src/crates/hashi-guardian-init/Cargo.toml
+
+WORKDIR /src
+
+# Create stub source files so cargo can resolve and compile all external deps
+RUN mkdir -p crates/hashi/src \
+ && echo 'fn main(){}' > crates/hashi/src/main.rs \
+ && touch crates/hashi/src/lib.rs \
+ && mkdir -p crates/hashi-types/src \
+ && touch crates/hashi-types/src/lib.rs \
+ && mkdir -p crates/hashi-guardian/src \
+ && echo 'fn main(){}' > crates/hashi-guardian/src/main.rs \
+ && touch crates/hashi-guardian/src/lib.rs \
+ && mkdir -p crates/hashi-guardian-init/src \
+ && echo 'fn main(){}' > crates/hashi-guardian-init/src/main.rs
+
+ENV TARGET=x86_64-unknown-linux-musl
+ENV OPENSSL_STATIC=true
+ENV CARGO_INCREMENTAL=0
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
+
+# One invocation for both binaries: they want the same feature, so unification
+# is intended here and the shared tree compiles once. Features are named
+# per-package because more than one package is selected. ENV rather than ARG so
+# the build stage below inherits it — ARG scope is per-stage.
+ENV CARGO_BUILD_ARGS="\
+    -p hashi-guardian -p hashi-guardian-init \
+    --features hashi-guardian/non-enclave-dev,hashi-guardian-init/non-enclave-dev \
+    --bin hashi-guardian --bin hashi-guardian-init"
+
+RUN cargo fetch
+RUN --network=none cargo build --release --frozen --target "$TARGET" ${CARGO_BUILD_ARGS}
+
+#
+# Build stage: compile with real source (only local crates recompile)
+#
+FROM deps AS build
+
+ARG GIT_REVISION=unknown
+ENV GIT_REVISION=${GIT_REVISION}
+
+COPY crates/hashi /src/crates/hashi
+COPY crates/hashi-types /src/crates/hashi-types
+COPY crates/hashi-guardian /src/crates/hashi-guardian
+COPY crates/hashi-guardian-init /src/crates/hashi-guardian-init
+
+# Touch source files to invalidate cargo's fingerprint cache for local crates
+RUN find crates/ -name "*.rs" -exec touch {} +
+
+RUN --network=none cargo build --release --frozen --target "$TARGET" ${CARGO_BUILD_ARGS}
+
+#
+# Package stage: nothing runs this image — it exists so the mp3 binary uploader
+# can extract these two paths to gs://mysten-hashi-binaries/<sha>/.
+#
+FROM core-filesystem
+# CA bundle for the AWS SDK's S3 TLS verification and Sui RPC; core-filesystem
+# ships none.
+COPY --from=build /etc/ssl/cert.pem /etc/ssl/cert.pem
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi-guardian /opt/hashi/bin/hashi-guardian-dev
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi-guardian-init /opt/hashi/bin/hashi-guardian-init-dev
