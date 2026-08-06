@@ -72,6 +72,40 @@ impl PackageVersions {
 
 /// A Rust mirror of a Move struct, identified by its defining package
 /// version, module, and name.
+///
+/// # Adding a new Move type that Rust reads
+///
+/// Mirrors are written by hand; nothing is generated. The path for a new
+/// Move struct whose bytes Rust decodes (an event, a dynamic-field value,
+/// a container node):
+///
+/// 1. Add the struct in `packages/hashi/`. An upgrade can only *add* types
+///    — it can never change an existing struct's layout (the CI compat gate
+///    enforces this) — so a layout change is a *new* type with a *new* name
+///    (`FooV2`, `StampedFoo`, …).
+/// 2. Mirror it in this module with serde derives whose field order matches
+///    the Move declaration exactly (BCS is positional), and `impl MoveType`.
+///    Types introduced by an upgraded package override [`PACKAGE_VERSION`]
+///    with the version that introduced them; existing types keep theirs
+///    forever — never renumber (a Move type's defining address never
+///    changes across upgrades).
+/// 3. To identify tags: use [`matches`] where a [`PackageVersions`] is in
+///    hand (event routing); use [`MODULE_NAME`] for name-keyed dispatch
+///    where the chain already reports a value's concrete type — see
+///    `hashi::onchain::versioned_decode`, and read its module doc before
+///    adding an address check there.
+/// 4. If the new type replaces what a dynamic-field slot holds (a v2 type
+///    in the same bucket), wire its name into the `versioned_decode`
+///    dispatch. Readers fail loudly on names they do not implement; they
+///    never guess a layout.
+///
+/// The package-wide version the *tree* ships as is a separate axis: see the
+/// `PACKAGE_VERSION` doc in `packages/hashi/sources/core/versioning.move`
+/// and `SUPPORTED_PACKAGE_VERSIONS` in the `hashi` crate's `constants`.
+///
+/// [`PACKAGE_VERSION`]: MoveType::PACKAGE_VERSION
+/// [`matches`]: MoveType::matches
+/// [`MODULE_NAME`]: MoveType::MODULE_NAME
 pub trait MoveType {
     /// The hashi package version that first defined this struct. A
     /// type keeps its defining package's address through upgrades, so
