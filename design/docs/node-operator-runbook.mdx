@@ -165,7 +165,7 @@ bitcoin-trusted-peers = ["127.0.0.1:38333"]       # host:port (port is mandatory
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults per network — `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit instead of re-syncing from genesis) and a post-Taproot height on Mainnet; override it only if you need a different anchor.
+> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults per network — `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit) and a post-Taproot height on Mainnet; override it only if you need a different anchor.
 
 **Verify your node:**
 
@@ -1211,15 +1211,15 @@ Lost connectivity to Bitcoin peers after 15 consecutive failures. Restarting Kyo
 
 ---
 
-**Symptom:** `hashi_kyoto_best_height` sits far below your Bitcoin node's height, restarting from near zero after each light client restart. The log shows:
+**Symptom:** `hashi_kyoto_best_height` stays at `0` and the log repeats:
 
 ```
-Start height 800000 is beyond bitcoind's tip; anchoring Kyoto at genesis
+Waiting for bitcoind to reach start height 300000; it is at 214173
 ```
 
-**Likely cause:** the light client could not read a block at `bitcoin-start-height`, so it anchored at genesis and replays the whole chain on every rebuild. Either the height is past your node's tip, or the node is still syncing. No deposits are missed; genesis is the conservative fallback.
+**Likely cause:** the light client anchors at `bitcoin-start-height` and cannot start until your Bitcoin node has that block. Either the node is still syncing, or the height is past its tip.
 
-**Fix:** leave `bitcoin-start-height` unset to take the per-network default, or set it at or below your first relevant deposit, as noted in [1.5](#15-bitcoin-node). If your Bitcoin node is still syncing, restart Hashi once it passes that height — the anchor is resolved once at startup.
+**Fix:** none needed while the node is syncing — the height in the log climbs, and Hashi anchors and carries on by itself once it arrives, with no restart. If the height is not climbing, set `bitcoin-start-height` at or below your node's tip, as noted in [1.5](#15-bitcoin-node).
 
 ---
 
