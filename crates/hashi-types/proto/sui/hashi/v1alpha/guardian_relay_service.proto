@@ -21,10 +21,10 @@ service GuardianRelayService {
   // backend when one is configured, else the active guardian (first deploy).
   // KP tooling pins its session from this instead of the node-facing
   // GetGuardianInfo, which always answers for the ACTIVE guardian.
-  rpc GetStandbyInfo(GetStandbyInfoRequest) returns (GetGuardianInfoResponse);
+  rpc GetProvisioningTargetInfo(GetProvisioningTargetInfoRequest) returns (GetGuardianInfoResponse);
 }
 
-message GetStandbyInfoRequest {}
+message GetProvisioningTargetInfoRequest {}
 
 message SingleProvisionerInitResponse {
   // Distinct shares the relay now holds for the current session.

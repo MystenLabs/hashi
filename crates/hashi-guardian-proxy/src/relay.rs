@@ -11,10 +11,10 @@
 //! a key.
 //!
 //! The relay's backend is the guardian KPs are provisioning: the proxy's
-//! standby when one is configured, else the active guardian. `GetStandbyInfo`
-//! exposes that backend's `GetGuardianInfo` so KP tooling pins the session it
-//! is actually submitting to (the node-facing `GetGuardianInfo` always answers
-//! for the ACTIVE guardian).
+//! standby when one is configured, else the active guardian.
+//! `GetProvisioningTargetInfo` exposes that backend's `GetGuardianInfo` so KP
+//! tooling pins the session it is actually submitting to (the node-facing
+//! `GetGuardianInfo` always answers for the ACTIVE guardian).
 //!
 //! `Accumulator` holds the (pure, unit-tested) accumulation logic; a `tokio`
 //! mutex serializes it and keeps at most one `ProvisionerInit` in flight.
@@ -97,16 +97,16 @@ struct BackendArming {
     genesis_state_hash: Option<[u8; 32]>,
 }
 
-/// `GetStandbyInfo` is public and unauthenticated, and the enclave mints a fresh
-/// Nitro attestation for every `GetGuardianInfo`, so a flood could crowd out
-/// provisioning. The request carries no nonce, so a seconds-old response is as
-/// good as a fresh one; cache it briefly to bound the backend's exposure. The
-/// only effect of staleness is that a KP may pin a session that has since
-/// changed, and `single_provisioner_init` reads the session fresh and rejects
-/// that loudly.
-const STANDBY_INFO_TTL: Duration = Duration::from_secs(5);
+/// `GetProvisioningTargetInfo` is public and unauthenticated, and the enclave
+/// mints a fresh Nitro attestation for every `GetGuardianInfo`, so a flood could
+/// crowd out provisioning. The request carries no nonce, so a seconds-old
+/// response is as good as a fresh one; cache it briefly to bound the backend's
+/// exposure. The only effect of staleness is that a KP may pin a session that
+/// has since changed, and `single_provisioner_init` reads the session fresh and
+/// rejects that loudly.
+const TARGET_INFO_TTL: Duration = Duration::from_secs(5);
 
-struct CachedStandbyInfo {
+struct CachedTargetInfo {
     at: Instant,
     response: proto::GetGuardianInfoResponse,
 }
@@ -116,7 +116,7 @@ pub struct Relay<L> {
     client: GuardianServiceClient<Channel>,
     accumulator: Arc<Mutex<Accumulator>>,
     roster: Arc<RosterCache<L>>,
-    standby_info: Arc<Mutex<Option<CachedStandbyInfo>>>,
+    target_info: Arc<Mutex<Option<CachedTargetInfo>>>,
 }
 
 impl<L: LogStore> Relay<L> {
@@ -125,7 +125,7 @@ impl<L: LogStore> Relay<L> {
             client: GuardianServiceClient::new(channel),
             accumulator: Arc::new(Mutex::new(Accumulator::default())),
             roster,
-            standby_info: Arc::new(Mutex::new(None)),
+            target_info: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -207,12 +207,12 @@ enum Matched<'a> {
 
 /// Confirm the backend this submission reached is the one the KP pinned.
 ///
-/// A KP reads the session it pins from `GetStandbyInfo`, and during a proxy
-/// rollout that read and the submission can land on instances with different
-/// relay backends. Checking the session before anything else is what stops an
-/// already-provisioned ACTIVE guardian from reporting a standby submission
-/// complete. (The share is HPKE-encrypted to the pinned session too, so a
-/// restarted backend could not use it either.)
+/// A KP reads the session it pins from `GetProvisioningTargetInfo`, and during
+/// a proxy rollout that read and the submission can land on instances with
+/// different relay backends. Checking the session before anything else is what
+/// stops an already-provisioned ACTIVE guardian from reporting a standby
+/// submission complete. (The share is HPKE-encrypted to the pinned session too,
+/// so a restarted backend could not use it either.)
 fn match_backend<'a>(
     request: &SingleProvisionerInitRequest,
     status: &'a BackendStatus,
@@ -302,13 +302,13 @@ fn check_share_id(id: u32, num_shares: usize) -> Result<(), Status> {
 impl<L: LogStore> GuardianRelayService for Relay<L> {
     /// The relay backend's `GetGuardianInfo`, verbatim. The lock is held across
     /// the fetch, so a burst collapses into one backend call.
-    async fn get_standby_info(
+    async fn get_provisioning_target_info(
         &self,
-        _request: Request<proto::GetStandbyInfoRequest>,
+        _request: Request<proto::GetProvisioningTargetInfoRequest>,
     ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let mut cached = self.standby_info.lock().await;
+        let mut cached = self.target_info.lock().await;
         if let Some(entry) = cached.as_ref() {
-            if entry.at.elapsed() < STANDBY_INFO_TTL {
+            if entry.at.elapsed() < TARGET_INFO_TTL {
                 return Ok(Response::new(entry.response.clone()));
             }
         }
@@ -318,7 +318,7 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
             .get_guardian_info(proto::GetGuardianInfoRequest {})
             .await?
             .into_inner();
-        *cached = Some(CachedStandbyInfo {
+        *cached = Some(CachedTargetInfo {
             at: Instant::now(),
             response: response.clone(),
         });
@@ -469,7 +469,7 @@ mod tests {
     }
 
     /// A submission's pins: the session and config hash the KP read off
-    /// `GetStandbyInfo` before signing.
+    /// `GetProvisioningTargetInfo` before signing.
     fn pinned(session: &str, config_hash: [u8; 32]) -> SingleProvisionerInitRequest {
         SingleProvisionerInitRequest::new(
             session.to_string().into(),
@@ -503,9 +503,10 @@ mod tests {
     }
 
     /// The regression: with separate active and relay backends, a KP's
-    /// `GetStandbyInfo` and its submission can reach proxies routed differently.
-    /// The active guardian is provisioned and activated, so answering `done()`
-    /// on `provisioned` alone would report a standby submission complete.
+    /// `GetProvisioningTargetInfo` and its submission can reach proxies routed
+    /// differently. The active guardian is provisioned and activated, so
+    /// answering `done()` on `provisioned` alone would report a standby
+    /// submission complete.
     #[test]
     fn a_backend_of_another_session_never_reports_done() {
         for status in [activated("active"), armed("active", [7u8; 32], true)] {
@@ -751,31 +752,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_standby_info_answers_from_the_relay_backend() {
-        // The relay fronts its own (standby) backend; GetStandbyInfo must
+    async fn get_provisioning_target_info_answers_from_the_relay_backend() {
+        // The relay fronts its own (standby) backend; GetProvisioningTargetInfo must
         // answer with that backend's info, untouched — main.rs gives the
         // node-facing forwarder a separate channel to the active guardian.
         let relay = relay_fronting(TaggedGuardian::new(0xB)).await;
 
         let info = relay
-            .get_standby_info(Request::new(proto::GetStandbyInfoRequest {}))
+            .get_provisioning_target_info(Request::new(proto::GetProvisioningTargetInfoRequest {}))
             .await
             .unwrap()
             .into_inner();
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
     }
 
-    /// `GetStandbyInfo` is unauthenticated and every backend call mints a fresh
+    /// `GetProvisioningTargetInfo` is unauthenticated and every backend call mints a fresh
     /// Nitro attestation, so a flood must not reach the enclave.
     #[tokio::test]
-    async fn get_standby_info_serves_a_burst_from_one_backend_call() {
+    async fn get_provisioning_target_info_serves_a_burst_from_one_backend_call() {
         let guardian = TaggedGuardian::new(0xC);
         let calls = guardian.calls.clone();
         let relay = relay_fronting(guardian).await;
 
         for _ in 0..5 {
             let info = relay
-                .get_standby_info(Request::new(proto::GetStandbyInfoRequest {}))
+                .get_provisioning_target_info(Request::new(
+                    proto::GetProvisioningTargetInfoRequest {},
+                ))
                 .await
                 .unwrap()
                 .into_inner();
