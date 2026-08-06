@@ -90,10 +90,12 @@ use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::ReducedWeight;
+use prometheus::HistogramVec;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
@@ -350,6 +352,24 @@ impl MpcManager {
         };
         manager.load_stored_messages()?;
         Ok(manager)
+    }
+
+    /// Run `f` against a read-locked manager on a blocking thread.
+    async fn with_manager_blocking<T: Send + 'static>(
+        mpc_manager: &Arc<RwLock<Self>>,
+        f: impl FnOnce(&Self) -> T + Send + 'static,
+    ) -> T {
+        let mgr = Arc::clone(mpc_manager);
+        spawn_blocking(move || f(&mgr.read().unwrap())).await
+    }
+
+    /// Run `f` against a write-locked manager on a blocking thread.
+    async fn with_manager_blocking_mut<T: Send + 'static>(
+        mpc_manager: &Arc<RwLock<Self>>,
+        f: impl FnOnce(&mut Self) -> T + Send + 'static,
+    ) -> T {
+        let mgr = Arc::clone(mpc_manager);
+        spawn_blocking(move || f(&mut mgr.write().unwrap())).await
     }
 
     // Only for devnet key recovery CLI tool
@@ -837,14 +857,12 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
         tracing::info!("run_key_rotation: starting prepare_previous_output");
-        let _timer = metrics
-            .mpc_rotation_prepare_previous_duration_seconds
-            .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-            .start_timer();
-        let (previous, is_member_of_previous_committee) =
-            Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel, metrics)
-                .await?;
-        drop(_timer);
+        let (previous, is_member_of_previous_committee) = time_async(
+            &metrics.mpc_rotation_prepare_previous_duration_seconds,
+            MPC_LABEL_KEY_ROTATION,
+            Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel, metrics),
+        )
+        .await?;
         tracing::info!(
             "run_key_rotation: prepare_previous_output complete, \
              is_member={is_member_of_previous_committee}",
@@ -1182,9 +1200,7 @@ impl MpcManager {
                     continue;
                 }
             };
-            let mgr = Arc::clone(mpc_manager);
-            let verification = spawn_blocking(move || {
-                let mgr = mgr.read().unwrap();
+            let verification = Self::with_manager_blocking(mpc_manager, move |mgr| {
                 mgr.verify_nonce_dealer_certificate(&dealer_cert)
                     .map_err(|e| {
                         let reason = mgr.rejection_reason(
@@ -1218,20 +1234,17 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
-        let _timer = metrics
-            .mpc_dealer_crypto_duration_seconds
-            .with_label_values(&[MPC_LABEL_DKG])
-            .start_timer();
-        let dealer_data = {
-            let mgr = Arc::clone(mpc_manager);
+        let mgr = Arc::clone(mpc_manager);
+        let dealer_data = time_async(
+            &metrics.mpc_dealer_crypto_duration_seconds,
+            MPC_LABEL_DKG,
             spawn_blocking(move || {
                 let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
                 mgr.prepare_dkg_dealer_flow(&mut rng)
-            })
-            .await?
-        };
-        drop(_timer);
+            }),
+        )
+        .await?;
         let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
@@ -1298,15 +1311,13 @@ impl MpcManager {
             if dealer_weight_sum >= threshold {
                 break;
             }
-            let _timer = metrics
-                .mpc_tob_poll_duration_seconds
-                .with_label_values(&[MPC_LABEL_DKG])
-                .start_timer();
-            let cert = tob_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
-            drop(_timer);
+            let cert = time_async(
+                &metrics.mpc_tob_poll_duration_seconds,
+                MPC_LABEL_DKG,
+                tob_channel.receive(),
+            )
+            .await
+            .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::Dkg(dkg_cert) = cert else {
                 continue;
             };
@@ -1316,18 +1327,15 @@ impl MpcManager {
                 continue;
             }
             {
-                let _timer = metrics
-                    .mpc_cert_verify_duration_seconds
-                    .with_label_values(&[MPC_LABEL_DKG])
-                    .start_timer();
-                let mgr = Arc::clone(mpc_manager);
                 let cert = dkg_cert.clone();
-                let verified = spawn_blocking(move || {
-                    let mgr = mgr.read().unwrap();
-                    mgr.verify_certificate(CertificateV1::Dkg(cert)).map(|_| ())
-                })
+                let verified = time_async(
+                    &metrics.mpc_cert_verify_duration_seconds,
+                    MPC_LABEL_DKG,
+                    Self::with_manager_blocking(mpc_manager, move |mgr| {
+                        mgr.verify_certificate(CertificateV1::Dkg(cert)).map(|_| ())
+                    }),
+                )
                 .await;
-                drop(_timer);
                 if let Err(e) = verified {
                     tracing::warn!("Rejected DKG cert from {:?}: {}", &dealer, e);
                     let reason = {
@@ -1358,21 +1366,20 @@ impl MpcManager {
                     "Certificate from dealer {:?} received but message missing or hash mismatch, retrieving from signers",
                     &dealer
                 );
-                let _timer = metrics
-                    .mpc_message_retrieval_duration_seconds
-                    .with_label_values(&[MPC_LABEL_DKG])
-                    .start_timer();
-                Self::retrieve_dealer_message(mpc_manager, message, &dkg_cert, p2p_channel)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(
-                            "Failed to retrieve message from any signer for dealer {:?}: {}. Certificate exists but message unavailable from all signers.",
-                            &dealer,
-                            e
-                        );
+                time_async(
+                    &metrics.mpc_message_retrieval_duration_seconds,
+                    MPC_LABEL_DKG,
+                    Self::retrieve_dealer_message(mpc_manager, message, &dkg_cert, p2p_channel),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to retrieve message from any signer for dealer {:?}: {}. Certificate exists but message unavailable from all signers.",
+                        &dealer,
                         e
-                    })?;
-                drop(_timer);
+                    );
+                    e
+                })?;
                 // Delete stale output from the RPC handler so the party phase
                 // reprocesses with the retrieved (certified) message.
                 mpc_manager
@@ -1381,14 +1388,10 @@ impl MpcManager {
                     .dealer_outputs
                     .remove(&DealerOutputsKey::Dkg(dealer));
             }
-            let _timer = metrics
-                .mpc_message_process_duration_seconds
-                .with_label_values(&[MPC_LABEL_DKG])
-                .start_timer();
-            let has_complaint = {
-                let mgr = Arc::clone(mpc_manager);
-                spawn_blocking(move || {
-                    let mut mgr = mgr.write().unwrap();
+            let has_complaint = time_async(
+                &metrics.mpc_message_process_duration_seconds,
+                MPC_LABEL_DKG,
+                Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                     if !mgr
                         .dealer_outputs
                         .contains_key(&DealerOutputsKey::Dkg(dealer))
@@ -1402,10 +1405,9 @@ impl MpcManager {
                         mgr.complaints_to_process
                             .contains_key(&ComplaintsToProcessKey::Dkg(dealer)),
                     )
-                })
-                .await?
-            };
-            drop(_timer);
+                }),
+            )
+            .await?;
             if has_complaint {
                 tracing::info!(
                     "DKG complaint detected for dealer {:?}, recovering via Complain RPC",
@@ -1480,19 +1482,14 @@ impl MpcManager {
             dealer_weight_sum += dealer_weight as u32;
             certified_dealers.insert(dealer);
         }
-        let _timer = metrics
-            .mpc_completion_duration_seconds
-            .with_label_values(&[MPC_LABEL_DKG])
-            .start_timer();
-        let output = {
-            let mgr = Arc::clone(mpc_manager);
-            spawn_blocking(move || {
-                let mgr = mgr.read().unwrap();
+        let output = time_async(
+            &metrics.mpc_completion_duration_seconds,
+            MPC_LABEL_DKG,
+            Self::with_manager_blocking(mpc_manager, move |mgr| {
                 mgr.complete_dkg(certified_dealers.into_iter())
-            })
-            .await?
-        };
-        drop(_timer);
+            }),
+        )
+        .await?;
         Ok(output)
     }
 
@@ -1594,15 +1591,13 @@ impl MpcManager {
             if certified_share_indices.len() >= previous.threshold as usize {
                 break;
             }
-            let _timer = metrics
-                .mpc_tob_poll_duration_seconds
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                .start_timer();
-            let cert = ordered_broadcast_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
-            drop(_timer);
+            let cert = time_async(
+                &metrics.mpc_tob_poll_duration_seconds,
+                MPC_LABEL_KEY_ROTATION,
+                ordered_broadcast_channel.receive(),
+            )
+            .await
+            .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::Rotation(rotation_cert) = cert else {
                 continue;
             };
@@ -1612,19 +1607,16 @@ impl MpcManager {
                 continue;
             }
             {
-                let _timer = metrics
-                    .mpc_cert_verify_duration_seconds
-                    .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                    .start_timer();
-                let mgr = Arc::clone(mpc_manager);
                 let cert = rotation_cert.clone();
-                let verified = spawn_blocking(move || {
-                    let mgr = mgr.read().unwrap();
-                    mgr.verify_certificate(CertificateV1::Rotation(cert))
-                        .map(|_| ())
-                })
+                let verified = time_async(
+                    &metrics.mpc_cert_verify_duration_seconds,
+                    MPC_LABEL_KEY_ROTATION,
+                    Self::with_manager_blocking(mpc_manager, move |mgr| {
+                        mgr.verify_certificate(CertificateV1::Rotation(cert))
+                            .map(|_| ())
+                    }),
+                )
                 .await;
-                drop(_timer);
                 if let Err(e) = verified {
                     tracing::warn!("Rejected rotation cert from {:?}: {}", &dealer, e);
                     let reason = {
@@ -1677,21 +1669,25 @@ impl MpcManager {
                     "Rotation messages from dealer {:?} not available or hash mismatch, retrieving from signers",
                     dealer
                 );
-                let _timer = metrics
-                    .mpc_message_retrieval_duration_seconds
-                    .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                    .start_timer();
-                Self::retrieve_rotation_messages(mpc_manager, message, &rotation_cert, p2p_channel)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(
-                            "Failed to retrieve rotation messages for dealer {:?}: {}",
-                            dealer,
-                            e
-                        );
+                time_async(
+                    &metrics.mpc_message_retrieval_duration_seconds,
+                    MPC_LABEL_KEY_ROTATION,
+                    Self::retrieve_rotation_messages(
+                        mpc_manager,
+                        message,
+                        &rotation_cert,
+                        p2p_channel,
+                    ),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to retrieve rotation messages for dealer {:?}: {}",
+                        dealer,
                         e
-                    })?;
-                drop(_timer);
+                    );
+                    e
+                })?;
                 // Delete stale outputs from the RPC handler so the party phase
                 // reprocesses with the retrieved (certified) messages.
                 {
@@ -1706,11 +1702,9 @@ impl MpcManager {
                     .mpc_message_process_duration_seconds
                     .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                     .start_timer();
-                let mgr = Arc::clone(mpc_manager);
                 let previous = previous.clone();
                 let share_indices = dealer_share_indices.clone();
-                spawn_blocking(move || {
-                    let mut mgr = mgr.write().unwrap();
+                Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                     if share_indices.iter().any(|idx| {
                         !mgr.dealer_outputs
                             .contains_key(&DealerOutputsKey::Rotation(*idx))
@@ -1794,10 +1788,8 @@ impl MpcManager {
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
             .start_timer();
         let output = {
-            let mgr = Arc::clone(mpc_manager);
             let previous = previous.clone();
-            spawn_blocking(move || {
-                let mut mgr = mgr.write().unwrap();
+            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                 mgr.complete_key_rotation(&previous, &certified_share_indices)
             })
             .await?
@@ -1813,20 +1805,17 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
-        let _timer = metrics
-            .mpc_dealer_crypto_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-            .start_timer();
-        let dealer_data = {
-            let mgr = Arc::clone(mpc_manager);
+        let mgr = Arc::clone(mpc_manager);
+        let dealer_data = time_async(
+            &metrics.mpc_dealer_crypto_duration_seconds,
+            MPC_LABEL_NONCE_GENERATION,
             spawn_blocking(move || {
                 let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
                 mgr.prepare_nonce_dealer_flow(batch_index, &mut rng)
-            })
-            .await?
-        };
-        drop(_timer);
+            }),
+        )
+        .await?;
         let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
@@ -1894,15 +1883,13 @@ impl MpcManager {
             if dealer_weight_sum >= required_weight {
                 break;
             }
-            let _timer = metrics
-                .mpc_tob_poll_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                .start_timer();
-            let cert = tob_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
-            drop(_timer);
+            let cert = time_async(
+                &metrics.mpc_tob_poll_duration_seconds,
+                MPC_LABEL_NONCE_GENERATION,
+                tob_channel.receive(),
+            )
+            .await
+            .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::NonceGeneration {
                 cert: nonce_cert, ..
             } = cert
@@ -1915,18 +1902,15 @@ impl MpcManager {
                 continue;
             }
             {
-                let _timer = metrics
-                    .mpc_cert_verify_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                    .start_timer();
-                let mgr = Arc::clone(mpc_manager);
                 let cert = nonce_cert.clone();
-                let verified = spawn_blocking(move || {
-                    let mgr = mgr.read().unwrap();
-                    mgr.verify_nonce_dealer_certificate(&cert).map(|_| ())
-                })
+                let verified = time_async(
+                    &metrics.mpc_cert_verify_duration_seconds,
+                    MPC_LABEL_NONCE_GENERATION,
+                    Self::with_manager_blocking(mpc_manager, move |mgr| {
+                        mgr.verify_nonce_dealer_certificate(&cert).map(|_| ())
+                    }),
+                )
                 .await;
-                drop(_timer);
                 if let Err(e) = verified {
                     tracing::warn!("Rejected nonce cert from {:?}: {}", &dealer, e);
                     let reason = {
@@ -1949,16 +1933,16 @@ impl MpcManager {
                     "Nonce message for dealer {:?} not found in memory or DB, retrieving from signers",
                     &dealer
                 );
-                let _timer = metrics
-                    .mpc_message_retrieval_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                    .start_timer();
-                Self::retrieve_nonce_message(
-                    mpc_manager,
-                    message,
-                    &nonce_cert,
-                    p2p_channel,
-                    batch_index,
+                time_async(
+                    &metrics.mpc_message_retrieval_duration_seconds,
+                    MPC_LABEL_NONCE_GENERATION,
+                    Self::retrieve_nonce_message(
+                        mpc_manager,
+                        message,
+                        &nonce_cert,
+                        p2p_channel,
+                        batch_index,
+                    ),
                 )
                 .await
                 .map_err(|e| {
@@ -1969,7 +1953,6 @@ impl MpcManager {
                     );
                     e
                 })?;
-                drop(_timer);
                 // Delete stale output from the RPC handler so the party phase
                 // reprocesses with the retrieved (certified) message.
                 mpc_manager
@@ -1978,14 +1961,10 @@ impl MpcManager {
                     .dealer_nonce_outputs
                     .remove(&(batch_index, dealer));
             }
-            let _timer = metrics
-                .mpc_message_process_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                .start_timer();
-            let has_complaint = {
-                let mgr = Arc::clone(mpc_manager);
-                spawn_blocking(move || {
-                    let mut mgr = mgr.write().unwrap();
+            let has_complaint = time_async(
+                &metrics.mpc_message_process_duration_seconds,
+                MPC_LABEL_NONCE_GENERATION,
+                Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                     if !mgr
                         .dealer_nonce_outputs
                         .contains_key(&(batch_index, dealer))
@@ -2004,10 +1983,9 @@ impl MpcManager {
                             dealer,
                         },
                     ))
-                })
-                .await?
-            };
-            drop(_timer);
+                }),
+            )
+            .await?;
             if has_complaint {
                 tracing::info!(
                     "Nonce gen complaint detected for dealer {:?}, recovering via Complain RPC",
@@ -2885,20 +2863,17 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
-        let _timer = metrics
-            .mpc_dealer_crypto_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-            .start_timer();
-        let mut dealer_data = {
-            let mgr = Arc::clone(mpc_manager);
+        let mgr = Arc::clone(mpc_manager);
+        let mut dealer_data = time_async(
+            &metrics.mpc_dealer_crypto_duration_seconds,
+            MPC_LABEL_NONCE_GENERATION,
             spawn_blocking(move || {
                 let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
                 mgr.prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-            })
-            .await?
-        };
-        drop(_timer);
+            }),
+        )
+        .await?;
         let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.confirm_target.clone(),
@@ -2963,15 +2938,11 @@ impl MpcManager {
         let confirm_cert = aggregator
             .finish()
             .expect("signatures should always be valid");
-        let _timer = metrics
-            .mpc_dealer_crypto_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-            .start_timer();
         let builder = dealer_data.builder;
-        let (vote_target, my_vote, recipient_dispersals) = {
-            let mgr = Arc::clone(mpc_manager);
-            spawn_blocking(move || -> MpcResult<_> {
-                let mut mgr = mgr.write().unwrap();
+        let (vote_target, my_vote, recipient_dispersals) = time_async(
+            &metrics.mpc_dealer_crypto_duration_seconds,
+            MPC_LABEL_NONCE_GENERATION,
+            Self::with_manager_blocking_mut(mpc_manager, move |mgr| -> MpcResult<_> {
                 let mut dispersals =
                     mgr.create_avid_nonce_dispersal_messages(&builder, confirm_cert, batch_index)?;
                 let own_index = dispersals
@@ -2996,10 +2967,9 @@ impl MpcManager {
                 };
                 let my_vote = MemberSignature::new(mgr.mpc_config.epoch, mgr.address, signature);
                 Ok((vote_target, my_vote, dispersals))
-            })
-            .await?
-        };
-        drop(_timer);
+            }),
+        )
+        .await?;
         let mut vote_aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             vote_target,
@@ -3165,9 +3135,7 @@ impl MpcManager {
         certified: Vec<(Address, CertificateV1)>,
         metrics: &Metrics,
     ) -> BTreeMap<Address, u32> {
-        let mgr = Arc::clone(mpc_manager);
-        let (verified, rejected) = spawn_blocking(move || {
-            let mgr = mgr.read().unwrap();
+        let (verified, rejected) = Self::with_manager_blocking(mpc_manager, move |mgr| {
             mgr.verified_dealer_weight(&certified)
         })
         .await;
@@ -3340,10 +3308,8 @@ impl MpcManager {
                 }
             })
             .collect();
-        let mgr = Arc::clone(mpc_manager);
         let nonce_cert = nonce_cert.clone();
-        let outcome = spawn_blocking(move || {
-            let mut mgr = mgr.write().unwrap();
+        let outcome = Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
             let digest = nonce_cert.message().messages_hash;
             let avid_vote = bundles.iter().find_map(|(_, b)| {
                 b.avid_vote
@@ -3590,15 +3556,13 @@ impl MpcManager {
             if dealer_weight_sum >= required_weight {
                 break;
             }
-            let _timer = metrics
-                .mpc_tob_poll_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                .start_timer();
-            let cert = tob_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
-            drop(_timer);
+            let cert = time_async(
+                &metrics.mpc_tob_poll_duration_seconds,
+                MPC_LABEL_NONCE_GENERATION,
+                tob_channel.receive(),
+            )
+            .await
+            .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
             let CertificateV1::NonceGeneration {
                 cert: nonce_cert, ..
             } = cert
@@ -3610,24 +3574,21 @@ impl MpcManager {
                 continue;
             }
             let signer_weight = {
-                let _timer = metrics
-                    .mpc_cert_verify_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                    .start_timer();
-                let mgr = Arc::clone(mpc_manager);
                 let cert = nonce_cert.clone();
-                let result = spawn_blocking(move || {
-                    let mgr = mgr.read().unwrap();
-                    mgr.committee
-                        .verify_signature_and_reduced_weight(
-                            &cert,
-                            &mgr.mpc_config.nodes,
-                            vote_quorum_weight,
-                        )
-                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
-                })
+                let result = time_async(
+                    &metrics.mpc_cert_verify_duration_seconds,
+                    MPC_LABEL_NONCE_GENERATION,
+                    Self::with_manager_blocking(mpc_manager, move |mgr| {
+                        mgr.committee
+                            .verify_signature_and_reduced_weight(
+                                &cert,
+                                &mgr.mpc_config.nodes,
+                                vote_quorum_weight,
+                            )
+                            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+                    }),
+                )
                 .await;
-                drop(_timer);
                 match result {
                     Ok(weight) => weight,
                     Err(e) => {
@@ -3655,20 +3616,19 @@ impl MpcManager {
             let kind = match kind {
                 Some(kind) => kind,
                 None => {
-                    let _timer = metrics
-                        .mpc_message_retrieval_duration_seconds
-                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                        .start_timer();
-                    let result = Self::pull_and_resolve_avid_cert(
-                        mpc_manager,
-                        dealer,
-                        batch_index,
-                        &nonce_cert,
-                        p2p_channel,
-                        metrics,
+                    let result = time_async(
+                        &metrics.mpc_message_retrieval_duration_seconds,
+                        MPC_LABEL_NONCE_GENERATION,
+                        Self::pull_and_resolve_avid_cert(
+                            mpc_manager,
+                            dealer,
+                            batch_index,
+                            &nonce_cert,
+                            p2p_channel,
+                            metrics,
+                        ),
                     )
                     .await;
-                    drop(_timer);
                     match result {
                         Ok(kind) => kind,
                         Err(e) => {
@@ -5446,18 +5406,17 @@ impl MpcManager {
         };
         let previous = if is_member_of_previous_committee && has_previous_key {
             let reconstruction_result = async {
-                let _retrieve_timer = metrics
-                    .mpc_prepare_previous_retrieve_duration_seconds
-                    .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                    .start_timer();
-                Self::retrieve_missing_previous_messages(
-                    mpc_manager,
-                    previous_certificates,
-                    p2p_channel,
-                    metrics,
+                time_async(
+                    &metrics.mpc_prepare_previous_retrieve_duration_seconds,
+                    MPC_LABEL_KEY_ROTATION,
+                    Self::retrieve_missing_previous_messages(
+                        mpc_manager,
+                        previous_certificates,
+                        p2p_channel,
+                        metrics,
+                    ),
                 )
                 .await;
-                drop(_retrieve_timer);
                 Self::reconstruct_with_complaint_recovery(
                     mpc_manager,
                     previous_certificates,
@@ -5523,19 +5482,16 @@ impl MpcManager {
     ) -> MpcResult<MpcOutput> {
         let mut complaint_cache: HashMap<DealerOutputsKey, avss::AvssOutput> = HashMap::new();
         loop {
-            let mgr = Arc::clone(mpc_manager);
             let certs = previous_certificates.to_vec();
             let cache_snapshot = complaint_cache.clone();
-            let _reconstruct_timer = metrics
-                .mpc_prepare_previous_reconstruct_duration_seconds
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                .start_timer();
-            let outcome = spawn_blocking(move || {
-                let mgr = mgr.read().unwrap();
-                mgr.reconstruct_previous_output(&certs, &cache_snapshot)
-            })
+            let outcome = time_async(
+                &metrics.mpc_prepare_previous_reconstruct_duration_seconds,
+                MPC_LABEL_KEY_ROTATION,
+                Self::with_manager_blocking(mpc_manager, move |mgr| {
+                    mgr.reconstruct_previous_output(&certs, &cache_snapshot)
+                }),
+            )
             .await?;
-            drop(_reconstruct_timer);
             match outcome {
                 ReconstructionOutcome::Success(output) => return Ok(output),
                 ReconstructionOutcome::NeedsDkgComplaintRecovery {
@@ -5564,20 +5520,19 @@ impl MpcManager {
                         .mpc_prepare_previous_complaint_recovery_total
                         .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                         .inc();
-                    let _recovery_timer = metrics
-                        .mpc_prepare_previous_complaint_recovery_duration_seconds
-                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                        .start_timer();
-                    let recovered = Self::recover_dkg_shares_via_complaint(
-                        mpc_manager,
-                        &dealer_address,
-                        &message,
-                        signers,
-                        p2p_channel,
-                        previous_epoch,
+                    let recovered = time_async(
+                        &metrics.mpc_prepare_previous_complaint_recovery_duration_seconds,
+                        MPC_LABEL_KEY_ROTATION,
+                        Self::recover_dkg_shares_via_complaint(
+                            mpc_manager,
+                            &dealer_address,
+                            &message,
+                            signers,
+                            p2p_channel,
+                            previous_epoch,
+                        ),
                     )
                     .await?;
-                    drop(_recovery_timer);
                     complaint_cache.insert(DealerOutputsKey::Dkg(dealer_address), recovered);
                     mpc_manager
                         .write()
@@ -5630,20 +5585,19 @@ impl MpcManager {
                         .mpc_prepare_previous_complaint_recovery_total
                         .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                         .inc();
-                    let _recovery_timer = metrics
-                        .mpc_prepare_previous_complaint_recovery_duration_seconds
-                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                        .start_timer();
-                    let recovered = Self::recover_rotation_shares_via_complaints(
-                        mpc_manager,
-                        &dealer_address,
-                        &rotation_msgs,
-                        signers,
-                        p2p_channel,
-                        previous_epoch,
+                    let recovered = time_async(
+                        &metrics.mpc_prepare_previous_complaint_recovery_duration_seconds,
+                        MPC_LABEL_KEY_ROTATION,
+                        Self::recover_rotation_shares_via_complaints(
+                            mpc_manager,
+                            &dealer_address,
+                            &rotation_msgs,
+                            signers,
+                            p2p_channel,
+                            previous_epoch,
+                        ),
                     )
                     .await?;
-                    drop(_recovery_timer);
                     let mut mgr = mpc_manager.write().unwrap();
                     for (share_index, output) in recovered {
                         complaint_cache.insert(DealerOutputsKey::Rotation(share_index), output);
@@ -6539,12 +6493,12 @@ async fn publish_dealer_cert(
     protocol: &'static str,
     metrics: &Metrics,
 ) -> MpcResult<()> {
-    let _timer = metrics
-        .mpc_cert_publish_duration_seconds
-        .with_label_values(&[protocol])
-        .start_timer();
-    let result = with_timeout_and_retry(|| tob_channel.publish(cert.clone())).await;
-    drop(_timer);
+    let result = time_async(
+        &metrics.mpc_cert_publish_duration_seconds,
+        protocol,
+        with_timeout_and_retry(|| tob_channel.publish(cert.clone())),
+    )
+    .await;
     let outcome = match &result {
         Ok(PublishOutcome::Landed) => "ok",
         Ok(PublishOutcome::AlreadyPresent) => "already_present",
@@ -6597,6 +6551,12 @@ fn consume_certified_nonce_outputs<T>(
         }
     });
     (pre_filter, dealers, outputs)
+}
+
+/// Time an async operation on `metric[label]`; the timer stops when `fut` completes.
+async fn time_async<F: Future>(metric: &HistogramVec, label: &str, fut: F) -> F::Output {
+    let _timer = metric.with_label_values(&[label]).start_timer();
+    fut.await
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
