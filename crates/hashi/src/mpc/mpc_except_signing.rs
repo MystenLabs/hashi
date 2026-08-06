@@ -1249,7 +1249,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         certs: Vec<(Address, T)>,
-        already_verified: &mut HashSet<Vec<u8>>,
+        adjudicated: &mut HashMap<Address, bool>,
         metrics: &Metrics,
     ) -> VerifiedNonceCerts<T>
     where
@@ -1257,6 +1257,12 @@ impl MpcManager {
     {
         let mut verified = Vec::with_capacity(certs.len());
         for (dealer, cert) in certs {
+            if let Some(&accepted) = adjudicated.get(&dealer) {
+                if accepted {
+                    verified.push((dealer, cert));
+                }
+                continue;
+            }
             let dealer_cert = match cert.to_dealer_certificate(epoch) {
                 Ok(dealer_cert) => dealer_cert,
                 Err(e) => {
@@ -1267,14 +1273,10 @@ impl MpcManager {
                         .mpc_certs_rejected_total
                         .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "malformed"])
                         .inc();
+                    adjudicated.insert(dealer, false);
                     continue;
                 }
             };
-            let key = bcs::to_bytes(&dealer_cert).ok();
-            if key.as_ref().is_some_and(|k| already_verified.contains(k)) {
-                verified.push((dealer, cert));
-                continue;
-            }
             let mgr = Arc::clone(mpc_manager);
             let verification = spawn_blocking(move || {
                 let mgr = mgr.read().unwrap();
@@ -1290,9 +1292,7 @@ impl MpcManager {
             .await;
             match verification {
                 Ok(_) => {
-                    if let Some(key) = key {
-                        already_verified.insert(key);
-                    }
+                    adjudicated.insert(dealer, true);
                     verified.push((dealer, cert));
                 }
                 Err((e, reason)) => {
@@ -1304,6 +1304,7 @@ impl MpcManager {
                         .mpc_certs_rejected_total
                         .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
                         .inc();
+                    adjudicated.insert(dealer, false);
                 }
             }
         }

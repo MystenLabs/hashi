@@ -11655,7 +11655,7 @@ async fn test_verified_nonce_certs_drops_unverified() {
 
     let mgr = Arc::new(RwLock::new(mgr));
     let verified =
-        MpcManager::verified_nonce_certs(&mgr, epoch, certs, &mut HashSet::new(), &test_metrics())
+        MpcManager::verified_nonce_certs(&mgr, epoch, certs, &mut HashMap::new(), &test_metrics())
             .await;
     assert_eq!(
         verified.as_slice().len(),
@@ -11676,6 +11676,57 @@ async fn test_verified_nonce_certs_drops_unverified() {
     assert!(window.floor_reached(), "three valid certs reach the floor");
     assert_eq!(certified.len(), 3);
     assert!(!certified.contains(&setup.address(1)));
+}
+
+#[tokio::test]
+async fn test_verified_nonce_certs_adjudicates_each_dealer_once() {
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.max_faulty = 25;
+    let epoch = mgr.mpc_config.epoch;
+
+    let mut certs: Vec<_> = (0..4)
+        .map(|i| valid_dealer_submission(&setup, i, 1_000))
+        .collect();
+    certs[1].1.submission.signature.signature = certs[0].1.submission.signature.signature.clone();
+
+    let mgr = Arc::new(RwLock::new(mgr));
+    let metrics = test_metrics();
+    let rejected = || {
+        metrics
+            .mpc_certs_rejected_total
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "signature"])
+            .get()
+    };
+    let mut adjudicated = HashMap::new();
+
+    for _ in 0..3 {
+        let verified = MpcManager::verified_nonce_certs(
+            &mgr,
+            epoch,
+            certs.clone(),
+            &mut adjudicated,
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            verified.as_slice().len(),
+            3,
+            "a cached rejection must not become an acceptance on a later poll"
+        );
+        assert!(
+            verified
+                .as_slice()
+                .iter()
+                .all(|(addr, _)| *addr != setup.address(1))
+        );
+    }
+
+    assert_eq!(
+        rejected(),
+        1,
+        "the forged cert must be counted once across polls, not once per poll"
+    );
 }
 
 #[test]

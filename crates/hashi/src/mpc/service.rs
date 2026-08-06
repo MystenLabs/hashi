@@ -11,6 +11,7 @@ use anyhow::Context;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use sui_futures::service::Service;
 use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
@@ -932,7 +933,7 @@ impl MpcService {
                     mpc_manager,
                     epoch,
                     certs,
-                    &mut HashSet::new(),
+                    &mut HashMap::new(),
                     &self.inner.metrics,
                 )
                 .await;
@@ -961,7 +962,7 @@ impl MpcService {
                     mpc_manager,
                     epoch,
                     certs,
-                    &mut HashSet::new(),
+                    &mut HashMap::new(),
                     &self.inner.metrics,
                 )
                 .await;
@@ -1214,7 +1215,7 @@ impl MpcService {
         let overall_deadline = tokio::time::Instant::now() + NONCE_WAIT_TOTAL_BUDGET;
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
-        let mut already_verified = HashSet::new();
+        let mut adjudicated = HashMap::new();
         loop {
             let (onchain_epoch, pending) = {
                 let state = onchain_state.state();
@@ -1282,7 +1283,7 @@ impl MpcService {
                 mpc_manager,
                 epoch,
                 certs,
-                &mut already_verified,
+                &mut adjudicated,
                 metrics,
             )
             .await;
