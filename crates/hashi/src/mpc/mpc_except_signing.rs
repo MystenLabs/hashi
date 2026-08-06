@@ -4933,7 +4933,7 @@ impl MpcManager {
             output_max_faulty,
             epoch: self.previous_epoch,
         };
-        self.reconstruct_dkg_output(&context, certificates, complaint_cache)
+        self.reconstruct_dkg_output_locally(&context, certificates, complaint_cache)
     }
 
     pub fn reconstruct_current_dkg_output(
@@ -4955,7 +4955,7 @@ impl MpcManager {
                 output_max_faulty: mgr.mpc_config.max_faulty,
                 epoch: mgr.mpc_config.epoch,
             };
-            match Self::classify_reconstruction(mgr.reconstruct_dkg_output(
+            match Self::classify_reconstruction(mgr.reconstruct_dkg_output_locally(
                 &context,
                 certificates,
                 &HashMap::new(),
@@ -5001,14 +5001,15 @@ impl MpcManager {
                 input_threshold,
                 epoch: mgr.mpc_config.epoch,
             };
-            let current = match Self::classify_reconstruction(mgr.reconstruct_rotation_output(
-                &current_context,
-                current_certificates,
-                &HashMap::new(),
-            )) {
-                Ok(output) => output,
-                Err(outcome) => return outcome,
-            };
+            let current =
+                match Self::classify_reconstruction(mgr.reconstruct_rotation_output_locally(
+                    &current_context,
+                    current_certificates,
+                    &HashMap::new(),
+                )) {
+                    Ok(output) => output,
+                    Err(outcome) => return outcome,
+                };
             let previous = match Self::classify_reconstruction(
                 mgr.reconstruct_previous_output(previous_certificates, &HashMap::new()),
             ) {
@@ -5058,7 +5059,7 @@ impl MpcManager {
         }
     }
 
-    fn reconstruct_dkg_output(
+    fn reconstruct_dkg_output_locally(
         &self,
         context: &DkgReconstructionContext<'_>,
         certificates: &[VerifiedCertificateV1],
@@ -5224,10 +5225,12 @@ impl MpcManager {
             input_threshold,
             epoch: self.previous_epoch,
         };
-        self.reconstruct_rotation_output(&context, certificates, complaint_cache)
+        self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache)
     }
 
-    fn reconstruct_rotation_output(
+    /// Rebuilds the rotation output from the local message store only; it never fetches from
+    /// peers.
+    fn reconstruct_rotation_output_locally(
         &self,
         context: &RotationReconstructionContext<'_>,
         certificates: &[VerifiedCertificateV1],

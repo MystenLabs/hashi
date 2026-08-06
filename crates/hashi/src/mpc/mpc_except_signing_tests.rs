@@ -9802,7 +9802,7 @@ fn test_recover_current_dkg() {
         };
         assert!(
             matches!(
-                guard.reconstruct_dkg_output(&context, &certificates, &HashMap::new()),
+                guard.reconstruct_dkg_output_locally(&context, &certificates, &HashMap::new()),
                 Err(MpcError::StoredMessageDiverged { .. })
             ),
             "the hash check, not a downstream AVSS failure, must reject the swapped message",
