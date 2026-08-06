@@ -890,6 +890,10 @@ impl OnchainState {
                     ])),
             )
             .pipe(Box::pin);
+        // Cloned once up front: the guard must not be held across the stream's
+        // await points, and identification below resolves defining addresses
+        // through this map.
+        let packages = self.state().package_versions().clone();
         while let Some(field) = stream.try_next().await? {
             if field.name().value() == key_bcs.as_slice() {
                 // Decode by the layout the chain reports (self-describing),
@@ -898,7 +902,7 @@ impl OnchainState {
                 // values this build cannot decode — so fail cleanly here
                 // instead of misparsing the linked-table nodes downstream.
                 let value_type = versioned_decode::field_value_type(&field)?;
-                match versioned_decode::TobCertLayout::from_struct_tag(&value_type)? {
+                match versioned_decode::TobCertLayout::from_struct_tag(&packages, &value_type)? {
                     versioned_decode::TobCertLayout::Bare => {}
                     versioned_decode::TobCertLayout::Stamped => anyhow::bail!(
                         "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses \

@@ -89,15 +89,13 @@ impl PackageVersions {
 ///    with the version that introduced them; existing types keep theirs
 ///    forever — never renumber (a Move type's defining address never
 ///    changes across upgrades).
-/// 3. To identify tags: use [`matches`] where a [`PackageVersions`] is in
-///    hand (event routing); use [`MODULE_NAME`] for name-keyed dispatch
-///    where the chain already reports a value's concrete type — see
-///    `hashi::onchain::versioned_decode`, and read its module doc before
-///    adding an address check there.
+/// 3. To identify tags, use [`matches`]: the full tag — defining package
+///    address included — must match the mirror, so a same-name type from a
+///    foreign package is rejected rather than trusted.
 /// 4. If the new type replaces what a dynamic-field slot holds (a v2 type
-///    in the same bucket), wire its name into the `versioned_decode`
-///    dispatch. Readers fail loudly on names they do not implement; they
-///    never guess a layout.
+///    in the same bucket), wire it into the dispatch in
+///    `hashi::onchain::versioned_decode`. Readers fail loudly on types they
+///    do not implement; they never guess a layout.
 ///
 /// The package-wide version the *tree* ships as is a separate axis: see the
 /// `PACKAGE_VERSION` doc in `packages/hashi/sources/core/versioning.move`
@@ -105,7 +103,6 @@ impl PackageVersions {
 ///
 /// [`PACKAGE_VERSION`]: MoveType::PACKAGE_VERSION
 /// [`matches`]: MoveType::matches
-/// [`MODULE_NAME`]: MoveType::MODULE_NAME
 pub trait MoveType {
     /// The hashi package version that first defined this struct. A
     /// type keeps its defining package's address through upgrades, so
