@@ -18,13 +18,21 @@
 //! the [`super::version`] active-version gate: that halts *writes* when the
 //! chain is ahead; this makes *reads* fail loud rather than wrong.
 //!
-//! Identification keys on `(module, name)` only. A Move type keeps its module
-//! and name across upgrades, and a divergent layout must be a *new* type with a
-//! new name (an upgrade cannot change an existing struct's layout — the compat
-//! gate enforces this), so the name is an authoritative layout discriminator.
+//! Identification keys on `(module, name)` only — [`MoveType::MODULE_NAME`],
+//! so the Rust mirrors stay the single source of truth for type identity. A
+//! Move type keeps its module and name across upgrades, and a divergent layout
+//! must be a *new* type with a new name (an upgrade cannot change an existing
+//! struct's layout — the compat gate enforces this), so the name is an
+//! authoritative layout discriminator. Deliberately not the address-checking
+//! [`MoveType::matches`]: the field's `value_type` is already authoritative
+//! here, and address-keyed dispatch would reintroduce the mid-upgrade lag this
+//! module exists to avoid.
 
 use anyhow::Context;
 use anyhow::Result;
+use hashi_types::move_types::EpochCertsV1;
+use hashi_types::move_types::MoveType;
+use hashi_types::move_types::StampedEpochCertsV1;
 use sui_rpc::proto::sui::rpc::v2::DynamicField;
 use sui_sdk_types::StructTag;
 
@@ -37,10 +45,6 @@ pub fn field_value_type(field: &DynamicField) -> Result<StructTag> {
     raw.parse::<StructTag>()
         .with_context(|| format!("parsing dynamic field value_type {raw:?}"))
 }
-
-const TOB_MODULE: &str = "tob";
-const EPOCH_CERTS_V1: &str = "EpochCertsV1";
-const STAMPED_EPOCH_CERTS_V1: &str = "StampedEpochCertsV1";
 
 /// The layout family of a TOB certificate bucket, identified by its on-chain
 /// value type.
@@ -63,15 +67,10 @@ pub enum TobCertLayout {
 impl TobCertLayout {
     /// Identify the bucket layout from its on-chain value type.
     pub fn from_struct_tag(tag: &StructTag) -> Result<Self> {
-        anyhow::ensure!(
-            tag.module() == TOB_MODULE,
-            "unexpected TOB bucket module: {}::{}",
-            tag.module(),
-            tag.name()
-        );
-        if tag.name() == EPOCH_CERTS_V1 {
+        let key = (tag.module().as_str(), tag.name().as_str());
+        if key == EpochCertsV1::MODULE_NAME {
             Ok(Self::Bare)
-        } else if tag.name() == STAMPED_EPOCH_CERTS_V1 {
+        } else if key == StampedEpochCertsV1::MODULE_NAME {
             Ok(Self::Stamped)
         } else {
             anyhow::bail!(

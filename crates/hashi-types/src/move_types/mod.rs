@@ -879,6 +879,23 @@ pub struct EpochCertsV1 {
     pub certs: LinkedTable<Address>,
 }
 
+impl MoveType for EpochCertsV1 {
+    const MODULE: &'static str = "tob";
+    const NAME: &'static str = "EpochCertsV1";
+}
+
+/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, which the v2
+/// package introduces (the stamped nonce-cert line of work). Identification
+/// only: this build recognizes the type but does not decode its stamped
+/// linked-table nodes; the mirror gains fields when that support lands.
+pub struct StampedEpochCertsV1;
+
+impl MoveType for StampedEpochCertsV1 {
+    const PACKAGE_VERSION: u64 = 2;
+    const MODULE: &'static str = "tob";
+    const NAME: &'static str = "StampedEpochCertsV1";
+}
+
 /// Rust version of the Move sui::linked_table::LinkedTable type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct LinkedTable<K> {
