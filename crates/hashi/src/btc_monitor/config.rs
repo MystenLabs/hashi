@@ -17,9 +17,8 @@ pub struct MonitorConfig {
     pub network: Network,
 
     /// Peers for P2P connections, identified by hostname (or IP) and port.
-    /// Hostnames are resolved at connection time; the monitor's supervisor
-    /// rebuilds the kyoto node on disconnect, which re-resolves them so IP
-    /// changes (e.g. Kubernetes pod rotation) are followed.
+    /// Hostnames are resolved at each connection attempt, so IP changes
+    /// (e.g. Kubernetes pod rotation) are followed.
     pub trusted_peers: Vec<kyoto::TrustedPeer>,
 
     /// Starting block height for synchronization
