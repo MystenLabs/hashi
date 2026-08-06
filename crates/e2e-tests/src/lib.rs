@@ -136,10 +136,16 @@ pub struct TestNetworksBuilder {
     external_guardian: Option<ExternalGuardian>,
     /// When set, bootstrap the local net by publishing the deployed **bytecode
     /// snapshot** in this directory as v1, instead of a fresh source build of
-    /// `packages/hashi`. Enables the "deployed v1 → current source" upgrade
-    /// e2e test. `None` (default) keeps the source-publish behavior. See
-    /// [`crate::snapshot`].
+    /// `packages/hashi`. `None` defaults to the checked-in testnet snapshot
+    /// when the auto-upgrade below is on, and to a fresh source publish when
+    /// it is off. See [`crate::snapshot`].
     v1_snapshot_dir: Option<std::path::PathBuf>,
+    /// When true (the default), `build()` publishes v1 (see `v1_snapshot_dir`)
+    /// and then runs the full governance upgrade to the current source before
+    /// returning, so every builder user gets a chain in the post-upgrade state
+    /// a real network is in. Opt out via [`Self::without_upgrade`] when v1-only
+    /// is the point (snapshot signing) or the test drives its own upgrade.
+    upgrade_to_current_source: bool,
 }
 
 impl TestNetworksBuilder {
@@ -159,7 +165,16 @@ impl TestNetworksBuilder {
             onchain_config_overrides,
             external_guardian: None,
             v1_snapshot_dir: None,
+            upgrade_to_current_source: true,
         }
+    }
+
+    /// Skip the default publish-v1-then-upgrade-to-current-source boot: the
+    /// chain stays at whatever v1 was published (snapshot or fresh source).
+    /// For tests where v1-only is the point, or that drive their own upgrade.
+    pub fn without_upgrade(mut self) -> Self {
+        self.upgrade_to_current_source = false;
+        self
     }
 
     /// Bootstrap the local net by publishing the deployed **bytecode snapshot**
@@ -348,7 +363,15 @@ impl TestNetworksBuilder {
             > 0;
 
         let publisher_key = sui_network.user_keys.first().unwrap();
-        let publish_output = match &self.v1_snapshot_dir {
+        // Under the default auto-upgrade boot, v1 defaults to the checked-in
+        // snapshot so the upgrade below is a real "deployed bytecode ->
+        // current source" transition.
+        let v1_snapshot_dir = match &self.v1_snapshot_dir {
+            Some(dir) => Some(dir.clone()),
+            None if self.upgrade_to_current_source => Some(snapshot::default_snapshot_dir()?),
+            None => None,
+        };
+        let publish_output = match &v1_snapshot_dir {
             Some(snapshot_dir) => {
                 tracing::info!(
                     dir = %snapshot_dir.display(),
@@ -405,6 +428,24 @@ impl TestNetworksBuilder {
 
         if nodes_started && test_networks.guardian_harness.is_some() {
             finalize_guardian_harness(&mut test_networks).await?;
+        }
+
+        // Last, once the network is fully settled: upgrade to the current
+        // source so callers receive a chain in the post-upgrade state a real
+        // network is in (package history {v1, vN}, routing at the upgraded
+        // package id, types defined at the v1 address). Manual-bootstrap mode
+        // (0 active nodes) has no committee to vote the upgrade; the chain
+        // stays at v1 for the operator to upgrade through governance.
+        if nodes_started && self.upgrade_to_current_source {
+            tracing::info!("upgrading the chain to the current source...");
+            let new_package_id = upgrade_flow::execute_full_upgrade(&mut test_networks).await?;
+            upgrade_flow::wait_for_package_convergence(
+                &test_networks,
+                new_package_id,
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+            tracing::info!("chain upgraded; the network runs the post-upgrade state");
         }
 
         Ok(test_networks)

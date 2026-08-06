@@ -24,13 +24,17 @@ use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::info;
 
-/// Test the full upgrade lifecycle, exercising real cascading effects.
+/// Explicit upgrade via governance proposal, exercising real cascading effects.
+///
+/// The builder's default boot already lands the chain at the current source
+/// (snapshot v1 auto-upgraded at build), so the upgrade driven *by this test*
+/// goes one version further (vN -> vN+1) through the full proposal flow:
 ///
 /// 1. Watcher picks up new package — PackageUpgraded updates OnchainState
 /// 2. Validators confirm deposits post-upgrade — leader routes calls correctly
 /// 3. Package ID routing — OnchainState.package_id() returns the new package
 #[tokio::test]
-async fn test_upgrade_v1_to_v2() -> Result<()> {
+async fn test_upgrade_via_proposal() -> Result<()> {
     init_test_logging();
     let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
 
@@ -74,8 +78,9 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
             .versions()
             .clone();
         assert!(
-            versions.len() >= 2,
-            "node {i}: should have at least 2 package versions, got {}",
+            versions.len() >= 3,
+            "node {i}: expected the auto-upgrade and this test's upgrade on \
+             top of v1 (>= 3 package versions), got {}",
             versions.len()
         );
         info!("node {i}: package_versions = {versions:?}");
@@ -225,9 +230,12 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     init_test_logging();
 
     // v1 = the checked-in deployed bytecode snapshot, NOT a source build.
+    // `without_upgrade` so the pre-upgrade deposit really runs against the
+    // deployed bytecode; this test drives the upgrade itself.
     let mut networks = TestNetworksBuilder::new()
         .with_nodes(4)
         .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
+        .without_upgrade()
         .build()
         .await?;
 
