@@ -184,6 +184,12 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
     300., 600., 1200.,
 ];
 
+// Hours-scale: sign_to_confirm waits on Bitcoin confirmations, unlike LATENCY_SEC_BUCKETS.
+const WITHDRAWAL_PHASE_SEC_BUCKETS: &[f64] = &[
+    10., 30., 60., 120., 300., 600., 1200., 1800., 2700., 3600., 5400., 7200., 10800., 14400.,
+    21600., 32400., 43200., 64800., 86400., 172800.,
+];
+
 pub const MPC_LABEL_DKG: &str = "dkg";
 pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
 pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
@@ -1058,7 +1064,7 @@ impl Metrics {
                 "hashi_withdrawal_duration_seconds",
                 "Duration of withdrawal lifecycle phases.",
                 &["phase"],
-                LATENCY_SEC_BUCKETS.to_vec(),
+                WITHDRAWAL_PHASE_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
