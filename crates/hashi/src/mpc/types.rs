@@ -143,7 +143,6 @@ pub enum ProtocolType {
     Dkg,
     KeyRotation,
     NonceGeneration { batch_index: u32 },
-    Signing { message_hash: MessageHash },
 }
 
 impl SessionId {
