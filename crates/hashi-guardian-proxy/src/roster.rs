@@ -27,15 +27,17 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Context as _;
+use hashi_types::guardian::log::CeremonyLogMessage;
+use hashi_types::guardian::log::KpShareStateLogMessage;
 use hashi_types::pgp::Fingerprint;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::widlog::LogStore;
 
+/// The pre-#779 layout, read-only: hashi-types no longer models it, so unlike
+/// the current prefixes this one has no constructor to borrow.
 const LEGACY_SHARES_PREFIX: &str = "shares/";
-const KP_SHARES_PREFIX: &str = "kp-shares/";
-const CEREMONY_PREFIX: &str = "ceremony/";
 
 /// The committed roster only changes at a ceremony, a re-deal, or a cert
 /// rotation — and rotation invalidates explicitly — so a minute of staleness
@@ -112,11 +114,16 @@ pub async fn latest_kp_roster<L: LogStore>(log: &L) -> anyhow::Result<Option<Vec
 /// Pre-#779 buckets have no `ceremony/` records at all; there the lex-greatest
 /// flat `shares/` key is the whole story.
 async fn latest_share_log_key<L: LogStore>(log: &L) -> anyhow::Result<Option<String>> {
-    let Some(ceremony_key) = log.list_keys(CEREMONY_PREFIX).await?.into_iter().max() else {
+    let Some(ceremony_key) = log
+        .list_keys(&CeremonyLogMessage::object_key_dir())
+        .await?
+        .into_iter()
+        .max()
+    else {
         return Ok(log.list_keys(LEGACY_SHARES_PREFIX).await?.into_iter().max());
     };
     let sharing_seq = ceremony_sharing_seq(&ceremony_key)?;
-    log.list_keys(&format!("{KP_SHARES_PREFIX}{sharing_seq}/"))
+    log.list_keys(&KpShareStateLogMessage::object_key_dir(sharing_seq))
         .await?
         .into_iter()
         .max()
@@ -127,13 +134,16 @@ async fn latest_share_log_key<L: LogStore>(log: &L) -> anyhow::Result<Option<Str
         .with_context(|| format!("ceremony {ceremony_key} has no kp-shares log"))
 }
 
-/// The `sharing_seq` a `ceremony/{sharing_seq:020}-{session}.json` key records,
-/// left as zero-padded text so it indexes `kp-shares/` directly.
-fn ceremony_sharing_seq(key: &str) -> anyhow::Result<&str> {
-    key.strip_prefix(CEREMONY_PREFIX)
+/// The `sharing_seq` a `ceremony/{sharing_seq:020}-{session}.json` key records.
+/// The canonical padding is required, not just parsed: lex order over these
+/// keys is the seq order only while every one of them pads to the same width.
+fn ceremony_sharing_seq(key: &str) -> anyhow::Result<u64> {
+    key.strip_prefix(&CeremonyLogMessage::object_key_dir())
         .and_then(|name| name.split('-').next())
         .filter(|seq| seq.len() == 20 && seq.bytes().all(|b| b.is_ascii_digit()))
-        .with_context(|| format!("ceremony key {key:?} has no sharing_seq"))
+        .with_context(|| format!("ceremony key {key:?} has no sharing_seq"))?
+        .parse()
+        .with_context(|| format!("ceremony key {key:?} has an out-of-range sharing_seq"))
 }
 
 /// Just the fields the roster needs, tolerant of everything else. Any record
@@ -387,6 +397,23 @@ mod tests {
             latest_kp_roster(&store).await.unwrap().unwrap(),
             vec![fp(FP_B)]
         );
+    }
+
+    /// Selecting the latest ceremony by lex order only holds while every key
+    /// pads to the same width: an unpadded key sorts above every padded one, so
+    /// without the width check this resolves to seq 3 and silently serves the
+    /// superseded roster instead of seq 5's.
+    #[tokio::test]
+    async fn an_unpadded_ceremony_key_fails_closed() {
+        let store = MemStore::default();
+        let (key, bytes) = kp_shares_record(5, 0, &[FP_A]);
+        store.insert(key, bytes);
+        complete_ceremony(&store, 5);
+        let (key, bytes) = kp_shares_record(3, 0, &[FP_B]);
+        store.insert(key, bytes);
+        store.insert("ceremony/3-test-session.json".to_string(), b"{}".to_vec());
+
+        assert!(latest_kp_roster(&store).await.is_err());
     }
 
     #[tokio::test]
