@@ -143,6 +143,9 @@ impl HttpJsonRpcTransport {
     /// Pace requests so a historical audit does not exhaust a provider's
     /// rolling throughput bucket, and retry the standard HTTP/JSON-RPC 429
     /// responses with bounded exponential backoff.
+    // TODO: Classify and retry transient non-rate-limit failures, such as
+    // timeouts, connection errors, and HTTP 5xx responses. They currently
+    // abort a batch audit or defer a continuous retry until the next BTC tick.
     fn post_json(&self, body: &Value) -> anyhow::Result<Value> {
         for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
             let response = minreq::post(&self.rpc_url)
