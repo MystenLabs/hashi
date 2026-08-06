@@ -41,6 +41,10 @@ on:
         description: 'Extra cargo features. Leave EMPTY for anything whose PCR0 is provenance; non-enclave-dev builds mock attestation.'
         required: false
         default: ''
+      git_revision:
+        description: 'Commit to build and stamp. Defaults to the dispatched ref. Set it to measure a commit that predates this workflow — an already-deployed guardian, or the ceremony build an allowlist has to keep trusting.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -51,17 +55,32 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    outputs:
+      git_revision: ${{ steps.rev.outputs.git_revision }}
 
     steps:
+      # The SOURCE measured is git_revision's, not the dispatched ref's — the
+      # ref only supplies this workflow file. GIT_REVISION is compiled into the
+      # guardian, so the two must name the same commit or the EIF measures a
+      # build that never existed.
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.git_revision || github.sha }}
+
+      - name: Resolve the revision being measured
+        id: rev
+        shell: bash
+        run: |
+          REV="$(git rev-parse HEAD)"
+          echo "GIT_REVISION=$REV" >> "$GITHUB_ENV"
+          echo "git_revision=$REV" >> "$GITHUB_OUTPUT"
 
       - name: Build enclave EIF
         working-directory: docker/hashi-guardian
         env:
           BUCKET_NAME: ${{ inputs.bucket_name }}
           AWS_REGION: ${{ inputs.aws_region }}
-          GIT_REVISION: ${{ github.sha }}
           FEATURES: ${{ inputs.features }}
           # The Makefile takes "true"/empty, not the friendlier input wording.
           CEREMONY_MODE: ${{ inputs.ceremony_mode == 'ceremony' && 'true' || '' }}
@@ -129,7 +148,7 @@ jobs:
             echo ""
             echo "| Input | Value |"
             echo "|-------|-------|"
-            echo "| commit | \`${{ github.sha }}\` |"
+            echo "| commit | \`${{ needs.build.outputs.git_revision }}\` |"
             echo "| bucket | \`${{ inputs.bucket_name }}\` |"
             echo "| region | \`${{ inputs.aws_region }}\` |"
             echo "| mode | \`${{ inputs.ceremony_mode }}\` |"
