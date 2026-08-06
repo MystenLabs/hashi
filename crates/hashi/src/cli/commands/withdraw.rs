@@ -117,7 +117,7 @@ async fn request(
         )
         .await?;
 
-        if let Some(response) = crate::cli::print_tx_outcome(outcome) {
+        if let Some(response) = crate::cli::print_tx_outcome(outcome, &config.sui_rpc_url) {
             let request_id =
                 crate::sui_tx_executor::withdrawal_request_id_from_response(&response)?;
             print_success(&format!("Withdrawal request created: {request_id}"));
@@ -218,7 +218,7 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
     )
     .await?;
 
-    if crate::cli::print_tx_outcome(outcome).is_some() {
+    if crate::cli::print_tx_outcome(outcome, &config.sui_rpc_url).is_some() {
         print_success("Withdrawal cancelled.");
     }
 

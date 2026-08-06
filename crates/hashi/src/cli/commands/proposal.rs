@@ -62,7 +62,7 @@ async fn execute_or_simulate(
     }
 
     let outcome = client.finalize_tx(tx, tx_opts).await?;
-    Ok(crate::cli::print_tx_outcome(outcome).map(|response| *response))
+    Ok(crate::cli::print_tx_outcome(outcome, client.sui_rpc_url()).map(|response| *response))
 }
 
 /// Print the newly-created proposal's ID after a `create_*_proposal` call,
