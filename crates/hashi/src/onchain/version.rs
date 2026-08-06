@@ -75,7 +75,26 @@ pub fn resolve_version_support(
         .collect();
 
     let Some(&live_max) = live.iter().next_back() else {
-        // Nothing enabled+published visible yet.
+        // Nothing enabled+published visible yet. Distinguish plain genesis
+        // (nothing on either side) from a chain that was fresh-published from
+        // a source tree whose `PACKAGE_VERSION` is ahead of its Sui sequence:
+        // there the genesis `create()` enabled {const} while the package
+        // history numbers the publish 1, so the two sets exist but never
+        // intersect and this state is permanent. Warn loudly instead of
+        // leaving an indistinguishable NotReady — the fix is to boot dev
+        // chains via snapshot + upgrade, not fresh-publish a mid-cycle tree.
+        if let (Some(&enabled_max), Some((&published_max, _))) = (
+            enabled.iter().next_back(),
+            published.versions().iter().next_back(),
+        ) {
+            tracing::warn!(
+                enabled_max,
+                published_max,
+                "no on-chain version is both enabled and published; the chain \
+                 appears fresh-published from a source tree ahead of its Sui \
+                 sequence — boot dev chains via snapshot + upgrade"
+            );
+        }
         return VersionSupport::NotReady;
     };
 
@@ -177,6 +196,18 @@ mod tests {
         // Empty everything.
         assert_eq!(
             resolve_version_support(&enabled(&[]), &published(&[]), &[1]),
+            VersionSupport::NotReady
+        );
+    }
+
+    #[test]
+    fn source_ahead_fresh_publish_is_not_ready_not_unsupported() {
+        // A mid-cycle tree (const = 2) fresh-published: genesis enabled {2},
+        // but the package history numbers the publish 1. Permanently disjoint
+        // sets must stay NotReady (the warn path), not halt as Unsupported —
+        // the binary is not behind the chain, the chain is misbooted.
+        assert_eq!(
+            resolve_version_support(&enabled(&[2]), &published(&[1]), &[1, 2]),
             VersionSupport::NotReady
         );
     }
