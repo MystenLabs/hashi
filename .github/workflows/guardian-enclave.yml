@@ -93,6 +93,27 @@ jobs:
         working-directory: docker/hashi-guardian
         run: cat out/nitro.pcrs
 
+      # PCR0 covers everything, so a mismatch between runners says only "the
+      # build moved". These say which half: rootfs.cpio is the app ramdisk
+      # (PCR2), bzImage the kernel (PCR1). Plus the host facts a from-source
+      # kernel build can leak — core count reaches it through `make -j$(nproc)`.
+      - name: Provenance of the build inputs
+        working-directory: docker/hashi-guardian
+        run: |
+          echo "runner        : ${{ matrix.os }}"
+          echo "nproc         : $(nproc)"
+          echo "docker        : $(docker version --format '{{.Server.Version}}')"
+          echo "buildx        : $(docker buildx version)"
+          sha256sum out/rootfs.cpio out/bzImage out/kernel.config
+
+      - name: Upload build-input hashes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
+        with:
+          name: build-inputs-${{ matrix.os }}
+          path: |
+            docker/hashi-guardian/out/kernel.config
+            docker/hashi-guardian/out/bzImage
+
       - name: Upload PCRs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
         with:

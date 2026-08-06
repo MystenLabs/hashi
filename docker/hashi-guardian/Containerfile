@@ -222,6 +222,13 @@ WORKDIR /rootfs
 COPY --from=build /nitro.eif .
 COPY --from=build /nitro.pcrs .
 COPY --from=build /build_cpio/rootfs.cpio .
+# Exported for provenance triage only — none of these is an EIF input, they are
+# the inputs eif_build consumed. When two builds of one commit disagree on PCR0,
+# hashing these says WHICH half moved: rootfs.cpio is PCR2 (the app), bzImage is
+# PCR1 (the kernel), and the kernel is the half we compile rather than pull from
+# a digest-pinned image.
+COPY --from=build /bzImage .
+COPY --from=build /kernel.config .
 
 FROM scratch AS package
 COPY --from=install /rootfs .
