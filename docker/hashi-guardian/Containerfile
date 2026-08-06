@@ -92,9 +92,21 @@ FROM kernel-toolchain AS kernel
 ADD --checksum=sha256:de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98 \
 	https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.14.tar.xz /linux.tar.xz
 COPY --from=user-linux-nitro /linux.config /config
-ENV SOURCE_DATE_EPOCH=1 KBUILD_BUILD_TIMESTAMP=1 KBUILD_BUILD_USER=stagex KBUILD_BUILD_HOST=stagex
+# KBUILD_BUILD_TIMESTAMP must be something `date -d` PARSES, not just a fixed
+# string. usr/Makefile forwards it to gen_initramfs.sh, which does
+# `timestamp="$(date -d"$1" +%s || :)"` — and that `|| :` means an unparseable
+# value is silently dropped, leaving gen_init_cpio to stamp the built-in
+# initramfs with the wall clock. `1` does not parse (this toolchain's date is
+# busybox: `date: invalid date '1'`), so every build embedded its own build
+# time, which is what made PCR0 differ between two identical builds. `@1` parses
+# and is timezone-proof, unlike a bare `1970-01-01 00:00:00`.
+ENV SOURCE_DATE_EPOCH=1 KBUILD_BUILD_TIMESTAMP=@1 KBUILD_BUILD_USER=stagex KBUILD_BUILD_HOST=stagex
 RUN <<-EOF
 	set -eux
+	# gen_initramfs.sh drops an unparseable -d on the floor (`|| :`) and stamps
+	# the built-in initramfs with the wall clock instead, so the only symptom of
+	# getting this wrong is a PCR0 that quietly differs per build. Fail loudly.
+	date -d"\$KBUILD_BUILD_TIMESTAMP" +%s
 	tar -xf /linux.tar.xz
 	cd linux-7.0.14
 	cp /config .config
