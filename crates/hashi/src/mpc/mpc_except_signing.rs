@@ -96,6 +96,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
@@ -355,21 +356,24 @@ impl MpcManager {
     }
 
     /// Run `f` against a read-locked manager on a blocking thread.
-    pub(crate) async fn with_manager_blocking<T: Send + 'static>(
+    pub(crate) fn with_manager_blocking<T: Send + 'static>(
         mpc_manager: &Arc<RwLock<Self>>,
         f: impl FnOnce(&Self) -> T + Send + 'static,
-    ) -> T {
+    ) -> Pin<Box<dyn Future<Output = T> + Send>> {
         let mgr = Arc::clone(mpc_manager);
-        spawn_blocking(move || f(&mgr.read().unwrap())).await
+        // This is boxed to keep the future off the caller's stack. If inlined and deeply nested,
+        // it can overflow the worker stack.
+        Box::pin(async move { spawn_blocking(move || f(&mgr.read().unwrap())).await })
     }
 
     /// Run `f` against a write-locked manager on a blocking thread.
-    async fn with_manager_blocking_mut<T: Send + 'static>(
+    fn with_manager_blocking_mut<T: Send + 'static>(
         mpc_manager: &Arc<RwLock<Self>>,
         f: impl FnOnce(&mut Self) -> T + Send + 'static,
-    ) -> T {
+    ) -> Pin<Box<dyn Future<Output = T> + Send>> {
         let mgr = Arc::clone(mpc_manager);
-        spawn_blocking(move || f(&mut mgr.write().unwrap())).await
+        // Same as with_manager_blocking.
+        Box::pin(async move { spawn_blocking(move || f(&mut mgr.write().unwrap())).await })
     }
 
     /// The AVSS threshold parameters (`t`, `f`) for this manager's epoch.
@@ -6500,9 +6504,19 @@ fn consume_certified_nonce_outputs<T>(
 }
 
 /// Time an async operation on `metric[label]`, holding the timer until `f` completes.
-pub(crate) async fn time_async<F: Future>(metric: &HistogramVec, label: &str, f: F) -> F::Output {
-    let _timer = metric.with_label_values(&[label]).start_timer();
-    f.await
+pub(crate) fn time_async<'a, F>(
+    metric: &HistogramVec,
+    label: &str,
+    f: F,
+) -> Pin<Box<dyn Future<Output = F::Output> + Send + 'a>>
+where
+    F: Future + Send + 'a,
+{
+    let timer = metric.with_label_values(&[label]).start_timer();
+    Box::pin(async move {
+        let _timer = timer;
+        f.await
+    })
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
