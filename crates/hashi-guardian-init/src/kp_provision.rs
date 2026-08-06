@@ -8,10 +8,10 @@
 //! setup; plaintext never touches disk, but the raw share scalar is held in this
 //! process' memory long enough to verify and re-encrypt it. The flow:
 //!
-//! 1. The relay's `GetStandbyInfo` — signed `GuardianInfo` of the guardian KPs
-//!    are provisioning (the proxy's standby backend when one is configured) —
-//!    is fetched and verified against the enclave attestation, pinning the
-//!    standby session.
+//! 1. The relay's `GetProvisioningTargetInfo` — signed `GuardianInfo` of the
+//!    guardian KPs are provisioning (the proxy's standby backend when one is
+//!    configured) — is fetched and verified against the enclave attestation,
+//!    pinning the standby session.
 //! 2. The same session's S3 `init/` log is fetched and required to match the
 //!    endpoint `GuardianInfo`. Bucket, limiter config, `mpc_master_g`, and
 //!    `enclave_btc_pubkey == None` are all confirmed.
@@ -32,10 +32,10 @@
 //!    `encryption_pubkey` (from its `GuardianInfo`) while constructing a PI
 //!    request bound to the pinned session and verified config/genesis hashes.
 //! 9. The request is signed and submitted to the configured relay endpoint via
-//!    `SingleProvisionerInit`, after re-checking `GetStandbyInfo` against the
-//!    pinned session. The relay accumulates T-of-N signed submissions and calls
-//!    the guardian's batch `provisioner_init` once it has enough; the enclave
-//!    re-verifies every signature and binding.
+//!    `SingleProvisionerInit`, after re-checking `GetProvisioningTargetInfo`
+//!    against the pinned session. The relay accumulates T-of-N signed
+//!    submissions and calls the guardian's batch `provisioner_init` once it has
+//!    enough; the enclave re-verifies every signature and binding.
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::GuardianReader;
@@ -56,7 +56,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
-use crate::guardian_info::verified_standby_guardian_info;
+use crate::guardian_info::verified_provisioning_target_info;
 use crate::kp_roster::decrypt_kp_share_copies;
 use crate::kp_roster::load_kp_cert;
 
@@ -136,11 +136,11 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "loaded this KP's selected cert",
     );
 
-    // 1. Ask the relay which session KPs are provisioning (`GetStandbyInfo` —
-    // the proxy's standby backend, not the active guardian its node-facing
-    // GetGuardianInfo fronts). Active guardian heartbeats may still exist, so
-    // identity comes from the endpoint KPs will submit to rather than from S3
-    // heartbeat discovery.
+    // 1. Ask the relay which session KPs are provisioning
+    // (`GetProvisioningTargetInfo` — the proxy's standby backend, not the active
+    // guardian its node-facing GetGuardianInfo fronts). Active guardian
+    // heartbeats may still exist, so identity comes from the endpoint KPs will
+    // submit to rather than from S3 heartbeat discovery.
     info!(
         phase = "guardian endpoint",
         endpoint = %cfg.relay_endpoint,
@@ -439,7 +439,7 @@ async fn verified_endpoint_guardian_info(
     )
     .await
     .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
-    verified_standby_guardian_info(&mut client, current_build)
+    verified_provisioning_target_info(&mut client, current_build)
         .await
         .with_context(|| format!("verify relay standby GuardianInfo at {endpoint}"))
 }
@@ -474,7 +474,7 @@ async fn submit_provisioner_init_to_relay(
         phase = "relay submit",
         endpoint = %endpoint,
         expected_session_id = %expected_session_id,
-        "running relay-side prechecks (GetStandbyInfo + session pin + GuardianInfo match)",
+        "running relay-side prechecks (GetProvisioningTargetInfo + session pin + GuardianInfo match)",
     );
     prechecks(
         &mut relay_client,
@@ -535,7 +535,7 @@ async fn prechecks(
     expected_guardian_info: &GuardianInfo,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
-    let verified = verified_standby_guardian_info(client, current_build).await?;
+    let verified = verified_provisioning_target_info(client, current_build).await?;
     let actual_session_id = verified.session_id;
     info!(
         phase = "relay submit",

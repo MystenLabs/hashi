@@ -26,18 +26,18 @@ pub async fn verified_live_guardian_info(
 }
 
 /// Like [`verified_live_guardian_info`], but over the relay's provisioning
-/// surface: `GetStandbyInfo` answers for the guardian KPs are provisioning
-/// (the proxy's standby backend when one is configured, else the active
-/// guardian), where the node-facing `GetGuardianInfo` always answers for the
-/// active one.
-pub async fn verified_standby_guardian_info(
+/// surface: `GetProvisioningTargetInfo` answers for the guardian KPs are
+/// provisioning (the proxy's standby backend when one is configured, else the
+/// active guardian), where the node-facing `GetGuardianInfo` always answers for
+/// the active one.
+pub async fn verified_provisioning_target_info(
     client: &mut GuardianRelayServiceClient<Channel>,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
     let info_pb = client
-        .get_standby_info(pb::GetStandbyInfoRequest {})
+        .get_provisioning_target_info(pb::GetProvisioningTargetInfoRequest {})
         .await
-        .context("GetStandbyInfo RPC failed")?
+        .context("GetProvisioningTargetInfo RPC failed")?
         .into_inner();
     verify_info_response(info_pb, current_build)
 }

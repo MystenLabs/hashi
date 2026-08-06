@@ -17,9 +17,10 @@ pub struct Config {
     /// `http://10.0.1.20:3000` (`GUARDIAN_BACKEND_URL`, required).
     pub backend_url: String,
     /// gRPC endpoint of a standby guardian being armed (`STANDBY_GUARDIAN_URL`,
-    /// optional). When set, the relay — share submissions and `GetStandbyInfo`
-    /// — targets it while node-facing forwarding stays on the active backend;
-    /// unset, the relay provisions the active backend (first deploy).
+    /// optional). When set, the relay — share submissions and
+    /// `GetProvisioningTargetInfo` — targets it while node-facing forwarding
+    /// stays on the active backend; unset, the relay provisions the active
+    /// backend (first deploy).
     pub standby_backend_url: Option<String>,
     /// Address the proxy serves everything on — gRPC (forwarder + relay + health)
     /// and the HTTP `/info` + `/health` (`PROXY_LISTEN_ADDR`, default `0.0.0.0:3000`).

@@ -1358,7 +1358,7 @@ pub mod bridge_service_server {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetStandbyInfoRequest {}
+pub struct GetProvisioningTargetInfoRequest {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SingleProvisionerInitResponse {
     /// Distinct shares the relay now holds for the current session.
@@ -1507,9 +1507,9 @@ pub mod guardian_relay_service_client {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
-        pub async fn get_standby_info(
+        pub async fn get_provisioning_target_info(
             &mut self,
-            request: impl tonic::IntoRequest<super::GetStandbyInfoRequest>,
+            request: impl tonic::IntoRequest<super::GetProvisioningTargetInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetGuardianInfoResponse>,
             tonic::Status,
@@ -1524,14 +1524,14 @@ pub mod guardian_relay_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.GuardianRelayService/GetStandbyInfo",
+                "/sui.hashi.v1alpha.GuardianRelayService/GetProvisioningTargetInfo",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new(
                         "sui.hashi.v1alpha.GuardianRelayService",
-                        "GetStandbyInfo",
+                        "GetProvisioningTargetInfo",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -1562,9 +1562,9 @@ pub mod guardian_relay_service_server {
         /// backend when one is configured, else the active guardian (first deploy).
         /// KP tooling pins its session from this instead of the node-facing
         /// GetGuardianInfo, which always answers for the ACTIVE guardian.
-        async fn get_standby_info(
+        async fn get_provisioning_target_info(
             &self,
-            request: tonic::Request<super::GetStandbyInfoRequest>,
+            request: tonic::Request<super::GetProvisioningTargetInfoRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetGuardianInfoResponse>,
             tonic::Status,
@@ -1709,13 +1709,16 @@ pub mod guardian_relay_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.GuardianRelayService/GetStandbyInfo" => {
+                "/sui.hashi.v1alpha.GuardianRelayService/GetProvisioningTargetInfo" => {
                     #[allow(non_camel_case_types)]
-                    struct GetStandbyInfoSvc<T: GuardianRelayService>(pub Arc<T>);
+                    struct GetProvisioningTargetInfoSvc<T: GuardianRelayService>(
+                        pub Arc<T>,
+                    );
                     impl<
                         T: GuardianRelayService,
-                    > tonic::server::UnaryService<super::GetStandbyInfoRequest>
-                    for GetStandbyInfoSvc<T> {
+                    > tonic::server::UnaryService<
+                        super::GetProvisioningTargetInfoRequest,
+                    > for GetProvisioningTargetInfoSvc<T> {
                         type Response = super::GetGuardianInfoResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
@@ -1723,11 +1726,13 @@ pub mod guardian_relay_service_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::GetStandbyInfoRequest>,
+                            request: tonic::Request<
+                                super::GetProvisioningTargetInfoRequest,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as GuardianRelayService>::get_standby_info(
+                                <T as GuardianRelayService>::get_provisioning_target_info(
                                         &inner,
                                         request,
                                     )
@@ -1742,7 +1747,7 @@ pub mod guardian_relay_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = GetStandbyInfoSvc(inner);
+                        let method = GetProvisioningTargetInfoSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
