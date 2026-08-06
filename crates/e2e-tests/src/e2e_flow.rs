@@ -133,9 +133,20 @@ mod tests {
             .ok_or_else(|| anyhow!("transaction effects BCS bytes were not returned"))
     }
 
+    /// Boot a network in the state a deployed chain actually runs in: the v1
+    /// bytecode snapshot is published first, then upgraded to the current
+    /// source through the full governance flow. Every test in this module
+    /// therefore exercises the post-upgrade configuration — package history
+    /// {v1, vN}, routing at the upgraded package id, types defined at the v1
+    /// address — not a fresh single-version publish no real network is in.
+    /// Fresh-publish coverage lives in the genesis-specific harnesses
+    /// (`upgrade_tests`, `snapshot_signing_tests` manage their own boots).
     async fn setup_test_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
-        let networks = builder.build().await?;
+        let mut networks = builder
+            .with_v1_from_snapshot(crate::snapshot::default_snapshot_dir()?)
+            .build()
+            .await?;
 
         info!("Test networks initialized");
         info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
@@ -147,6 +158,16 @@ mod tests {
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
         info!("MPC key ready");
+
+        info!("Upgrading the chain to the current source...");
+        let new_package_id = crate::upgrade_flow::execute_full_upgrade(&mut networks).await?;
+        crate::upgrade_flow::wait_for_package_convergence(
+            &networks,
+            new_package_id,
+            Duration::from_secs(30),
+        )
+        .await?;
+        info!("Chain upgraded; tests run against the post-upgrade state");
 
         Ok(networks)
     }

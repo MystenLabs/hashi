@@ -28,6 +28,43 @@ use sui_sdk_types::TypeTag;
 use crate::TestNetworks;
 use crate::sui_network::sui_binary;
 
+/// Poll until every node's watcher reports `package_id` as the active
+/// package — the PackageUpgraded handler in watcher.rs must update
+/// OnchainState's package_versions map on all nodes. Prints per-node
+/// diagnostics before failing on timeout.
+pub async fn wait_for_package_convergence(
+    networks: &TestNetworks,
+    package_id: Address,
+    max_wait: std::time::Duration,
+) -> Result<()> {
+    tracing::info!("waiting for all nodes to detect the new package version...");
+    let wait_start = std::time::Instant::now();
+    loop {
+        let all_updated = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .all(|node| node.hashi().onchain_state().package_id() == Some(package_id));
+        if all_updated {
+            return Ok(());
+        }
+        if wait_start.elapsed() > max_wait {
+            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+                let latest = node.hashi().onchain_state().package_id();
+                let versions = node
+                    .hashi()
+                    .onchain_state()
+                    .state()
+                    .package_versions()
+                    .clone();
+                tracing::info!("node {i}: package_id={latest:?}, versions={versions:?}");
+            }
+            anyhow::bail!("timeout: not all nodes detected the new package version");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 /// Prepare an upgrade package by copying the deployed source and patching it.
 ///
 /// 1. Copies `<test_dir>/packages/hashi` to `<test_dir>/packages/hashi-upgrade`
