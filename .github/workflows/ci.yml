@@ -135,6 +135,19 @@ jobs:
 
       - run: make is-dirty
 
+  # guardian-enclave-lock resolves on this runner, where #960's failure does not
+  # reproduce. Resolve in the enclave's own toolchain instead; it fails before
+  # compiling anything, so this costs a minute rather than an EIF build.
+  guardian-enclave-resolve:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve the enclave workspace
+        run: make -C docker/hashi-guardian resolve-check
+
   docs:
     runs-on: ubuntu-latest
 

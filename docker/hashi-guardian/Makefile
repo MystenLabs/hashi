@@ -54,6 +54,17 @@ run-debug: out/nitro.eif
 enclave-lock:
 	./scripts/gen-enclave-lock.sh
 
+# Reproduce the resolution the EIF build performs, without building it.
+.PHONY: resolve-check
+resolve-check:
+	docker build \
+		--pull \
+		--progress=plain \
+		--platform linux/amd64 \
+		--target resolve \
+		-f Containerfile \
+		../..
+
 .PHONY: clean
 clean:
 	rm -rf out/

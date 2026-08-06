@@ -124,23 +124,10 @@ COPY --from=core-llvm . /
 COPY --from=core-libffi . /
 COPY --from=core-gcc . /
 COPY --from=user-cpio . /
-COPY --from=kernel /bzImage .
-COPY --from=kernel /kernel.config .
 
-FROM base AS build
-ARG BUCKET_NAME
-ARG AWS_REGION=us-east-1
-ARG GIT_REVISION
-# Extra cargo features for the guardian build. Empty (the default) is the real
-# enclave build — leave it empty for anything whose PCR0 must match provenance.
-# Dev deploys pass `non-enclave-dev` so a runner-local mock ceremony verifies.
-ARG FEATURES=""
-# Enclave boot mode, baked into run.sh below (see guardian main.rs). Empty (the
-# default) => withdraw; "true" => ceremony. A ceremony enclave is intentionally a
-# distinct, separately-attested EIF with its own PCR0.
-ARG CEREMONY_MODE=""
-RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
-ENV GIT_REVISION=${GIT_REVISION}
+# The pruned workspace the enclave compiles, split out so `resolve` below gates
+# this exact tree. The kernel moves to `build` so resolving does not wait on it.
+FROM base AS workspace
 COPY crates /crates
 COPY Cargo.toml /Cargo.toml
 # Keep test-only code out of the enclave build. `-p hashi-guardian` does not
@@ -163,6 +150,29 @@ RUN rm -rf /crates/e2e-tests /crates/hashi-monitor \
 # the workspace resolves to. Regenerate with `make enclave-lock` and keep it in
 # sync; CI (guardian-enclave-lock) fails if it drifts.
 COPY docker/hashi-guardian/enclave-Cargo.lock /Cargo.lock
+
+# Resolution only: where a dependency this cargo cannot resolve fails (#960),
+# reached in a minute instead of the hour a full EIF takes.
+FROM workspace AS resolve
+WORKDIR /
+RUN cargo metadata --locked --format-version 1 >/dev/null
+
+FROM workspace AS build
+COPY --from=kernel /bzImage /bzImage
+COPY --from=kernel /kernel.config /kernel.config
+ARG BUCKET_NAME
+ARG AWS_REGION=us-east-1
+ARG GIT_REVISION
+# Extra cargo features for the guardian build. Empty (the default) is the real
+# enclave build — leave it empty for anything whose PCR0 must match provenance.
+# Dev deploys pass `non-enclave-dev` so a runner-local mock ceremony verifies.
+ARG FEATURES=""
+# Enclave boot mode, baked into run.sh below (see guardian main.rs). Empty (the
+# default) => withdraw; "true" => ceremony. A ceremony enclave is intentionally a
+# distinct, separately-attested EIF with its own PCR0.
+ARG CEREMONY_MODE=""
+RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
+ENV GIT_REVISION=${GIT_REVISION}
 
 WORKDIR /
 ENV OPENSSL_STATIC=true
