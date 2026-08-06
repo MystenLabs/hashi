@@ -34,7 +34,7 @@ use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
-use crate::mpc::mpc_except_signing::spawn_blocking;
+use crate::mpc::mpc_except_signing::time_async;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
@@ -503,19 +503,18 @@ impl MpcService {
         )
         .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT);
         let metrics = &self.inner.metrics;
-        let _timer = metrics
-            .mpc_total_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-            .start_timer();
-        let nonce_result = MpcManager::run_nonce_generation(
-            &mpc_manager,
-            batch_index,
-            &p2p_channel,
-            &mut tob_channel,
-            metrics,
+        let nonce_result = time_async(
+            &metrics.mpc_total_duration_seconds,
+            MPC_LABEL_NONCE_GENERATION,
+            MpcManager::run_nonce_generation(
+                &mpc_manager,
+                batch_index,
+                &p2p_channel,
+                &mut tob_channel,
+                metrics,
+            ),
         )
         .await;
-        drop(_timer);
         let nonce_outputs =
             nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
         let (batch_size_per_weight, params) = {
@@ -1732,9 +1731,7 @@ pub(crate) async fn verify_fetched_certificates(
     certs: Vec<CertificateV1>,
     metrics: &Metrics,
 ) -> Vec<VerifiedCertificateV1> {
-    let mgr = Arc::clone(mpc_manager);
-    let (verified, rejected) = spawn_blocking(move || {
-        let mgr = mgr.read().unwrap();
+    let (verified, rejected) = MpcManager::with_manager_blocking(mpc_manager, move |mgr| {
         let mut verified = Vec::with_capacity(certs.len());
         let mut rejected: Vec<(&'static str, &'static str)> = Vec::new();
         for cert in certs {
