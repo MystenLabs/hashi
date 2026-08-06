@@ -75,7 +75,7 @@ use std::ops::Deref;
 /// `InitConfig` whose digest KPs authenticate during provisioner init.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
-    s3_config: S3Config,
+    s3_config: ResolvedS3Config,
     init_config: Option<InitConfig>,
     genesis_state: Option<GenesisState>,
 }
@@ -382,8 +382,21 @@ impl fmt::Display for SessionID {
     }
 }
 
+/// S3 configuration as supplied by a config file, before AWS credentials have
+/// been resolved.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UnresolvedS3Config {
+    pub bucket: String,
+    pub region: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
+    pub retention_environment: S3RetentionEnvironment,
+}
+
+/// Runtime S3 configuration with concrete credentials.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct S3Config {
+pub struct ResolvedS3Config {
     pub access_key: String,
     pub secret_key: String,
     pub session_token: Option<String>,
@@ -401,7 +414,7 @@ pub struct S3BucketInfo {
 //          Helper impl's
 // ---------------------------------
 
-impl S3Config {
+impl ResolvedS3Config {
     pub fn bucket_name(&self) -> &str {
         &self.bucket_info.bucket
     }
@@ -450,7 +463,7 @@ impl SetupNewKeyRequest {
 
 impl OperatorInitRequest {
     /// Build a ceremony-mode request (S3 only).
-    pub fn new_ceremony_mode(s3_config: S3Config) -> Self {
+    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
         Self {
             s3_config,
             init_config: None,
@@ -460,7 +473,7 @@ impl OperatorInitRequest {
 
     /// Build a withdraw-mode request carrying the stable operator config.
     pub fn new_withdraw_mode(
-        s3_config: S3Config,
+        s3_config: ResolvedS3Config,
         init_config: InitConfig,
         genesis_state: Option<GenesisState>,
     ) -> Self {
@@ -471,7 +484,7 @@ impl OperatorInitRequest {
         }
     }
 
-    pub fn s3_config(&self) -> &S3Config {
+    pub fn s3_config(&self) -> &ResolvedS3Config {
         &self.s3_config
     }
 
@@ -497,7 +510,7 @@ impl OperatorInitRequest {
         }
     }
 
-    pub fn into_parts(self) -> (S3Config, Option<InitConfig>, Option<GenesisState>) {
+    pub fn into_parts(self) -> (ResolvedS3Config, Option<InitConfig>, Option<GenesisState>) {
         (self.s3_config, self.init_config, self.genesis_state)
     }
 }

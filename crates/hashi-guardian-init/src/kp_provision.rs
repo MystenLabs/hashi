@@ -59,7 +59,7 @@ use crate::kp_roster::load_kp_cert;
 
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
 
     info!(
         phase = "setup",

@@ -35,11 +35,11 @@ pub fn mock_logger() -> GuardianS3Client {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::S3Config;
+    use hashi_types::guardian::ResolvedS3Config;
 
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client)
+    GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client)
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
@@ -126,7 +126,7 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::S3Config;
+    use hashi_types::guardian::ResolvedS3Config;
 
     let captures: CapturedPuts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captures_w = captures.clone();
@@ -144,7 +144,8 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
         })
         .then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    let logger = GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client);
+    let logger =
+        GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client);
     (logger, captures)
 }
 
@@ -167,7 +168,7 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::S3Config;
+    use hashi_types::guardian::ResolvedS3Config;
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -236,7 +237,7 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
         RuleMode::MatchAny,
         &[&list_v2, &list_versions, &put_ok]
     );
-    GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client)
+    GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client)
 }
 
 /// Args for arming a withdraw-mode test enclave. `config` is the stable

@@ -8,7 +8,7 @@ use anyhow::Context;
 use anyhow::anyhow;
 use corepc_client::client_sync::Auth;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::UnresolvedS3Config;
 use serde::Deserialize;
 
 use crate::domain::WithdrawalEventType;
@@ -23,7 +23,7 @@ pub struct Config {
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
-    pub guardian: S3Config,
+    pub guardian_s3: UnresolvedS3Config,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
     pub sui: SuiConfig,

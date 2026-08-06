@@ -22,10 +22,11 @@ use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VersionedLogMessage::V1;
 use hashi_types::guardian::VersionedLogMessage::V2;
+use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 use tracing::info;
@@ -69,7 +70,7 @@ pub struct GuardianReader {
 
 impl GuardianReader {
     /// Create a reader after checking S3 connectivity and object-lock support.
-    pub async fn new(config: &S3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
+    pub async fn new(config: &ResolvedS3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
         let s3 = GuardianS3Client::new_checked(config).await?;
         Ok(Self::from_s3_client(s3, allowlist))
     }
@@ -119,7 +120,15 @@ impl GuardianReader {
         &mut self,
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<VerifiedLogRecord>> {
-        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
+        let prefix = dir.to_string();
+        self.read_logs_with_prefix(&prefix).await
+    }
+
+    async fn read_logs_with_prefix(
+        &mut self,
+        prefix: &str,
+    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+        let all_logs = self.s3.list_all_log_records_with_prefix(prefix).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
         for record in all_logs {
@@ -127,6 +136,18 @@ impl GuardianReader {
             out.push(verified_record);
         }
         Ok(out)
+    }
+
+    /// Read and verify successful withdrawal records in `dir`.
+    ///
+    /// This excludes rejected withdrawal requests, which do not represent
+    /// Guardian approval events and are not inputs to the monitor state machine.
+    pub async fn read_successful_withdrawals_in_dir(
+        &mut self,
+        dir: &S3HourScopedDirectory,
+    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+        let prefix = format!("{dir}{}", WithdrawalLogMessage::SUCCESS_OBJECT_KEY_PREFIX);
+        self.read_logs_with_prefix(&prefix).await
     }
 
     /// Return verified session info after requiring the attested PCRs to match
