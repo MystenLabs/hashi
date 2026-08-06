@@ -242,6 +242,8 @@ impl Monitor {
             .maximum_connection_time(Duration::MAX)
             .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
 
+        // No-op as of bip157 0.6.3: the builder takes the path and `Node::new`
+        // discards it. Kept for when upstream implements persistence.
         if let Some(data_dir) = &config.data_dir {
             builder = builder.data_dir(data_dir.clone());
         }
@@ -263,19 +265,22 @@ impl Monitor {
             bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
                 HashCheckpoint::segwit_activation()
             }
-            network => Self::checkpoint_at_height(bitcoind_rpc, config.start_height, network).await,
+            _ => Self::checkpoint_at_height(bitcoind_rpc, config.start_height).await,
         }
     }
 
+    /// Wait for bitcoind to have the block at `height`. A node still in initial
+    /// block download reports the same "out of range" error as a height past the
+    /// tip, so giving up would anchor Kyoto far below `height` permanently.
     async fn checkpoint_at_height(
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
         height: u32,
-        network: bitcoin::Network,
     ) -> HashCheckpoint {
-        const MAX_ATTEMPTS: u32 = 5;
         const RETRY_DELAY: Duration = Duration::from_secs(2);
+        const LOG_EVERY: u32 = 15;
 
-        for attempt in 1..=MAX_ATTEMPTS {
+        let mut attempt: u32 = 0;
+        loop {
             match btc_rpc_call(bitcoind_rpc, move |rpc| rpc.get_block_hash(height as u64)).await {
                 Ok(raw) => match raw.into_model() {
                     Ok(model) => {
@@ -284,29 +289,32 @@ impl Monitor {
                     }
                     Err(e) => error!("Failed to parse getblockhash({height}) response: {e}"),
                 },
-                // RPC error -8 "block height out of range": start_height is beyond
-                // the node's tip — permanent, so anchor at genesis instead of retrying.
-                Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(
-                    ref e,
-                ))) if e.code == -8 => {
-                    warn!(
-                        "Start height {height} is beyond bitcoind's tip; anchoring Kyoto at genesis"
-                    );
-                    return HashCheckpoint::from_genesis(network);
+                Err(e) => {
+                    if attempt.is_multiple_of(LOG_EVERY) {
+                        match Self::bitcoind_height(bitcoind_rpc).await {
+                            Some(blocks) => warn!(
+                                "Waiting for bitcoind to reach start height {height}; it is at {blocks}"
+                            ),
+                            None => warn!(
+                                "Waiting for a block at start height {height} from bitcoind: {e}"
+                            ),
+                        }
+                    }
                 }
-                Err(e) => warn!(
-                    "Failed to fetch block hash at start height {height} \
-                     (attempt {attempt}/{MAX_ATTEMPTS}): {e}"
-                ),
             }
+            attempt = attempt.wrapping_add(1);
             tokio::time::sleep(RETRY_DELAY).await;
         }
+    }
 
-        warn!(
-            "Could not resolve a checkpoint at start height {height}; falling back to genesis. \
-             Kyoto will sync the entire chain from genesis."
-        );
-        HashCheckpoint::from_genesis(network)
+    async fn bitcoind_height(
+        bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    ) -> Option<u32> {
+        btc_rpc_call(bitcoind_rpc, |rpc| rpc.get_blockchain_info())
+            .await
+            .ok()
+            .and_then(|info| info.into_model().ok())
+            .map(|info| info.blocks)
     }
 
     /// Run a BTC monitor with the given configuration.
@@ -1431,6 +1439,86 @@ mod tests {
             Monitor::resolve_start_checkpoint(&rpc, &between_segwit_and_taproot).await,
             HashCheckpoint::segwit_activation(),
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_at_height_waits_out_a_lagging_bitcoind() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::atomic::Ordering;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        const HASH: &str = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+        // `getblockhash` replies "out of range" this many times before the block lands.
+        const LAGGING_REPLIES: u32 = 2;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let block_hash_calls = Arc::new(AtomicU32::new(0));
+
+        tokio::spawn({
+            let block_hash_calls = block_hash_calls.clone();
+            async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let block_hash_calls = block_hash_calls.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        while let Ok(n) = sock.read(&mut buf).await {
+                            if n == 0 {
+                                return;
+                            }
+                            let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                            let id = req
+                                .rsplit_once("\"id\":")
+                                .and_then(|(_, rest)| rest.split([',', '}']).next())
+                                .unwrap_or("0")
+                                .to_string();
+                            let out_of_range = |id: &str| {
+                                format!(
+                                    r#"{{"result":null,"error":{{"code":-8,"message":"Block height out of range"}},"id":{id}}}"#
+                                )
+                            };
+                            let body = if req.contains("\"getblockhash\"") {
+                                if block_hash_calls.fetch_add(1, Ordering::SeqCst) < LAGGING_REPLIES
+                                {
+                                    out_of_range(&id)
+                                } else {
+                                    format!(r#"{{"result":"{HASH}","error":null,"id":{id}}}"#)
+                                }
+                            } else {
+                                // The progress-logging `getblockchaininfo`; failing it
+                                // exercises the branch that logs without a height.
+                                out_of_range(&id)
+                            };
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            if sock.write_all(resp.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        let rpc = Arc::new(corepc_client::client_sync::v29::Client::new(&format!(
+            "http://{addr}"
+        )));
+
+        // The old "-8 is permanent" path returned a genesis checkpoint on the first reply.
+        let checkpoint = tokio::time::timeout(
+            Duration::from_secs(60),
+            Monitor::checkpoint_at_height(&rpc, 300_000),
+        )
+        .await
+        .expect("checkpoint_at_height gave up instead of waiting for bitcoind");
+
+        assert_eq!(checkpoint.height, 300_000);
+        assert_eq!(checkpoint.hash.to_string(), HASH);
+        assert!(block_hash_calls.load(Ordering::SeqCst) > LAGGING_REPLIES);
     }
 
     #[test]
