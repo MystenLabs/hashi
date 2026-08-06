@@ -9,6 +9,7 @@ use hashi_guardian_proxy::forward::Forwarding;
 use hashi_guardian_proxy::info;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::relay::Relay;
+use hashi_guardian_proxy::roster::RosterCache;
 use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -64,13 +65,16 @@ async fn main() -> Result<()> {
         .http2_keep_alive_interval(config.keepalive_interval)
         .connect_lazy();
 
-    let relay_svc = Relay::new(channel.clone(), log_store.clone());
+    // One roster cache, shared: the relay authorizes submissions against it and
+    // a cert rotation through the forwarder invalidates it.
+    let roster = Arc::new(RosterCache::new(log_store.clone()));
+    let relay_svc = Relay::new(channel.clone(), roster.clone());
     let info_state = info::InfoState::new(
         GuardianServiceClient::new(channel.clone()),
         config.info_cache_ttl,
     );
     let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel),
+        Forwarding::new(channel, roster),
         log_store,
         config.btc_network,
         metrics.clone(),
@@ -80,7 +84,7 @@ async fn main() -> Result<()> {
     // health-checkers; the HTTP `/health` route below covers plain-HTTP liveness.
     let (health_reporter, health_service) = health_reporter();
     health_reporter
-        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding, S3LogStore>>>()
+        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding<S3LogStore>, S3LogStore>>>()
         .await;
     health_reporter
         .set_serving::<GuardianRelayServiceServer<Relay<S3LogStore>>>()
