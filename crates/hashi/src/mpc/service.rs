@@ -38,7 +38,7 @@ use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
-use crate::mpc::mpc_except_signing::spawn_blocking;
+use crate::mpc::mpc_except_signing::time_async;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
@@ -2186,9 +2186,7 @@ pub(crate) async fn verify_fetched_certificates(
     certs: Vec<CertificateV1>,
     metrics: &Metrics,
 ) -> Vec<VerifiedCertificateV1> {
-    let mgr = Arc::clone(mpc_manager);
-    let (verified, rejected) = spawn_blocking(move || {
-        let mgr = mgr.read().unwrap();
+    let (verified, rejected) = MpcManager::with_manager_blocking(mpc_manager, move |mgr| {
         let mut verified = Vec::with_capacity(certs.len());
         let mut rejected: Vec<(&'static str, &'static str)> = Vec::new();
         for cert in certs {
