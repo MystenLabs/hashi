@@ -15,15 +15,75 @@
 //! the hashi-types enum so it keeps working across that migration.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context as _;
 use hashi_types::pgp::Fingerprint;
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
 use crate::widlog::LogStore;
 
 const LEGACY_SHARES_PREFIX: &str = "shares/";
 const KP_SHARES_PREFIX: &str = "kp-shares/";
+
+/// The committed roster only changes at a ceremony, a re-deal, or a cert
+/// rotation — and rotation invalidates explicitly — so a minute of staleness
+/// costs nothing and bounds S3 reads under submission spam.
+const ROSTER_TTL: Duration = Duration::from_secs(60);
+/// "No ceremony yet" is cached far more briefly: the first ceremony should be
+/// authorized promptly once its log lands, but an unauthenticated caller must
+/// not be able to drive an S3 read per request while we wait.
+const MISSING_ROSTER_TTL: Duration = Duration::from_secs(5);
+
+struct Cached {
+    at: Instant,
+    roster: Option<Arc<Vec<Fingerprint>>>,
+}
+
+/// TTL-cached view of [`latest_kp_roster`]. The mutex is held across the fetch,
+/// so concurrent misses collapse into one S3 read.
+pub struct RosterCache<L> {
+    store: L,
+    cached: Mutex<Option<Cached>>,
+}
+
+impl<L: LogStore> RosterCache<L> {
+    pub fn new(store: L) -> Self {
+        Self {
+            store,
+            cached: Mutex::new(None),
+        }
+    }
+
+    /// `Ok(None)` means no ceremony has committed a share set yet.
+    pub async fn get(&self) -> anyhow::Result<Option<Arc<Vec<Fingerprint>>>> {
+        let mut cached = self.cached.lock().await;
+        if let Some(entry) = cached.as_ref() {
+            let ttl = if entry.roster.is_some() {
+                ROSTER_TTL
+            } else {
+                MISSING_ROSTER_TTL
+            };
+            if entry.at.elapsed() < ttl {
+                return Ok(entry.roster.clone());
+            }
+        }
+        let roster = latest_kp_roster(&self.store).await?.map(Arc::new);
+        *cached = Some(Cached {
+            at: Instant::now(),
+            roster: roster.clone(),
+        });
+        Ok(roster)
+    }
+
+    /// Drop the cached roster so the next read observes a just-committed change.
+    pub async fn invalidate(&self) {
+        *self.cached.lock().await = None;
+    }
+}
 
 /// Recipient fingerprints of the latest committed share set. `Ok(None)` means
 /// no share log exists anywhere (no ceremony yet) — a definitive miss; any
@@ -132,6 +192,7 @@ fn parse_recipient_fingerprint(label: &str) -> anyhow::Result<Fingerprint> {
 mod tests {
     use super::*;
     use crate::widlog::test_store::MemStore;
+    use std::sync::atomic::Ordering;
 
     const FP_A: &str = "AAAABBBBCCCCDDDDEEEE11112222333344445555";
     const FP_B: &str = "AAAABBBBCCCCDDDDEEEE1111222233334444FFFF";
@@ -365,5 +426,58 @@ mod tests {
         store.insert(key, bytes);
 
         assert!(latest_kp_roster(&store).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_reads_the_committed_roster() {
+        let store = MemStore::default();
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
+        store.insert(key, bytes);
+
+        let roster = RosterCache::new(store).get().await.unwrap().unwrap();
+        assert_eq!(*roster, vec![fp(FP_A)]);
+    }
+
+    #[tokio::test]
+    async fn cache_serves_the_cached_roster_within_the_ttl() {
+        let store = MemStore::default();
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
+        store.insert(key, bytes);
+        let cache = RosterCache::new(store);
+
+        let first = cache.get().await.unwrap();
+        // The store now fails hard; a fresh read would error, the cache must not.
+        cache.store.fail_lists.store(true, Ordering::SeqCst);
+        assert_eq!(first, cache.get().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn cache_reports_a_missing_share_log_as_none() {
+        assert!(RosterCache::new(MemStore::default())
+            .get()
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn invalidate_makes_the_next_read_observe_a_rotated_cert() {
+        let store = MemStore::default();
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
+        store.insert(key, bytes);
+        let cache = RosterCache::new(store);
+        assert_eq!(*cache.get().await.unwrap().unwrap(), vec![fp(FP_A)]);
+
+        // A cert rotation commits a higher cert_seq under the same sharing_seq.
+        let (key, bytes) = kp_shares_record(0, 1, &[FP_B]);
+        cache.store.insert(key, bytes);
+        assert_eq!(
+            *cache.get().await.unwrap().unwrap(),
+            vec![fp(FP_A)],
+            "still cached until invalidated"
+        );
+
+        cache.invalidate().await;
+        assert_eq!(*cache.get().await.unwrap().unwrap(), vec![fp(FP_B)]);
     }
 }

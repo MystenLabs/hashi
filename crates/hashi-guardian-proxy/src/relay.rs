@@ -15,10 +15,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
-use crate::roster::latest_kp_roster;
+use crate::roster::RosterCache;
 use crate::widlog::LogStore;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::KpSigned;
@@ -86,51 +84,6 @@ struct BackendStatus {
     provisioned: bool,
 }
 
-/// The committed roster changes only at ceremonies/rotations; a short TTL
-/// bounds S3 reads under submission spam without staleness that matters.
-const ROSTER_TTL: Duration = Duration::from_secs(60);
-
-/// TTL-cached view of the S3-committed KP roster. The mutex is held across the
-/// fetch, so concurrent misses collapse into one S3 read.
-struct RosterCache<L> {
-    store: L,
-    cached: Mutex<Option<(Instant, Arc<Vec<Fingerprint>>)>>,
-}
-
-impl<L: LogStore> RosterCache<L> {
-    fn new(store: L) -> Self {
-        Self {
-            store,
-            cached: Mutex::new(None),
-        }
-    }
-
-    async fn get(&self) -> Result<Arc<Vec<Fingerprint>>, Status> {
-        let mut cached = self.cached.lock().await;
-        if let Some((at, roster)) = cached.as_ref() {
-            if at.elapsed() < ROSTER_TTL {
-                return Ok(roster.clone());
-            }
-        }
-        match latest_kp_roster(&self.store).await {
-            Ok(Some(roster)) => {
-                let roster = Arc::new(roster);
-                *cached = Some((Instant::now(), roster.clone()));
-                Ok(roster)
-            }
-            // No ceremony has committed a share set yet: fail closed, uncached
-            // (so the first ceremony is authorized the moment its log lands).
-            Ok(None) => Err(Status::failed_precondition(
-                "no KP share log in the guardian bucket; run the key ceremony first",
-            )),
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "KP roster read failed");
-                Err(Status::unavailable("KP roster unavailable; retry"))
-            }
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Relay<L> {
     client: GuardianServiceClient<Channel>,
@@ -139,11 +92,26 @@ pub struct Relay<L> {
 }
 
 impl<L: LogStore> Relay<L> {
-    pub fn new(channel: Channel, roster_store: L) -> Self {
+    pub fn new(channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
             accumulator: Arc::new(Mutex::new(Accumulator::default())),
-            roster: Arc::new(RosterCache::new(roster_store)),
+            roster,
+        }
+    }
+
+    /// The ceremony's committed roster, mapped onto the relay's failure modes:
+    /// no share log yet is a definitive "not ready", a read error is transient.
+    async fn authorized_kps(&self) -> Result<Arc<Vec<Fingerprint>>, Status> {
+        match self.roster.get().await {
+            Ok(Some(roster)) => Ok(roster),
+            Ok(None) => Err(Status::failed_precondition(
+                "no KP share log in the guardian bucket; run the key ceremony first",
+            )),
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "KP roster read failed");
+                Err(Status::unavailable("KP roster unavailable; retry"))
+            }
         }
     }
 
@@ -185,6 +153,10 @@ fn verify_kp_submission<'a>(
     signed_request: &'a KpSigned<SingleProvisionerInitRequest>,
     authorized_kp_fingerprints: &[Fingerprint],
 ) -> Result<&'a SingleProvisionerInitRequest, Status> {
+    // Membership first: it is a lookup against a cached roster, while signature
+    // verification is PGP. Checking the cheap one that actually excludes callers
+    // keeps a flood from costing crypto — the signature alone excludes nobody,
+    // since it is made by the cert the request carries.
     let fingerprint = signed_request.signer_fingerprint();
     if !authorized_kp_fingerprints.contains(&fingerprint) {
         return Err(Status::permission_denied(format!(
@@ -229,14 +201,14 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
         &self,
         request: Request<proto::SignedSingleProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
-        // The ceremony's committed roster, not deploy config: a rotation
-        // re-deals shares without a proxy redeploy. Fails closed when no share
-        // log exists yet.
-        let roster = self.roster.get().await?;
-
+        // Decode before the roster read so a malformed submission costs no S3.
         let submission = request.into_inner();
         let signed_request = KpSigned::<SingleProvisionerInitRequest>::try_from(submission.clone())
             .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
+
+        // The ceremony's committed roster, not deploy config: a rotation
+        // re-deals shares without a proxy redeploy.
+        let roster = self.authorized_kps().await?;
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
@@ -365,60 +337,6 @@ mod tests {
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;
-
-    use crate::widlog::test_store::MemStore;
-    use std::sync::atomic::Ordering;
-
-    /// A share log naming exactly one recipient, in the `kp-shares/` layout the
-    /// enclave writes today.
-    fn shares_record_for(fp_hex: &str) -> (String, Vec<u8>) {
-        let record = serde_json::json!({
-            "session_id": "s",
-            "timestamp_ms": 0,
-            "message": { "KpShareState": { "sharing_seq": 0, "cert_seq": 0, "encrypted_shares": [
-                { "id": 1, "recipient_fingerprint": fp_hex, "armored_ciphertext": "" }
-            ]}},
-            "signature": null,
-        });
-        let key = "kp-shares/00000000000000000000/00000000000000000000-s.json".to_string();
-        (key, serde_json::to_vec(&record).unwrap())
-    }
-
-    #[tokio::test]
-    async fn roster_cache_reads_membership_from_the_share_log() {
-        let (cert_armored, _) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let store = MemStore::default();
-        let (key, bytes) = shares_record_for(&cert.fingerprint().to_hex());
-        store.insert(key, bytes);
-
-        let roster = RosterCache::new(store).get().await.unwrap();
-        assert!(roster.contains(&cert.fingerprint()));
-        assert_eq!(roster.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn roster_cache_serves_the_cached_roster_within_the_ttl() {
-        let store = MemStore::default();
-        let (key, bytes) = shares_record_for("AAAABBBBCCCCDDDDEEEE11112222333344445555");
-        store.insert(key, bytes);
-        let cache = RosterCache::new(store);
-
-        let first = cache.get().await.unwrap();
-        // The store now fails hard; a fresh read would error, the cache must not.
-        cache.store.fail_lists.store(true, Ordering::SeqCst);
-        let second = cache.get().await.unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[tokio::test]
-    async fn missing_share_log_fails_closed() {
-        let err = RosterCache::new(MemStore::default())
-            .get()
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    }
 
     fn submission(id: u32) -> proto::SignedSingleProvisionerInitRequest {
         proto::SignedSingleProvisionerInitRequest {
