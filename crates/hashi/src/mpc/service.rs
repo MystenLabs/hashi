@@ -1241,16 +1241,58 @@ impl MpcService {
             self.sleep_if_still_pending(target_epoch).await;
             return;
         }
-        let metrics = &self.inner.metrics;
-        let _reconfig_timer = metrics
+        let _reconfig_timer = self
+            .inner
+            .metrics
             .mpc_reconfig_total_duration_seconds
             .with_label_values(&[protocol_label])
             .start_timer();
+
+        // Run the key protocol, publish the key on-chain, then set up signing.
+        // Each stage re-checks that this epoch is still the pending/live one and
+        // bails cleanly if the reconfig was aborted or completed elsewhere.
+        let Some(output) = self
+            .run_mpc_protocol(target_epoch, run_dkg, protocol_label)
+            .await
+        else {
+            return;
+        };
+
+        if !self.reconfig_target_live(target_epoch) {
+            info!("handle_reconfig: epoch {target_epoch} aborted after protocol completion");
+            return;
+        }
+        let _ = self.key_ready_tx.send(Some(output.public_key));
+        info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
+        self.submit_end_reconfig_until_committed(target_epoch, &output, protocol_label)
+            .await;
+
+        self.post_epoch_cleanup(target_epoch).await;
+
+        if !self.reconfig_target_live(target_epoch) {
+            info!(
+                "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
+                 skipping signing setup"
+            );
+            return;
+        }
+        self.prepare_signing_with_retries(target_epoch, &output, protocol_label)
+            .await;
+    }
+
+    /// Run DKG or key rotation, retrying until it produces an [`MpcOutput`] or the
+    /// reconfig is no longer pending. Returns `None` when the reconfig was aborted.
+    async fn run_mpc_protocol(
+        &self,
+        target_epoch: u64,
+        run_dkg: bool,
+        protocol_label: &'static str,
+    ) -> Option<MpcOutput> {
         info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}, entering retry loop",);
-        let output = loop {
+        loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
-                return;
+                return None;
             }
             let needs_fresh_manager = match self.inner.mpc_manager() {
                 None => true,
@@ -1271,7 +1313,9 @@ impl MpcService {
                     continue;
                 }
             }
-            let _timer = metrics
+            let _timer = self
+                .inner
+                .metrics
                 .mpc_total_duration_seconds
                 .with_label_values(&[protocol_label])
                 .start_timer();
@@ -1282,7 +1326,7 @@ impl MpcService {
             };
             drop(_timer);
             match result {
-                Ok(output) => break output,
+                Ok(output) => return Some(output),
                 Err(e) => {
                     error!(
                         "MPC protocol for epoch {} failed: {e}, retrying...",
@@ -1291,14 +1335,20 @@ impl MpcService {
                     self.sleep_if_still_pending(target_epoch).await;
                 }
             }
-        };
-        if !self.reconfig_target_live(target_epoch) {
-            info!("handle_reconfig: epoch {target_epoch} aborted after protocol completion");
-            return;
         }
-        let _ = self.key_ready_tx.send(Some(output.public_key));
-        info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
-        let _end_reconfig_timer = metrics
+    }
+
+    /// Submit `end_reconfig` on-chain, retrying transient failures until it lands
+    /// or the epoch is no longer pending. Panics on a non-retryable abort.
+    async fn submit_end_reconfig_until_committed(
+        &self,
+        target_epoch: u64,
+        output: &MpcOutput,
+        protocol_label: &'static str,
+    ) {
+        let _end_reconfig_timer = self
+            .inner
+            .metrics
             .mpc_end_reconfig_duration_seconds
             .with_label_values(&[protocol_label])
             .start_timer();
@@ -1306,7 +1356,7 @@ impl MpcService {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 break;
             }
-            match self.submit_end_reconfig(target_epoch, &output).await {
+            match self.submit_end_reconfig(target_epoch, output).await {
                 Ok(()) => break,
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
@@ -1328,7 +1378,11 @@ impl MpcService {
                 },
             }
         }
-        drop(_end_reconfig_timer);
+    }
+
+    /// Register keys for the next epoch, back up, and prune superseded MPC
+    /// messages now that this epoch is committed.
+    async fn post_epoch_cleanup(&self, target_epoch: u64) {
         let next_epoch = target_epoch + 1;
         if let Err(e) = self.inner.prepare_and_register_keys(next_epoch).await {
             warn!(
@@ -1367,19 +1421,24 @@ impl MpcService {
         {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
-        if !self.reconfig_target_live(target_epoch) {
-            info!(
-                "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
-                 skipping signing setup"
-            );
-            return;
-        }
-        let _prepare_signing_timer = metrics
+    }
+
+    /// Generate the epoch's presignatures and install the signing manager,
+    /// retrying up to [`MAX_PROTOCOL_ATTEMPTS`].
+    async fn prepare_signing_with_retries(
+        &self,
+        target_epoch: u64,
+        output: &MpcOutput,
+        protocol_label: &'static str,
+    ) {
+        let _prepare_signing_timer = self
+            .inner
+            .metrics
             .mpc_prepare_signing_duration_seconds
             .with_label_values(&[protocol_label])
             .start_timer();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
-            match self.prepare_signing(target_epoch, &output).await {
+            match self.prepare_signing(target_epoch, output).await {
                 Ok(()) => break,
                 Err(e) => {
                     error!(
@@ -1397,8 +1456,6 @@ impl MpcService {
                 }
             }
         }
-        drop(_prepare_signing_timer);
-        drop(_reconfig_timer);
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {
