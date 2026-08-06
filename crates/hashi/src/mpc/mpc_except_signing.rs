@@ -410,6 +410,14 @@ impl MpcManager {
         spawn_blocking(move || f(&mut mgr.write().unwrap())).await
     }
 
+    /// The AVSS threshold parameters (`t`, `f`) for this manager's epoch.
+    fn params(&self) -> Parameters {
+        Parameters {
+            t: self.mpc_config.threshold,
+            f: self.mpc_config.max_faulty,
+        }
+    }
+
     // Only for devnet key recovery CLI tool
     pub fn handle_send_messages_request(
         &mut self,
@@ -2208,17 +2216,8 @@ impl MpcManager {
     ) -> avss::Message {
         let dealer_session_id = self.current_session_id().dealer_session_id(&self.address);
         let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
-        let dealer = avss::Dealer::new(
-            None,
-            nodes,
-            Parameters {
-                t: self.mpc_config.threshold,
-                f: self.mpc_config.max_faulty,
-            },
-            dealer_session_id.to_vec(),
-            rng,
-        )
-        .expect("checked threshold above");
+        let dealer = avss::Dealer::new(None, nodes, self.params(), dealer_session_id.to_vec(), rng)
+            .expect("checked threshold above");
         dealer.create_message(rng)
     }
 
@@ -2367,10 +2366,7 @@ impl MpcManager {
             &self.encryption_key,
             self.mpc_config.nodes.clone(),
             self.party_id,
-            Parameters {
-                t: self.mpc_config.threshold,
-                f: self.mpc_config.max_faulty,
-            },
+            self.params(),
             &dealer_session_id,
             message,
             None, // commitment: None for initial DKG
@@ -2512,10 +2508,7 @@ impl MpcManager {
             self.mpc_config.nodes.clone(),
             self.party_id,
             dealer_party_id,
-            Parameters {
-                t: self.mpc_config.threshold,
-                f: self.mpc_config.max_faulty,
-            },
+            self.params(),
             dealer_session_id.to_vec(),
             self.encryption_key.clone(),
             self.batch_size_per_weight,
@@ -2538,10 +2531,7 @@ impl MpcManager {
         let dealer = batch_avss_avid::Dealer::new(
             nodes,
             self.party_id,
-            Parameters {
-                t: self.mpc_config.threshold,
-                f: self.mpc_config.max_faulty,
-            },
+            self.params(),
             dealer_sid.to_vec(),
             self.batch_size_per_weight,
         )
@@ -2622,10 +2612,7 @@ impl MpcManager {
         let dealer = batch_avss_avid::Dealer::new(
             nodes,
             self.party_id,
-            Parameters {
-                t: self.mpc_config.threshold,
-                f: self.mpc_config.max_faulty,
-            },
+            self.params(),
             dealer_sid.to_vec(),
             self.batch_size_per_weight,
         )
@@ -3197,14 +3184,7 @@ impl MpcManager {
         epoch: u64,
     ) -> MpcResult<(&Committee, &Nodes<EncryptionGroupElement>, Parameters)> {
         if epoch == self.mpc_config.epoch {
-            return Ok((
-                &self.committee,
-                &self.mpc_config.nodes,
-                Parameters {
-                    t: self.mpc_config.threshold,
-                    f: self.mpc_config.max_faulty,
-                },
-            ));
+            return Ok((&self.committee, &self.mpc_config.nodes, self.params()));
         }
         if epoch != self.previous_epoch {
             return Err(MpcError::InvalidCertificate(format!(
@@ -3267,10 +3247,7 @@ impl MpcManager {
     }
 
     fn current_dealer_cert_quorum(&self) -> u32 {
-        Self::dealer_cert_quorum(Parameters {
-            t: self.mpc_config.threshold,
-            f: self.mpc_config.max_faulty,
-        })
+        Self::dealer_cert_quorum(self.params())
     }
 
     fn nonce_cert_quorum(&self, epoch: u64) -> MpcResult<u32> {
@@ -4835,17 +4812,9 @@ impl MpcManager {
             .map(|share| {
                 let sid = base_sid.rotation_session_id(&self.address, share.index);
                 let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
-                let dealer = avss::Dealer::new(
-                    Some(share.value),
-                    nodes,
-                    Parameters {
-                        t: self.mpc_config.threshold,
-                        f: self.mpc_config.max_faulty,
-                    },
-                    sid.to_vec(),
-                    rng,
-                )
-                .expect(EXPECT_THRESHOLD_VALIDATED);
+                let dealer =
+                    avss::Dealer::new(Some(share.value), nodes, self.params(), sid.to_vec(), rng)
+                        .expect(EXPECT_THRESHOLD_VALIDATED);
                 let message = dealer.create_message(rng);
                 (share.index, message)
             })
@@ -4903,10 +4872,7 @@ impl MpcManager {
                 &self.encryption_key,
                 self.mpc_config.nodes.clone(),
                 self.party_id,
-                Parameters {
-                    t: self.mpc_config.threshold,
-                    f: self.mpc_config.max_faulty,
-                },
+                self.params(),
                 &session_id,
                 message,
                 commitment,
@@ -6153,14 +6119,7 @@ impl MpcManager {
         epoch: u64,
     ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, Parameters)> {
         if epoch == self.mpc_config.epoch {
-            Ok((
-                self.mpc_config.nodes.clone(),
-                self.party_id,
-                Parameters {
-                    t: self.mpc_config.threshold,
-                    f: self.mpc_config.max_faulty,
-                },
-            ))
+            Ok((self.mpc_config.nodes.clone(), self.party_id, self.params()))
         } else if epoch == self.previous_epoch {
             let committee = self.previous_committee.as_ref().ok_or_else(|| {
                 MpcError::InvalidConfig("No previous committee for cross-epoch complaint".into())
