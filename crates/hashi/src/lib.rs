@@ -821,10 +821,6 @@ impl Hashi {
         // Verify the local bitcoin_chain_id matches the on-chain value.
         self.verify_bitcoin_chain_id()?;
 
-        // Sweep any SUI in the configured account to AB to enable parallelization of txns
-        sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)
-            .await?;
-
         let next_epoch_keys = match self.next_reconfig_epoch().await {
             Ok(next_epoch) => self
                 .prepare_next_epoch_keys(next_epoch)
@@ -886,6 +882,7 @@ impl Hashi {
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
         let sui_balance_service = self.clone().start_sui_balance_metric();
+        let sui_address_balance_sweeper_service = self.clone().start_sui_address_balance_sweeper();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -895,7 +892,8 @@ impl Hashi {
             .merge(backup_service)
             .merge(mpc_service)
             .merge(guardian_bootstrap_service)
-            .merge(sui_balance_service);
+            .merge(sui_balance_service)
+            .merge(sui_address_balance_sweeper_service);
 
         Ok(service)
     }
@@ -1167,6 +1165,31 @@ impl Hashi {
                         }
                     }
                     Err(e) => tracing::debug!("failed to fetch operator SUI balance: {e}"),
+                }
+            }
+        })
+    }
+
+    fn start_sui_address_balance_sweeper(self: Arc<Self>) -> Service {
+        const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+        Service::new().spawn_aborting(async move {
+            let mut client = self.onchain_state().client();
+            let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                // Tokio's first interval tick completes immediately.
+                interval.tick().await;
+                match sui_tx_executor::sweep_to_address_balance(&mut client, &self.config).await {
+                    Ok(0) => {}
+                    Ok(coin_objects) => {
+                        self.metrics.record_sui_address_balance_sweep(coin_objects);
+                        tracing::info!(coin_objects, "Swept SUI coin objects into address balance");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to sweep SUI coin objects into address balance: {e}")
+                    }
                 }
             }
         })

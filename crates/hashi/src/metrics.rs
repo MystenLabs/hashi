@@ -104,6 +104,8 @@ pub struct Metrics {
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
     pub sui_balance: IntGaugeVec,
+    pub sui_address_balance_sweeps_total: IntCounter,
+    pub sui_address_balance_objects_swept_total: IntCounter,
 
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
@@ -699,6 +701,20 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            sui_address_balance_sweeps_total: register_int_counter_with_registry!(
+                "hashi_sui_address_balance_sweeps_total",
+                "Total completed non-empty sweeps of operator-owned SUI coin objects into the \
+                 address balance",
+                registry,
+            )
+            .unwrap(),
+            sui_address_balance_objects_swept_total: register_int_counter_with_registry!(
+                "hashi_sui_address_balance_objects_swept_total",
+                "Total operator-owned SUI coin objects included in completed address-balance \
+                 sweeps",
+                registry,
+            )
+            .unwrap(),
             is_leader: register_int_gauge_with_registry!(
                 "hashi_is_leader",
                 "Whether this node is the current leader (1) or not (0)",
@@ -1119,6 +1135,12 @@ impl Metrics {
             .inc();
     }
 
+    pub fn record_sui_address_balance_sweep(&self, coin_objects: usize) {
+        self.sui_address_balance_sweeps_total.inc();
+        self.sui_address_balance_objects_swept_total
+            .inc_by(coin_objects as u64);
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -1408,6 +1430,16 @@ mod tests {
     use crate::guardian_limiter::LocalLimiterError;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
+
+    #[test]
+    fn record_sui_address_balance_sweep_updates_completed_sweep_metrics() {
+        let metrics = Metrics::new(&Registry::new());
+
+        metrics.record_sui_address_balance_sweep(3);
+
+        assert_eq!(metrics.sui_address_balance_sweeps_total.get(), 1);
+        assert_eq!(metrics.sui_address_balance_objects_swept_total.get(), 3);
+    }
 
     #[test]
     fn guardian_metric_helpers_cover_every_label() {

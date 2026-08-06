@@ -2170,8 +2170,11 @@ pub async fn build_register_or_update_validator_tx(
     Ok(Some(transaction))
 }
 
-/// Sweeps SUI coins into the account's Address Balance
-pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
+/// Sweeps SUI coins into the account's Address Balance.
+pub async fn sweep_to_address_balance(
+    client: &mut Client,
+    config: &Config,
+) -> anyhow::Result<usize> {
     let signer = config.operator_private_key()?;
     let sender = signer.verifying_key().derive_address();
 
@@ -2189,6 +2192,10 @@ pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> a
         .balance
         .take()
         .unwrap_or_default();
+
+    if balance.coin_balance() == 0 {
+        return Ok(0);
+    }
 
     // Bootstrap by ensuring sender has at least 1 SUI in its AB
     if balance.address_balance() < 1_000_000_000 {
@@ -2252,6 +2259,7 @@ pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> a
         })
         .try_collect()
         .await?;
+    let coin_objects = coins.len();
 
     while !coins.is_empty() {
         let mut builder = TransactionBuilder::new();
@@ -2303,7 +2311,7 @@ pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> a
         }
     }
 
-    Ok(())
+    Ok(coin_objects)
 }
 
 #[cfg(test)]
