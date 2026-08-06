@@ -106,7 +106,7 @@ RUN <<-EOF
 	# gen_initramfs.sh drops an unparseable -d on the floor (`|| :`) and stamps
 	# the built-in initramfs with the wall clock instead, so the only symptom of
 	# getting this wrong is a PCR0 that quietly differs per build. Fail loudly.
-	date -d"\$KBUILD_BUILD_TIMESTAMP" +%s
+	date -d"$KBUILD_BUILD_TIMESTAMP" +%s
 	tar -xf /linux.tar.xz
 	cd linux-7.0.14
 	cp /config .config
