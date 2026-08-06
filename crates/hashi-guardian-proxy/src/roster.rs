@@ -13,6 +13,13 @@
 //!   `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session}.json` (`KpShareState`)
 //! The reader prefers `kp-shares/`, parsing a local tolerant shape rather than
 //! the hashi-types enum so it keeps working across that migration.
+//!
+//! Which `sharing_seq` is current comes from `ceremony/`, not from the newest
+//! `kp-shares/` dir: a ceremony publishes its shares before its `ceremony/`
+//! record, so an aborted one leaves an orphan dir that was never authorized.
+//! This is the resolution the enclave performs
+//! (`hashi-guardian::s3_reader::read_latest_ceremony_state`), and the relay has
+//! to agree with it or it rejects the very KPs the enclave would accept.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,6 +35,7 @@ use crate::widlog::LogStore;
 
 const LEGACY_SHARES_PREFIX: &str = "shares/";
 const KP_SHARES_PREFIX: &str = "kp-shares/";
+const CEREMONY_PREFIX: &str = "ceremony/";
 
 /// The committed roster only changes at a ceremony, a re-deal, or a cert
 /// rotation — and rotation invalidates explicitly — so a minute of staleness
@@ -97,20 +105,35 @@ pub async fn latest_kp_roster<L: LogStore>(log: &L) -> anyhow::Result<Option<Vec
     Ok(Some(roster))
 }
 
-/// Key of the latest share-state record: the lex-greatest object under the
-/// lex-greatest `kp-shares/` sharing-seq dir, else the lex-greatest flat
-/// `shares/` key (zero-padded seqs make lex order the seq order).
+/// Key of the share-state record the latest completed ceremony committed: the
+/// lex-greatest `cert_seq` under that ceremony's `sharing_seq` dir. Zero-padded
+/// seqs make lex order the seq order throughout.
+///
+/// Pre-#779 buckets have no `ceremony/` records at all; there the lex-greatest
+/// flat `shares/` key is the whole story.
 async fn latest_share_log_key<L: LogStore>(log: &L) -> anyhow::Result<Option<String>> {
-    if let Some(dir) = log.list_dirs(KP_SHARES_PREFIX).await?.into_iter().max() {
-        let key = log
-            .list_keys(&dir)
-            .await?
-            .into_iter()
-            .max()
-            .with_context(|| format!("share dir {dir} listed but has no keys"))?;
-        return Ok(Some(key));
-    }
-    Ok(log.list_keys(LEGACY_SHARES_PREFIX).await?.into_iter().max())
+    let Some(ceremony_key) = log.list_keys(CEREMONY_PREFIX).await?.into_iter().max() else {
+        return Ok(log.list_keys(LEGACY_SHARES_PREFIX).await?.into_iter().max());
+    };
+    let sharing_seq = ceremony_sharing_seq(&ceremony_key)?;
+    log.list_keys(&format!("{KP_SHARES_PREFIX}{sharing_seq}/"))
+        .await?
+        .into_iter()
+        .max()
+        .map(Some)
+        // Shares are written first, so a ceremony without them is a corrupt
+        // log, not a not-ready one. Fail closed rather than fall back to a
+        // roster this ceremony did not authorize.
+        .with_context(|| format!("ceremony {ceremony_key} has no kp-shares log"))
+}
+
+/// The `sharing_seq` a `ceremony/{sharing_seq:020}-{session}.json` key records,
+/// left as zero-padded text so it indexes `kp-shares/` directly.
+fn ceremony_sharing_seq(key: &str) -> anyhow::Result<&str> {
+    key.strip_prefix(CEREMONY_PREFIX)
+        .and_then(|name| name.split('-').next())
+        .filter(|seq| seq.len() == 20 && seq.bytes().all(|b| b.is_ascii_digit()))
+        .with_context(|| format!("ceremony key {key:?} has no sharing_seq"))
 }
 
 /// Just the fields the roster needs, tolerant of everything else. Any record
@@ -254,6 +277,15 @@ mod tests {
         (key, serde_json::to_vec(&record).unwrap())
     }
 
+    /// Mark `sharing_seq` as completed. Only the key matters — the reader takes
+    /// the seq from there and never opens a ceremony record.
+    fn complete_ceremony(store: &MemStore, sharing_seq: u64) {
+        store.insert(
+            format!("ceremony/{sharing_seq:020}-test-session.json"),
+            b"{}".to_vec(),
+        );
+    }
+
     /// A `kp-shares/` record in #779's shape — the layout the enclave writes
     /// today. One cert per share; use `kp_shares_record_multi_cert` for a KP
     /// holding several.
@@ -307,6 +339,7 @@ mod tests {
         let (key, bytes) = kp_shares_record(0, 0, &[FP_B]);
         store.insert(legacy_key, legacy_bytes);
         store.insert(key, bytes);
+        complete_ceremony(&store, 0);
 
         let roster = latest_kp_roster(&store).await.unwrap().unwrap();
         assert_eq!(roster, vec![fp(FP_B)]);
@@ -317,14 +350,56 @@ mod tests {
         let store = MemStore::default();
         let (key0, bytes0) = kp_shares_record(3, 0, &[FP_A]);
         let (key1, bytes1) = kp_shares_record(3, 1, &[FP_B]);
-        // An older sharing seq must lose to the newer dir regardless of cert_seq.
+        // An older sharing seq must lose regardless of cert_seq.
         let (key_old, bytes_old) = kp_shares_record(2, 9, &[FP_A]);
         store.insert(key0, bytes0);
         store.insert(key1, bytes1);
         store.insert(key_old, bytes_old);
+        complete_ceremony(&store, 2);
+        complete_ceremony(&store, 3);
 
         let roster = latest_kp_roster(&store).await.unwrap().unwrap();
         assert_eq!(roster, vec![fp(FP_B)]);
+    }
+
+    /// The regression: shares are published before the `ceremony/` record, so a
+    /// ceremony that dies in between leaves a `kp-shares/` dir that was never
+    /// authorized. Taking the newest dir would swap the roster out from under
+    /// the KPs the enclave still accepts, and block provisioning.
+    #[tokio::test]
+    async fn an_aborted_ceremony_does_not_move_the_roster() {
+        let store = MemStore::default();
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
+        store.insert(key, bytes);
+        complete_ceremony(&store, 0);
+        // A re-deal wrote its shares, then failed before committing.
+        let (orphan_key, orphan_bytes) = kp_shares_record(1, 0, &[FP_B]);
+        store.insert(orphan_key, orphan_bytes);
+
+        assert_eq!(
+            latest_kp_roster(&store).await.unwrap().unwrap(),
+            vec![fp(FP_A)]
+        );
+
+        // Once that ceremony does commit, the new roster takes over.
+        complete_ceremony(&store, 1);
+        assert_eq!(
+            latest_kp_roster(&store).await.unwrap().unwrap(),
+            vec![fp(FP_B)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ceremony_without_its_shares_fails_closed() {
+        let store = MemStore::default();
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
+        store.insert(key, bytes);
+        complete_ceremony(&store, 0);
+        // Its own shares are missing, so falling back to seq 0 would authorize
+        // a roster this ceremony replaced.
+        complete_ceremony(&store, 1);
+
+        assert!(latest_kp_roster(&store).await.is_err());
     }
 
     /// The shape the guardian deployed on testnet writes: a `kp-shares/` record
@@ -358,6 +433,7 @@ mod tests {
             "kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json".to_string(),
             serde_json::to_vec(&record).unwrap(),
         );
+        complete_ceremony(&store, 0);
 
         let roster = latest_kp_roster(&store).await.unwrap().unwrap();
         assert_eq!(roster, DEPLOYED.iter().map(|f| fp(f)).collect::<Vec<_>>());
@@ -384,6 +460,7 @@ mod tests {
             "kp-shares/00000000000000000000/00000000000000000000-test-session.json".to_string(),
             serde_json::to_vec(&record).unwrap(),
         );
+        complete_ceremony(&store, 0);
 
         let roster = latest_kp_roster(&store).await.unwrap().unwrap();
         assert_eq!(roster, vec![fp(FP_A), fp(FP_B)]);
@@ -433,6 +510,7 @@ mod tests {
         let store = MemStore::default();
         let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
         store.insert(key, bytes);
+        complete_ceremony(&store, 0);
 
         let roster = RosterCache::new(store).get().await.unwrap().unwrap();
         assert_eq!(*roster, vec![fp(FP_A)]);
@@ -443,6 +521,7 @@ mod tests {
         let store = MemStore::default();
         let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
         store.insert(key, bytes);
+        complete_ceremony(&store, 0);
         let cache = RosterCache::new(store);
 
         let first = cache.get().await.unwrap();
@@ -465,6 +544,7 @@ mod tests {
         let store = MemStore::default();
         let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
         store.insert(key, bytes);
+        complete_ceremony(&store, 0);
         let cache = RosterCache::new(store);
         assert_eq!(*cache.get().await.unwrap().unwrap(), vec![fp(FP_A)]);
 
