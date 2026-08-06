@@ -5228,8 +5228,7 @@ impl MpcManager {
         self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache)
     }
 
-    /// Rebuilds the rotation output from the local message store only; it never fetches from
-    /// peers.
+    /// Makes no peer calls, but `complaint_cache` may hold outputs recovered from peers.
     fn reconstruct_rotation_output_locally(
         &self,
         context: &RotationReconstructionContext<'_>,
