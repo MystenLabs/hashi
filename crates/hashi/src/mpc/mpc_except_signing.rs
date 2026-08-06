@@ -355,7 +355,7 @@ impl MpcManager {
     }
 
     /// Run `f` against a read-locked manager on a blocking thread.
-    async fn with_manager_blocking<T: Send + 'static>(
+    pub(crate) async fn with_manager_blocking<T: Send + 'static>(
         mpc_manager: &Arc<RwLock<Self>>,
         f: impl FnOnce(&Self) -> T + Send + 'static,
     ) -> T {
@@ -1234,13 +1234,11 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
-        let mgr = Arc::clone(mpc_manager);
         let dealer_data = time_async(
             &metrics.mpc_dealer_crypto_duration_seconds,
             MPC_LABEL_DKG,
-            spawn_blocking(move || {
+            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                 let mut rng = rand::thread_rng();
-                let mut mgr = mgr.write().unwrap();
                 mgr.prepare_dkg_dealer_flow(&mut rng)
             }),
         )
@@ -1507,11 +1505,9 @@ impl MpcManager {
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
             .start_timer();
         let dealer_data = {
-            let mgr = Arc::clone(mpc_manager);
             let previous = previous.clone();
-            spawn_blocking(move || {
+            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                 let mut rng = rand::thread_rng();
-                let mut mgr = mgr.write().unwrap();
                 mgr.prepare_rotation_dealer_flow(&previous, &mut rng)
             })
             .await?
@@ -1806,13 +1802,11 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
-        let mgr = Arc::clone(mpc_manager);
         let dealer_data = time_async(
             &metrics.mpc_dealer_crypto_duration_seconds,
             MPC_LABEL_NONCE_GENERATION,
-            spawn_blocking(move || {
+            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                 let mut rng = rand::thread_rng();
-                let mut mgr = mgr.write().unwrap();
                 mgr.prepare_nonce_dealer_flow(batch_index, &mut rng)
             }),
         )
@@ -2865,13 +2859,11 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
-        let mgr = Arc::clone(mpc_manager);
         let mut dealer_data = time_async(
             &metrics.mpc_dealer_crypto_duration_seconds,
             MPC_LABEL_NONCE_GENERATION,
-            spawn_blocking(move || {
+            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
                 let mut rng = rand::thread_rng();
-                let mut mgr = mgr.write().unwrap();
                 mgr.prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
             }),
         )
@@ -3457,15 +3449,10 @@ impl MpcManager {
             protocol_type: ProtocolTypeIndicator::NonceGeneration,
             epoch,
         };
-        let receiver = {
-            let mgr = Arc::clone(mpc_manager);
-            spawn_blocking(move || {
-                mgr.read()
-                    .unwrap()
-                    .create_avid_nonce_receiver(dealer, batch_index)
-            })
-            .await?
-        };
+        let receiver = Self::with_manager_blocking(mpc_manager, move |mgr| {
+            mgr.create_avid_nonce_receiver(dealer, batch_index)
+        })
+        .await?;
         let receiver = Arc::new(receiver);
         let verified_common = Arc::new(verified_common);
         let mut verified: Vec<batch_avss_avid::VerifiedComplaintResponse> = Vec::new();
@@ -6550,10 +6537,10 @@ fn consume_certified_nonce_outputs<T>(
     (pre_filter, dealers, outputs)
 }
 
-/// Time an async operation on `metric[label]`; the timer stops when `fut` completes.
-async fn time_async<F: Future>(metric: &HistogramVec, label: &str, fut: F) -> F::Output {
+/// Time an async operation on `metric[label]`, holding the timer until `f` completes.
+pub(crate) async fn time_async<F: Future>(metric: &HistogramVec, label: &str, f: F) -> F::Output {
     let _timer = metric.with_label_values(&[label]).start_timer();
-    fut.await
+    f.await
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
