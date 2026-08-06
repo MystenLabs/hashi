@@ -97,8 +97,9 @@ sequenceDiagram
     Guardian->>S3: start heartbeat stream from OI onward
 
     Note over KPs,Guardian: Threshold share provisioning
-    KPs->>Guardian: GetGuardianInfo via proxy
-    Guardian-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
+    KPs->>Proxy: GetStandbyInfo
+    Proxy->>Guardian: GetGuardianInfo
+    Proxy-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Require S3 state to match --do-genesis intent
     KPs->>KPs: Verify PCRs and derive config hash plus optional genesis-state hash
     KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
