@@ -58,10 +58,8 @@ pub fn field_value_type(field: &DynamicField) -> Result<StructTag> {
 pub enum TobCertLayout {
     /// `tob::EpochCertsV1` — nodes are `DealerSubmissionV1`.
     Bare,
-    /// `tob::StampedEpochCertsV1` — nodes carry a timestamp. Decoding it
-    /// requires binary support for the stamped types (the nonce dealer-cert
-    /// window work); a build without them identifies the layout but must not
-    /// attempt to decode its nodes.
+    /// `tob::StampedEpochCertsV1` — nodes are `StampedDealerSubmissionV1`,
+    /// carrying the submission timestamp the nonce accumulation window reads.
     Stamped,
 }
 

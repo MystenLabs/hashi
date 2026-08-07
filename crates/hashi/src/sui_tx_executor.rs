@@ -429,10 +429,12 @@ pub struct SuiTxExecutor {
     hashi_ids: HashiIds,
     timeout: Duration,
     /// Present for node-internal executors (built via [`SuiTxExecutor::from_config`]
-    /// / [`SuiTxExecutor::from_hashi`]); used to refuse submitting when this
+    /// / [`SuiTxExecutor::from_hashi`]). Supplies both the call target and the
+    /// ABI shape (see [`Self::call_target`]), and refuses to submit when this
     /// binary supports no live on-chain package version. `None` for CLI/ad-hoc
-    /// executors built via [`SuiTxExecutor::new`], which are operator-driven and
-    /// intentionally not version-gated.
+    /// executors built via [`SuiTxExecutor::new`]: they are not version-gated
+    /// and call `hashi_ids.package_id`, the *original* package, so on an
+    /// upgraded chain they run v1 bytecode.
     onchain_state: Option<OnchainState>,
 }
 
@@ -479,6 +481,26 @@ impl SuiTxExecutor {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    pub fn with_onchain_state(mut self, onchain_state: &OnchainState) -> Self {
+        self.onchain_state = Some(onchain_state.clone());
+        self
+    }
+
+    fn call_package(&self) -> Address {
+        self.call_target().0
+    }
+
+    fn call_target(&self) -> (Address, Option<u64>) {
+        match self
+            .onchain_state
+            .as_ref()
+            .and_then(OnchainState::active_package)
+        {
+            Some((id, version)) => (id, Some(version)),
+            None => (self.hashi_ids.package_id, None),
+        }
     }
 
     /// Get the sender address (derived from the signer's public key).
@@ -570,6 +592,7 @@ impl SuiTxExecutor {
         signed_message: SignedMessage<DepositConfirmationMessage>,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -579,7 +602,7 @@ impl SuiTxExecutor {
         let request_id_arg = builder.pure(&deposit_request.id);
         let cert_arg = build_committee_signature_arg(
             &mut builder,
-            self.hashi_ids.package_id,
+            package_id,
             signed_message.committee_signature(),
         );
         let clock_arg = builder.object(
@@ -590,7 +613,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("deposit"),
                 Identifier::from_static("approve_deposit"),
             ),
@@ -634,7 +657,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                self.call_package(),
                 Identifier::from_static("deposit"),
                 Identifier::from_static("confirm_deposit"),
             ),
@@ -666,6 +689,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<()> {
         // Build a PTB that calls delete_expired_deposit for each expired request
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -684,7 +708,7 @@ impl SuiTxExecutor {
 
             builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("deposit"),
                     Identifier::from_static("delete_expired_deposit"),
                 ),
@@ -759,6 +783,7 @@ impl SuiTxExecutor {
         anyhow::ensure!(!utxos.is_empty(), "No UTXOs to deposit");
 
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -780,7 +805,7 @@ impl SuiTxExecutor {
             // 1. Create UtxoId
             let utxo_id_arg = builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("utxo"),
                     Identifier::from_static("utxo_id"),
                 ),
@@ -790,7 +815,7 @@ impl SuiTxExecutor {
             // 2. Create Utxo
             let utxo_arg = builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("utxo"),
                     Identifier::from_static("utxo"),
                 ),
@@ -800,7 +825,7 @@ impl SuiTxExecutor {
             // 3. Call deposit(hashi, utxo, clock)
             builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("deposit"),
                     Identifier::from_static("deposit"),
                 ),
@@ -859,6 +884,7 @@ impl SuiTxExecutor {
         anyhow::ensure!(!deposits.is_empty(), "No deposits to create");
 
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -879,7 +905,7 @@ impl SuiTxExecutor {
 
             let utxo_id_arg = builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("utxo"),
                     Identifier::from_static("utxo_id"),
                 ),
@@ -888,7 +914,7 @@ impl SuiTxExecutor {
 
             let utxo_arg = builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("utxo"),
                     Identifier::from_static("utxo"),
                 ),
@@ -897,7 +923,7 @@ impl SuiTxExecutor {
 
             builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("deposit"),
                     Identifier::from_static("deposit"),
                 ),
@@ -988,6 +1014,7 @@ impl SuiTxExecutor {
         let total_sats = total_sats as u64;
 
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1031,7 +1058,7 @@ impl SuiTxExecutor {
 
             builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("withdraw"),
                     Identifier::from_static("request_withdrawal"),
                 ),
@@ -1081,7 +1108,7 @@ impl SuiTxExecutor {
         );
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                self.call_package(),
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("start_reconfig"),
             ),
@@ -1104,17 +1131,17 @@ impl SuiTxExecutor {
         mpc_cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
                 .as_shared()
                 .with_mutable(true),
         );
         let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
-        let mpc_cert_arg =
-            build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, mpc_cert);
+        let mpc_cert_arg = build_committee_signature_arg(&mut builder, package_id, mpc_cert);
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("end_reconfig"),
             ),
@@ -1138,19 +1165,17 @@ impl SuiTxExecutor {
         committee_handoff_cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
                 .as_shared()
                 .with_mutable(true),
         );
-        let committee_handoff_cert_arg = build_committee_signature_arg(
-            &mut builder,
-            self.hashi_ids.package_id,
-            committee_handoff_cert,
-        );
+        let committee_handoff_cert_arg =
+            build_committee_signature_arg(&mut builder, package_id, committee_handoff_cert);
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("submit_committee_handoff"),
             ),
@@ -1191,7 +1216,7 @@ impl SuiTxExecutor {
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                self.call_package(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
@@ -1283,9 +1308,9 @@ impl SuiTxExecutor {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
-            CertificateV1::NonceGeneration { batch_index, cert } => {
-                (cert, "submit_nonce_cert", Some(*batch_index))
-            }
+            CertificateV1::NonceGeneration {
+                batch_index, cert, ..
+            } => (cert, "submit_nonce_cert", Some(*batch_index)),
         };
         tracing::Span::current().record("cert_kind", function_name);
 
@@ -1310,12 +1335,23 @@ impl SuiTxExecutor {
         }
         let dealer_arg = builder.pure(&dealer);
         let message_hash_arg = builder.pure(&message_hash);
-        let cert_arg =
-            build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, committee_sig);
+        let (package_id, version) = self.call_target();
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, committee_sig);
         args.extend([dealer_arg, message_hash_arg, cert_arg]);
+        if batch_index.is_some()
+            && version
+                .is_some_and(|v| v >= crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
+        {
+            let clock_arg = builder.object(
+                ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                    .as_shared()
+                    .with_mutable(false),
+            );
+            args.push(clock_arg);
+        }
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("cert_submission"),
                 Identifier::new(function_name).expect("valid identifier"),
             ),
@@ -1345,6 +1381,7 @@ impl SuiTxExecutor {
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1359,12 +1396,11 @@ impl SuiTxExecutor {
 
         for (request_id, cert) in approvals {
             let request_id_arg = builder.pure(request_id);
-            let cert_arg =
-                build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+            let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
 
             builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("withdraw"),
                     Identifier::from_static("approve_request"),
                 ),
@@ -1398,6 +1434,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1421,7 +1458,7 @@ impl SuiTxExecutor {
                 let vout_arg = builder.pure(&utxo_id.vout);
                 builder.move_call(
                     Function::new(
-                        self.hashi_ids.package_id,
+                        package_id,
                         Identifier::from_static("utxo"),
                         Identifier::from_static("utxo_id"),
                     ),
@@ -1446,7 +1483,7 @@ impl SuiTxExecutor {
                 let address_arg = builder.pure(&output.bitcoin_address);
                 builder.move_call(
                     Function::new(
-                        self.hashi_ids.package_id,
+                        package_id,
                         Identifier::from_static("withdrawal_queue"),
                         Identifier::from_static("output_utxo"),
                     ),
@@ -1458,7 +1495,7 @@ impl SuiTxExecutor {
             build_chunked_move_vec_arg(&mut builder, output_elements, output_utxo_type.into());
 
         let txid_arg = builder.pure(&approval.txid);
-        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
 
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
@@ -1473,7 +1510,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("commit_withdrawal_tx"),
             ),
@@ -1519,6 +1556,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1529,11 +1567,11 @@ impl SuiTxExecutor {
         let indices_vec = indices.to_vec();
         let indices_arg = builder.pure(&indices_vec);
         let signatures_arg = build_chunked_vec_vec_u8_arg(&mut builder, signatures);
-        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("commit_input_signatures"),
             ),
@@ -1576,6 +1614,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1587,7 +1626,7 @@ impl SuiTxExecutor {
         let request_ids_arg = builder.pure(&request_ids_vec);
         let guardian_signatures_arg =
             build_chunked_vec_vec_u8_arg(&mut builder, guardian_signatures);
-        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
                 .as_shared()
@@ -1596,7 +1635,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("finalize_withdrawal"),
             ),
@@ -1668,6 +1707,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
+        let package_id = self.call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1675,7 +1715,7 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
-        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
                 .as_shared()
@@ -1684,7 +1724,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                package_id,
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("confirm_withdrawal"),
             ),
@@ -1726,6 +1766,7 @@ impl SuiTxExecutor {
         let mut max_checkpoint = 0;
         for chunk in utxo_ids.chunks(MAX_PER_TX) {
             let mut builder = TransactionBuilder::new();
+            let package_id = self.call_package();
             let hashi_arg = builder.object(
                 ObjectInput::new(self.hashi_ids.hashi_object_id)
                     .as_shared()
@@ -1746,7 +1787,7 @@ impl SuiTxExecutor {
                     let vout_arg = builder.pure(&id.vout);
                     builder.move_call(
                         Function::new(
-                            self.hashi_ids.package_id,
+                            package_id,
                             Identifier::from_static("utxo"),
                             Identifier::from_static("utxo_id"),
                         ),
@@ -1759,7 +1800,7 @@ impl SuiTxExecutor {
 
             builder.move_call(
                 Function::new(
-                    self.hashi_ids.package_id,
+                    package_id,
                     Identifier::from_static("withdraw"),
                     Identifier::from_static("cleanup_spent_utxos"),
                 ),
@@ -1781,6 +1822,9 @@ impl SuiTxExecutor {
         Ok(max_checkpoint)
     }
 }
+
+// TODO: the free builders still call the original package id, so they run v1
+// bytecode after an upgrade. Take the call target as a parameter.
 
 /// Build the PTB for a single deposit request. Pure (no signer / no network),
 /// so it can be signed/executed by [`SuiTxExecutor::execute`] or serialized

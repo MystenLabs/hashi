@@ -36,12 +36,17 @@ pub const PRESIG_REFILL_DIVISOR: usize = 2;
 /// Add the next version here in the same change that teaches this binary to
 /// run it (e.g. a package upgrade); never list a version whose semantics this
 /// build does not implement.
-pub const SUPPORTED_PACKAGE_VERSIONS: &[u64] = &[1];
+pub const SUPPORTED_PACKAGE_VERSIONS: &[u64] = &[1, 2];
 
 pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
 }
 
+/// The `versioning::PACKAGE_VERSION` at which the stamped nonce-cert path becomes available
+/// on-chain. Compared against the *active* version, which is already intersected with
+/// `SUPPORTED_PACKAGE_VERSIONS` and the published set — so a version merely `enable_version`d
+/// ahead of its deployment cannot switch the ABI on early.
+pub const STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION: u64 = 2;
 #[cfg(test)]
 mod tests {
     use super::*;
