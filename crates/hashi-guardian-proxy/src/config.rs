@@ -16,6 +16,12 @@ pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
     /// `http://10.0.1.20:3000` (`GUARDIAN_BACKEND_URL`, required).
     pub backend_url: String,
+    /// gRPC endpoint of a standby guardian being armed (`STANDBY_GUARDIAN_URL`,
+    /// optional). When set, the relay — share submissions and
+    /// `GetProvisioningTargetInfo` — targets it while node-facing forwarding
+    /// stays on the active backend; unset, the relay provisions the active
+    /// backend (first deploy).
+    pub standby_backend_url: Option<String>,
     /// Address the proxy serves everything on — gRPC (forwarder + relay + health)
     /// and the HTTP `/info` + `/health` (`PROXY_LISTEN_ADDR`, default `0.0.0.0:3000`).
     pub listen_addr: SocketAddr,
@@ -46,6 +52,9 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         let backend_url = std::env::var("GUARDIAN_BACKEND_URL")
             .context("GUARDIAN_BACKEND_URL must be set (gRPC endpoint of the enclave guardian)")?;
+        let standby_backend_url = std::env::var("STANDBY_GUARDIAN_URL")
+            .ok()
+            .filter(|url| !url.is_empty());
         let listen_addr = std::env::var("PROXY_LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
             .parse()
@@ -68,6 +77,7 @@ impl Config {
             .context("BTC_NETWORK must be one of bitcoin|testnet|signet|regtest")?;
         Ok(Self {
             backend_url,
+            standby_backend_url,
             listen_addr,
             metrics_listen_addr,
             info_cache_ttl,
