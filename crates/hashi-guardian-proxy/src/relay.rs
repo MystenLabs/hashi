@@ -16,6 +16,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::roster::RosterCache;
+use crate::widlog::LogStore;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::SessionID;
@@ -83,20 +85,54 @@ struct BackendStatus {
 }
 
 #[derive(Clone)]
-pub struct Relay {
+pub struct Relay<L> {
     client: GuardianServiceClient<Channel>,
     accumulator: Arc<Mutex<Accumulator>>,
-    /// Fingerprints of the KPs allowed to submit shares (the ceremony roster,
-    /// via deploy config). Empty rejects every submission — fail closed.
-    authorized_kp_fingerprints: Vec<Fingerprint>,
+    roster: Arc<RosterCache<L>>,
 }
 
-impl Relay {
-    pub fn new(channel: Channel, authorized_kp_fingerprints: Vec<Fingerprint>) -> Self {
+impl<L: LogStore> Relay<L> {
+    pub fn new(channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
             accumulator: Arc::new(Mutex::new(Accumulator::default())),
-            authorized_kp_fingerprints,
+            roster,
+        }
+    }
+
+    /// Pre-authenticate a submission: its detached signature must cover these
+    /// exact (session, config, share) bytes, and the signer's cert must be in
+    /// the ceremony's committed roster. Signature first because it needs no
+    /// I/O — a submission that isn't internally consistent never costs an S3
+    /// roster read. DoS guard only; the enclave re-verifies authoritatively.
+    async fn verify_kp_submission<'a>(
+        &self,
+        signed_request: &'a KpSigned<SingleProvisionerInitRequest>,
+    ) -> Result<&'a SingleProvisionerInitRequest, Status> {
+        let request = signed_request
+            .verify_signature()
+            .map_err(|error| Status::unauthenticated(error.to_string()))?;
+        // The ceremony's committed roster, not deploy config: a rotation
+        // re-deals shares without a proxy redeploy.
+        check_rostered(
+            &signed_request.signer_fingerprint(),
+            &self.authorized_kps().await?,
+        )?;
+        Ok(request)
+    }
+
+    /// The ceremony's committed roster, mapped onto the relay's failure modes:
+    /// no share log yet is a definitive "not ready", a read error is transient.
+    async fn authorized_kps(&self) -> Result<Arc<Vec<Fingerprint>>, Status> {
+        match self.roster.get().await {
+            Ok(Some(roster)) => Ok(roster),
+            Ok(None) => Err(Status::failed_precondition(
+                "no KP share log in the guardian bucket; run the key ceremony first",
+            )),
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "KP roster read failed");
+                Err(Status::unavailable("KP roster unavailable; retry"))
+            }
         }
     }
 
@@ -130,23 +166,13 @@ impl Relay {
     }
 }
 
-/// Pre-authenticate a submission: the signer's cert must be in the configured
-/// relay roster and its detached signature must cover these exact
-/// (session, config, share) bytes. This is only a DoS guard; the enclave repeats
-/// signature verification authoritatively.
-fn verify_kp_submission<'a>(
-    signed_request: &'a KpSigned<SingleProvisionerInitRequest>,
-    authorized_kp_fingerprints: &[Fingerprint],
-) -> Result<&'a SingleProvisionerInitRequest, Status> {
-    let fingerprint = signed_request.signer_fingerprint();
-    if !authorized_kp_fingerprints.contains(&fingerprint) {
-        return Err(Status::permission_denied(format!(
-            "signer {fingerprint} is not in the relay's authorized KP roster"
-        )));
+fn check_rostered(fingerprint: &Fingerprint, roster: &[Fingerprint]) -> Result<(), Status> {
+    if roster.contains(fingerprint) {
+        return Ok(());
     }
-    signed_request
-        .verify_signature()
-        .map_err(|error| Status::unauthenticated(error.to_string()))
+    Err(Status::permission_denied(format!(
+        "signer {fingerprint} is not in the relay's authorized KP roster"
+    )))
 }
 
 fn done() -> Response<proto::SingleProvisionerInitResponse> {
@@ -177,27 +203,18 @@ fn check_share_id(id: u32, num_shares: usize) -> Result<(), Status> {
 }
 
 #[tonic::async_trait]
-impl GuardianRelayService for Relay {
+impl<L: LogStore> GuardianRelayService for Relay<L> {
     async fn single_provisioner_init(
         &self,
         request: Request<proto::SignedSingleProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
-        // No roster configured (proxy deployed before its ceremony): fail closed.
-        if self.authorized_kp_fingerprints.is_empty() {
-            return Err(Status::failed_precondition(
-                "relay has no authorized KP roster configured; \
-                 set AUTHORIZED_KP_FINGERPRINTS on the proxy",
-            ));
-        }
-
         let submission = request.into_inner();
         let signed_request = KpSigned::<SingleProvisionerInitRequest>::try_from(submission.clone())
             .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
-        let verified_request =
-            verify_kp_submission(&signed_request, &self.authorized_kp_fingerprints)?;
+        let verified_request = self.verify_kp_submission(&signed_request).await?;
         let expected_session_id = verified_request.expected_session_id().to_string();
         let expected_config_hash = *verified_request.expected_config_hash();
         let expected_genesis_state_hash = verified_request.expected_genesis_state_hash();
@@ -323,6 +340,16 @@ mod tests {
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;
 
+    use crate::widlog::test_store::MemStore;
+    use std::sync::atomic::Ordering;
+
+    /// A relay whose backend is never dialled — enough to exercise the roster
+    /// mapping, which happens before any backend call.
+    fn relay_with_roster(store: MemStore) -> Relay<MemStore> {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        Relay::new(channel, Arc::new(RosterCache::new(store)))
+    }
+
     fn submission(id: u32) -> proto::SignedSingleProvisionerInitRequest {
         proto::SignedSingleProvisionerInitRequest {
             encrypted_share: Some(proto::GuardianEncryptedShare {
@@ -348,70 +375,80 @@ mod tests {
         }
     }
 
-    #[test]
-    fn verify_kp_submission_gates_on_roster_and_signature() {
+    /// The store holds no share log, so anything that reaches the roster read
+    /// answers FailedPrecondition — an Unauthenticated verdict is proof the
+    /// signature was checked first, before any S3 read.
+    #[tokio::test]
+    async fn bad_signatures_are_rejected_before_the_roster_read() {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored.clone()).unwrap();
-        let roster = vec![cert.fingerprint()];
-        let session = "sess-a";
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let relay = relay_with_roster(MemStore::default());
 
-        let domain_share = signed_share(1);
-        let config_hash = [7u8; 32];
-        let request = SingleProvisionerInitRequest::new(
-            session.to_string().into(),
-            config_hash,
-            None,
-            domain_share.clone(),
-        );
-        let signed_bytes = KpSigned::signed_bytes(&request);
-        let good_sig = sign_detached_in_process(&secret_armored, &signed_bytes);
-        let signed_request = KpSigned::from_parts(request.clone(), cert.clone(), good_sig.clone());
+        let request = |session: &str, share_id: u16| {
+            SingleProvisionerInitRequest::new(
+                session.to_string().into(),
+                [7u8; 32],
+                None,
+                signed_share(share_id),
+            )
+        };
+        let sign = |req: &SingleProvisionerInitRequest| {
+            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(req))
+        };
+        let good_sig = sign(&request("sess-a", 1));
 
-        // A rostered signer with a valid signature over the exact submission passes.
-        verify_kp_submission(&signed_request, &roster).unwrap();
+        for (case, signed) in [
+            (
+                "signature bound to another share",
+                KpSigned::from_parts(request("sess-a", 2), cert.clone(), good_sig.clone()),
+            ),
+            (
+                "signature bound to another session",
+                KpSigned::from_parts(
+                    request("sess-a", 1),
+                    cert.clone(),
+                    sign(&request("other-session", 1)),
+                ),
+            ),
+            (
+                "missing signature",
+                KpSigned::from_parts(request("sess-a", 1), cert.clone(), String::new()),
+            ),
+        ] {
+            let err = relay.verify_kp_submission(&signed).await.unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unauthenticated, "{case}");
+        }
 
-        // A roster entry parsed from config text (lowercase bare hex) matches too.
-        let from_config: Fingerprint = cert.fingerprint().to_hex().to_lowercase().parse().unwrap();
-        verify_kp_submission(&signed_request, &[from_config]).unwrap();
+        // A signature over the exact submission gets past, on to the roster read.
+        let signed = KpSigned::from_parts(request("sess-a", 1), cert, good_sig);
+        let err = relay.verify_kp_submission(&signed).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
 
-        let other_share = signed_share(2);
-        let other_request = SingleProvisionerInitRequest::new(
-            session.to_string().into(),
-            config_hash,
-            None,
-            other_share,
-        );
-        let signed_other_share =
-            KpSigned::from_parts(other_request, cert.clone(), good_sig.clone());
-        assert!(
-            verify_kp_submission(&signed_other_share, &roster).is_err(),
-            "signature bound to another share must be rejected"
-        );
+    #[test]
+    fn roster_membership_is_by_fingerprint_value() {
+        let cert = PgpPublicCert::new(mock_pgp_keypair().0).unwrap();
+        let fingerprint = cert.fingerprint();
+        check_rostered(&fingerprint, std::slice::from_ref(&fingerprint)).unwrap();
 
-        assert!(
-            verify_kp_submission(&signed_request, &[]).is_err(),
-            "non-rostered signer must be rejected"
-        );
+        // Share-log labels are bare hex, so case must not matter.
+        let lowercase: Fingerprint = fingerprint.to_hex().to_lowercase().parse().unwrap();
+        check_rostered(&fingerprint, &[lowercase]).unwrap();
 
-        let missing_signature = KpSigned::from_parts(request.clone(), cert.clone(), String::new());
-        assert!(
-            verify_kp_submission(&missing_signature, &roster).is_err(),
-            "missing signature must be rejected"
-        );
+        let err = check_rostered(&fingerprint, &[]).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
 
-        let other_session_request = SingleProvisionerInitRequest::new(
-            "other-session".into(),
-            config_hash,
-            None,
-            domain_share,
-        );
-        let other_bytes = KpSigned::signed_bytes(&other_session_request);
-        let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
-        let stale_request = KpSigned::from_parts(request, cert, stale_sig);
-        assert!(
-            verify_kp_submission(&stale_request, &roster).is_err(),
-            "signature bound to another session must be rejected"
-        );
+    #[tokio::test]
+    async fn roster_store_failure_is_unavailable_and_unclassified() {
+        let store = MemStore::default();
+        store.fail_lists.store(true, Ordering::SeqCst);
+        let err = relay_with_roster(store).authorized_kps().await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        // The node classifies guardian errors by substring; this must stay in
+        // its retriable bucket.
+        assert!(!err.message().contains("seq mismatch"));
+        assert!(!err.message().contains("Rate limit exceeded"));
     }
 
     #[test]

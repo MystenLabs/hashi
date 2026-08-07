@@ -10,8 +10,9 @@
 //!   in front of the guardian's own S3 withdrawal log ([`widlog`]) as the
 //!   durable, read-only tier.
 //! - [`relay`] serves `GuardianRelayService`: key provisioners submit one share
-//!   each and the relay batches a threshold-many into the guardian's
-//!   `ProvisionerInit`.
+//!   each — authenticated against the ceremony's committed roster read from the
+//!   S3 share log ([`roster`]) — and the relay batches a threshold-many into
+//!   the guardian's `ProvisionerInit`.
 //! - [`info`] serves a read-only HTTP `/info` + `/health` JSON surface (a
 //!   curated limiter/identity view, with CORS) so browser / `fetch` clients can
 //!   read limiter status the gRPC surface only exposes to nodes — on the same
@@ -26,6 +27,7 @@ pub mod forward;
 pub mod info;
 pub mod metrics;
 pub mod relay;
+pub mod roster;
 pub mod widlog;
 
 pub use cache::CachingGuardianGrpc;
