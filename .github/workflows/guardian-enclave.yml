@@ -113,6 +113,7 @@ jobs:
           path: |
             docker/hashi-guardian/out/kernel.config
             docker/hashi-guardian/out/bzImage
+            docker/hashi-guardian/out/rootfs.cpio
 
       - name: Upload PCRs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
@@ -176,9 +177,38 @@ jobs:
             echo "| features | \`${{ inputs.features }}\`${{ inputs.features == '' && ' (real attestation)' || ' — MOCK attestation, not provenance' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # A bare "the PCRs differ" costs whoever sees it a long investigation:
+      # PCR0 covers everything, so it only says the build moved. These are the
+      # inputs eif_build consumed, and naming the one that moved is most of the
+      # diagnosis. The last time this fired, the answer was the kernel — it was
+      # stamping its built-in initramfs with the wall clock.
+      - name: Download build inputs (only when the PCRs disagree)
+        if: steps.compare.outputs.match != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
+        with:
+          pattern: build-inputs-*
+          path: inputs
+
       - name: Fail if PCRs differ
         if: steps.compare.outputs.match != 'true'
         run: |
           echo "PCRs differ across platforms!"
-          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs
+          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs || true
+          echo
+          echo "Which build input moved:"
+          for f in rootfs.cpio bzImage kernel.config; do
+            a="$(sha256sum "inputs/build-inputs-ubuntu-latest/$f" 2>/dev/null | cut -d' ' -f1)"
+            b="$(sha256sum "inputs/build-inputs-ubuntu-22.04/$f" 2>/dev/null | cut -d' ' -f1)"
+            if [ -z "$a" ] || [ -z "$b" ]; then
+              printf '  %-14s ?  (artifact missing)\n' "$f"
+            elif [ "$a" = "$b" ]; then
+              printf '  %-14s same\n' "$f"
+            else
+              printf '  %-14s DIFFERS\n    ubuntu-latest %s\n    ubuntu-22.04  %s\n' "$f" "$a" "$b"
+            fi
+          done
+          echo
+          echo "rootfs.cpio is the app ramdisk; bzImage the kernel. If only bzImage moved,"
+          echo "suspect something the kernel build absorbs from its environment — a clock"
+          echo "reaching the built-in initramfs is the failure mode that has happened before."
           exit 1
