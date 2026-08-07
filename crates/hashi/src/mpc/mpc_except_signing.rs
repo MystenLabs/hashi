@@ -379,7 +379,7 @@ impl MpcManager {
     }
 
     /// The AVSS threshold parameters (`t`, `f`) for this manager's epoch.
-    fn params(&self) -> Parameters {
+    pub(crate) fn params(&self) -> Parameters {
         Parameters {
             t: self.mpc_config.threshold,
             f: self.mpc_config.max_faulty,
