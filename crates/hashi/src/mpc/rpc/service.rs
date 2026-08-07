@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
-use crate::mpc::spawn_blocking;
+use crate::mpc::MpcManager;
 use crate::mpc::types;
 use crate::mpc::types::MpcError;
 use crate::mpc::types::SigningError;
@@ -46,20 +46,20 @@ impl MpcService for HttpService {
             .mpc_rpc_handler_process_duration_seconds
             .with_label_values(&[label])
             .start_timer();
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
-            mgr.handle_send_messages_request(sender, &internal_request)
-                .map_err(|e| {
-                    if matches!(&e, MpcError::NotReady(_)) {
-                        tracing::info!("send_messages from {sender:?}: {e}");
-                    } else {
-                        tracing::warn!("send_messages from {sender:?} failed: {e}");
-                    }
-                    mpc_error_to_status(e)
-                })
-        })
-        .await?;
+        let response =
+            MpcManager::with_manager_blocking_mut(&mpc_manager, move |mgr| -> Result<_, Status> {
+                validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
+                mgr.handle_send_messages_request(sender, &internal_request)
+                    .map_err(|e| {
+                        if matches!(&e, MpcError::NotReady(_)) {
+                            tracing::info!("send_messages from {sender:?}: {e}");
+                        } else {
+                            tracing::warn!("send_messages from {sender:?} failed: {e}");
+                        }
+                        mpc_error_to_status(e)
+                    })
+            })
+            .await?;
         drop(_timer);
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
     }
@@ -109,20 +109,20 @@ impl MpcService for HttpService {
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch_current_or_previous(
-                mgr.mpc_config.epoch,
-                mgr.previous_epoch,
-                internal_request.epoch,
-            )?;
-            mgr.handle_complain_request(caller, &internal_request)
-                .map_err(|e| {
-                    tracing::warn!("complain failed: {e}");
-                    mpc_error_to_status(e)
-                })
-        })
-        .await?;
+        let response =
+            MpcManager::with_manager_blocking_mut(&mpc_manager, move |mgr| -> Result<_, Status> {
+                validate_epoch_current_or_previous(
+                    mgr.mpc_config.epoch,
+                    mgr.previous_epoch,
+                    internal_request.epoch,
+                )?;
+                mgr.handle_complain_request(caller, &internal_request)
+                    .map_err(|e| {
+                        tracing::warn!("complain failed: {e}");
+                        mpc_error_to_status(e)
+                    })
+            })
+            .await?;
         Ok(tonic::Response::new(ComplainResponse::from(&response)))
     }
 
