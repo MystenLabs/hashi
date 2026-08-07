@@ -6020,7 +6020,7 @@ impl MpcManager {
                     f: self.mpc_config.max_faulty,
                 },
             ))
-        } else {
+        } else if epoch == self.previous_epoch {
             let committee = self.previous_committee.as_ref().ok_or_else(|| {
                 MpcError::InvalidConfig("No previous committee for cross-epoch complaint".into())
             })?;
@@ -6035,16 +6035,26 @@ impl MpcManager {
             })?;
             let party_id = self.own_party_id(committee)?;
             Ok((nodes.clone(), party_id, Parameters { t, f }))
+        } else {
+            Err(MpcError::InvalidConfig(format!(
+                "config_for_epoch({epoch}): not current ({}) or previous ({})",
+                self.mpc_config.epoch, self.previous_epoch,
+            )))
         }
     }
 
     fn committee_for_epoch(&self, epoch: u64) -> MpcResult<&Committee> {
         if epoch == self.mpc_config.epoch {
             Ok(&self.committee)
-        } else {
+        } else if epoch == self.previous_epoch {
             self.previous_committee.as_ref().ok_or_else(|| {
                 MpcError::InvalidConfig("No previous committee for cross-epoch complaint".into())
             })
+        } else {
+            Err(MpcError::InvalidConfig(format!(
+                "committee_for_epoch({epoch}): not current ({}) or previous ({})",
+                self.mpc_config.epoch, self.previous_epoch,
+            )))
         }
     }
 
