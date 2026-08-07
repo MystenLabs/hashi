@@ -667,13 +667,7 @@ impl MpcService {
             .set(outcome.outputs.len() as i64);
         let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
-            (
-                mgr.batch_size_per_weight,
-                Parameters {
-                    t: mgr.mpc_config.threshold,
-                    f: mgr.mpc_config.max_faulty,
-                },
-            )
+            (mgr.batch_size_per_weight, mgr.params())
         };
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
@@ -809,10 +803,7 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
-                Parameters {
-                    t: mgr.mpc_config.threshold,
-                    f: mgr.mpc_config.max_faulty,
-                },
+                mgr.params(),
                 mgr.mpc_config.nonce_generation_protocol,
                 mgr.required_nonce_weight(),
             )
