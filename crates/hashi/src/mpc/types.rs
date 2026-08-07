@@ -107,10 +107,9 @@ impl NonceGenerationProtocol {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
+    /// `nodes`, `threshold` and `max_faulty` are returned together by weight reduction.
     pub nodes: Nodes<EncryptionGroupElement>,
-    /// Threshold for signing (t)
     pub threshold: u16,
-    /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
 }
