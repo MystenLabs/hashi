@@ -28,6 +28,7 @@ use sui_sdk_types::Address;
 
 use crate::config::SuiConfig;
 use crate::domain::DepositEventType;
+use crate::domain::DepositId;
 use crate::domain::MonitorDepositEvent;
 use crate::domain::MonitorEvent;
 use crate::domain::MonitorWithdrawalEvent;
@@ -465,8 +466,7 @@ impl SuiEventsPoller {
                     // ListTransactions supplies the containing checkpoint's
                     // timestamp alongside the nested events.
                     timestamp_secs: transaction_timestamp_secs,
-                    btc_txid: event.utxo.id.txid.into(),
-                    btc_vout: event.utxo.id.vout,
+                    deposit_id: DepositId::new(event.utxo.id.txid.into(), event.utxo.id.vout),
                 }))
             }
             Some(_) | None => None,
