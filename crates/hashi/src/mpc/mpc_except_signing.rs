@@ -363,8 +363,8 @@ impl MpcManager {
         f: impl FnOnce(&Self) -> T + Send + 'static,
     ) -> Pin<Box<dyn Future<Output = T> + Send>> {
         let mgr = Arc::clone(mpc_manager);
-        // This is boxed to keep the future off the caller's stack. If inlined and deeply nested,
-        // it can overflow the worker stack.
+        // Boxed so it isn't inlined into the enclosing future; deeply nested, the inlined
+        // layers can overflow the worker stack.
         Box::pin(async move { spawn_blocking(move || f(&mgr.read().unwrap())).await })
     }
 
@@ -6514,7 +6514,9 @@ pub(crate) fn time_async<'a, F>(
 where
     F: Future + Send + 'a,
 {
+    // Timer starts here, at call time, not on first poll of the returned future.
     let timer = metric.with_label_values(&[label]).start_timer();
+    // Boxed for the same reason as with_manager_blocking.
     Box::pin(async move {
         let _timer = timer;
         f.await
