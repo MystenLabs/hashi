@@ -1189,7 +1189,7 @@ impl MpcService {
                     return;
                 }
                 Err(e) => {
-                    warn!("start_reconfig attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}");
+                    warn!("start_reconfig attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e:#}");
                     if attempt < MAX_PROTOCOL_ATTEMPTS {
                         // Poll for pending epoch change while waiting, so we can
                         // return early if another node submitted start_reconfig.
@@ -1311,7 +1311,7 @@ impl MpcService {
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
                         warn!(
-                            "submit_end_reconfig for epoch {} failed: {e}, retrying...",
+                            "submit_end_reconfig for epoch {} failed: {e:#}, retrying...",
                             target_epoch
                         );
                         self.sleep_if_still_pending(target_epoch).await;
@@ -1320,7 +1320,7 @@ impl MpcService {
                     | ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
                     | ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
                         let msg = format!(
-                            "submit_end_reconfig for epoch {target_epoch} failed with non-retryable error: {e}"
+                            "submit_end_reconfig for epoch {target_epoch} failed with non-retryable error: {e:#}"
                         );
                         error!("{msg}");
                         panic!("{msg}");
@@ -1526,7 +1526,7 @@ impl MpcService {
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
                         warn!(
-                            "end_reconfig submission for epoch {epoch} found reconfig already completed; waiting for the watcher to observe it: {e}"
+                            "end_reconfig submission for epoch {epoch} found reconfig already completed; waiting for the watcher to observe it: {e:#}"
                         );
                         self.wait_for_epoch_change_visibility(epoch).await;
                         if self.get_pending_epoch_change() != Some(epoch) {
@@ -1548,7 +1548,7 @@ impl MpcService {
                     }
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
                         warn!(
-                            "end_reconfig submission for epoch {} failed: {e}, retrying...",
+                            "end_reconfig submission for epoch {} failed: {e:#}, retrying...",
                             epoch
                         );
                         self.sleep_if_still_pending(epoch).await;
@@ -1586,7 +1586,7 @@ impl MpcService {
                 Err(e) => {
                     warn!(
                         from_epoch,
-                        "Committee handoff signature collection failed: {e}, retrying..."
+                        "Committee handoff signature collection failed: {e:#}, retrying..."
                     );
                     self.sleep_if_still_pending(epoch).await;
                 }
@@ -1608,7 +1608,7 @@ impl MpcService {
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
                         warn!(
-                            "submit_committee_handoff submission for epoch {epoch} found handoff already submitted: {e}"
+                            "submit_committee_handoff submission for epoch {epoch} found handoff already submitted: {e:#}"
                         );
                         return Ok(());
                     }
@@ -1622,7 +1622,7 @@ impl MpcService {
                     }
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
                         warn!(
-                            "submit_committee_handoff submission for epoch {} failed: {e}, retrying...",
+                            "submit_committee_handoff submission for epoch {} failed: {e:#}, retrying...",
                             epoch
                         );
                         self.sleep_if_still_pending(epoch).await;

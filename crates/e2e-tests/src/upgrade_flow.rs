@@ -22,6 +22,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
+use sui_sdk_types::Publish;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
 
@@ -155,6 +156,129 @@ pub fn prepare_upgrade_package(
     Ok(dst)
 }
 
+/// [`build_upgrade_package`] behind a cross-process disk cache.
+///
+/// Every builder boot compiles the byte-identical artifact (verified: the
+/// per-test `published-at` patch does not reach the compiled modules or
+/// digest), and nextest runs each test in its own process — so on CI's
+/// 4-core runners the compile was repeated per test, starving the network
+/// it was booting next to. Keyed on the patched source (with the
+/// `published-at` line masked), the target version, and the sui toolchain;
+/// a mkdir lock dedups concurrent builders, and every fallback path builds
+/// rather than fails — the cache can only add speed, never wrongness.
+fn build_upgrade_package_cached(
+    upgrade_path: &Path,
+    client_config: Option<&Path>,
+    target_version: u64,
+) -> Result<(Publish, Vec<u8>)> {
+    use fastcrypto::hash::HashFunction;
+
+    let key = {
+        let mut hasher = fastcrypto::hash::Sha256::default();
+        hasher.update(target_version.to_le_bytes());
+        let sui_version = std::process::Command::new(sui_binary())
+            .arg("--version")
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        hasher.update(&sui_version);
+        let mut files: Vec<PathBuf> = walk_files(upgrade_path)?;
+        files.sort();
+        for file in &files {
+            let rel = file.strip_prefix(upgrade_path).unwrap_or(file);
+            // `build/` is output, not input; `published-at` is per-test but
+            // verified not to reach the artifact.
+            if rel.starts_with("build") {
+                continue;
+            }
+            hasher.update(rel.to_string_lossy().as_bytes());
+            let contents = std::fs::read(file)?;
+            if rel == Path::new("Move.toml") {
+                let masked: String = String::from_utf8_lossy(&contents)
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("published-at"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                hasher.update(masked.as_bytes());
+            } else {
+                hasher.update(&contents);
+            }
+        }
+        hex_encode(&hasher.finalize().digest)
+    };
+
+    let cache_root = std::env::temp_dir().join("hashi-e2e-upgrade-build-cache");
+    let final_path = cache_root.join(format!("{key}.json"));
+
+    if let Some(cached) = read_cached_build(&final_path) {
+        tracing::info!("upgrade package cache hit ({key})");
+        return Ok(cached);
+    }
+
+    // mkdir is atomic: exactly one process wins the right to build; the rest
+    // wait for the artifact to appear. Timeouts and stale locks fall through
+    // to building — duplicated work over a wedged run.
+    std::fs::create_dir_all(&cache_root)?;
+    let lock = cache_root.join(format!("{key}.lock"));
+    if std::fs::create_dir(&lock).is_err() {
+        let stale = std::time::Duration::from_secs(900);
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(600) {
+            if let Some(cached) = read_cached_build(&final_path) {
+                tracing::info!("upgrade package cache hit after waiting ({key})");
+                return Ok(cached);
+            }
+            if std::fs::metadata(&lock)
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().unwrap_or_default() > stale)
+                .unwrap_or(true)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        tracing::warn!("upgrade build lock wait expired; building anyway ({key})");
+    }
+
+    let built = build_upgrade_package(sui_binary(), upgrade_path, client_config, target_version);
+    let _ = std::fs::remove_dir(&lock);
+    let (compiled, digest) = built?;
+
+    // Write-then-rename so readers never see a partial file.
+    let tmp = cache_root.join(format!("{key}.tmp-{}", std::process::id()));
+    if let Ok(bytes) = serde_json::to_vec(&(&compiled, &digest))
+        && std::fs::write(&tmp, bytes).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &final_path);
+    }
+    Ok((compiled, digest))
+}
+
+fn read_cached_build(path: &Path) -> Option<(Publish, Vec<u8>)> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Run the full upgrade lifecycle: prepare → build → propose → vote → execute+publish+finalize.
 ///
 /// Returns the new package ID on success.
@@ -194,7 +318,7 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
     // 2. Build the upgrade
     tracing::info!("building upgrade package from {}", upgrade_path.display());
     let (compiled, digest) =
-        build_upgrade_package(sui_binary(), &upgrade_path, client_config, target_version)?;
+        build_upgrade_package_cached(&upgrade_path, client_config, target_version)?;
     tracing::info!("upgrade package built, digest: {digest:?}");
 
     // 3. Propose the upgrade
