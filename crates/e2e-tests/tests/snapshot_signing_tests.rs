@@ -47,10 +47,12 @@ use tracing::info;
 async fn snapshot_v1_signs_withdrawal_end_to_end() -> Result<()> {
     init_test_logging();
 
-    // v1 = the checked-in deployed bytecode snapshot, not a source build.
+    // v1 = the checked-in deployed bytecode snapshot, not a source build —
+    // and no auto-upgrade: signing against the deployed bytecode is the point.
     let mut networks = TestNetworksBuilder::new()
         .with_nodes(4)
         .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
+        .without_upgrade()
         .build()
         .await?;
 

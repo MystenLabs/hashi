@@ -133,6 +133,10 @@ mod tests {
             .ok_or_else(|| anyhow!("transaction effects BCS bytes were not returned"))
     }
 
+    /// The builder's default boot already publishes the v1 bytecode snapshot
+    /// and upgrades to the current source, so every test in this module
+    /// exercises the post-upgrade configuration a real network is in — not a
+    /// fresh single-version publish.
     async fn setup_test_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
         let networks = builder.build().await?;

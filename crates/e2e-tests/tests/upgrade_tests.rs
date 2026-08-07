@@ -9,7 +9,6 @@
 //! - Package ID routing updates correctly in OnchainState
 
 use anyhow::Result;
-use e2e_tests::TestNetworks;
 use e2e_tests::TestNetworksBuilder;
 use e2e_tests::snapshot;
 use e2e_tests::test_helpers::create_deposit_and_wait;
@@ -25,50 +24,17 @@ use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::info;
 
-/// Poll until every node's watcher reports `package_id` as the active
-/// package — the PackageUpgraded handler in watcher.rs must update
-/// OnchainState's package_versions map on all nodes. Prints per-node
-/// diagnostics before failing on timeout.
-async fn wait_for_package_convergence(
-    networks: &TestNetworks,
-    package_id: Address,
-    max_wait: Duration,
-) -> Result<()> {
-    info!("waiting for all nodes to detect the new package version...");
-    let wait_start = std::time::Instant::now();
-    loop {
-        let all_updated = networks
-            .hashi_network
-            .nodes()
-            .iter()
-            .all(|node| node.hashi().onchain_state().package_id() == Some(package_id));
-        if all_updated {
-            return Ok(());
-        }
-        if wait_start.elapsed() > max_wait {
-            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
-                let latest = node.hashi().onchain_state().package_id();
-                let versions = node
-                    .hashi()
-                    .onchain_state()
-                    .state()
-                    .package_versions()
-                    .clone();
-                info!("node {i}: package_id={latest:?}, versions={versions:?}");
-            }
-            anyhow::bail!("timeout: not all nodes detected the new package version");
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-/// Test the full upgrade lifecycle, exercising real cascading effects.
+/// Explicit upgrade via governance proposal, exercising real cascading effects.
+///
+/// The builder's default boot already lands the chain at the current source
+/// (snapshot v1 auto-upgraded at build), so the upgrade driven *by this test*
+/// goes one version further (vN -> vN+1) through the full proposal flow:
 ///
 /// 1. Watcher picks up new package — PackageUpgraded updates OnchainState
 /// 2. Validators confirm deposits post-upgrade — leader routes calls correctly
 /// 3. Package ID routing — OnchainState.package_id() returns the new package
 #[tokio::test]
-async fn test_upgrade_v1_to_v2() -> Result<()> {
+async fn test_upgrade_via_proposal() -> Result<()> {
     init_test_logging();
     let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
 
@@ -97,7 +63,8 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     assert_ne!(new_package_id, hashi_ids.package_id);
 
     // ── Cascading effect 1: Watcher picks up new package ────────────────
-    wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
+    upgrade_flow::wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30))
+        .await?;
 
     // ── Cascading effect 2: Package ID routing ──────────────────────────
     //
@@ -111,8 +78,9 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
             .versions()
             .clone();
         assert!(
-            versions.len() >= 2,
-            "node {i}: should have at least 2 package versions, got {}",
+            versions.len() >= 3,
+            "node {i}: expected the auto-upgrade and this test's upgrade on \
+             top of v1 (>= 3 package versions), got {}",
             versions.len()
         );
         info!("node {i}: package_versions = {versions:?}");
@@ -262,9 +230,12 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     init_test_logging();
 
     // v1 = the checked-in deployed bytecode snapshot, NOT a source build.
+    // `without_upgrade` so the pre-upgrade deposit really runs against the
+    // deployed bytecode; this test drives the upgrade itself.
     let mut networks = TestNetworksBuilder::new()
         .with_nodes(4)
         .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
+        .without_upgrade()
         .build()
         .await?;
 
@@ -303,7 +274,8 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     );
 
     // ── All nodes' watchers must pick up the new package version ─────────
-    wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30)).await?;
+    upgrade_flow::wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30))
+        .await?;
 
     // ── Post-upgrade: deposit on top of v1-initialized state ────────────
     //

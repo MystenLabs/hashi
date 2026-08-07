@@ -329,6 +329,20 @@ impl HashiNetwork {
             .iter_mut()
             .find(|n| n.service.is_none())
             .ok_or_else(|| anyhow::anyhow!("no pending nodes to start"))?;
+        // The node's ports were picked (and released) when the network was
+        // built, and have sat unbound through everything the test did since —
+        // minutes, under the upgraded-chain boot — so on a busy CI runner
+        // another process may hold them by now, and the gRPC server panics on
+        // bind. Re-pick immediately before the registration that publishes the
+        // endpoint on-chain, shrinking the reservation window to milliseconds.
+        let listen_addr =
+            std::net::SocketAddr::from(([127, 0, 0, 1], hashi::config::get_available_port()));
+        node.config.listen_address = Some(listen_addr);
+        node.config.endpoint_url = Some(format!("https://{listen_addr}"));
+        node.config.metrics_http_address = Some(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            hashi::config::get_available_port(),
+        )));
         register_onchain(client, &node.config).await?;
         node.start().await?;
         Ok(())
