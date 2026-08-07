@@ -11,7 +11,9 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 ### Deposits (BTC → Sui)
 - **E1**: Deposit confirmed on Bitcoin.
-- **E2**: `DepositApproved` on Sui.
+- **E2**: `DepositConfirmed` on Sui. Because its Move payload has no timestamp,
+  the monitor uses the timestamp of its containing checkpoint returned by Sui
+  gRPC.
 
 ### Checks
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
