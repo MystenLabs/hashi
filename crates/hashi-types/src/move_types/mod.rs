@@ -72,6 +72,37 @@ impl PackageVersions {
 
 /// A Rust mirror of a Move struct, identified by its defining package
 /// version, module, and name.
+///
+/// # Adding a new Move type that Rust reads
+///
+/// Mirrors are written by hand; nothing is generated. The path for a new
+/// Move struct whose bytes Rust decodes (an event, a dynamic-field value,
+/// a container node):
+///
+/// 1. Add the struct in `packages/hashi/`. An upgrade can only *add* types
+///    — it can never change an existing struct's layout (the CI compat gate
+///    enforces this) — so a layout change is a *new* type with a *new* name
+///    (`FooV2`, `StampedFoo`, …).
+/// 2. Mirror it in this module with serde derives whose field order matches
+///    the Move declaration exactly (BCS is positional), and `impl MoveType`.
+///    Types introduced by an upgraded package override [`PACKAGE_VERSION`]
+///    with the version that introduced them; existing types keep theirs
+///    forever — never renumber (a Move type's defining address never
+///    changes across upgrades).
+/// 3. To identify tags, use [`matches`]: the full tag — defining package
+///    address included — must match the mirror, so a same-name type from a
+///    foreign package is rejected rather than trusted.
+/// 4. If the new type replaces what a dynamic-field slot holds (a v2 type
+///    in the same bucket), wire it into the dispatch in
+///    `hashi::onchain::versioned_decode`. Readers fail loudly on types they
+///    do not implement; they never guess a layout.
+///
+/// The package-wide version the *tree* ships as is a separate axis: see the
+/// `PACKAGE_VERSION` doc in `packages/hashi/sources/core/versioning.move`
+/// and `SUPPORTED_PACKAGE_VERSIONS` in the `hashi` crate's `constants`.
+///
+/// [`PACKAGE_VERSION`]: MoveType::PACKAGE_VERSION
+/// [`matches`]: MoveType::matches
 pub trait MoveType {
     /// The hashi package version that first defined this struct. A
     /// type keeps its defining package's address through upgrades, so
@@ -877,6 +908,23 @@ pub struct EpochCertsV1 {
     /// Dealer submissions indexed by dealer address (first-submission-wins).
     // LinkedTable<address, DealerSubmissionV1>
     pub certs: LinkedTable<Address>,
+}
+
+impl MoveType for EpochCertsV1 {
+    const MODULE: &'static str = "tob";
+    const NAME: &'static str = "EpochCertsV1";
+}
+
+/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, which the v2
+/// package introduces (the stamped nonce-cert line of work). Identification
+/// only: this build recognizes the type but does not decode its stamped
+/// linked-table nodes; the mirror gains fields when that support lands.
+pub struct StampedEpochCertsV1;
+
+impl MoveType for StampedEpochCertsV1 {
+    const PACKAGE_VERSION: u64 = 2;
+    const MODULE: &'static str = "tob";
+    const NAME: &'static str = "StampedEpochCertsV1";
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.
