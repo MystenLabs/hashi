@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["backup","balance","committee","config","deposit","proposal","withdraw"]};

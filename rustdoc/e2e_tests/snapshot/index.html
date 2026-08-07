@@ -1,0 +1,38 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Publish a checked-in Move bytecode snapshot into a local Sui network."><title>e2e_tests::snapshot - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="e2e_tests" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module snapshot</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../e2e_tests/index.html">e2e_<wbr>tests</a><span class="version">0.0.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module snapshot</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#mechanism" title="Mechanism">Mechanism</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate e2e_<wbr>tests</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">e2e_tests</a></div><h1>Module <span>snapshot</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/e2e_tests/snapshot.rs.html#4-220">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Publish a checked-in Move <em>bytecode snapshot</em> into a local Sui network.</p>
+<p>Hashi keeps a checked-in bytecode snapshot of the deployed package
+(<code>crates/hashi/tests/move_upgrade_snapshots/&lt;network&gt;/v&lt;version&gt;/</code>) so the
+upgrade-compatibility CI gate can run hermetically. This module reuses that
+same snapshot for a <em>stronger</em> test: publish the deployed v1 bytecode into a
+fresh local net and then upgrade it to the current source, proving the real
+“deployed bytecode → current source” upgrade end-to-end (not just the static
+compatibility check).</p>
+<h3 id="mechanism"><a class="doc-anchor" href="#mechanism">§</a>Mechanism</h3>
+<ol>
+<li>Read every <code>*.mv</code> in the snapshot directory.</li>
+<li>Rebase each module’s self-address from the package’s <em>runtime</em> id to
+<code>0x0</code>. This is the <strong>inverse</strong> of the compat test’s
+<code>substitute_self_address</code>: the on-chain <code>module_map</code> (and thus the
+snapshot) stores modules self-addressed at the runtime id, while a fresh
+<code>publish</code> on Sui assigns a brand-new object id and expects the incoming
+modules to be self-addressed at <code>0x0</code> (what a source build of an
+upgradeable package emits).</li>
+<li>Re-serialize at each module’s <em>original</em> binary version (via
+<code>serialize_with_version</code>, NOT <code>serialize()</code> — the latter forces
+<code>VERSION_MAX</code>, which could exceed what the local net accepts).</li>
+<li>Build a <code>Publish { modules, dependencies: [0x1, 0x2, 0x3] }</code> — the
+framework-only deps present on any local net, per the on-chain linkage
+table.</li>
+<li>Publish via the production <code>hashi::publish::publish_package</code> path, which
+also extracts the <code>Hashi</code> shared object + <code>UpgradeCap</code> — a strong signal
+the snapshot published as a real, init-run package.</li>
+</ol>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.default_snapshot_dir.html" title="fn e2e_tests::snapshot::default_snapshot_dir">default_<wbr>snapshot_<wbr>dir</a></dt><dd>Default snapshot directory: the deployed <code>testnet</code> package’s snapshot,
+<code>../hashi/tests/move_upgrade_snapshots/testnet/v&lt;version&gt;</code>, with the
+version taken from <code>packages/hashi/Published.toml</code> — the same source of
+truth the compat CI gate derives its snapshot locations from. A deployment
+bumps <code>Published.toml</code>, so this test follows it to the new snapshot
+instead of silently exercising stale bytecode.</dd><dt><a class="fn" href="fn.load_snapshot_publish.html" title="fn e2e_tests::snapshot::load_snapshot_publish">load_<wbr>snapshot_<wbr>publish</a></dt><dd>Load every <code>*.mv</code> in <code>snapshot_dir</code>, rebase each module’s self-address from
+the runtime id to <code>0x0</code>, re-serialize at its original binary version, and
+return a <code>Publish</code> payload with framework-only dependencies (<code>[0x1, 0x2, 0x3]</code>) ready to hand to <code>hashi::publish::publish_package</code>.</dd><dt><a class="fn" href="fn.publish_snapshot.html" title="fn e2e_tests::snapshot::publish_snapshot">publish_<wbr>snapshot</a></dt><dd>Publish the bytecode snapshot at <code>snapshot_dir</code> as a fresh package, driven
+by <code>private_key</code>. Mirrors the <code>publish</code> module but sources the modules from a
+checked-in bytecode snapshot instead of a source build.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_snapshot_dir","load_snapshot_publish","publish_snapshot"]};

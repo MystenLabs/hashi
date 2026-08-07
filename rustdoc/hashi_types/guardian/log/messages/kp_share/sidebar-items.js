@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["KPEncryptedShareV1","KPEncryptedSharesV1","KpShareStateLogMessageV1","KpShareStateLogMessageV2"],"type":["KpShareStateLogMessage"]};
