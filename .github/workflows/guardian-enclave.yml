@@ -1,12 +1,50 @@
 name: Guardian Enclave Build
 
+# Measures the guardian EIF for a deployment.
+#
+# PCR0 is a hash of the built image, and the build takes BUCKET_NAME, AWS_REGION
+# and CEREMONY_MODE as inputs — they are substituted into run.sh, which goes in
+# the ramdisk the measurement covers. So a PCR0 only means something next to the
+# deployment it was built for: pass the same values that stack's enclave hosts
+# build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml in
+# sui-operations, rendered into user-data by enclave.go), and dispatch this on
+# the commit the hosts pin.
+#
+# This is the ONLY sanctioned source for the eif-pcr0 / eif-pcr0-b /
+# ceremony-pcr0 config values and for the rotate workflow's hashi_pcr0 input.
+# Reading a measurement off the host being verified would make the check
+# circular: it would confirm the host runs whatever it runs.
+#
+# Both runners must agree, or the build is not reproducible and no measurement
+# from it can be trusted.
+
 on:
   workflow_dispatch:
     inputs:
       bucket_name:
-        description: 'S3 bucket name for the build'
+        description: 'S3 bucket the guardian logs to (must match the target stack exactly)'
         required: true
         default: 'guardian-test-bucket'
+      aws_region:
+        description: 'Region of that bucket. Every deployed stack is us-west-2; the Makefile default is not.'
+        required: true
+        default: 'us-west-2'
+      ceremony_mode:
+        description: 'Enclave boot mode: withdraw (serving) or ceremony (one-time key ceremony, a different PCR0 at the same commit)'
+        type: choice
+        options:
+          - withdraw
+          - ceremony
+        required: true
+        default: withdraw
+      features:
+        description: 'Extra cargo features. Leave EMPTY for anything whose PCR0 is provenance; non-enclave-dev builds mock attestation.'
+        required: false
+        default: ''
+      git_revision:
+        description: 'Commit to build and stamp. Defaults to the dispatched ref. Set it to measure a commit that predates this workflow — an already-deployed guardian, or the ceremony build an allowlist has to keep trusting.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -17,21 +55,65 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    outputs:
+      git_revision: ${{ steps.rev.outputs.git_revision }}
 
     steps:
+      # The SOURCE measured is git_revision's, not the dispatched ref's — the
+      # ref only supplies this workflow file. GIT_REVISION is compiled into the
+      # guardian, so the two must name the same commit or the EIF measures a
+      # build that never existed.
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.git_revision || github.sha }}
+
+      - name: Resolve the revision being measured
+        id: rev
+        shell: bash
+        run: |
+          REV="$(git rev-parse HEAD)"
+          echo "GIT_REVISION=$REV" >> "$GITHUB_ENV"
+          echo "git_revision=$REV" >> "$GITHUB_OUTPUT"
 
       - name: Build enclave EIF
         working-directory: docker/hashi-guardian
         env:
-          BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
-          GIT_REVISION: ${{ github.sha }}
-        run: make BUCKET_NAME=$BUCKET_NAME GIT_REVISION=$GIT_REVISION
+          BUCKET_NAME: ${{ inputs.bucket_name }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          FEATURES: ${{ inputs.features }}
+          # The Makefile takes "true"/empty, not the friendlier input wording.
+          CEREMONY_MODE: ${{ inputs.ceremony_mode == 'ceremony' && 'true' || '' }}
+        run: |
+          make BUCKET_NAME="$BUCKET_NAME" AWS_REGION="$AWS_REGION" \
+               GIT_REVISION="$GIT_REVISION" FEATURES="$FEATURES" \
+               CEREMONY_MODE="$CEREMONY_MODE"
 
       - name: Print PCRs
         working-directory: docker/hashi-guardian
         run: cat out/nitro.pcrs
+
+      # PCR0 covers everything, so a mismatch between runners says only "the
+      # build moved". These say which half: rootfs.cpio is the app ramdisk
+      # (PCR2), bzImage the kernel (PCR1). Plus the host facts a from-source
+      # kernel build can leak — core count reaches it through `make -j$(nproc)`.
+      - name: Provenance of the build inputs
+        working-directory: docker/hashi-guardian
+        run: |
+          echo "runner        : ${{ matrix.os }}"
+          echo "nproc         : $(nproc)"
+          echo "docker        : $(docker version --format '{{.Server.Version}}')"
+          echo "buildx        : $(docker buildx version)"
+          sha256sum out/rootfs.cpio out/bzImage out/kernel.config
+
+      - name: Upload build-input hashes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
+        with:
+          name: build-inputs-${{ matrix.os }}
+          path: |
+            docker/hashi-guardian/out/kernel.config
+            docker/hashi-guardian/out/bzImage
+            docker/hashi-guardian/out/rootfs.cpio
 
       - name: Upload PCRs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # pin@v7.0.1
@@ -58,8 +140,6 @@ jobs:
       - name: Compare PCRs
         id: compare
         run: |
-          LATEST=$(cat pcrs-latest/nitro.pcrs)
-          OLDER=$(cat pcrs-22/nitro.pcrs)
           if diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
             echo "match=true" >> "$GITHUB_OUTPUT"
           else
@@ -75,20 +155,60 @@ jobs:
 
       - name: Print results
         run: |
-          echo "## Guardian Enclave PCR Measurements" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR0 | \`${{ steps.compare.outputs.pcr0 }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Bucket**: \`${{ inputs.bucket_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Guardian Enclave PCR Measurements"
+            echo ""
+            echo "| PCR | Value |"
+            echo "|-----|-------|"
+            echo "| PCR0 | \`${{ steps.compare.outputs.pcr0 }}\` |"
+            echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |"
+            echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |"
+            echo ""
+            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)"
+            echo ""
+            echo "Measured build — a PCR0 is only valid for this exact combination:"
+            echo ""
+            echo "| Input | Value |"
+            echo "|-------|-------|"
+            echo "| commit | \`${{ needs.build.outputs.git_revision }}\` |"
+            echo "| bucket | \`${{ inputs.bucket_name }}\` |"
+            echo "| region | \`${{ inputs.aws_region }}\` |"
+            echo "| mode | \`${{ inputs.ceremony_mode }}\` |"
+            echo "| features | \`${{ inputs.features }}\`${{ inputs.features == '' && ' (real attestation)' || ' — MOCK attestation, not provenance' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A bare "the PCRs differ" costs whoever sees it a long investigation:
+      # PCR0 covers everything, so it only says the build moved. These are the
+      # inputs eif_build consumed, and naming the one that moved is most of the
+      # diagnosis. The last time this fired, the answer was the kernel — it was
+      # stamping its built-in initramfs with the wall clock.
+      - name: Download build inputs (only when the PCRs disagree)
+        if: steps.compare.outputs.match != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
+        with:
+          pattern: build-inputs-*
+          path: inputs
 
       - name: Fail if PCRs differ
         if: steps.compare.outputs.match != 'true'
         run: |
           echo "PCRs differ across platforms!"
-          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs
+          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs || true
+          echo
+          echo "Which build input moved:"
+          for f in rootfs.cpio bzImage kernel.config; do
+            a="$(sha256sum "inputs/build-inputs-ubuntu-latest/$f" 2>/dev/null | cut -d' ' -f1)"
+            b="$(sha256sum "inputs/build-inputs-ubuntu-22.04/$f" 2>/dev/null | cut -d' ' -f1)"
+            if [ -z "$a" ] || [ -z "$b" ]; then
+              printf '  %-14s ?  (artifact missing)\n' "$f"
+            elif [ "$a" = "$b" ]; then
+              printf '  %-14s same\n' "$f"
+            else
+              printf '  %-14s DIFFERS\n    ubuntu-latest %s\n    ubuntu-22.04  %s\n' "$f" "$a" "$b"
+            fi
+          done
+          echo
+          echo "rootfs.cpio is the app ramdisk; bzImage the kernel. If only bzImage moved,"
+          echo "suspect something the kernel build absorbs from its environment — a clock"
+          echo "reaching the built-in initramfs is the failure mode that has happened before."
           exit 1
