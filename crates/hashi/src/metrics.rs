@@ -94,6 +94,12 @@ pub struct Metrics {
     num_consumed_presigs: IntGauge,
     treasury_supply: IntGaugeVec,
     package_version_enabled: IntGaugeVec,
+    /// The package version this binary is operating at (0 when none is
+    /// supported — see `package_version_unsupported`).
+    package_version_active: IntGauge,
+    /// 1 when this binary supports no live on-chain package version (chain
+    /// ahead of the binary); autonomous mutations are halted. 0 otherwise.
+    package_version_unsupported: IntGauge,
 
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
@@ -641,6 +647,18 @@ impl Metrics {
                 "hashi_package_version_enabled",
                 "enabled package versions (1 = enabled)",
                 &["version", "package_id"],
+                registry,
+            )
+            .unwrap(),
+            package_version_active: register_int_gauge_with_registry!(
+                "hashi_package_version_active",
+                "package version this binary is operating at (0 = none supported)",
+                registry,
+            )
+            .unwrap(),
+            package_version_unsupported: register_int_gauge_with_registry!(
+                "hashi_package_version_unsupported",
+                "1 = binary supports no live on-chain version (mutations halted), 0 = ok",
                 registry,
             )
             .unwrap(),
@@ -1295,6 +1313,12 @@ impl Metrics {
                 .with_label_values(&[&version_str, &package_id_str])
                 .set(1);
         }
+
+        let support = guard.version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS);
+        self.package_version_active
+            .set(support.active_version().map(|v| v as i64).unwrap_or(0));
+        self.package_version_unsupported
+            .set(i64::from(support.must_halt()));
     }
 }
 

@@ -77,11 +77,22 @@ mod apply;
 mod mirror;
 mod route;
 pub mod types;
+pub mod version;
 mod watcher;
 
 fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::mpc::EncryptionGroupElement> {
     let array: [u8; 32] = bytes.try_into().ok()?;
     crate::mpc::EncryptionGroupElement::from_byte_array(&array).ok()
+}
+
+/// Why a node must not initiate autonomous on-chain mutations right now.
+#[derive(Debug, Clone, Copy)]
+pub enum HaltReason {
+    /// The bridge is governance-paused (`config.paused()`).
+    Paused,
+    /// This binary supports no live on-chain package version — typically the
+    /// chain has upgraded past this build. Fields are for diagnostics/logging.
+    BinaryUnsupported { supported_max: u64, live_max: u64 },
 }
 
 #[derive(Clone)]
@@ -278,6 +289,40 @@ impl OnchainState {
 
     pub fn state(&self) -> RwLockReadGuard<'_, State> {
         self.0.state.read().unwrap()
+    }
+
+    /// How this binary's [`crate::constants::SUPPORTED_PACKAGE_VERSIONS`]
+    /// relate to the current on-chain enabled+published versions.
+    pub fn version_support(&self) -> version::VersionSupport {
+        self.state()
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+    }
+
+    /// The on-chain package version this binary should operate at, or `None`
+    /// when the chain is ahead of / incompatible with this build.
+    pub fn active_package_version(&self) -> Option<u64> {
+        self.version_support().active_version()
+    }
+
+    /// Reason autonomous on-chain work must halt (governance pause, or an
+    /// unsupported on-chain version), or `None` to proceed. Reads state once so
+    /// callers get a single consistent snapshot. Mirrors — and subsumes — the
+    /// existing `config.paused()` gate.
+    pub fn autonomous_halt_reason(&self) -> Option<HaltReason> {
+        let state = self.state();
+        if state.hashi().config.paused() {
+            return Some(HaltReason::Paused);
+        }
+        match state.version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS) {
+            version::VersionSupport::Unsupported {
+                supported_max,
+                live_max,
+            } => Some(HaltReason::BinaryUnsupported {
+                supported_max,
+                live_max,
+            }),
+            version::VersionSupport::Active(_) | version::VersionSupport::NotReady => None,
+        }
     }
 
     // NOTE: This function must remain private to this module so that only this module and its
@@ -961,6 +1006,18 @@ impl State {
 
     pub fn hashi(&self) -> &types::Hashi {
         &self.hashi
+    }
+
+    /// Resolve version support from this snapshot against `supported` (the
+    /// binary's [`crate::constants::SUPPORTED_PACKAGE_VERSIONS`]). Kept on
+    /// `State` so callers that already hold a read guard resolve without
+    /// re-locking or racing a second snapshot.
+    pub fn version_support(&self, supported: &[u64]) -> version::VersionSupport {
+        version::resolve_version_support(
+            &self.hashi.config.enabled_versions,
+            &self.package_versions,
+            supported,
+        )
     }
 
     async fn scrape(

@@ -428,6 +428,12 @@ pub struct SuiTxExecutor {
     signer: SimpleKeypair,
     hashi_ids: HashiIds,
     timeout: Duration,
+    /// Present for node-internal executors (built via [`SuiTxExecutor::from_config`]
+    /// / [`SuiTxExecutor::from_hashi`]); used to refuse submitting when this
+    /// binary supports no live on-chain package version. `None` for CLI/ad-hoc
+    /// executors built via [`SuiTxExecutor::new`], which are operator-driven and
+    /// intentionally not version-gated.
+    onchain_state: Option<OnchainState>,
 }
 
 impl SuiTxExecutor {
@@ -438,19 +444,21 @@ impl SuiTxExecutor {
             signer,
             hashi_ids,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            onchain_state: None,
         }
     }
 
     /// Create a new executor from config and onchain state.
     ///
-    /// This is a convenience constructor for use within the Hashi system.
+    /// This is a convenience constructor for use within the Hashi system. The
+    /// executor retains the [`OnchainState`] so [`SuiTxExecutor::execute`] can
+    /// refuse to submit when this binary supports no live on-chain package
+    /// version.
     pub fn from_config(config: &Config, onchain_state: &OnchainState) -> anyhow::Result<Self> {
         let signer = config.operator_private_key()?;
-        Ok(Self::new(
-            onchain_state.client(),
-            signer,
-            config.hashi_ids(),
-        ))
+        let mut executor = Self::new(onchain_state.client(), signer, config.hashi_ids());
+        executor.onchain_state = Some(onchain_state.clone());
+        Ok(executor)
     }
 
     /// Create a new executor from an `Arc<Hashi>`.
@@ -504,6 +512,21 @@ impl SuiTxExecutor {
         &mut self,
         builder: TransactionBuilder,
     ) -> anyhow::Result<ExecuteTransactionResponse> {
+        // Node-internal executors refuse to submit when the chain is running
+        // package versions this binary doesn't support — fail fast rather than
+        // burn a doomed transaction (the on-chain `assert_version_enabled` would
+        // reject it) or act on state we can't interpret. Operator/CLI executors
+        // (built via `new`, no `onchain_state`) are exempt.
+        if let Some(onchain_state) = &self.onchain_state {
+            let support = onchain_state.version_support();
+            if support.must_halt() {
+                anyhow::bail!(
+                    "refusing to submit hashi transaction: this binary supports no enabled \
+                     on-chain package version ({support:?}) — a binary upgrade is required"
+                );
+            }
+        }
+
         let outcome = finalize(
             &mut self.client,
             Some(&self.signer),
