@@ -48,6 +48,21 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
+const CERT_LISTING_ATTEMPTS: u32 = 3;
+const CERT_LISTING_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct InconsistentListing(String);
+
+fn inconsistent_listing(message: String) -> anyhow::Error {
+    anyhow::Error::new(InconsistentListing(message))
+}
+
+fn is_inconsistent_listing(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<InconsistentListing>().is_some()
+}
+
 /// How much of the on-chain state a scrape loads. The Bitcoin collections are
 /// paged `SCRAPE_PAGE_SIZE` at a time and dominate the cost — a 70k-entry
 /// withdrawal queue is ~70 extra round-trips, enough to draw a 429.
@@ -845,6 +860,32 @@ impl OnchainState {
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
     ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        for attempt in 1..CERT_LISTING_ATTEMPTS {
+            match self
+                .fetch_certs_once(epoch, batch_index, protocol_type)
+                .await
+            {
+                Ok(certs) => return Ok(certs),
+                Err(e) if is_inconsistent_listing(&e) => {
+                    tracing::debug!(
+                        "epoch {epoch} {protocol_type:?}: {e}; re-reading (attempt {attempt} of \
+                         {CERT_LISTING_ATTEMPTS})"
+                    );
+                    tokio::time::sleep(CERT_LISTING_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.fetch_certs_once(epoch, batch_index, protocol_type)
+            .await
+    }
+
+    async fn fetch_certs_once(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
         let epoch_certs = match self
             .fetch_epoch_certs(epoch, batch_index, protocol_type)
             .await?
@@ -878,18 +919,39 @@ impl OnchainState {
             let node = field.value().deserialize()?;
             nodes.insert(dealer, node);
         }
-        // Traverse in insertion order following LinkedTable's linked list
-        let mut certificates = Vec::with_capacity(nodes.len());
-        let mut current = Some(head);
-        while let Some(dealer) = current {
-            let Some(node) = nodes.remove(&dealer) else {
-                break;
-            };
-            certificates.push((dealer, node.value));
-            current = node.next;
-        }
-        Ok(Some(certificates))
+        walk_linked_table(head, epoch_certs.certs.size, nodes)
+            .map_err(|e| {
+                inconsistent_listing(format!(
+                    "incomplete cert listing for epoch {epoch} {protocol_type:?}: {e}"
+                ))
+            })
+            .map(Some)
     }
+}
+
+fn walk_linked_table<V>(
+    head: Address,
+    size: u64,
+    mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>,
+) -> Result<Vec<(Address, V)>> {
+    let mut entries = Vec::with_capacity(nodes.len());
+    let mut current = Some(head);
+    while let Some(key) = current {
+        let Some(node) = nodes.remove(&key) else {
+            return Err(anyhow!(
+                "the linked list references {key} but the dynamic-field listing did not return it"
+            ));
+        };
+        entries.push((key, node.value));
+        current = node.next;
+    }
+    if (entries.len() as u64) < size {
+        return Err(anyhow!(
+            "walked {} entries but the table reported {size}",
+            entries.len()
+        ));
+    }
+    Ok(entries)
 }
 
 impl State {
@@ -2012,5 +2074,79 @@ mod key_rotation_epoch_tests {
     #[test]
     fn an_empty_committee_history_answers_dkg() {
         assert!(!OnchainState::epoch_after_first_committee(None, 9));
+    }
+}
+
+#[cfg(test)]
+mod walk_linked_table_tests {
+    use super::walk_linked_table;
+    use hashi_types::move_types::LinkedTableNode;
+    use std::collections::HashMap;
+    use sui_sdk_types::Address;
+
+    fn addr(byte: u8) -> Address {
+        Address::new([byte; 32])
+    }
+
+    fn chain(keys: &[u8]) -> HashMap<Address, LinkedTableNode<Address, u32>> {
+        keys.iter()
+            .enumerate()
+            .map(|(i, &k)| {
+                (
+                    addr(k),
+                    LinkedTableNode {
+                        prev: (i > 0).then(|| addr(keys[i - 1])),
+                        next: keys.get(i + 1).map(|&n| addr(n)),
+                        value: u32::from(k),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_complete_listing_walks_in_insertion_order() {
+        let entries = walk_linked_table(addr(1), 3, chain(&[1, 2, 3])).unwrap();
+        assert_eq!(
+            entries,
+            vec![(addr(1), 1u32), (addr(2), 2u32), (addr(3), 3u32)]
+        );
+    }
+
+    #[test]
+    fn a_listing_missing_a_referenced_node_is_an_error() {
+        let mut nodes = chain(&[1, 2, 3]);
+        nodes.remove(&addr(2));
+        let err = walk_linked_table(addr(1), 3, nodes)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did not return it"), "{err}");
+    }
+
+    #[test]
+    fn a_walk_shorter_than_the_reported_size_is_an_error() {
+        let err = walk_linked_table(addr(1), 5, chain(&[1, 2, 3]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("walked 3 entries"), "{err}");
+    }
+
+    #[test]
+    fn a_listing_newer_than_the_reported_size_is_accepted() {
+        let entries = walk_linked_table(addr(1), 1, chain(&[1, 2, 3])).unwrap();
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn an_inconsistent_listing_error_is_recognised_for_retry() {
+        let err = super::inconsistent_listing("walked 3 entries but the table reported 5".into());
+        assert!(super::is_inconsistent_listing(&err));
+    }
+
+    #[test]
+    fn an_unrelated_error_is_not_retried() {
+        assert!(!super::is_inconsistent_listing(&anyhow::anyhow!(
+            "Sui RPC transport failure"
+        )));
     }
 }

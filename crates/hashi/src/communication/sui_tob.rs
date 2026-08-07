@@ -107,12 +107,25 @@ pub async fn fetch_certificates(
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
+    Ok(
+        fetch_certificates_if_present(onchain_state, epoch, batch_index, protocol_type)
+            .await?
+            .unwrap_or_default(),
+    )
+}
+
+async fn fetch_certificates_if_present(
+    onchain_state: &OnchainState,
+    epoch: u64,
+    batch_index: Option<u32>,
+    protocol_type: ProtocolType,
+) -> Result<Option<Vec<(Address, CertificateV1)>>, TobError> {
     let Some(raw_certs) = onchain_state
         .fetch_certs(epoch, batch_index, protocol_type)
         .await
-        .map_err(|e| TobError::RpcError(e.to_string()))?
+        .map_err(|e| TobError::RpcError(format!("{e:#}")))?
     else {
-        return Ok(vec![]);
+        return Ok(None);
     };
     let mut certificates = Vec::with_capacity(raw_certs.len());
     for (dealer, cert) in raw_certs {
@@ -121,7 +134,7 @@ pub async fn fetch_certificates(
         let cert = CertificateV1::new(protocol_type, batch_index, inner_cert);
         certificates.push((dealer, cert));
     }
-    Ok(certificates)
+    Ok(Some(certificates))
 }
 
 pub struct PrefetchedTobChannel {
@@ -163,12 +176,20 @@ pub async fn fetch_key_generation_certificates(
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
     let earliest_committee_epoch = onchain_state.earliest_committee_epoch();
     let protocol_type = key_generation_protocol(earliest_committee_epoch, epoch);
-    let certificates = fetch_certificates(onchain_state, epoch, None, protocol_type).await?;
+    let certificates = fetch_certificates_if_present(onchain_state, epoch, None, protocol_type)
+        .await?
+        .ok_or_else(|| {
+            TobError::InvalidState(format!(
+                "epoch {epoch}: {protocol_type:?} certificate bucket not found — either absent or \
+                 the tob listing was incomplete (earliest committee epoch \
+                 {earliest_committee_epoch:?})"
+            ))
+        })?;
     if certificates.is_empty() {
-        tracing::warn!(
-            "epoch {epoch}: no key-generation certificates in the {protocol_type:?} bucket \
+        return Err(TobError::InvalidState(format!(
+            "epoch {epoch}: {protocol_type:?} certificate bucket exists but is empty \
              (earliest committee epoch {earliest_committee_epoch:?})"
-        );
+        )));
     }
     Ok(certificates)
 }
