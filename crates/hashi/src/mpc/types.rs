@@ -1139,6 +1139,32 @@ mod tests {
     }
 
     #[test]
+    fn test_session_id_derivation_is_wire_stable() {
+        let dealer = Address::new([1; 32]);
+        let share = NonZeroU16::new(1).unwrap();
+        let dkg = SessionId::new("testnet", 100, &ProtocolType::Dkg);
+        let rotation = SessionId::new("testnet", 100, &ProtocolType::KeyRotation);
+
+        let actual: Vec<String> = vec![
+            hex::encode(dkg.to_vec()),
+            hex::encode(dkg.dealer_session_id(&dealer).to_vec()),
+            hex::encode(rotation.to_vec()),
+            hex::encode(rotation.rotation_session_id(&dealer, share).to_vec()),
+            hex::encode(SessionId::nonce_dealer_session_id("testnet", 100, 7, &dealer).to_vec()),
+        ];
+        assert_eq!(
+            actual,
+            vec![
+                "44d9e2d76343404d73e639b8136c7998173923cde4743df8fdddc2f5988025bd9355634e11abdf9be378ff86ef1aa200b6f16a8d39e083543cfc78ab8714905b",
+                "66191197a9a9d5ed703cfeceed7f540a7a88c0838919ae3ebef7e69c23db0fd227529ab9484ac1538be6c8e62f40fc30ae2fc9a563e9a0ac0dbe6b98d810e86c",
+                "e201fd2004f6607e4ca4acf2d411a132977df4c5d4ce7df9dd40038b6a4cf5f77ca3ab08219ddbbc502bb5e2619ed029392d49dc358944ff909fefc8321a3be8",
+                "ea2e0d56a9bd2044e2a5af55df94274bae36c8e890d8a50ba6fe32b301a36583a533ce54a766bcc3431f1ab74b5f2d02111a3d4d11680cd092fbe97b67bec448",
+                "0558d7ae18d26c18a9fa47e045f35c814aef2e64421f1f2a00b7077dda8ad835cee5bf830a2970472aa33a5f153345db55ef13fef18fbc405a8ad5b740a38890",
+            ]
+        );
+    }
+
+    #[test]
     fn test_from_onchain_cert_success() {
         let mut rng = rand::thread_rng();
         let epoch = 100u64;

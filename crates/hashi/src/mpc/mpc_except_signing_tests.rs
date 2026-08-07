@@ -9135,14 +9135,13 @@ fn test_party_restart_uses_stored_rotation_messages() {
             }
             let session_id = party_manager
                 .current_session_id()
-                .rotation_session_id(dealer_addr, *share_index)
-                .to_vec();
+                .rotation_session_id(dealer_addr, *share_index);
             party_manager
                 .process_and_store_message(
                     party_manager.mpc_config.nodes.clone(),
                     party_manager.party_id,
                     party_manager.mpc_config.threshold,
-                    session_id,
+                    &session_id,
                     message,
                     None,
                     output_key,
