@@ -20,7 +20,7 @@ use super::PublishOutcome;
 use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
-use crate::mpc::types::MessageHash;
+use crate::mpc::types::MessagesHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SubmitCertError;
 use crate::sui_tx_executor::SuiTxExecutor;
@@ -214,7 +214,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         )
         .await
         .map_err(ChannelError::from)?;
-        let published: Vec<(Address, MessageHash)> = existing
+        let published: Vec<(Address, MessagesHash)> = existing
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))
             .collect();
@@ -229,8 +229,8 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 self.epoch,
                 self.batch_index,
                 ours.dealer_address,
-                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(on_chain)),
-                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(on_chain)),
+                hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(
                     &ours.messages_hash
                 )),
             );
@@ -261,7 +261,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         )
         .await
         .map_err(ChannelError::from)?;
-        let settled: Vec<(Address, MessageHash)> = settled
+        let settled: Vec<(Address, MessagesHash)> = settled
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))
             .collect();
@@ -277,7 +277,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
             self.epoch,
             self.batch_index,
             ours.dealer_address,
-            hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+            hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(
                 &ours.messages_hash
             )),
             outcome,
@@ -385,7 +385,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
 enum PublishedCert {
     Absent,
     Same,
-    Diverged { on_chain: MessageHash },
+    Diverged { on_chain: MessagesHash },
 }
 
 fn raced_outcome(classified: &PublishedCert) -> PublishOutcome {
@@ -404,9 +404,9 @@ fn short_circuit_outcome(classified: &PublishedCert) -> Option<PublishOutcome> {
 }
 
 fn classify_published_cert(
-    existing: &[(Address, MessageHash)],
+    existing: &[(Address, MessagesHash)],
     dealer: &Address,
-    ours: MessageHash,
+    ours: MessagesHash,
 ) -> PublishedCert {
     let Some((_, on_chain)) = existing.iter().find(|(d, _)| d == dealer) else {
         return PublishedCert::Absent;
@@ -446,10 +446,10 @@ mod tests {
         Address::new([b; 32])
     }
 
-    fn hash(b: u8) -> MessageHash {
+    fn hash(b: u8) -> MessagesHash {
         let mut bytes = [0xAB; 32];
         bytes[17] = b;
-        MessageHash::new(bytes)
+        MessagesHash::new(bytes)
     }
 
     #[test]

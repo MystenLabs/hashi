@@ -29,13 +29,14 @@ pub use crate::mpc::types::DealerFlowData;
 use crate::mpc::types::DealerMessagesHash;
 pub use crate::mpc::types::DealerOutputsKey;
 use crate::mpc::types::DkgReconstructionContext;
+use crate::mpc::types::EXPECT_SERIALIZATION_SUCCESS;
 pub use crate::mpc::types::EncryptionGroupElement;
 pub use crate::mpc::types::GetPublicMpcOutputRequest;
 pub use crate::mpc::types::GetPublicMpcOutputResponse;
 use crate::mpc::types::HeldAvidEchoes;
-pub use crate::mpc::types::MessageHash;
 pub use crate::mpc::types::MessageResponsesKey;
 pub use crate::mpc::types::Messages;
+pub use crate::mpc::types::MessagesHash;
 use crate::mpc::types::MpcConfig;
 pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
@@ -102,7 +103,6 @@ use sui_sdk_types::Address;
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
-const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
 
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
@@ -160,7 +160,7 @@ pub struct MpcManager {
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::AvssOutput>,
     pub current_dkg_messages: HashMap<Address, avss::Message>,
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
-    pub rotation_ack_signatures: HashMap<Address, (MessageHash, BLS12381Signature)>,
+    pub rotation_ack_signatures: HashMap<Address, (MessagesHash, BLS12381Signature)>,
     pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub current_avid_verified_common:
@@ -385,8 +385,8 @@ impl MpcManager {
         let existing =
             self.accepted_dealer_messages(request.messages.protocol_type(), &sender, batch_index)?;
         if let Some(existing_messages) = existing {
-            let existing_hash = compute_messages_hash(&existing_messages);
-            let incoming_hash = compute_messages_hash(&request.messages);
+            let existing_hash = existing_messages.compute_hash();
+            let incoming_hash = request.messages.compute_hash();
             if existing_hash != incoming_hash {
                 return Err(MpcError::InvalidMessage {
                     sender,
@@ -1349,8 +1349,7 @@ impl MpcManager {
                 match mgr.current_dkg_messages.get(&dealer) {
                     None => true,
                     Some(stored_msg) => {
-                        compute_messages_hash(&Messages::Dkg(stored_msg.clone()))
-                            != message.messages_hash
+                        Messages::Dkg(stored_msg.clone()).compute_hash() != message.messages_hash
                     }
                 }
             };
@@ -1668,7 +1667,7 @@ impl MpcManager {
                 match mgr.current_rotation_messages.get(&dealer) {
                     None => true,
                     Some(stored_msgs) => {
-                        compute_messages_hash(&Messages::Rotation(stored_msgs.clone()))
+                        Messages::Rotation(stored_msgs.clone()).compute_hash()
                             != message.messages_hash
                     }
                 }
@@ -2187,11 +2186,10 @@ impl MpcManager {
         &mut self,
         dealer: Address,
         batch_index: u32,
-        expected_hash: &MessageHash,
+        expected_hash: &MessagesHash,
     ) -> bool {
         if let Some(stored) = self.current_nonce_messages.get(&(batch_index, dealer)) {
-            return compute_messages_hash(&Messages::NonceGeneration(stored.clone()))
-                != *expected_hash;
+            return Messages::NonceGeneration(stored.clone()).compute_hash() != *expected_hash;
         }
         let found_in_db = self
             .public_messages_store
@@ -2208,7 +2206,7 @@ impl MpcManager {
                 message: db_msg,
             };
             let hash_mismatch =
-                compute_messages_hash(&Messages::NonceGeneration(nonce.clone())) != *expected_hash;
+                Messages::NonceGeneration(nonce.clone()).compute_hash() != *expected_hash;
             self.current_nonce_messages
                 .insert((batch_index, dealer), nonce);
             hash_mismatch
@@ -2250,7 +2248,7 @@ impl MpcManager {
                     .insert(DealerOutputsKey::Dkg(dealer), output);
                 let dkg_message = DealerMessagesHash {
                     dealer_address: dealer,
-                    messages_hash: compute_messages_hash(messages),
+                    messages_hash: messages.compute_hash(),
                 };
                 let signature =
                     self.signing_key
@@ -2345,7 +2343,7 @@ impl MpcManager {
                     .insert((batch_index, dealer), output);
                 let nonce_message = DealerMessagesHash {
                     dealer_address: dealer,
-                    messages_hash: compute_messages_hash(messages),
+                    messages_hash: messages.compute_hash(),
                 };
                 let signature =
                     self.signing_key
@@ -2467,7 +2465,7 @@ impl MpcManager {
         )?;
         let confirm = DealerMessagesHash {
             dealer_address: dealer,
-            messages_hash: MessageHash::from(avss_vote.common_message_hash.digest),
+            messages_hash: MessagesHash::from(avss_vote.common_message_hash.digest),
         };
         let signature = self
             .signing_key
@@ -2863,7 +2861,7 @@ impl MpcManager {
         let my_signature = MemberSignature::new(epoch, self.address, signature);
         let confirm_target = DealerMessagesHash {
             dealer_address: self.address,
-            messages_hash: MessageHash::from(own_avss.common.hash().digest),
+            messages_hash: MessagesHash::from(own_avss.common.hash().digest),
         };
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
         let vote_quorum_weight =
@@ -3269,13 +3267,13 @@ impl MpcManager {
         &self,
         batch_index: u32,
         dealer: &Address,
-        digest: &MessageHash,
+        digest: &MessagesHash,
     ) -> Option<CertKind> {
         if let Some(state) = self
             .get_avid_round_state(batch_index, dealer)
             .ok()
             .flatten()
-            && MessageHash::from(state.common.hash().digest) == *digest
+            && MessagesHash::from(state.common.hash().digest) == *digest
         {
             return Some(CertKind::AvssVote);
         }
@@ -3357,7 +3355,7 @@ impl MpcManager {
                 let common_pins = bundles.iter().any(|(_, b)| {
                     b.common
                         .as_ref()
-                        .is_some_and(|c| MessageHash::from(c.hash().digest) == digest)
+                        .is_some_and(|c| MessagesHash::from(c.hash().digest) == digest)
                 });
                 return if common_pins {
                     Ok((CertKind::AvssVote, None))
@@ -4236,7 +4234,7 @@ impl MpcManager {
         let my_signature = MemberSignature::new(self.mpc_config.epoch, self.address, signature);
         let messages_hash = DealerMessagesHash {
             dealer_address: self.address,
-            messages_hash: compute_messages_hash(&messages),
+            messages_hash: messages.compute_hash(),
         };
         let recipients: Vec<_> = self
             .committee
@@ -4721,7 +4719,7 @@ impl MpcManager {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
-        let messages_hash = compute_messages_hash(messages);
+        let messages_hash = messages.compute_hash();
         if let Some((acked_hash, ack)) = self.rotation_ack_signatures.get(&dealer) {
             if *acked_hash == messages_hash {
                 tracing::info!("re-acking identical rotation batch from dealer {dealer}");
@@ -4730,8 +4728,8 @@ impl MpcManager {
             tracing::warn!(
                 "dealer {dealer} sent a rotation batch differing from the one already acked this \
                  epoch (acked {}, got {}); rejecting — equivocation or lost persisted messages",
-                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(acked_hash)),
-                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(&messages_hash)),
+                hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(acked_hash)),
+                hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(&messages_hash)),
             );
             return Err(MpcError::InvalidMessage {
                 sender: dealer,
@@ -5093,7 +5091,7 @@ impl MpcManager {
                     ))
                 })?;
             let messages = Messages::Dkg(message.clone());
-            let actual_hash = compute_messages_hash(&messages);
+            let actual_hash = messages.compute_hash();
             if actual_hash != msg.messages_hash {
                 tracing::warn!(
                     "Stored DKG message for dealer {:?} does not match its \
@@ -5259,7 +5257,7 @@ impl MpcManager {
                     ))
                 })?;
             let messages = Messages::Rotation(rotation_msgs.clone());
-            let actual_hash = compute_messages_hash(&messages);
+            let actual_hash = messages.compute_hash();
             if actual_hash != msg.messages_hash {
                 tracing::warn!(
                     "Stored rotation message for dealer {:?} does not match its \
@@ -5870,7 +5868,7 @@ impl MpcManager {
                 .as_ref()
                 .ok()
                 .and_then(|m| m.as_ref())
-                .map(compute_messages_hash);
+                .map(Messages::compute_hash);
             if stored_hash.as_ref() == Some(&msg.messages_hash) {
                 continue;
             }
@@ -6385,7 +6383,7 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
     mut signers: Vec<Address>,
     p2p_channel: &'a P,
     request: &'a RetrieveMessagesRequest,
-    expected_hash: MessageHash,
+    expected_hash: MessagesHash,
 ) -> Option<Messages> {
     signers.shuffle(&mut rand::thread_rng());
     let mut remaining = signers.into_iter();
@@ -6412,7 +6410,7 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
                 biased;
                 Some((signer, result)) = in_flight.next() => match result {
                     Ok(response) => {
-                        if compute_messages_hash(&response.messages) == expected_hash {
+                        if response.messages.compute_hash() == expected_hash {
                             return Some(response.messages);
                         }
                         tracing::info!(
@@ -6472,11 +6470,6 @@ fn process_avss_message(
             Err(MpcError::from(e))
         }
     }
-}
-
-fn compute_messages_hash(messages: &Messages) -> MessageHash {
-    let bytes = bcs::to_bytes(messages).expect(EXPECT_SERIALIZATION_SUCCESS);
-    MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
 
 fn build_reduced_nodes(

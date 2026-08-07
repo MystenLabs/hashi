@@ -36,7 +36,8 @@ use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-pub type MessageHash = Digest;
+pub(crate) const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
+pub type MessagesHash = Digest;
 pub type RotationMessages = BTreeMap<ShareIndex, avss::Message>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NonceMessage {
@@ -142,7 +143,6 @@ pub enum ProtocolType {
     Dkg,
     KeyRotation,
     NonceGeneration { batch_index: u32 },
-    Signing { message_hash: MessageHash },
 }
 
 impl SessionId {
@@ -224,6 +224,11 @@ pub enum Messages {
 }
 
 impl Messages {
+    pub(crate) fn compute_hash(&self) -> MessagesHash {
+        let bytes = bcs::to_bytes(self).expect(EXPECT_SERIALIZATION_SUCCESS);
+        MessagesHash::from(Blake2b256::digest(&bytes).digest)
+    }
+
     pub fn protocol_type(&self) -> ProtocolTypeIndicator {
         match self {
             Messages::Dkg(_) => ProtocolTypeIndicator::Dkg,
@@ -312,8 +317,8 @@ pub enum NonceReconstructionOutcome {
     Success(Vec<batch_avss::ReceiverOutput>),
     NeedsComplaintRecovery {
         dealer_address: Address,
-        complaint: complaint::Complaint,
         batch_index: u32,
+        complaint: complaint::Complaint,
     },
 }
 
@@ -331,12 +336,12 @@ pub enum ProtocolComplaint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
-    pub dealer: Address,
-    pub share_index: Option<ShareIndex>, // Only for key rotation
-    pub batch_index: Option<u32>,        // Only for nonce generation
-    pub complaint: ProtocolComplaint,
-    pub protocol_type: ProtocolTypeIndicator,
     pub epoch: u64,
+    pub protocol_type: ProtocolTypeIndicator,
+    pub dealer: Address,
+    pub batch_index: Option<u32>,        // Only for nonce generation
+    pub share_index: Option<ShareIndex>, // Only for key rotation
+    pub complaint: ProtocolComplaint,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -351,7 +356,7 @@ pub enum ComplaintResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DealerMessagesHash {
     pub dealer_address: Address,
-    pub messages_hash: MessageHash,
+    pub messages_hash: MessagesHash,
 }
 
 impl hashi_types::intent::IntentMessage for DealerMessagesHash {
@@ -539,9 +544,9 @@ impl VerifiedCertificateV1 {
     }
 }
 
-pub(crate) fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessageHash {
+pub(crate) fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessagesHash {
     let bytes = bcs::to_bytes(vote).expect("AvidVote is serializable");
-    MessageHash::from(Blake2b256::digest(&bytes).digest)
+    MessagesHash::from(Blake2b256::digest(&bytes).digest)
 }
 
 #[derive(Clone)]
@@ -611,8 +616,8 @@ impl AvidCertificate<batch_avss_avid::AvidVote> {
     }
 }
 
-fn to_fastcrypto_digest(h: &MessageHash) -> fastcrypto::hash::Digest<32> {
-    fastcrypto::hash::Digest::new(*<MessageHash as AsRef<[u8; 32]>>::as_ref(h))
+fn to_fastcrypto_digest(h: &MessagesHash) -> fastcrypto::hash::Digest<32> {
+    fastcrypto::hash::Digest::new(*<MessagesHash as AsRef<[u8; 32]>>::as_ref(h))
 }
 
 fn resolve_signers(
@@ -865,7 +870,7 @@ mod tests {
         keys: &[Bls12381PrivateKey],
         signer_indices: &[usize],
         epoch: u64,
-        messages_hash: MessageHash,
+        messages_hash: MessagesHash,
     ) -> DealerCertificate {
         let message = DealerMessagesHash {
             dealer_address: Address::new([0u8; 32]),
@@ -999,7 +1004,7 @@ mod tests {
         let own_message = builder.message_for(0).unwrap();
 
         // A real Confirm cert
-        let h_v = MessageHash::from(own_message.common.hash().digest);
+        let h_v = MessagesHash::from(own_message.common.hash().digest);
         let confirmers: Vec<usize> = (0..=7).collect();
         let signed = dealer_cert(&committee, &keys, &confirmers, epoch, h_v);
         let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
@@ -1228,7 +1233,7 @@ mod tests {
         let parsed = result.unwrap();
         assert_eq!(parsed.message().dealer_address, dealer_address);
         assert_eq!(
-            <MessageHash as AsRef<[u8; 32]>>::as_ref(&parsed.message().messages_hash),
+            <MessagesHash as AsRef<[u8; 32]>>::as_ref(&parsed.message().messages_hash),
             &messages_hash
         );
     }
