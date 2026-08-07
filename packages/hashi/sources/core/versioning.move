@@ -14,7 +14,13 @@ use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{
 
 // ~~~~~~~ Constants ~~~~~~~
 
-const PACKAGE_VERSION: u64 = 1;
+/// The package version this tree ships as: the deployed version while the
+/// tree matches a deployment, bumped to the next version when a release
+/// cycle's changes begin landing. A mid-cycle tree must reach a chain as an
+/// upgrade (snapshot v1 + upgrade in every dev harness), never as a fresh
+/// publish — `create` enables this constant, and a fresh publish is Sui
+/// sequence version 1, so a mid-cycle fresh publish can never activate.
+const PACKAGE_VERSION: u64 = 2;
 
 // ~~~~~~~ Errors ~~~~~~~
 

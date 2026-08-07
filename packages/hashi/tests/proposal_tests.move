@@ -746,11 +746,12 @@ fun test_enable_version_proposal() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Create enable version proposal for version 2
+    // Enable a version that is not already enabled (genesis enables
+    // PACKAGE_VERSION itself, so use the one after it).
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        2,
+        3,
         &clock,
         ctx,
     );
@@ -772,21 +773,21 @@ fun test_disable_version_proposal() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // First enable version 2
+    // First enable a version that is not the current PACKAGE_VERSION
     let enable_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        2,
+        3,
         &clock,
         ctx,
     );
     hashi::enable_version::execute(&mut hashi, enable_id, &clock);
 
-    // Now disable version 2 (not the current version)
+    // Now disable it (disabling the current version is rejected)
     let disable_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        2,
+        3,
         &clock,
         ctx,
     );
@@ -807,11 +808,11 @@ fun test_disable_current_version_fails() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Try to disable version 1 (current version) - should fail
+    // Try to disable the current PACKAGE_VERSION - should fail
     let proposal_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        1, // current package version
+        2, // current package version
         &clock,
         ctx,
     );
@@ -832,11 +833,12 @@ fun test_enable_already_enabled_version_fails() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Try to enable version 1 (already enabled by default) - should fail
+    // Try to enable the current PACKAGE_VERSION (already enabled by the
+    // genesis `create`) - should fail
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        1, // already enabled
+        2, // already enabled
         &clock,
         ctx,
     );
