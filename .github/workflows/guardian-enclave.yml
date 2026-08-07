@@ -53,7 +53,13 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-22.04]
+        # Two builders that share as little as possible — the agreement between
+        # them is the entire value of this workflow. ubuntu-latest and
+        # ubuntu-22.04 turned out to be the same 4-core image with the same
+        # Docker and buildx, so pairing them proved almost nothing; ubuntu-ghcloud
+        # is different infrastructure AND much faster, which matters because a
+        # rotation waits on this measurement.
+        os: [ubuntu-latest, ubuntu-ghcloud]
     runs-on: ${{ matrix.os }}
     outputs:
       git_revision: ${{ steps.rev.outputs.git_revision }}
@@ -131,16 +137,16 @@ jobs:
           name: nitro-pcrs-ubuntu-latest
           path: pcrs-latest
 
-      - name: Download ubuntu-22.04 PCRs
+      - name: Download ubuntu-ghcloud PCRs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
-          name: nitro-pcrs-ubuntu-22.04
-          path: pcrs-22
+          name: nitro-pcrs-ubuntu-ghcloud
+          path: pcrs-ghcloud
 
       - name: Compare PCRs
         id: compare
         run: |
-          if diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
+          if diff pcrs-latest/nitro.pcrs pcrs-ghcloud/nitro.pcrs > /dev/null; then
             echo "match=true" >> "$GITHUB_OUTPUT"
           else
             echo "match=false" >> "$GITHUB_OUTPUT"
@@ -164,7 +170,7 @@ jobs:
             echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |"
             echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |"
             echo ""
-            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)"
+            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-ghcloud)"
             echo ""
             echo "Measured build — a PCR0 is only valid for this exact combination:"
             echo ""
@@ -193,18 +199,18 @@ jobs:
         if: steps.compare.outputs.match != 'true'
         run: |
           echo "PCRs differ across platforms!"
-          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs || true
+          diff pcrs-latest/nitro.pcrs pcrs-ghcloud/nitro.pcrs || true
           echo
           echo "Which build input moved:"
           for f in rootfs.cpio bzImage kernel.config; do
             a="$(sha256sum "inputs/build-inputs-ubuntu-latest/$f" 2>/dev/null | cut -d' ' -f1)"
-            b="$(sha256sum "inputs/build-inputs-ubuntu-22.04/$f" 2>/dev/null | cut -d' ' -f1)"
+            b="$(sha256sum "inputs/build-inputs-ubuntu-ghcloud/$f" 2>/dev/null | cut -d' ' -f1)"
             if [ -z "$a" ] || [ -z "$b" ]; then
               printf '  %-14s ?  (artifact missing)\n' "$f"
             elif [ "$a" = "$b" ]; then
               printf '  %-14s same\n' "$f"
             else
-              printf '  %-14s DIFFERS\n    ubuntu-latest %s\n    ubuntu-22.04  %s\n' "$f" "$a" "$b"
+              printf '  %-14s DIFFERS\n    ubuntu-latest %s\n    ubuntu-ghcloud %s\n' "$f" "$a" "$b"
             fi
           done
           echo
