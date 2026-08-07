@@ -90,6 +90,8 @@ use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::ReducedWeight;
 use prometheus::HistogramVec;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -1246,11 +1248,11 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
+        let mut rng = StdRng::from_entropy();
         let dealer_data = time_async(
             &metrics.mpc_dealer_crypto_duration_seconds,
             MPC_LABEL_DKG,
             Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                let mut rng = rand::thread_rng();
                 mgr.prepare_dkg_dealer_flow(&mut rng)
             }),
         )
@@ -1518,8 +1520,8 @@ impl MpcManager {
             .start_timer();
         let dealer_data = {
             let previous = previous.clone();
+            let mut rng = StdRng::from_entropy();
             Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                let mut rng = rand::thread_rng();
                 mgr.prepare_rotation_dealer_flow(&previous, &mut rng)
             })
             .await?
@@ -1814,11 +1816,11 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
+        let mut rng = StdRng::from_entropy();
         let dealer_data = time_async(
             &metrics.mpc_dealer_crypto_duration_seconds,
             MPC_LABEL_NONCE_GENERATION,
             Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                let mut rng = rand::thread_rng();
                 mgr.prepare_nonce_dealer_flow(batch_index, &mut rng)
             }),
         )
@@ -2850,11 +2852,11 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
+        let mut rng = StdRng::from_entropy();
         let mut dealer_data = time_async(
             &metrics.mpc_dealer_crypto_duration_seconds,
             MPC_LABEL_NONCE_GENERATION,
             Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                let mut rng = rand::thread_rng();
                 mgr.prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
             }),
         )
