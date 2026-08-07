@@ -47,6 +47,16 @@ use x509_parser::nom::AsBytes;
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Throttle for the "binary unsupported for the on-chain version" leader
+/// warning. `node_is_leader` runs every checkpoint (and from re-checking
+/// tasks), so an unthrottled `warn!` would flood logs for the whole time the
+/// chain sits ahead of this binary; the `hashi_package_version_unsupported`
+/// metric is the durable signal, so we log on first detection and then only
+/// periodically. Stores the last checkpoint height it warned at (0 = never).
+static LAST_UNSUPPORTED_WARN_CHECKPOINT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+const UNSUPPORTED_WARN_EVERY_CHECKPOINTS: u64 = 240;
+
 pub(crate) struct LeaderService {
     // Shared application state and external service clients used by leader jobs.
     inner: Arc<Hashi>,
@@ -382,9 +392,35 @@ impl LeaderService {
     /// tasks can re-check leadership mid-flight and stop driving work that
     /// has rotated to another node.
     pub(super) fn node_is_leader(inner: &Arc<Hashi>, checkpoint_height: u64) -> bool {
-        if inner.onchain_state().state().hashi().config.paused() {
-            debug!("Bridge is paused, not acting as leader");
-            return false;
+        match inner.onchain_state().autonomous_halt_reason() {
+            None => {}
+            Some(crate::onchain::HaltReason::Paused) => {
+                debug!("Bridge is paused, not acting as leader");
+                return false;
+            }
+            Some(crate::onchain::HaltReason::BinaryUnsupported {
+                supported_max,
+                live_max,
+            }) => {
+                // Throttle: loud on first detection, then periodic (the metric
+                // carries the steady-state signal).
+                use std::sync::atomic::Ordering;
+                let last = LAST_UNSUPPORTED_WARN_CHECKPOINT.load(Ordering::Relaxed);
+                if last == 0
+                    || checkpoint_height.saturating_sub(last) >= UNSUPPORTED_WARN_EVERY_CHECKPOINTS
+                {
+                    LAST_UNSUPPORTED_WARN_CHECKPOINT
+                        .store(checkpoint_height.max(1), Ordering::Relaxed);
+                    warn!(
+                        supported_max,
+                        live_max,
+                        checkpoint_height,
+                        "binary supports no live on-chain package version; not acting as leader — \
+                         upgrade required"
+                    );
+                }
+                return false;
+            }
         }
 
         match inner.config.force_run_as_leader() {

@@ -31,7 +31,7 @@ pub async fn run(
     new_kp_pgp_cert_path: PathBuf,
 ) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
 

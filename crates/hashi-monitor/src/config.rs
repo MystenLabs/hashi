@@ -1,14 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::anyhow;
-use corepc_client::client_sync::Auth;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::S3Config;
+use hashi_types::guardian::UnresolvedS3Config;
 use serde::Deserialize;
 
 use crate::domain::WithdrawalEventType;
@@ -23,7 +22,7 @@ pub struct Config {
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
-    pub guardian: S3Config,
+    pub guardian_s3: UnresolvedS3Config,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
     pub sui: SuiConfig,
@@ -39,41 +38,36 @@ pub struct NextEventDelays(Vec<(WithdrawalEventType, u64)>);
 pub struct SuiConfig {
     /// Sui RPC endpoint.
     pub rpc_url: String,
+
+    /// Currently deployed Hashi package.
+    pub package_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct BtcConfig {
-    /// Bitcoin Core RPC endpoint.
+    /// Bitcoin JSON-RPC endpoint.
+    ///
+    /// Prefix with `env:` to read the URL from an environment variable, which
+    /// keeps provider API keys out of YAML.
     pub rpc_url: String,
 
-    /// Bitcoin Core RPC auth.
+    /// Optional HTTP headers for the JSON-RPC provider.
     #[serde(default)]
-    pub rpc_auth: BtcRpcAuth,
+    pub http_headers: BTreeMap<String, String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum BtcRpcAuth {
-    #[default]
-    None,
-    UserPass {
-        username: String,
-        password: String,
-    },
-    CookieFile {
-        path: PathBuf,
-    },
-}
-
-impl BtcRpcAuth {
-    pub fn to_corepc_auth(&self) -> Auth {
-        match self {
-            BtcRpcAuth::None => Auth::None,
-            BtcRpcAuth::UserPass { username, password } => {
-                Auth::UserPass(username.clone(), password.clone())
-            }
-            BtcRpcAuth::CookieFile { path } => Auth::CookieFile(path.clone()),
+impl BtcConfig {
+    pub fn resolve_rpc_url(&self) -> anyhow::Result<String> {
+        if let Some(variable) = self.rpc_url.strip_prefix("env:") {
+            anyhow::ensure!(
+                !variable.is_empty(),
+                "bitcoin rpc_url environment variable name is empty"
+            );
+            return std::env::var(variable).with_context(|| {
+                format!("bitcoin RPC environment variable {variable} is not set")
+            });
         }
+        Ok(self.rpc_url.clone())
     }
 }
 

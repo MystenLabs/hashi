@@ -478,6 +478,15 @@ impl HashiClient {
         ))
     }
 
+    /// The package governance calls execute on. `disable_version` checks its
+    /// guard against the *executing* package's `PACKAGE_VERSION`, so running it
+    /// through the original id after an upgrade lets it disable the live one.
+    fn call_package(&self) -> Address {
+        self.onchain_state
+            .active_package()
+            .map_or(self.hashi_ids.package_id, |(id, _)| id)
+    }
+
     /// Build a transaction to execute a proposal that has reached quorum.
     ///
     /// Each proposal type has its own `module::execute(hashi, proposal_id, clock)`
@@ -522,7 +531,7 @@ impl HashiClient {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                self.call_package(),
                 Identifier::new(module_name)?,
                 Identifier::from_static("execute"),
             ),

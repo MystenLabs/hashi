@@ -6,19 +6,25 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bitcoin.workspace = true
-corepc-client.workspace = true
-jsonrpc.workspace = true
 clap.workspace = true
+futures.workspace = true
 hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
+minreq = { workspace = true, features = ["json-using-serde"] }
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
+sui-rpc.workspace = true
+sui-sdk-types.workspace = true
+time = { version = "0.3", features = ["parsing"] }
 tokio.workspace = true
+tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+base64ct.workspace = true
 e2e-tests = { path = "../e2e-tests" }
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
 tempfile.workspace = true

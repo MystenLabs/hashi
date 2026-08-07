@@ -14,6 +14,13 @@ use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{
 
 // ~~~~~~~ Constants ~~~~~~~
 
+/// The package version this tree ships as: always one past the deployed
+/// testnet package, bumped in the same change that records a deployment
+/// (Published.toml + snapshot capture) and never in mid-cycle Move changes.
+/// CI pins this (`version_policy_tests`). The tree must reach a chain as an
+/// upgrade (snapshot v1 + upgrade in every dev harness), never as a fresh
+/// publish — `create` enables this constant, and a fresh publish is Sui
+/// sequence version 1, so a mid-cycle fresh publish can never activate.
 const PACKAGE_VERSION: u64 = 2;
 
 // ~~~~~~~ Errors ~~~~~~~
@@ -38,14 +45,8 @@ public struct Versioning has store {
 // Constructor
 
 public(package) fun create(): Versioning {
-    let mut enabled_versions = vec_set::empty();
-    let mut version = 1;
-    while (version <= PACKAGE_VERSION) {
-        enabled_versions.insert(version);
-        version = version + 1;
-    };
     Versioning {
-        enabled_versions,
+        enabled_versions: vec_set::from_keys(vector[PACKAGE_VERSION]),
         upgrade_cap: option::none(),
     }
 }

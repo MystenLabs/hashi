@@ -14,6 +14,7 @@
 //! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
+use std::fmt;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -29,6 +30,34 @@ pub fn now_unix_seconds() -> UnixSeconds {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Unix seconds rendered in the monitor's canonical UTC timestamp format.
+pub struct UtcTimestamp(UnixSeconds);
+
+pub fn utc_timestamp(timestamp: UnixSeconds) -> UtcTimestamp {
+    UtcTimestamp(timestamp)
+}
+
+impl fmt::Display for UtcTimestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Ok(timestamp) = i64::try_from(self.0)
+            && let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(timestamp)
+        {
+            return write!(
+                formatter,
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                datetime.year(),
+                u8::from(datetime.month()),
+                datetime.day(),
+                datetime.hour(),
+                datetime.minute(),
+                datetime.second(),
+            );
+        }
+
+        formatter.write_str("<invalid UTC timestamp>")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,13 +111,9 @@ pub struct MonitorDepositEvent {
 pub enum DepositEventType {
     /// deposit confirmed event on btc
     E1BtcConfirmed,
-    /// `DepositApproved` on Sui.
-    ///
-    /// This event carries its approval timestamp and lets the monitor detect a
-    /// Bitcoin mismatch before hBTC is minted. `DepositConfirmed` is also a
-    /// natural monitoring point because it is unique per deposit and directly
-    /// represents hBTC minting, but it does not carry a timestamp of its own.
-    E2HashiApproved,
+    /// `DepositConfirmed` on Sui. Its timestamp is the containing checkpoint's
+    /// timestamp, supplied with the transaction by Sui gRPC.
+    E2HashiDeposited,
 }
 
 impl WithdrawalEventType {

@@ -138,10 +138,16 @@ pub struct TestNetworksBuilder {
     external_guardian: Option<ExternalGuardian>,
     /// When set, bootstrap the local net by publishing the deployed **bytecode
     /// snapshot** in this directory as v1, instead of a fresh source build of
-    /// `packages/hashi`. Enables the "deployed v1 → current source" upgrade
-    /// e2e test. `None` (default) keeps the source-publish behavior. See
-    /// [`crate::snapshot`].
+    /// `packages/hashi`. `None` defaults to the checked-in testnet snapshot
+    /// when the auto-upgrade below is on, and to a fresh source publish when
+    /// it is off. See [`crate::snapshot`].
     v1_snapshot_dir: Option<std::path::PathBuf>,
+    /// When true (the default), `build()` publishes v1 (see `v1_snapshot_dir`)
+    /// and then runs the full governance upgrade to the current source before
+    /// returning, so every builder user gets a chain in the post-upgrade state
+    /// a real network is in. Opt out via [`Self::without_upgrade`] when v1-only
+    /// is the point (snapshot signing) or the test drives its own upgrade.
+    upgrade_to_current_source: bool,
 }
 
 impl TestNetworksBuilder {
@@ -163,7 +169,16 @@ impl TestNetworksBuilder {
             onchain_config_overrides,
             external_guardian: None,
             v1_snapshot_dir: None,
+            upgrade_to_current_source: true,
         }
+    }
+
+    /// Skip the default publish-v1-then-upgrade-to-current-source boot: the
+    /// chain stays at whatever v1 was published (snapshot or fresh source).
+    /// For tests where v1-only is the point, or that drive their own upgrade.
+    pub fn without_upgrade(mut self) -> Self {
+        self.upgrade_to_current_source = false;
+        self
     }
 
     /// Bootstrap the local net by publishing the deployed **bytecode snapshot**
@@ -352,7 +367,15 @@ impl TestNetworksBuilder {
             > 0;
 
         let publisher_key = sui_network.user_keys.first().unwrap();
-        let publish_output = match &self.v1_snapshot_dir {
+        // Under the default auto-upgrade boot, v1 defaults to the checked-in
+        // snapshot so the upgrade below is a real "deployed bytecode ->
+        // current source" transition.
+        let v1_snapshot_dir = match &self.v1_snapshot_dir {
+            Some(dir) => Some(dir.clone()),
+            None if self.upgrade_to_current_source => Some(snapshot::default_snapshot_dir()?),
+            None => None,
+        };
+        let publish_output = match &v1_snapshot_dir {
             Some(snapshot_dir) => {
                 tracing::info!(
                     dir = %snapshot_dir.display(),
@@ -402,23 +425,58 @@ impl TestNetworksBuilder {
             tracing::info!("running hashi nodes resolved the guardian client from on-chain config");
         }
 
-        if nodes_started && !self.onchain_config_overrides.is_empty() {
-            let overrides: Vec<_> = self
-                .onchain_config_overrides
-                .iter()
-                .filter(|(key, _)| {
-                    self.v1_snapshot_dir.is_none()
-                        || !KEYS_NEWER_THAN_V1_SNAPSHOT.contains(&key.as_str())
-                })
-                .cloned()
-                .collect();
-            if !overrides.is_empty() {
-                apply_onchain_config_overrides(&mut test_networks, &overrides).await?;
-            }
+        // Overrides run against v1; keys it does not define wait for the upgrade.
+        let (deferred_overrides, v1_overrides): (Vec<_>, Vec<_>) = self
+            .onchain_config_overrides
+            .iter()
+            .cloned()
+            .partition(|(key, _)| {
+                v1_snapshot_dir.is_some() && KEYS_NEWER_THAN_V1_SNAPSHOT.contains(&key.as_str())
+            });
+        if nodes_started && !v1_overrides.is_empty() {
+            apply_onchain_config_overrides(&mut test_networks, &v1_overrides).await?;
+        }
+        if !deferred_overrides.is_empty() && !self.upgrade_to_current_source {
+            tracing::warn!(
+                keys = ?deferred_overrides.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                "config overrides are undefined in the v1 snapshot and this build stays on v1; \
+                 leaving them at the package default"
+            );
         }
 
         if nodes_started && test_networks.guardian_harness.is_some() {
             finalize_guardian_harness(&mut test_networks).await?;
+        }
+
+        // Last, once the network is fully settled: upgrade to the current
+        // source so callers receive a chain in the post-upgrade state a real
+        // network is in (package history {v1, vN}, routing at the upgraded
+        // package id, types defined at the v1 address). Manual-bootstrap mode
+        // (0 active nodes) has no committee to vote the upgrade; the chain
+        // stays at v1 for the operator to upgrade through governance.
+        if nodes_started && self.upgrade_to_current_source {
+            tracing::info!("upgrading the chain to the current source...");
+            let new_package_id = upgrade_flow::execute_full_upgrade(&mut test_networks).await?;
+            upgrade_flow::wait_for_package_convergence(
+                &test_networks,
+                new_package_id,
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+            tracing::info!("chain upgraded; the network runs the post-upgrade state");
+
+            // `update_config` cannot insert, and `init_defaults` runs only at the
+            // original publish, so a key this upgrade adds keeps its default.
+            if !deferred_overrides.is_empty()
+                && let Err(e) =
+                    apply_onchain_config_overrides(&mut test_networks, &deferred_overrides).await
+            {
+                tracing::warn!(
+                    keys = ?deferred_overrides.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                    "post-upgrade config overrides did not apply ({e:#}); \
+                     the upgraded package keeps its compiled-in defaults"
+                );
+            }
         }
 
         Ok(test_networks)
@@ -545,6 +603,11 @@ pub(crate) async fn apply_onchain_config_overrides(
         .await?;
 
     let hashi_ids = networks.hashi_network.ids();
+    let execute_package_id = nodes[0]
+        .hashi()
+        .onchain_state()
+        .package_id()
+        .unwrap_or(hashi_ids.package_id);
 
     // Build one executor per node, reused across all overrides.
     let mut executors: Vec<SuiTxExecutor> = nodes
@@ -576,6 +639,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         );
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateMpcConfig {
                 threshold_bps: mpc_threshold_bps,
@@ -597,6 +661,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         tracing::info!("applying on-chain config override: {key} = {value:?}");
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateConfig {
                 key: key.clone(),
@@ -636,8 +701,11 @@ pub(crate) async fn apply_onchain_config_overrides(
     Ok(())
 }
 
+/// `execute_package_id` must be the chain's latest package: calling the
+/// original id after an upgrade executes the old bytecode.
 async fn submit_proposal_through_quorum(
     hashi_ids: hashi::config::HashiIds,
+    execute_package_id: sui_sdk_types::Address,
     executors: &mut [hashi::sui_tx_executor::SuiTxExecutor],
     create_params: hashi::cli::client::CreateProposalParams,
     proposal_type_tag: sui_sdk_types::TypeTag,
@@ -671,7 +739,7 @@ async fn submit_proposal_through_quorum(
     let execute_tx = build_execute_proposal_transaction(
         hashi_ids,
         proposal_id,
-        hashi_ids.package_id,
+        execute_package_id,
         module_name,
     )?;
     let exec_resp = executors[0].execute(execute_tx).await?;

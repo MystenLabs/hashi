@@ -152,8 +152,13 @@ pub fn build_upgrade_package(
 /// The three steps must be in one PTB so the `UpgradeTicket` and
 /// `UpgradeReceipt` hot potatoes can be consumed without leaving the
 /// transaction.
+/// `current_package_id` is the chain's LATEST published package id: the
+/// `Upgrade` command checks it against the ticket (an upgrade of v2 with the
+/// original v1 id fails `PackageIDDoesNotMatch`), and the entry calls should
+/// run the newest code.
 pub fn build_upgrade_execution_transaction(
     hashi_ids: HashiIds,
+    current_package_id: Address,
     proposal_id: Address,
     compiled: Publish,
 ) -> TransactionBuilder {
@@ -173,7 +178,7 @@ pub fn build_upgrade_execution_transaction(
     // Step A: upgrade::execute → UpgradeTicket
     let ticket = builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            current_package_id,
             Identifier::from_static("upgrade"),
             Identifier::from_static("execute"),
         ),
@@ -184,7 +189,7 @@ pub fn build_upgrade_execution_transaction(
     let receipt = builder.upgrade(
         compiled.modules,
         compiled.dependencies,
-        hashi_ids.package_id,
+        current_package_id,
         ticket,
     );
 
@@ -198,7 +203,7 @@ pub fn build_upgrade_execution_transaction(
     );
     builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            current_package_id,
             Identifier::from_static("upgrade"),
             Identifier::from_static("finalize_upgrade"),
         ),

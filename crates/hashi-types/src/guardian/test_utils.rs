@@ -25,9 +25,9 @@ use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
+use super::ResolvedS3Config;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
-use super::S3Config;
 use super::SecretSharingInstance;
 use super::SessionID;
 use super::SetupNewKeyRequest;
@@ -233,7 +233,7 @@ impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
 
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
-        let s3_config = super::S3Config {
+        let s3_config = super::ResolvedS3Config {
             access_key: "ak".into(),
             secret_key: "sk".into(),
             session_token: Some("token".into()),
@@ -482,7 +482,7 @@ impl S3BucketInfo {
     }
 }
 
-impl S3Config {
+impl ResolvedS3Config {
     /// Convenience helper for tests.
     pub fn mock_for_testing() -> Self {
         Self {

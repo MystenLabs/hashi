@@ -294,16 +294,11 @@ impl TestSetup {
         store: Box<dyn PublicMessagesStore>,
     ) -> MpcManager {
         let address = Address::new([validator_index as u8; 32]);
-        let session_id = SessionId::new(
-            TEST_CHAIN_ID,
-            self.committee_set.epoch(),
-            &ProtocolType::Dkg,
-        );
         MpcManager::new(
             address,
             &self.committee_set,
             self.committee_set.epoch(),
-            session_id,
+            ProtocolType::Dkg,
             self.encryption_keys[validator_index].clone(),
             None,
             self.signing_keys[validator_index].clone(),
@@ -365,7 +360,7 @@ fn create_test_certificate(
     dealer_address: Address,
     signatures: Vec<MemberSignature>,
 ) -> MpcResult<DealerCertificate> {
-    let messages_hash = compute_messages_hash(dealer_messages);
+    let messages_hash = dealer_messages.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address,
         messages_hash,
@@ -426,7 +421,7 @@ fn create_rotation_test_certificate(
     dealer_address: Address,
     signatures: Vec<MemberSignature>,
 ) -> MpcResult<DealerCertificate> {
-    let messages_hash = compute_messages_hash(rotation_messages);
+    let messages_hash = rotation_messages.compute_hash();
     let rotation_message = DealerMessagesHash {
         dealer_address,
         messages_hash,
@@ -1034,13 +1029,12 @@ fn test_mpc_manager_new_from_committee_set() {
     let encryption_key = setup.encryption_keys[0].clone();
     let signing_key = setup.signing_keys[0].clone();
     let address = setup.address(0);
-    let session_id = setup.session_id();
 
     let manager = MpcManager::new(
         address,
         &setup.committee_set,
         setup.epoch(),
-        session_id,
+        ProtocolType::Dkg,
         encryption_key,
         None,
         signing_key,
@@ -1100,12 +1094,11 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         .set_members(members)
         .set_committees(BTreeMap::new()); // Empty!
 
-    let session_id = SessionId::new("test", epoch, &ProtocolType::Dkg);
     let result = MpcManager::new(
         Address::new([0; 32]),
         &committee_set,
         epoch,
-        session_id,
+        ProtocolType::Dkg,
         encryption_keys[0].clone(),
         None,
         signing_keys[0].clone(),
@@ -1137,7 +1130,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         setup.address(0),
         &setup.committee_set,
         setup.epoch(),
-        setup.session_id(),
+        ProtocolType::Dkg,
         wrong_encryption_key,
         None,
         setup.signing_keys[0].clone(),
@@ -1220,12 +1213,11 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         .set_members(member_infos)
         .set_committees(committees);
 
-    let session_id = SessionId::new(TEST_CHAIN_ID, 33, &ProtocolType::KeyRotation);
     let manager = MpcManager::new(
         Address::new([0u8; 32]),
         &committee_set,
         33,
-        session_id,
+        ProtocolType::KeyRotation,
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
@@ -1306,12 +1298,11 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         .set_members(member_infos)
         .set_committees(committees);
 
-    let session_id = SessionId::new(TEST_CHAIN_ID, 5, &ProtocolType::KeyRotation);
     let manager = MpcManager::new(
         Address::new([0u8; 32]),
         &committee_set,
         5, // <-- explicit caller epoch; old recompute would have used 10
-        session_id,
+        ProtocolType::KeyRotation,
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
@@ -2395,7 +2386,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
             .unwrap()
             .clone(),
     );
-    let dealer_0_message_hash = compute_messages_hash(&dealer_0_message);
+    let dealer_0_message_hash = dealer_0_message.compute_hash();
     let dealer_0_dkg_message = DealerMessagesHash {
         dealer_address: dealer_0_addr,
         messages_hash: dealer_0_message_hash,
@@ -2405,7 +2396,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
     let dealer_1_addr = setup.address(1);
     let dealer_1_msg = create_cheating_message(&setup, 1, 2, &mut rng);
     let dealer_1_message = Messages::Dkg(dealer_1_msg.clone());
-    let dealer_1_message_hash = compute_messages_hash(&dealer_1_message);
+    let dealer_1_message_hash = dealer_1_message.compute_hash();
     let dealer_1_dkg_message = DealerMessagesHash {
         dealer_address: dealer_1_addr,
         messages_hash: dealer_1_message_hash,
@@ -2549,7 +2540,7 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
         .iter()
         .skip(1) // Skip test_manager who has wrong message
         .map(|mgr| {
-            let messages_hash = compute_messages_hash(&correct_msg_0);
+            let messages_hash = correct_msg_0.compute_hash();
             let dkg_message = DealerMessagesHash {
                 dealer_address: dealer_addr_0,
                 messages_hash,
@@ -3015,7 +3006,7 @@ fn create_weight_based_test_certificate(
     dealer_addr: &Address,
     messages: &Messages,
 ) -> CertificateV1 {
-    let messages_hash = compute_messages_hash(messages);
+    let messages_hash = messages.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address: *dealer_addr,
         messages_hash,
@@ -3275,7 +3266,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     let signatures_1: Vec<MemberSignature> = (0..3)
         .map(|i| {
             let addr = setup.address(i);
-            let messages_hash = compute_messages_hash(&msg1);
+            let messages_hash = msg1.compute_hash();
             let dkg_message = DealerMessagesHash {
                 dealer_address: dealer1_addr,
                 messages_hash,
@@ -3287,7 +3278,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     let signatures_2: Vec<MemberSignature> = (0..3)
         .map(|i| {
             let addr = setup.address(i);
-            let messages_hash = compute_messages_hash(&msg2);
+            let messages_hash = msg2.compute_hash();
             let dkg_message = DealerMessagesHash {
                 dealer_address: dealer2_addr,
                 messages_hash,
@@ -3384,7 +3375,7 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
         (0..3)
             .map(|i| {
                 let addr = setup.address(i);
-                let messages_hash = compute_messages_hash(msgs);
+                let messages_hash = msgs.compute_hash();
                 let dkg_message = DealerMessagesHash {
                     dealer_address: dealer_addr,
                     messages_hash,
@@ -3467,7 +3458,7 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
             .unwrap()
             .clone(),
     );
-    let dealer0_message_hash = compute_messages_hash(&dealer0_message);
+    let dealer0_message_hash = dealer0_message.compute_hash();
     let dealer0_dkg_message = DealerMessagesHash {
         dealer_address: dealer0_addr,
         messages_hash: dealer0_message_hash,
@@ -3483,7 +3474,7 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
             .unwrap()
             .clone(),
     );
-    let dealer1_message_hash = compute_messages_hash(&dealer1_message);
+    let dealer1_message_hash = dealer1_message.compute_hash();
     let dealer1_dkg_message = DealerMessagesHash {
         dealer_address: dealer1_addr,
         messages_hash: dealer1_message_hash,
@@ -3637,8 +3628,8 @@ async fn test_handle_retrieve_messages_request_success() {
         .handle_retrieve_messages_request(Address::ZERO, &request)
         .unwrap();
 
-    let expected_hash = compute_messages_hash(&dealer_messages);
-    let received_hash = compute_messages_hash(&response.messages);
+    let expected_hash = dealer_messages.compute_hash();
+    let received_hash = response.messages.compute_hash();
     assert_eq!(received_hash, expected_hash);
 }
 
@@ -3694,8 +3685,8 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
         .handle_retrieve_messages_request(Address::ZERO, &request)
         .unwrap();
 
-    let expected_hash = compute_messages_hash(&Messages::Dkg(dealer_message));
-    let received_hash = compute_messages_hash(&response.messages);
+    let expected_hash = Messages::Dkg(dealer_message).compute_hash();
+    let received_hash = response.messages.compute_hash();
     assert_eq!(
         received_hash, expected_hash,
         "DB fallback should serve the correct message"
@@ -3711,11 +3702,6 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
 
     // Create rotation messages and store in DB only.
-    manager.session_id = SessionId::new(
-        TEST_CHAIN_ID,
-        rotation_setup.setup.epoch(),
-        &ProtocolType::KeyRotation,
-    );
     let rotation_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
     manager
         .public_messages_store
@@ -3776,8 +3762,8 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
         .handle_retrieve_messages_request(Address::ZERO, &request)
         .unwrap();
 
-    let expected_hash = compute_messages_hash(&Messages::Rotation(prev_msgs));
-    let actual_hash = compute_messages_hash(&response.messages);
+    let expected_hash = Messages::Rotation(prev_msgs).compute_hash();
+    let actual_hash = response.messages.compute_hash();
     assert_eq!(
         expected_hash, actual_hash,
         "Should return DB messages for previous epoch, not in-memory current epoch messages"
@@ -3800,8 +3786,8 @@ fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_no
 
     let prev_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
     assert_ne!(
-        compute_messages_hash(&Messages::Rotation(current_msgs.clone())),
-        compute_messages_hash(&Messages::Rotation(prev_msgs.clone())),
+        Messages::Rotation(current_msgs.clone()).compute_hash(),
+        Messages::Rotation(prev_msgs.clone()).compute_hash(),
         "Test precondition: the two message sets must differ",
     );
 
@@ -3815,8 +3801,8 @@ fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_no
         .unwrap()
         .expect("Store should have the cross-epoch entry");
     assert_eq!(
-        compute_messages_hash(&Messages::Rotation(stored_prev)),
-        compute_messages_hash(&Messages::Rotation(prev_msgs)),
+        Messages::Rotation(stored_prev).compute_hash(),
+        Messages::Rotation(prev_msgs).compute_hash(),
     );
 
     let cached = manager
@@ -3824,8 +3810,8 @@ fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_no
         .get(&dealer_address)
         .expect("In-memory entry should still be present");
     assert_eq!(
-        compute_messages_hash(&Messages::Rotation(cached.clone())),
-        compute_messages_hash(&Messages::Rotation(current_msgs)),
+        Messages::Rotation(cached.clone()).compute_hash(),
+        Messages::Rotation(current_msgs).compute_hash(),
         "Cross-epoch persist must not overwrite current-epoch in-memory cache",
     );
 }
@@ -3847,8 +3833,8 @@ fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_curr
 
     let prev_msg = manager.create_dealer_message(&mut rng);
     assert_ne!(
-        compute_messages_hash(&Messages::Dkg(current_msg.clone())),
-        compute_messages_hash(&Messages::Dkg(prev_msg.clone())),
+        Messages::Dkg(current_msg.clone()).compute_hash(),
+        Messages::Dkg(prev_msg.clone()).compute_hash(),
         "Test precondition: the two messages must differ",
     );
 
@@ -3862,8 +3848,8 @@ fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_curr
         .unwrap()
         .expect("Store should have the cross-epoch entry");
     assert_eq!(
-        compute_messages_hash(&Messages::Dkg(stored_prev)),
-        compute_messages_hash(&Messages::Dkg(prev_msg)),
+        Messages::Dkg(stored_prev).compute_hash(),
+        Messages::Dkg(prev_msg).compute_hash(),
     );
 
     let cached = manager
@@ -3871,8 +3857,8 @@ fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_curr
         .get(&dealer_address)
         .expect("In-memory entry should still be present");
     assert_eq!(
-        compute_messages_hash(&Messages::Dkg(cached.clone())),
-        compute_messages_hash(&Messages::Dkg(current_msg)),
+        Messages::Dkg(cached.clone()).compute_hash(),
+        Messages::Dkg(current_msg).compute_hash(),
         "Cross-epoch persist must not overwrite current-epoch in-memory cache",
     );
 }
@@ -3895,8 +3881,8 @@ fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_cu
 
     let prev_nonce = create_nonce_dealer_message(&setup, 0, batch_index, &mut rng);
     assert_ne!(
-        compute_messages_hash(&Messages::NonceGeneration(current_nonce.clone())),
-        compute_messages_hash(&Messages::NonceGeneration(prev_nonce.clone())),
+        Messages::NonceGeneration(current_nonce.clone()).compute_hash(),
+        Messages::NonceGeneration(prev_nonce.clone()).compute_hash(),
         "Test precondition: the two messages must differ",
     );
 
@@ -3910,11 +3896,12 @@ fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_cu
         .unwrap()
         .expect("Store should have the cross-epoch entry");
     assert_eq!(
-        compute_messages_hash(&Messages::NonceGeneration(NonceMessage {
+        Messages::NonceGeneration(NonceMessage {
             batch_index,
             message: stored_prev_msg,
-        })),
-        compute_messages_hash(&Messages::NonceGeneration(prev_nonce)),
+        })
+        .compute_hash(),
+        Messages::NonceGeneration(prev_nonce).compute_hash(),
     );
 
     let cached = manager
@@ -3922,8 +3909,8 @@ fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_cu
         .get(&(batch_index, dealer_address))
         .expect("In-memory entry should still be present");
     assert_eq!(
-        compute_messages_hash(&Messages::NonceGeneration(cached.clone())),
-        compute_messages_hash(&Messages::NonceGeneration(current_nonce)),
+        Messages::NonceGeneration(cached.clone()).compute_hash(),
+        Messages::NonceGeneration(current_nonce).compute_hash(),
         "Cross-epoch persist must not overwrite current-epoch in-memory cache",
     );
 }
@@ -3964,8 +3951,8 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
         },
     );
     let response = result.expect("nonce gen should fall back to DB when batch_index is provided");
-    let expected_hash = compute_messages_hash(&Messages::NonceGeneration(nonce_msg));
-    let received_hash = compute_messages_hash(&response.messages);
+    let expected_hash = Messages::NonceGeneration(nonce_msg).compute_hash();
+    let received_hash = response.messages.compute_hash();
     assert_eq!(
         received_hash, expected_hash,
         "DB fallback should serve the correct nonce message"
@@ -4024,14 +4011,14 @@ fn test_prepare_dealer_flow_survives_restart() {
 
     // First call: generates and persists.
     let flow1 = manager.prepare_dkg_dealer_flow(&mut rng).unwrap();
-    let hash1 = compute_messages_hash(&flow1.request.messages);
+    let hash1 = flow1.request.messages.compute_hash();
 
     // Simulate restart: wipe in-memory cache.
     manager.current_dkg_messages.clear();
 
     // Second call: must load from DB, not regenerate.
     let flow2 = manager.prepare_dkg_dealer_flow(&mut rng).unwrap();
-    let hash2 = compute_messages_hash(&flow2.request.messages);
+    let hash2 = flow2.request.messages.compute_hash();
 
     assert_eq!(
         hash1, hash2,
@@ -4049,16 +4036,11 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
-    manager.session_id = SessionId::new(
-        TEST_CHAIN_ID,
-        rotation_setup.setup.epoch(),
-        &ProtocolType::KeyRotation,
-    );
 
     let flow1 = manager
         .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
         .unwrap();
-    let hash1 = compute_messages_hash(&flow1.request.messages);
+    let hash1 = flow1.request.messages.compute_hash();
 
     // Simulate restart: wipe in-memory caches that `try_sign_rotation_messages`
     // uses to track which shares it already processed. On a real restart,
@@ -4069,7 +4051,7 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
     let flow2 = manager
         .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
         .unwrap();
-    let hash2 = compute_messages_hash(&flow2.request.messages);
+    let hash2 = flow2.request.messages.compute_hash();
 
     assert_eq!(
         hash1, hash2,
@@ -4088,11 +4070,6 @@ fn test_prepare_rotation_dealer_flow_survives_same_process_retry() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
-    manager.session_id = SessionId::new(
-        TEST_CHAIN_ID,
-        rotation_setup.setup.epoch(),
-        &ProtocolType::KeyRotation,
-    );
 
     let flow1 = manager
         .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
@@ -4103,8 +4080,8 @@ fn test_prepare_rotation_dealer_flow_survives_same_process_retry() {
         .expect("same-process dealer retry must re-ack its own batch, not reject it");
 
     assert_eq!(
-        compute_messages_hash(&flow1.request.messages),
-        compute_messages_hash(&flow2.request.messages),
+        flow1.request.messages.compute_hash(),
+        flow2.request.messages.compute_hash(),
         "dealer batch must be identical across a same-process retry",
     );
 }
@@ -4120,14 +4097,14 @@ fn test_prepare_nonce_dealer_flow_survives_restart() {
     let flow1 = manager
         .prepare_nonce_dealer_flow(batch_index, &mut rng)
         .unwrap();
-    let hash1 = compute_messages_hash(&flow1.request.messages);
+    let hash1 = flow1.request.messages.compute_hash();
 
     manager.current_nonce_messages.clear();
 
     let flow2 = manager
         .prepare_nonce_dealer_flow(batch_index, &mut rng)
         .unwrap();
-    let hash2 = compute_messages_hash(&flow2.request.messages);
+    let hash2 = flow2.request.messages.compute_hash();
 
     assert_eq!(
         hash1, hash2,
@@ -4476,7 +4453,7 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
         .get(&dealer_addr)
         .unwrap();
     let dealer_message = &Messages::Dkg(dealer_message_raw.clone());
-    let messages_hash = compute_messages_hash(dealer_message);
+    let messages_hash = dealer_message.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address: dealer_addr,
         messages_hash,
@@ -4763,7 +4740,7 @@ async fn test_retrieve_dealer_message_success() {
     );
 
     // Create DkgMessage and validator signatures
-    let messages_hash = compute_messages_hash(dealer_message);
+    let messages_hash = dealer_message.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address,
         messages_hash,
@@ -4843,7 +4820,7 @@ async fn test_retrieve_dealer_message_retries_multiple_signers() {
     );
 
     // Create DkgMessage
-    let messages_hash = compute_messages_hash(dealer_message);
+    let messages_hash = dealer_message.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address: dealer_addr,
         messages_hash,
@@ -4910,7 +4887,7 @@ async fn test_retrieve_dealer_message_all_signers_fail() {
     );
 
     // Create DkgMessage
-    let messages_hash = compute_messages_hash(dealer_message);
+    let messages_hash = dealer_message.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address: dealer_addr,
         messages_hash,
@@ -4992,7 +4969,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     }
 
     // Create DkgMessage for dealer A
-    let message_hash_a = compute_messages_hash(&message_a);
+    let message_hash_a = message_a.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address: dealer_a_addr,
         messages_hash: message_hash_a,
@@ -5043,7 +5020,7 @@ fn create_certificate_with_signers(
     messages: &Messages,
     signatures: Vec<MemberSignature>,
 ) -> MpcResult<DealerCertificate> {
-    let messages_hash = compute_messages_hash(messages);
+    let messages_hash = messages.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address,
         messages_hash,
@@ -5410,8 +5387,8 @@ async fn test_nonce_equivocation_is_rejected_for_a_pruned_batch() {
     let certified = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
     let re_deal = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
     assert_ne!(
-        compute_messages_hash(&Messages::NonceGeneration(certified.clone())),
-        compute_messages_hash(&Messages::NonceGeneration(re_deal.clone())),
+        Messages::NonceGeneration(certified.clone()).compute_hash(),
+        Messages::NonceGeneration(re_deal.clone()).compute_hash(),
         "Test precondition: the two deals must differ",
     );
 
@@ -5459,8 +5436,8 @@ async fn test_nonce_equivocation_is_rejected_after_a_restart() {
     let certified = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
     let re_deal = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
     assert_ne!(
-        compute_messages_hash(&Messages::NonceGeneration(certified.clone())),
-        compute_messages_hash(&Messages::NonceGeneration(re_deal.clone())),
+        Messages::NonceGeneration(certified.clone()).compute_hash(),
+        Messages::NonceGeneration(re_deal.clone()).compute_hash(),
         "Test precondition: the two deals must differ",
     );
 
@@ -5494,11 +5471,12 @@ async fn test_nonce_equivocation_is_rejected_after_a_restart() {
         .unwrap()
         .expect("store still holds the certified deal");
     assert_eq!(
-        compute_messages_hash(&Messages::NonceGeneration(NonceMessage {
+        Messages::NonceGeneration(NonceMessage {
             batch_index,
             message: stored,
-        })),
-        compute_messages_hash(&Messages::NonceGeneration(certified)),
+        })
+        .compute_hash(),
+        Messages::NonceGeneration(certified).compute_hash(),
         "the re-deal must not have overwritten the certified message",
     );
 }
@@ -5587,8 +5565,8 @@ async fn test_handle_send_messages_request_invalid_shares_cached_on_retry() {
         .handle_retrieve_messages_request(Address::ZERO, &retrieve_request)
         .unwrap();
     assert_eq!(
-        compute_messages_hash(&retrieve_response.messages),
-        compute_messages_hash(&cheating_message),
+        retrieve_response.messages.compute_hash(),
+        cheating_message.compute_hash(),
         "Stored message should be retrievable"
     );
 }
@@ -5693,7 +5671,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
     }
 
     // Create certificate signed by parties 2, 3, 4
-    let messages_hash = compute_messages_hash(&cheating_message);
+    let messages_hash = cheating_message.compute_hash();
     let dkg_message = DealerMessagesHash {
         dealer_address: dealer_addr,
         messages_hash,
@@ -6002,7 +5980,7 @@ async fn test_restart_dealer_reuses_stored_message() {
     let original_dealer = setup.create_manager(0);
     let dealer_address = original_dealer.address;
     let original_message = original_dealer.create_dealer_message(&mut rng);
-    let original_hash = compute_messages_hash(&Messages::Dkg(original_message.clone()));
+    let original_hash = Messages::Dkg(original_message.clone()).compute_hash();
 
     // Create tracking store with pre-populated message (simulating persistence)
     let store_count = Arc::new(AtomicUsize::new(0));
@@ -6019,7 +5997,7 @@ async fn test_restart_dealer_reuses_stored_message() {
         .get(&dealer_address)
         .unwrap();
     assert_eq!(
-        compute_messages_hash(&Messages::Dkg(loaded_raw.clone())),
+        Messages::Dkg(loaded_raw.clone()).compute_hash(),
         original_hash
     );
 
@@ -6058,7 +6036,7 @@ async fn test_restart_dealer_reuses_stored_message() {
         .unwrap()
         .clone();
     assert_eq!(
-        compute_messages_hash(&Messages::Dkg(final_raw)),
+        Messages::Dkg(final_raw).compute_hash(),
         original_hash,
         "run_as_dealer should use the pre-stored message, not create a new one"
     );
@@ -6120,7 +6098,7 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
     let signatures_1: Vec<MemberSignature> = (0..3)
         .map(|i| {
             let addr = setup.address(i);
-            let messages_hash = compute_messages_hash(&msg1_wrapped);
+            let messages_hash = msg1_wrapped.compute_hash();
             let dkg_message = DealerMessagesHash {
                 dealer_address: dealer1_addr,
                 messages_hash,
@@ -6132,7 +6110,7 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
     let signatures_2: Vec<MemberSignature> = (0..3)
         .map(|i| {
             let addr = setup.address(i);
-            let messages_hash = compute_messages_hash(&msg2_wrapped);
+            let messages_hash = msg2_wrapped.compute_hash();
             let dkg_message = DealerMessagesHash {
                 dealer_address: dealer2_addr,
                 messages_hash,
@@ -6295,7 +6273,11 @@ impl RotationTestSetup {
         result
     }
 
-    fn prepare_for_rotation(&self, manager: &mut MpcManager) {
+    fn switch_to_rotation(&self, manager: &mut MpcManager) {
+        manager.protocol_type = ProtocolType::KeyRotation;
+    }
+
+    fn install_previous_committee(&self, manager: &mut MpcManager) {
         let previous_committee = self
             .setup
             .committee_set
@@ -6342,7 +6324,8 @@ impl RotationTestSetup {
         receiver_manager.dealer_outputs.clear();
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut receiver_manager);
+        self.install_previous_committee(&mut receiver_manager);
+        self.switch_to_rotation(&mut receiver_manager);
 
         (receiver_manager, dkg_output)
     }
@@ -6372,7 +6355,8 @@ impl RotationTestSetup {
         receiver_manager.dealer_outputs.clear();
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut receiver_manager);
+        self.install_previous_committee(&mut receiver_manager);
+        self.switch_to_rotation(&mut receiver_manager);
 
         (receiver_manager, dkg_output)
     }
@@ -6399,7 +6383,8 @@ impl RotationTestSetup {
         dealer_manager.dealer_outputs.clear();
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut dealer_manager);
+        self.install_previous_committee(&mut dealer_manager);
+        self.switch_to_rotation(&mut dealer_manager);
 
         // Create rotation messages and store for reuse
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -6439,7 +6424,8 @@ impl RotationTestSetup {
         dealer_manager.dealer_outputs.clear();
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
-        self.prepare_for_rotation(&mut dealer_manager);
+        self.install_previous_committee(&mut dealer_manager);
+        self.switch_to_rotation(&mut dealer_manager);
 
         // Create rotation messages and store for reuse
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -7361,7 +7347,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         .unwrap();
     let (_, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &cheating_dealer_mgr.session_id,
+        &cheating_dealer_mgr.current_session_id(),
         &cheating_dealer_addr,
         share_value,
         first_share_index,
@@ -7550,12 +7536,11 @@ async fn test_prepare_previous_output_for_new_member() {
         .set_committees(committees);
 
     // Create new member's MpcManager
-    let session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg);
     let new_member_manager = MpcManager::new(
         new_member_addr,
         &new_committee_set,
         epoch,
-        session_id,
+        ProtocolType::Dkg,
         new_member_encryption_key,
         None,
         new_member_signing_key,
@@ -7703,9 +7688,9 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
     let Messages::Dkg(other_msg) = &rotation_setup.dealer_messages[1] else {
         panic!("expected a DKG message");
     };
-    let certified_hash = compute_messages_hash(&Messages::Dkg(certified_msg.clone()));
+    let certified_hash = Messages::Dkg(certified_msg.clone()).compute_hash();
     assert_ne!(
-        compute_messages_hash(&Messages::Dkg(other_msg.clone())),
+        Messages::Dkg(other_msg.clone()).compute_hash(),
         certified_hash,
         "Test precondition: the stored message must differ from the certified one",
     );
@@ -7773,7 +7758,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
         .unwrap()
         .expect("the re-fetched message is persisted");
     assert_eq!(
-        compute_messages_hash(&Messages::Dkg(stored)),
+        Messages::Dkg(stored).compute_hash(),
         certified_hash,
         "the diverged copy must be replaced by the certified one",
     );
@@ -7786,10 +7771,6 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
 
-    // Override session ID to KeyRotation so rotation messages match
-    // what reconstruct_previous_rotation_output expects.
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
-
     // Create rotation dealers with KeyRotation session ID.
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -7797,7 +7778,6 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -7892,7 +7872,6 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
 async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -7900,7 +7879,6 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -7952,10 +7930,9 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     let diverged = dealers[0]
         .1
         .create_rotation_messages(&dealer0_output, &mut rng);
-    let certified_hash =
-        compute_messages_hash(&Messages::Rotation(certified[&diverged_dealer].clone()));
+    let certified_hash = Messages::Rotation(certified[&diverged_dealer].clone()).compute_hash();
     assert_ne!(
-        compute_messages_hash(&Messages::Rotation(diverged.clone())),
+        Messages::Rotation(diverged.clone()).compute_hash(),
         certified_hash,
         "Test precondition: the stored deal must differ from the certified one",
     );
@@ -8019,7 +7996,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         .unwrap()
         .expect("the re-fetched message is persisted");
     assert_eq!(
-        compute_messages_hash(&Messages::Rotation(stored)),
+        Messages::Rotation(stored).compute_hash(),
         certified_hash,
         "the diverged copy must be replaced by the certified one",
     );
@@ -8029,7 +8006,6 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
 async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -8037,7 +8013,6 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -8131,7 +8106,6 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
 async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch();
-    let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     let dealer_indices = [0usize, 1, 4];
     let mut dealers: Vec<(usize, MpcManager, MpcOutput)> = dealer_indices
@@ -8139,7 +8113,6 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
         .map(|&i| {
             let (mut mgr, output) = rotation_setup.create_receiver_with_memory_store(i);
             mgr.previous_output = Some(output.clone());
-            mgr.session_id = rotation_session_id.clone();
             (i, mgr, output)
         })
         .collect();
@@ -8198,9 +8171,9 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
     let out_later = dealers[2].2.clone();
     let diverged_later = dealers[2].1.create_rotation_messages(&out_later, &mut rng);
     let repairable_certified_hash =
-        compute_messages_hash(&Messages::Rotation(certified[&repairable].clone()));
+        Messages::Rotation(certified[&repairable].clone()).compute_hash();
     assert_ne!(
-        compute_messages_hash(&Messages::Rotation(diverged_later.clone())),
+        Messages::Rotation(diverged_later.clone()).compute_hash(),
         repairable_certified_hash,
         "Test precondition: the later dealer's stored deal must differ from its certified one",
     );
@@ -8244,7 +8217,7 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
         .unwrap()
         .expect("the later dealer's message is still present");
     assert_eq!(
-        compute_messages_hash(&Messages::Rotation(stored_later)),
+        Messages::Rotation(stored_later).compute_hash(),
         repairable_certified_hash,
         "a failed repair must not skip the dealers certified after it",
     );
@@ -8329,7 +8302,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         .unwrap();
     let cheating_msg = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &receiver_manager.session_id,
+        &receiver_manager.current_session_id(),
         &rotation_dealer_addr,
         share3_value,
         share3_index,
@@ -8337,7 +8310,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         &mut rng,
     );
     let session_id = receiver_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&rotation_dealer_addr, share3_index);
     let receiver = avss::Receiver::new(
         receiver_manager.mpc_config.nodes.clone(),
@@ -8460,7 +8433,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     // Use the test_manager's session_id which is the base session_id for rotation
     let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &test_manager.session_id,
+        &test_manager.current_session_id(),
         &dealer_addr,
         share_value,
         first_share_index,
@@ -8484,7 +8457,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
 
     // Test party processes cheating message with their CORRECT key, generating a complaint
     let session_id = test_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, first_share_index);
     let receiver = avss::Receiver::new(
         test_manager.mpc_config.nodes.clone(),
@@ -8607,6 +8580,24 @@ async fn test_recover_rotation_shares_via_complaint_success() {
 }
 
 #[test]
+fn base_session_id_for_epoch_honours_both_arguments() {
+    let setup = TestSetup::new(4);
+    let manager = setup.create_manager(0);
+    let epoch = manager.mpc_config.epoch;
+
+    assert_eq!(
+        manager.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation),
+        SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation),
+        "the manager's cached Dkg id must not stand in for another protocol"
+    );
+    assert_eq!(
+        manager.base_session_id_for_epoch(epoch + 7, &ProtocolType::Dkg),
+        SessionId::new(TEST_CHAIN_ID, epoch + 7, &ProtocolType::Dkg),
+        "a non-current epoch must use the epoch passed, not previous_epoch"
+    );
+}
+
+#[test]
 fn test_handle_complain_request_success() {
     let rotation_setup = RotationTestSetup::new();
     let mut rng = rand::thread_rng();
@@ -8646,7 +8637,7 @@ fn test_handle_complain_request_success() {
     // Create a cheating rotation message that corrupts the share for victim
     let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &victim_manager.session_id,
+        &victim_manager.current_session_id(),
         &dealer_addr,
         share_value,
         first_share_index,
@@ -8661,7 +8652,7 @@ fn test_handle_complain_request_success() {
 
     // Victim processes cheating message and generates a complaint
     let session_id = victim_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, first_share_index);
     let commitment = victim_dkg_output
         .commitments
@@ -8977,7 +8968,8 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         // Clear DKG state to prepare for rotation
         dealer_manager.current_dkg_messages.clear();
         dealer_manager.dealer_outputs.clear();
-        rotation_setup.prepare_for_rotation(&mut dealer_manager);
+        rotation_setup.install_previous_committee(&mut dealer_manager);
+        rotation_setup.switch_to_rotation(&mut dealer_manager);
 
         // Create and store rotation messages
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -9011,7 +9003,8 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         .unwrap();
     new_dealer_manager.current_dkg_messages.clear();
     new_dealer_manager.dealer_outputs.clear();
-    rotation_setup.prepare_for_rotation(&mut new_dealer_manager);
+    rotation_setup.install_previous_committee(&mut new_dealer_manager);
+    rotation_setup.switch_to_rotation(&mut new_dealer_manager);
 
     // Load rotation messages from store (simulating restart recovery)
     let stored_messages = shared_store
@@ -9030,12 +9023,12 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
             .get(share_index)
             .expect("Should have message for share index");
         // Compare message hashes (messages contain random elements, so compare hashes)
-        let original_hash = compute_messages_hash(&Messages::Rotation(
-            std::iter::once((*share_index, original_msg.clone())).collect(),
-        ));
-        let stored_hash = compute_messages_hash(&Messages::Rotation(
-            std::iter::once((*share_index, stored_msg.clone())).collect(),
-        ));
+        let original_hash =
+            Messages::Rotation(std::iter::once((*share_index, original_msg.clone())).collect())
+                .compute_hash();
+        let stored_hash =
+            Messages::Rotation(std::iter::once((*share_index, stored_msg.clone())).collect())
+                .compute_hash();
         assert_eq!(
             original_hash, stored_hash,
             "Stored message should match original for share index {}",
@@ -9123,7 +9116,9 @@ fn test_party_restart_uses_stored_rotation_messages() {
     let mut party_manager = rotation_setup
         .setup
         .create_manager_with_store(party_index, Box::new(shared_store.clone()));
-    rotation_setup.prepare_for_rotation(&mut party_manager);
+    // No `switch_to_rotation`: this manager runs DKG below, which derives
+    // against the Dkg base. Verified — switching here fails the test.
+    rotation_setup.install_previous_committee(&mut party_manager);
 
     // Verify rotation messages were loaded from store
     for dealer_addr in rotation_messages_map.keys() {
@@ -9161,15 +9156,14 @@ fn test_party_restart_uses_stored_rotation_messages() {
                 continue;
             }
             let session_id = party_manager
-                .session_id
-                .rotation_session_id(dealer_addr, *share_index)
-                .to_vec();
+                .current_session_id()
+                .rotation_session_id(dealer_addr, *share_index);
             party_manager
                 .process_and_store_message(
                     party_manager.mpc_config.nodes.clone(),
                     party_manager.party_id,
                     party_manager.mpc_config.threshold,
-                    session_id,
+                    &session_id,
                     message,
                     None,
                     output_key,
@@ -9310,12 +9304,11 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     }
 
     // Create MpcManager for the shifted member with the target committee.
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager = MpcManager::new(
         shifted_addr,
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::Dkg,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
@@ -9438,7 +9431,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
                     setup.address(signer_idx),
                     &DealerMessagesHash {
                         dealer_address: dealer_addr,
-                        messages_hash: compute_messages_hash(msg),
+                        messages_hash: msg.compute_hash(),
                     },
                 )
             })
@@ -9490,12 +9483,11 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     }
 
     // Create manager for member 4 at target epoch.
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager = MpcManager::new(
         setup.address(target_index),
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::Dkg,
         setup.encryption_keys[target_index].clone(),
         Some(setup.encryption_keys[target_index].clone()),
         setup.signing_keys[target_index].clone(),
@@ -9574,7 +9566,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
                     setup.address(signer_idx),
                     &DealerMessagesHash {
                         dealer_address: dealer_addr,
-                        messages_hash: compute_messages_hash(msg),
+                        messages_hash: msg.compute_hash(),
                     },
                 )
             })
@@ -9626,12 +9618,11 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
 
     let prev_key = setup.encryption_keys[target_index].clone();
     // With `previous_encryption_key = Some(prev_key)`: reconstruction succeeds.
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager_with_prev = MpcManager::new(
         setup.address(target_index),
         &committee_set,
         target_epoch,
-        session_id.clone(),
+        ProtocolType::Dkg,
         prev_key.clone(),
         Some(prev_key.clone()),
         setup.signing_keys[target_index].clone(),
@@ -9659,7 +9650,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         setup.address(target_index),
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::Dkg,
         prev_key,
         None,
         setup.signing_keys[target_index].clone(),
@@ -9724,7 +9715,7 @@ fn test_recover_current_dkg() {
                         setup.address(s),
                         &DealerMessagesHash {
                             dealer_address: dealer_addr,
-                            messages_hash: compute_messages_hash(msg),
+                            messages_hash: msg.compute_hash(),
                         },
                     )
                 })
@@ -9764,7 +9755,7 @@ fn test_recover_current_dkg() {
             setup.address(target_index),
             &committee_set,
             epoch,
-            SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg),
+            ProtocolType::Dkg,
             setup.encryption_keys[target_index].clone(),
             None, // genesis: no previous encryption key
             setup.signing_keys[target_index].clone(),
@@ -9832,7 +9823,7 @@ fn test_recover_current_dkg() {
         };
         assert!(
             matches!(
-                guard.reconstruct_dkg_output(&context, &certificates, &HashMap::new()),
+                guard.reconstruct_dkg_output_locally(&context, &certificates, &HashMap::new()),
                 Err(MpcError::StoredMessageDiverged { .. })
             ),
             "the hash check, not a downstream AVSS failure, must reject the swapped message",
@@ -9898,7 +9889,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
                         setup.address(s),
                         &DealerMessagesHash {
                             dealer_address: dealer_addr,
-                            messages_hash: compute_messages_hash(msg),
+                            messages_hash: msg.compute_hash(),
                         },
                     )
                 })
@@ -9936,7 +9927,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         setup.address(target_index),
         &committee_set,
         epoch,
-        SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg),
+        ProtocolType::Dkg,
         setup.encryption_keys[target_index].clone(),
         None,
         setup.signing_keys[target_index].clone(),
@@ -10026,13 +10017,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
 
     for &dealer_idx in &dealer_indices {
         let dealer_addr = rotation_setup.setup.address(dealer_idx);
-        let rotation_session_id =
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
         let mut dealer_manager = MpcManager::new(
             dealer_addr,
             &rotation_committee_set,
             rotation_epoch,
-            rotation_session_id.clone(),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             None,
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
@@ -10061,13 +10050,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         // Get another validator's signature
         let other_idx = if dealer_idx == 0 { 1 } else { 0 };
         let other_addr = rotation_setup.setup.address(other_idx);
-        let other_rotation_session_id =
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
         let mut other_manager = MpcManager::new(
             other_addr,
             &rotation_committee_set,
             rotation_epoch,
-            other_rotation_session_id,
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             None,
             rotation_setup.setup.signing_keys[other_idx].clone(),
@@ -10176,12 +10163,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     }
 
     // Create MpcManager for the shifted member at epoch 102
-    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::KeyRotation);
     let manager = MpcManager::new(
         shifted_addr,
         &committee_set,
         target_epoch,
-        session_id,
+        ProtocolType::KeyRotation,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
@@ -10267,7 +10253,7 @@ fn test_recover_current_rotation() {
             rotation_setup.setup.address(idx),
             &committee_set,
             rotation_epoch,
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             rotation_setup.setup.signing_keys[idx].clone(),
@@ -10344,7 +10330,7 @@ fn test_recover_current_rotation() {
             rotation_setup.setup.address(receiver_index),
             &committee_set,
             rotation_epoch,
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[receiver_index].clone(),
             Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
             rotation_setup.setup.signing_keys[receiver_index].clone(),
@@ -10465,7 +10451,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             rotation_setup.setup.address(idx),
             &committee_set,
             rotation_epoch,
-            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            ProtocolType::KeyRotation,
             rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             rotation_setup.setup.signing_keys[idx].clone(),
@@ -10545,7 +10531,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         receiver_addr,
         &committee_set,
         rotation_epoch,
-        base_session_id,
+        ProtocolType::KeyRotation,
         rotation_setup.setup.encryption_keys[receiver_index].clone(),
         Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
         rotation_setup.setup.signing_keys[receiver_index].clone(),
@@ -10837,8 +10823,8 @@ fn retrieve_and_verify_hash(
         .handle_retrieve_messages_request(Address::ZERO, &request)
         .unwrap();
     assert_eq!(
-        compute_messages_hash(&response.messages),
-        compute_messages_hash(expected_messages),
+        response.messages.compute_hash(),
+        expected_messages.compute_hash(),
     );
 }
 
@@ -10979,7 +10965,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
 
     // Build a complaint using wrong key
     let session_id = receiver
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
     let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
     let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
@@ -11045,7 +11031,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
 
     // Build complaint
     let session_id = receiver
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
     let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
     let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
@@ -11121,7 +11107,7 @@ fn test_handle_complain_request_rotation_caches_response() {
 
     let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
         &rotation_setup.setup,
-        &victim_manager.session_id,
+        &victim_manager.current_session_id(),
         &dealer_addr,
         share_value,
         first_share_index,
@@ -11135,7 +11121,7 @@ fn test_handle_complain_request_rotation_caches_response() {
 
     // Victim builds complaint
     let session_id = victim_manager
-        .session_id
+        .current_session_id()
         .rotation_session_id(&dealer_addr, first_share_index);
     let commitment = victim_dkg_output
         .commitments
@@ -12100,7 +12086,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
         .iter()
         .skip(1) // Skip test_manager who has wrong message
         .map(|mgr| {
-            let messages_hash = compute_messages_hash(&correct_messages_0);
+            let messages_hash = correct_messages_0.compute_hash();
             let dkg_message = DealerMessagesHash {
                 dealer_address: dealer_addr_0,
                 messages_hash,
@@ -12124,7 +12110,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
         let signatures: Vec<_> = managers
             .iter()
             .map(|mgr| {
-                let messages_hash = compute_messages_hash(&messages);
+                let messages_hash = messages.compute_hash();
                 let dkg_message = DealerMessagesHash {
                     dealer_address: dealer_addr,
                     messages_hash,
@@ -12418,7 +12404,7 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
 
     let confirm_target = DealerMessagesHash {
         dealer_address: dealer_addr,
-        messages_hash: MessageHash::from(avss_msg.common.hash().digest),
+        messages_hash: MessagesHash::from(avss_msg.common.hash().digest),
     };
     let member_sig = MemberSignature::new(receiver.mpc_config.epoch, receiver.address, sig);
     let mut aggregator = BlsSignatureAggregator::new(setup.committee(), confirm_target);
@@ -12580,7 +12566,7 @@ fn avid_pessimistic_fixture(
     let common = common.expect("at least one confirmer");
     let confirm_target = DealerMessagesHash {
         dealer_address: dealer_addr,
-        messages_hash: MessageHash::from(common.hash().digest),
+        messages_hash: MessagesHash::from(common.hash().digest),
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
     for s in sigs {
@@ -12874,7 +12860,7 @@ fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
 
     let confirm_target = DealerMessagesHash {
         dealer_address: fx.dealer_addr,
-        messages_hash: MessageHash::from(fx.common.hash().digest),
+        messages_hash: MessagesHash::from(fx.common.hash().digest),
     };
     let member_sig = MemberSignature::new(
         receiver.mpc_config.epoch,
@@ -13110,7 +13096,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
     ));
     let confirm_target = DealerMessagesHash {
         dealer_address: fx.dealer_addr,
-        messages_hash: MessageHash::from(fx.common.hash().digest),
+        messages_hash: MessagesHash::from(fx.common.hash().digest),
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
     for s in sigs {
@@ -13312,7 +13298,7 @@ async fn test_run_as_avid_nonce_dealer_all_confirm_posts_confirm_cert() {
         .expect("dealer self-dealt");
     assert_eq!(
         cert.message().messages_hash,
-        MessageHash::from(state.common.hash().digest),
+        MessagesHash::from(state.common.hash().digest),
         "the all-confirm cert pins H(v)"
     );
     assert_eq!(
@@ -13370,7 +13356,7 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
         .unwrap();
     assert_ne!(
         cert.message().messages_hash,
-        MessageHash::from(state.common.hash().digest),
+        MessagesHash::from(state.common.hash().digest),
         "the Vote target is distinct from H(v)"
     );
     assert!(
@@ -13745,7 +13731,7 @@ async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() 
 
     let unresolvable_target = DealerMessagesHash {
         dealer_address: setup.address(4),
-        messages_hash: MessageHash::from([9u8; 32]),
+        messages_hash: MessagesHash::from([9u8; 32]),
     };
     let unresolvable_sigs: Vec<MemberSignature> = (0..6)
         .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
@@ -13975,7 +13961,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         let dealer_address = setup.address(dealer_idx);
         let message = DealerMessagesHash {
             dealer_address,
-            messages_hash: MessageHash::from([dealer_idx as u8 + 1; 32]),
+            messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
         };
         let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
         for &s in signers {
@@ -14083,7 +14069,7 @@ fn test_avid_sizing_counts_past_the_floor() {
         let dealer_address = setup.address(dealer_idx);
         let message = DealerMessagesHash {
             dealer_address,
-            messages_hash: MessageHash::from([dealer_idx as u8 + 1; 32]),
+            messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
         };
         let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
         for s in 0..4 {
@@ -15804,7 +15790,7 @@ fn party_rejects_a_self_signed_cert() {
         dealer,
         &DealerMessagesHash {
             dealer_address: dealer,
-            messages_hash: compute_messages_hash(&messages),
+            messages_hash: messages.compute_hash(),
         },
     );
     let self_signed = CertificateV1::Dkg(
@@ -15854,7 +15840,7 @@ fn previous_epoch_certs_verify_against_previous_parameters() {
     let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
     let target = DealerMessagesHash {
         dealer_address: dealer,
-        messages_hash: compute_messages_hash(&messages),
+        messages_hash: messages.compute_hash(),
     };
     let prev_epoch = setup.epoch() - 1;
     let prev_committee = setup
@@ -15910,7 +15896,7 @@ fn dealer_skip_weight_ignores_unverifiable_certs() {
     let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
     let target = DealerMessagesHash {
         dealer_address: dealer,
-        messages_hash: compute_messages_hash(&messages),
+        messages_hash: messages.compute_hash(),
     };
 
     let self_signed = CertificateV1::Dkg(
@@ -15966,7 +15952,7 @@ async fn self_signed_certs_do_not_suppress_the_dealer_phase() {
         let dealer = setup.setup.address(dealer_idx);
         let target = DealerMessagesHash {
             dealer_address: dealer,
-            messages_hash: compute_messages_hash(messages),
+            messages_hash: messages.compute_hash(),
         };
         let own = setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
         let cert =
@@ -16021,7 +16007,7 @@ async fn party_phase_rejects_a_sub_quorum_cert() {
             let dealer = setup.setup.address(dealer_idx);
             let target = DealerMessagesHash {
                 dealer_address: dealer,
-                messages_hash: compute_messages_hash(messages),
+                messages_hash: messages.compute_hash(),
             };
             let own =
                 setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
@@ -16092,7 +16078,7 @@ async fn recovery_drops_certs_the_live_path_would_reject() {
     let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
     let target = DealerMessagesHash {
         dealer_address: dealer,
-        messages_hash: compute_messages_hash(&messages),
+        messages_hash: messages.compute_hash(),
     };
 
     let self_signed = CertificateV1::Dkg(
@@ -16260,7 +16246,7 @@ fn departing_rotation_dealer_is_verified_not_rejected() {
     let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
     let target = DealerMessagesHash {
         dealer_address: departed,
-        messages_hash: compute_messages_hash(&messages),
+        messages_hash: messages.compute_hash(),
     };
     let cert = CertificateV1::Rotation(
         create_test_certificate(

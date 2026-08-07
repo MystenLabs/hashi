@@ -746,7 +746,8 @@ fun test_enable_version_proposal() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Create enable version proposal for version 3 (not enabled by default)
+    // Enable a version that is not already enabled (genesis enables
+    // PACKAGE_VERSION itself, so use the one after it).
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
@@ -772,7 +773,7 @@ fun test_disable_version_proposal() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // First enable version 3 (not the current version)
+    // First enable a version that is not the current PACKAGE_VERSION
     let enable_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
@@ -782,7 +783,7 @@ fun test_disable_version_proposal() {
     );
     hashi::enable_version::execute(&mut hashi, enable_id, &clock);
 
-    // Now disable version 3 (not the current version)
+    // Now disable it (disabling the current version is rejected)
     let disable_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
@@ -798,27 +799,6 @@ fun test_disable_version_proposal() {
 }
 
 #[test]
-fun test_fresh_publish_enables_versions_below_current() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    let disable_id = test_utils::create_disable_version_proposal(
-        &mut hashi,
-        VOTER1,
-        1,
-        &clock,
-        ctx,
-    );
-    hashi::disable_version::execute(&mut hashi, disable_id, &clock);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
 #[expected_failure(abort_code = hashi::versioning::EDisableCurrentVersion)]
 /// Test that disabling the current package version fails (anti-bricking protection)
 fun test_disable_current_version_fails() {
@@ -828,7 +808,7 @@ fun test_disable_current_version_fails() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Try to disable version 2 (current version) - should fail
+    // Try to disable the current PACKAGE_VERSION - should fail
     let proposal_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
@@ -853,7 +833,8 @@ fun test_enable_already_enabled_version_fails() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    // Try to enable version 2 (already enabled by default) - should fail
+    // Try to enable the current PACKAGE_VERSION (already enabled by the
+    // genesis `create`) - should fail
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,

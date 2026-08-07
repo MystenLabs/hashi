@@ -20,7 +20,7 @@ use super::PublishOutcome;
 use crate::config::HashiIds;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
-use crate::mpc::types::MessageHash;
+use crate::mpc::types::MessagesHash;
 use crate::onchain::OnchainState;
 use crate::sui_tx_executor::SubmitCertError;
 use crate::sui_tx_executor::SuiTxExecutor;
@@ -141,7 +141,7 @@ impl SuiTobSessionChannel {
             self.hashi_ids,
         )
         .with_timeout(TX_CONFIRMATION_TIMEOUT)
-        .with_stamped_nonce_certs(self.onchain_state.supports_stamped_nonce_certs())
+        .with_onchain_state(&self.onchain_state)
     }
 }
 
@@ -154,9 +154,7 @@ impl Drop for SuiTobSessionChannel {
 }
 
 fn tob_fetch_error(e: anyhow::Error) -> TobError {
-    if e.downcast_ref::<crate::onchain::IncompleteCertTableRead>()
-        .is_some()
-    {
+    if crate::onchain::is_inconsistent_listing(&e) {
         TobError::IncompleteRead(e.to_string())
     } else if e
         .downcast_ref::<crate::onchain::UnorderedCertTableRead>()
@@ -174,33 +172,45 @@ pub async fn fetch_certificates(
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    let raw: Vec<(Address, hashi_types::move_types::DealerSubmissionV1, u64)> = if protocol_type
-        == ProtocolType::NonceGeneration
-        && onchain_state.supports_stamped_nonce_certs()
-    {
-        let Some(certs) = onchain_state
-            .fetch_stamped_certs(epoch, batch_index, protocol_type)
-            .await
-            .map_err(tob_fetch_error)?
-        else {
-            return Ok(vec![]);
+    Ok(
+        fetch_certificates_if_present(onchain_state, epoch, batch_index, protocol_type)
+            .await?
+            .unwrap_or_default(),
+    )
+}
+
+async fn fetch_certificates_if_present(
+    onchain_state: &OnchainState,
+    epoch: u64,
+    batch_index: Option<u32>,
+    protocol_type: ProtocolType,
+) -> Result<Option<Vec<(Address, CertificateV1)>>, TobError> {
+    let raw: Option<Vec<(Address, hashi_types::move_types::DealerSubmissionV1, u64)>> =
+        if protocol_type == ProtocolType::NonceGeneration {
+            onchain_state
+                .fetch_nonce_certs_stamped_or_bare(epoch, batch_index)
+                .await
+                .map_err(tob_fetch_error)?
+                .map(|certs| {
+                    certs
+                        .into_iter()
+                        .map(|(dealer, s)| (dealer, s.submission, s.timestamp_ms))
+                        .collect()
+                })
+        } else {
+            onchain_state
+                .fetch_certs(epoch, batch_index, protocol_type)
+                .await
+                .map_err(tob_fetch_error)?
+                .map(|certs| {
+                    certs
+                        .into_iter()
+                        .map(|(dealer, submission)| (dealer, submission, 0u64))
+                        .collect()
+                })
         };
-        certs
-            .into_iter()
-            .map(|(dealer, stamped)| (dealer, stamped.submission, stamped.timestamp_ms))
-            .collect()
-    } else {
-        let Some(certs) = onchain_state
-            .fetch_certs(epoch, batch_index, protocol_type)
-            .await
-            .map_err(tob_fetch_error)?
-        else {
-            return Ok(vec![]);
-        };
-        certs
-            .into_iter()
-            .map(|(dealer, submission)| (dealer, submission, 0u64))
-            .collect()
+    let Some(raw) = raw else {
+        return Ok(None);
     };
     let mut certificates = Vec::with_capacity(raw.len());
     for (dealer, submission, timestamp_ms) in raw {
@@ -217,7 +227,7 @@ pub async fn fetch_certificates(
         let cert = CertificateV1::new(protocol_type, batch_index, inner_cert, timestamp_ms);
         certificates.push((dealer, cert));
     }
-    Ok(certificates)
+    Ok(Some(certificates))
 }
 
 pub struct PrefetchedTobChannel {
@@ -256,12 +266,20 @@ pub async fn fetch_key_generation_certificates(
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
     let earliest_committee_epoch = onchain_state.earliest_committee_epoch();
     let protocol_type = key_generation_protocol(earliest_committee_epoch, epoch);
-    let certificates = fetch_certificates(onchain_state, epoch, None, protocol_type).await?;
+    let certificates = fetch_certificates_if_present(onchain_state, epoch, None, protocol_type)
+        .await?
+        .ok_or_else(|| {
+            TobError::InvalidState(format!(
+                "epoch {epoch}: {protocol_type:?} certificate bucket not found — either absent or \
+                 the tob listing was incomplete (earliest committee epoch \
+                 {earliest_committee_epoch:?})"
+            ))
+        })?;
     if certificates.is_empty() {
-        tracing::warn!(
-            "epoch {epoch}: no key-generation certificates in the {protocol_type:?} bucket \
+        return Err(TobError::InvalidState(format!(
+            "epoch {epoch}: {protocol_type:?} certificate bucket exists but is empty \
              (earliest committee epoch {earliest_committee_epoch:?})"
-        );
+        )));
     }
     Ok(certificates)
 }
@@ -312,7 +330,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 Vec::new()
             }
         };
-        let published: Vec<(Address, MessageHash)> = existing
+        let published: Vec<(Address, MessagesHash)> = existing
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))
             .collect();
@@ -327,8 +345,8 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 self.epoch,
                 self.batch_index,
                 ours.dealer_address,
-                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(on_chain)),
-                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+                hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(on_chain)),
+                hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(
                     &ours.messages_hash
                 )),
             );
@@ -359,7 +377,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         )
         .await
         .map_err(ChannelError::from)?;
-        let settled: Vec<(Address, MessageHash)> = settled
+        let settled: Vec<(Address, MessagesHash)> = settled
             .iter()
             .map(|(d, c)| (*d, c.message().messages_hash))
             .collect();
@@ -375,7 +393,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
             self.epoch,
             self.batch_index,
             ours.dealer_address,
-            hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(
+            hex::encode(<MessagesHash as AsRef<[u8; 32]>>::as_ref(
                 &ours.messages_hash
             )),
             outcome,
@@ -558,7 +576,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
 enum PublishedCert {
     Absent,
     Same,
-    Diverged { on_chain: MessageHash },
+    Diverged { on_chain: MessagesHash },
 }
 
 fn raced_outcome(classified: &PublishedCert) -> PublishOutcome {
@@ -577,9 +595,9 @@ fn short_circuit_outcome(classified: &PublishedCert) -> Option<PublishOutcome> {
 }
 
 fn classify_published_cert(
-    existing: &[(Address, MessageHash)],
+    existing: &[(Address, MessagesHash)],
     dealer: &Address,
-    ours: MessageHash,
+    ours: MessagesHash,
 ) -> PublishedCert {
     let Some((_, on_chain)) = existing.iter().find(|(d, _)| d == dealer) else {
         return PublishedCert::Absent;
@@ -615,21 +633,16 @@ pub(crate) fn tob_wait_superseded(
 mod tests {
     #[test]
     fn raced_cert_reads_classify_as_retryable() {
-        use crate::onchain::IncompleteCertTableRead;
+        use crate::onchain::inconsistent_listing;
 
-        let raced: anyhow::Error = IncompleteCertTableRead {
-            dealer: Address::ZERO,
-        }
-        .into();
+        let raced = inconsistent_listing("dangling node".into());
         assert!(
             matches!(super::tob_fetch_error(raced), TobError::IncompleteRead(_)),
             "a raced cert-table read must stay distinguishable from an RPC failure"
         );
 
-        let wrapped = anyhow::Error::from(IncompleteCertTableRead {
-            dealer: Address::ZERO,
-        })
-        .context("fetching stamped certs");
+        let wrapped =
+            inconsistent_listing("dangling node".into()).context("fetching stamped certs");
         assert!(matches!(
             super::tob_fetch_error(wrapped),
             TobError::IncompleteRead(_)
@@ -671,10 +684,10 @@ mod tests {
         Address::new([b; 32])
     }
 
-    fn hash(b: u8) -> MessageHash {
+    fn hash(b: u8) -> MessagesHash {
         let mut bytes = [0xAB; 32];
         bytes[17] = b;
-        MessageHash::new(bytes)
+        MessagesHash::new(bytes)
     }
 
     #[test]

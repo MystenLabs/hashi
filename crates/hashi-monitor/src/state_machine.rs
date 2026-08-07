@@ -291,7 +291,7 @@ pub struct DepositStateMachine {
 
 impl DepositStateMachine {
     pub fn new(event: MonitorDepositEvent, cfg: &Config) -> Self {
-        if event.event_type != DepositEventType::E2HashiApproved {
+        if event.event_type != DepositEventType::E2HashiDeposited {
             panic!("unexpected event type");
         }
         // btc confirmation is a predecessor event => we set the deadline to now (+skew).
@@ -389,13 +389,14 @@ impl DepositStateMachine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::config::BtcConfig;
-    use crate::config::BtcRpcAuth;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use bitcoin::hashes::Hash as _;
-    use hashi_types::guardian::S3Config;
+    use hashi_types::guardian::UnresolvedS3Config;
 
     struct TestWindow {
         start: UnixSeconds,
@@ -416,7 +417,13 @@ mod tests {
             ])
             .expect("valid intra-event delays"),
             clock_skew: 10,
-            guardian: S3Config::mock_for_testing(),
+            guardian_s3: UnresolvedS3Config {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                access_key: Some("access-key".to_string()),
+                secret_key: Some("secret-key".to_string()),
+                retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
+            },
             pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
                 hashi_types::guardian::BuildPcrs::new("", vec![]),
                 vec![],
@@ -424,10 +431,11 @@ mod tests {
             .expect("valid PCR allowlist"),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
+                package_id: format!("0x{}", "11".repeat(32)),
             },
             btc: BtcConfig {
                 rpc_url: "http://btc".to_string(),
-                rpc_auth: BtcRpcAuth::None,
+                http_headers: BTreeMap::new(),
             },
         }
     }
@@ -452,7 +460,7 @@ mod tests {
 
     fn deposit_event(timestamp: UnixSeconds, fill: u8) -> MonitorDepositEvent {
         MonitorDepositEvent {
-            event_type: DepositEventType::E2HashiApproved,
+            event_type: DepositEventType::E2HashiDeposited,
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
             btc_vout: 0,

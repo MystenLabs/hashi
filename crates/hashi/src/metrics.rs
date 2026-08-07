@@ -51,6 +51,7 @@ pub struct Metrics {
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
     pub guardian_finalize_deferred_total: IntCounter,
     pub guardian_limiter_reconciled_total: IntCounter,
+    pub guardian_limiter_config_changed_total: IntCounter,
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
@@ -93,6 +94,12 @@ pub struct Metrics {
     num_consumed_presigs: IntGauge,
     treasury_supply: IntGaugeVec,
     package_version_enabled: IntGaugeVec,
+    /// The package version this binary is operating at (0 when none is
+    /// supported — see `package_version_unsupported`).
+    package_version_active: IntGauge,
+    /// 1 when this binary supports no live on-chain package version (chain
+    /// ahead of the binary); autonomous mutations are halted. 0 otherwise.
+    package_version_unsupported: IntGauge,
 
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
@@ -103,6 +110,8 @@ pub struct Metrics {
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
     pub sui_balance: IntGaugeVec,
+    pub sui_address_balance_sweeps_total: IntCounter,
+    pub sui_address_balance_objects_swept_total: IntCounter,
 
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
@@ -198,6 +207,12 @@ pub struct Metrics {
 const LATENCY_SEC_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 20., 30., 60., 90., 120., 180.,
     300., 600., 1200.,
+];
+
+// Hours-scale: sign_to_confirm waits on Bitcoin confirmations, unlike LATENCY_SEC_BUCKETS.
+const WITHDRAWAL_PHASE_SEC_BUCKETS: &[f64] = &[
+    10., 30., 60., 120., 300., 600., 1200., 1800., 2700., 3600., 5400., 7200., 10800., 14400.,
+    21600., 32400., 43200., 64800., 86400., 172800.,
 ];
 
 pub const MPC_LABEL_DKG: &str = "dkg";
@@ -466,6 +481,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            guardian_limiter_config_changed_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_config_changed_total",
+                "Times the local limiter adopted a changed guardian limiter policy, i.e. a \
+                 guardian re-provision installed a different refill rate or bucket capacity",
+                registry,
+            )
+            .unwrap(),
             guardian_rpc_total: register_int_counter_vec_with_registry!(
                 "hashi_guardian_rpc_total",
                 "Outbound RPC calls to the guardian by method and outcome \
@@ -651,6 +673,18 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            package_version_active: register_int_gauge_with_registry!(
+                "hashi_package_version_active",
+                "package version this binary is operating at (0 = none supported)",
+                registry,
+            )
+            .unwrap(),
+            package_version_unsupported: register_int_gauge_with_registry!(
+                "hashi_package_version_unsupported",
+                "1 = binary supports no live on-chain version (mutations halted), 0 = ok",
+                registry,
+            )
+            .unwrap(),
             deposits_confirmed_total: register_int_counter_with_registry!(
                 "hashi_deposits_confirmed_total",
                 "Total number of deposits successfully confirmed on Sui",
@@ -709,6 +743,20 @@ impl Metrics {
                  address that pays gas, so a low-balance alert names the \
                  wallet to top up. One series per node.",
                 &["address"],
+                registry,
+            )
+            .unwrap(),
+            sui_address_balance_sweeps_total: register_int_counter_with_registry!(
+                "hashi_sui_address_balance_sweeps_total",
+                "Total completed non-empty sweeps of operator-owned SUI coin objects into the \
+                 address balance",
+                registry,
+            )
+            .unwrap(),
+            sui_address_balance_objects_swept_total: register_int_counter_with_registry!(
+                "hashi_sui_address_balance_objects_swept_total",
+                "Total operator-owned SUI coin objects included in completed address-balance \
+                 sweeps",
                 registry,
             )
             .unwrap(),
@@ -1160,7 +1208,7 @@ impl Metrics {
                 "hashi_withdrawal_duration_seconds",
                 "Duration of withdrawal lifecycle phases.",
                 &["phase"],
-                LATENCY_SEC_BUCKETS.to_vec(),
+                WITHDRAWAL_PHASE_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
@@ -1219,6 +1267,12 @@ impl Metrics {
         self.guardian_bootstrap_outcomes_total
             .with_label_values(&[outcome])
             .inc();
+    }
+
+    pub fn record_sui_address_balance_sweep(&self, coin_objects: usize) {
+        self.sui_address_balance_sweeps_total.inc();
+        self.sui_address_balance_objects_swept_total
+            .inc_by(coin_objects as u64);
     }
 
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
@@ -1391,6 +1445,12 @@ impl Metrics {
                 .with_label_values(&[&version_str, &package_id_str])
                 .set(1);
         }
+
+        let support = guard.version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS);
+        self.package_version_active
+            .set(support.active_version().map(|v| v as i64).unwrap_or(0));
+        self.package_version_unsupported
+            .set(i64::from(support.must_halt()));
     }
 }
 
@@ -1510,6 +1570,16 @@ mod tests {
     use crate::guardian_limiter::LocalLimiterError;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
+
+    #[test]
+    fn record_sui_address_balance_sweep_updates_completed_sweep_metrics() {
+        let metrics = Metrics::new(&Registry::new());
+
+        metrics.record_sui_address_balance_sweep(3);
+
+        assert_eq!(metrics.sui_address_balance_sweeps_total.get(), 1);
+        assert_eq!(metrics.sui_address_balance_objects_swept_total.get(), 3);
+    }
 
     #[test]
     fn guardian_metric_helpers_cover_every_label() {

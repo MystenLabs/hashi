@@ -22,22 +22,74 @@ use std::path::Path;
 use std::path::PathBuf;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
+use sui_sdk_types::Publish;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::TypeTag;
 
 use crate::TestNetworks;
 use crate::sui_network::sui_binary;
 
-/// Prepare an upgrade package by copying the deployed source and patching it.
+/// Poll until every node's watcher reports `package_id` as the active
+/// package — the PackageUpgraded handler in watcher.rs must update
+/// OnchainState's package_versions map on all nodes. Prints per-node
+/// diagnostics before failing on timeout.
+pub async fn wait_for_package_convergence(
+    networks: &TestNetworks,
+    package_id: Address,
+    max_wait: std::time::Duration,
+) -> Result<()> {
+    tracing::info!("waiting for all nodes to detect the new package version...");
+    let wait_start = std::time::Instant::now();
+    // Only nodes that are actually running: a pending member (the key-rotation
+    // tests hold one back to start mid-test) has no Hashi instance yet — its
+    // accessor panics — and when it does boot, its fresh scrape sees the
+    // post-upgrade chain, so there is nothing to converge.
+    loop {
+        let all_updated = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .filter(|node| node.is_running())
+            .all(|node| node.hashi().onchain_state().package_id() == Some(package_id));
+        if all_updated {
+            return Ok(());
+        }
+        if wait_start.elapsed() > max_wait {
+            for (i, node) in networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .filter(|node| node.is_running())
+                .enumerate()
+            {
+                let latest = node.hashi().onchain_state().package_id();
+                let versions = node
+                    .hashi()
+                    .onchain_state()
+                    .state()
+                    .package_versions()
+                    .clone();
+                tracing::info!("node {i}: package_id={latest:?}, versions={versions:?}");
+            }
+            anyhow::bail!("timeout: not all nodes detected the new package version");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Prepare an upgrade package by copying the current source and patching it.
 ///
 /// 1. Copies `<test_dir>/packages/hashi` to `<test_dir>/packages/hashi-upgrade`
-/// 2. Sets `PACKAGE_VERSION` to `target_version` in `versioning.move`
-/// 3. Sets `published-at` in `Move.toml` to the original package ID
+/// 2. Sets `PACKAGE_VERSION` in `versioning.move` to `target_version`
+///    (whatever the source currently declares — a no-op rewrite when the tree
+///    already carries the target, a real bump when the chain has moved past it)
+/// 3. Sets `published-at` in `Move.toml` to `published_at` — the chain's
+///    LATEST published package id, which the upgrade ticket checks against
 ///
 /// Returns the path to the patched package directory.
 pub fn prepare_upgrade_package(
     test_dir: &Path,
-    original_package_id: Address,
+    published_at: Address,
     target_version: u64,
 ) -> Result<PathBuf> {
     let src = test_dir.join("packages/hashi");
@@ -49,7 +101,9 @@ pub fn prepare_upgrade_package(
         src.display()
     );
 
-    // Copy the package
+    // Copy the package; the builder's auto-upgrade may have left a previous
+    // copy behind, and `cp -r` into an existing directory would nest.
+    let _ = std::fs::remove_dir_all(&dst);
     let output = std::process::Command::new("cp")
         .args(["-r", &src.to_string_lossy(), &dst.to_string_lossy()])
         .output()?;
@@ -59,51 +113,46 @@ pub fn prepare_upgrade_package(
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // Patch versioning.move: set PACKAGE_VERSION to the target version.
     let versioning_path = dst.join("sources/core/versioning.move");
     let versioning_src = std::fs::read_to_string(&versioning_path)?;
-    const VERSION_PREFIX: &str = "const PACKAGE_VERSION: u64 = ";
-    let value_start = versioning_src
-        .find(VERSION_PREFIX)
-        .map(|i| i + VERSION_PREFIX.len())
-        .ok_or_else(|| {
-            anyhow::anyhow!("PACKAGE_VERSION declaration not found in {versioning_path:?}")
-        })?;
-    let value_len = versioning_src[value_start..]
-        .find(';')
-        .ok_or_else(|| anyhow::anyhow!("PACKAGE_VERSION declaration is not terminated"))?;
-    let current: u64 = versioning_src[value_start..value_start + value_len]
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("PACKAGE_VERSION is not a u64 in {versioning_path:?}: {e}"))?;
+    const CONST_PREFIX: &str = "const PACKAGE_VERSION: u64 = ";
+    let mut replaced = false;
+    let patched: String = versioning_src
+        .lines()
+        .map(|line| {
+            if line.starts_with(CONST_PREFIX) {
+                replaced = true;
+                format!("{CONST_PREFIX}{target_version};\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
     anyhow::ensure!(
-        current <= target_version,
-        "source declares PACKAGE_VERSION {current}, above the {target_version} this upgrade \
-         would publish; point the base at a newer snapshot"
+        replaced,
+        "PACKAGE_VERSION constant not found in versioning.move"
     );
-    if current < target_version {
-        let patched = format!(
-            "{}{}{}",
-            &versioning_src[..value_start],
-            target_version,
-            &versioning_src[value_start + value_len..]
-        );
-        std::fs::write(&versioning_path, patched)?;
-    }
+    std::fs::write(&versioning_path, patched)?;
 
     // Patch Move.toml: add published-at
     let move_toml_path = dst.join("Move.toml");
     let move_toml = std::fs::read_to_string(&move_toml_path)?;
     let patched_toml = move_toml.replace(
         "[package]",
-        &format!("[package]\npublished-at = \"{}\"", original_package_id),
+        &format!("[package]\npublished-at = \"{}\"", published_at),
     );
     std::fs::write(&move_toml_path, patched_toml)?;
 
-    // Add a trivial v2-only module to prove new code is callable post-upgrade
+    // Add a trivial new-in-this-version module to prove new code is callable
+    // post-upgrade. Re-added on every prepare so successive upgrades stay
+    // module-compatible.
     let test_module_path = dst.join("sources/upgrade_canary.move");
     std::fs::write(
         &test_module_path,
-        "module hashi::upgrade_canary;\n\npublic fun version(): u64 { 2 }\n",
+        format!(
+            "module hashi::upgrade_canary;\n\npublic fun version(): u64 {{ {target_version} }}\n"
+        ),
     )?;
 
     // Clean build artifacts from the copy
@@ -112,17 +161,149 @@ pub fn prepare_upgrade_package(
     tracing::info!(
         "upgrade package prepared at {} (published-at = {})",
         dst.display(),
-        original_package_id
+        published_at
     );
 
     Ok(dst)
+}
+
+/// [`build_upgrade_package`] behind a cross-process disk cache.
+///
+/// Every builder boot compiles the byte-identical artifact (verified: the
+/// per-test `published-at` patch does not reach the compiled modules or
+/// digest), and nextest runs each test in its own process — so on CI's
+/// 4-core runners the compile was repeated per test, starving the network
+/// it was booting next to. Keyed on the patched source (with the
+/// `published-at` line masked), the target version, and the sui toolchain;
+/// a mkdir lock dedups concurrent builders, and every fallback path builds
+/// rather than fails — the cache can only add speed, never wrongness.
+fn build_upgrade_package_cached(
+    upgrade_path: &Path,
+    client_config: Option<&Path>,
+    target_version: u64,
+) -> Result<(Publish, Vec<u8>)> {
+    use fastcrypto::hash::HashFunction;
+
+    let key = {
+        let mut hasher = fastcrypto::hash::Sha256::default();
+        hasher.update(target_version.to_le_bytes());
+        let sui_version = std::process::Command::new(sui_binary())
+            .arg("--version")
+            .output()
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        hasher.update(&sui_version);
+        let mut files: Vec<PathBuf> = walk_files(upgrade_path)?;
+        files.sort();
+        for file in &files {
+            let rel = file.strip_prefix(upgrade_path).unwrap_or(file);
+            // `build/` is output, not input; `published-at` is per-test but
+            // verified not to reach the artifact.
+            if rel.starts_with("build") {
+                continue;
+            }
+            hasher.update(rel.to_string_lossy().as_bytes());
+            let contents = std::fs::read(file)?;
+            if rel == Path::new("Move.toml") {
+                let masked: String = String::from_utf8_lossy(&contents)
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("published-at"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                hasher.update(masked.as_bytes());
+            } else {
+                hasher.update(&contents);
+            }
+        }
+        hex_encode(&hasher.finalize().digest)
+    };
+
+    let cache_root = std::env::temp_dir().join("hashi-e2e-upgrade-build-cache");
+    let final_path = cache_root.join(format!("{key}.json"));
+
+    if let Some(cached) = read_cached_build(&final_path) {
+        tracing::info!("upgrade package cache hit ({key})");
+        return Ok(cached);
+    }
+
+    // mkdir is atomic: exactly one process wins the right to build; the rest
+    // wait for the artifact to appear. Timeouts and stale locks fall through
+    // to building — duplicated work over a wedged run.
+    std::fs::create_dir_all(&cache_root)?;
+    let lock = cache_root.join(format!("{key}.lock"));
+    if std::fs::create_dir(&lock).is_err() {
+        let stale = std::time::Duration::from_secs(900);
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(600) {
+            if let Some(cached) = read_cached_build(&final_path) {
+                tracing::info!("upgrade package cache hit after waiting ({key})");
+                return Ok(cached);
+            }
+            if std::fs::metadata(&lock)
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().unwrap_or_default() > stale)
+                .unwrap_or(true)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        tracing::warn!("upgrade build lock wait expired; building anyway ({key})");
+    }
+
+    let built = build_upgrade_package(sui_binary(), upgrade_path, client_config, target_version);
+    let _ = std::fs::remove_dir(&lock);
+    let (compiled, digest) = built?;
+
+    // Write-then-rename so readers never see a partial file.
+    let tmp = cache_root.join(format!("{key}.tmp-{}", std::process::id()));
+    if let Ok(bytes) = serde_json::to_vec(&(&compiled, &digest))
+        && std::fs::write(&tmp, bytes).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &final_path);
+    }
+    Ok((compiled, digest))
+}
+
+fn read_cached_build(path: &Path) -> Option<(Publish, Vec<u8>)> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn walk_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Run the full upgrade lifecycle: prepare → build → propose → vote → execute+publish+finalize.
 ///
 /// Returns the new package ID on success.
 pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address> {
-    let nodes = networks.hashi_network.nodes();
+    // Running nodes only: a pending member (started mid-test by the
+    // key-rotation tests) has no Hashi instance to read state from or vote
+    // with — and is not a registered committee member yet anyway.
+    let nodes: Vec<_> = networks
+        .hashi_network
+        .nodes()
+        .iter()
+        .filter(|node| node.is_running())
+        .collect();
+    anyhow::ensure!(!nodes.is_empty(), "no running nodes to drive the upgrade");
     let hashi_ids = networks.hashi_network.ids();
 
     let mut executors: Vec<SuiTxExecutor> = nodes
@@ -133,17 +314,21 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         })
         .collect::<Result<_>>()?;
 
-    // 1. Prepare the upgrade package (copy + patch)
+    // 1. Prepare the upgrade package (copy + patch), targeting one past the
+    // chain's latest published version. `published-at` must name the LATEST
+    // published package (not the original): upgrading v2 -> v3 with a
+    // v1 `published-at` fails the upgrade ticket's package-id check.
+    let (current_version, current_package_id) = {
+        let state = nodes[0].hashi().onchain_state().state();
+        let versions = state.package_versions();
+        match (versions.latest_version(), versions.latest_id()) {
+            (Some(version), Some(id)) => (version, id),
+            _ => anyhow::bail!("onchain state has no package versions yet"),
+        }
+    };
+    let target_version = current_version + 1;
     let test_dir = networks.dir();
-    let current_version = nodes[0]
-        .hashi()
-        .onchain_state()
-        .state()
-        .package_versions()
-        .latest_version()
-        .ok_or_else(|| anyhow::anyhow!("onchain state has no package versions yet"))?;
-    let upgrade_path =
-        prepare_upgrade_package(test_dir, hashi_ids.package_id, current_version + 1)?;
+    let upgrade_path = prepare_upgrade_package(test_dir, current_package_id, target_version)?;
 
     let client_config_path = test_dir.join("sui/client.yaml");
     let client_config = client_config_path
@@ -152,12 +337,8 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
 
     // 2. Build the upgrade
     tracing::info!("building upgrade package from {}", upgrade_path.display());
-    let (compiled, digest) = build_upgrade_package(
-        sui_binary(),
-        &upgrade_path,
-        client_config,
-        current_version + 1,
-    )?;
+    let (compiled, digest) =
+        build_upgrade_package_cached(&upgrade_path, client_config, target_version)?;
     tracing::info!("upgrade package built, digest: {digest:?}");
 
     // 3. Propose the upgrade
@@ -202,7 +383,8 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
 
     // 5. Execute upgrade + publish + finalize in one PTB
     tracing::info!("executing upgrade (execute + publish + finalize in one PTB)...");
-    let upgrade_tx = build_upgrade_execution_transaction(hashi_ids, proposal_id, compiled);
+    let upgrade_tx =
+        build_upgrade_execution_transaction(hashi_ids, current_package_id, proposal_id, compiled);
     let upgrade_resp = executors[0].execute(upgrade_tx).await?;
     anyhow::ensure!(
         upgrade_resp.transaction().effects().status().success(),

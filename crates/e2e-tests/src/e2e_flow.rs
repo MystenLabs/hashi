@@ -133,6 +133,10 @@ mod tests {
             .ok_or_else(|| anyhow!("transaction effects BCS bytes were not returned"))
     }
 
+    /// The builder's default boot already publishes the v1 bytecode snapshot
+    /// and upgrades to the current source, so every test in this module
+    /// exercises the post-upgrade configuration a real network is in — not a
+    /// fresh single-version publish.
     async fn setup_test_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
         let networks = builder.build().await?;
@@ -667,10 +671,18 @@ mod tests {
                 .unwrap()
                 .mpc_config
                 .nonce_accumulation_window_ms;
+            assert_eq!(
+                window_ms,
+                hashi_types::move_types::DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS,
+                "the accumulation window must be open for this test to mean anything"
+            );
             assert!(
-                window_ms > 0,
-                "the accumulation window must be open for this test to mean anything, \
-                 got {window_ms}ms"
+                hashi.onchain_state().active_package().is_some_and(
+                    |(_, v)| v >= hashi::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION
+                ),
+                "certs carry timestamp 0 below the stamped version, which collapses the window \
+                 to the floor-only rule — this test would then pass while exercising the legacy \
+                 path it exists to distinguish from"
             );
         }
         let deposit_amount_sats = 100_000u64;

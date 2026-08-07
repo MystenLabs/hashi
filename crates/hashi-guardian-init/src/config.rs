@@ -5,14 +5,11 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use aws_credential_types::provider::ProvideCredentials;
 use bitcoin::Network;
 use hashi::config::HashiIds;
 use hashi::onchain::OnchainState;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::S3BucketInfo;
-use hashi_types::guardian::S3Config;
-use hashi_types::guardian::S3RetentionEnvironment;
+use hashi_types::guardian::UnresolvedS3Config;
 use serde::Deserialize;
 
 use crate::kp_roster::KpRosterConfig;
@@ -20,7 +17,7 @@ use crate::kp_roster::KpRosterConfig;
 #[derive(Deserialize)]
 pub struct Config {
     pub hashi: HashiOnchainConfig,
-    pub guardian_s3: GuardianInitS3Config,
+    pub guardian_s3: UnresolvedS3Config,
     #[serde(deserialize_with = "deserialize_network")]
     pub bitcoin_network: Network,
     pub kp_roster: KpRosterConfig,
@@ -109,64 +106,5 @@ impl HashiOnchainConfig {
             .await
             .with_context(|| format!("failed to connect to Sui RPC at {}", self.sui_rpc))?;
         Ok(state)
-    }
-}
-
-#[derive(Deserialize)]
-pub struct GuardianInitS3Config {
-    pub bucket: String,
-    pub region: String,
-    pub access_key: Option<String>,
-    pub secret_key: Option<String>,
-    // TODO(s3-retention): Should this be replaced by, or derived from, a
-    // repository-wide Hashi network identifier?
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-impl GuardianInitS3Config {
-    pub async fn resolve(&self) -> anyhow::Result<S3Config> {
-        let access_key = self
-            .access_key
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let secret_key = self
-            .secret_key
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-
-        let (access_key, secret_key, session_token) = match (access_key, secret_key) {
-            (Some(access_key), Some(secret_key)) => {
-                (access_key.to_string(), secret_key.to_string(), None)
-            }
-            (None, None) => {
-                let provider =
-                    aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
-                        .build()
-                        .await;
-                let creds = provider
-                    .provide_credentials()
-                    .await
-                    .context("failed to resolve AWS credentials from the default provider chain")?;
-                (
-                    creds.access_key_id().to_string(),
-                    creds.secret_access_key().to_string(),
-                    creds.session_token().map(ToOwned::to_owned),
-                )
-            }
-            _ => anyhow::bail!(
-                "guardian_s3 access_key and secret_key must either both be set or both be omitted"
-            ),
-        };
-
-        Ok(S3Config {
-            access_key,
-            secret_key,
-            session_token,
-            bucket_info: S3BucketInfo {
-                bucket: self.bucket.clone(),
-                region: self.region.clone(),
-            },
-            retention_environment: self.retention_environment,
-        })
     }
 }

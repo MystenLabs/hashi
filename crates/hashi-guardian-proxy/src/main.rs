@@ -9,6 +9,7 @@ use hashi_guardian_proxy::forward::Forwarding;
 use hashi_guardian_proxy::info;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::relay::Relay;
+use hashi_guardian_proxy::roster::RosterCache;
 use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -33,21 +34,16 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     info!(
         backend = %config.backend_url,
+        standby = config.standby_backend_url.as_deref().unwrap_or("<none>"),
         listen = %config.listen_addr,
         log_bucket = %config.log_bucket,
         network = %config.btc_network,
-        kp_roster = config.authorized_kp_fingerprints.len(),
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
-    if config.authorized_kp_fingerprints.is_empty() {
-        warn!(
-            "AUTHORIZED_KP_FINGERPRINTS is empty: the provisioning relay will reject \
-             all share submissions until a KP roster is configured."
-        );
-    }
 
-    // The wid cache's durable tier. Prove bucket access before serving: a
-    // proxy that can't read the log fails every retry closed.
+    // The wid cache's durable tier and the relay's roster source. Prove bucket
+    // access before serving: a proxy that can't read the log fails every retry
+    // closed.
     let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
     probe_with_retries(&log_store).await?;
 
@@ -62,34 +58,40 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Lazy channel to the enclave guardian, shared by forwarder, relay, and the
-    // /info reader. Mirrors the node-side client
+    // Lazy channel to the active enclave guardian, shared by the forwarder and
+    // the /info reader. Mirrors the node-side client
     // (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
-    let channel = Endpoint::from_shared(config.backend_url.clone())?
-        .connect_timeout(config.connect_timeout)
-        .http2_keep_alive_interval(config.keepalive_interval)
-        .connect_lazy();
+    let channel = lazy_channel(&config.backend_url, &config)?;
+    // The relay provisions the standby when one is configured; the node-facing
+    // forwarder, wid cache, and /info always front the active guardian.
+    let relay_channel = match &config.standby_backend_url {
+        Some(url) => lazy_channel(url, &config)?,
+        None => channel.clone(),
+    };
 
-    let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel.clone()),
-        log_store,
-        config.btc_network,
-        metrics.clone(),
-    );
+    // One roster cache, shared: the relay authorizes submissions against it and
+    // a cert rotation through the forwarder invalidates it.
+    let roster = Arc::new(RosterCache::new(log_store.clone()));
+    let relay_svc = Relay::new(relay_channel, roster.clone());
     let info_state = info::InfoState::new(
         GuardianServiceClient::new(channel.clone()),
         config.info_cache_ttl,
     );
-    let relay_svc = Relay::new(channel, config.authorized_kp_fingerprints);
+    let guardian_svc = CachingGuardianGrpc::new(
+        Forwarding::new(channel, roster),
+        log_store,
+        config.btc_network,
+        metrics.clone(),
+    );
 
     // Standard gRPC health service (`grpc.health.v1.Health`) for gRPC
     // health-checkers; the HTTP `/health` route below covers plain-HTTP liveness.
     let (health_reporter, health_service) = health_reporter();
     health_reporter
-        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding, S3LogStore>>>()
+        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding<S3LogStore>, S3LogStore>>>()
         .await;
     health_reporter
-        .set_serving::<GuardianRelayServiceServer<Relay>>()
+        .set_serving::<GuardianRelayServiceServer<Relay<S3LogStore>>>()
         .await;
     // A gRPC health check may query the empty ("") service, so mark it serving
     // too — otherwise such a check flaps the proxy as unhealthy.
@@ -154,6 +156,13 @@ impl RouterExt for axum::Router {
     {
         self.route_service(&format!("/{}/{{*rest}}", S::NAME), svc)
     }
+}
+
+fn lazy_channel(url: &str, config: &Config) -> Result<tonic::transport::Channel> {
+    Ok(Endpoint::from_shared(url.to_string())?
+        .connect_timeout(config.connect_timeout)
+        .http2_keep_alive_interval(config.keepalive_interval)
+        .connect_lazy())
 }
 
 /// Retry transient S3 blips at boot (no target-group crash-loop), but fail

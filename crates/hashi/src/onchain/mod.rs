@@ -48,6 +48,21 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
+const CERT_LISTING_ATTEMPTS: u32 = 3;
+const CERT_LISTING_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct InconsistentListing(String);
+
+pub(crate) fn inconsistent_listing(message: String) -> anyhow::Error {
+    anyhow::Error::new(InconsistentListing(message))
+}
+
+pub fn is_inconsistent_listing(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<InconsistentListing>().is_some()
+}
+
 /// How much of the on-chain state a scrape loads. The Bitcoin collections are
 /// paged `SCRAPE_PAGE_SIZE` at a time and dominate the cost — a 70k-entry
 /// withdrawal queue is ~70 extra round-trips, enough to draw a 429.
@@ -62,11 +77,23 @@ mod apply;
 mod mirror;
 mod route;
 pub mod types;
+pub mod version;
+mod versioned_decode;
 mod watcher;
 
 fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::mpc::EncryptionGroupElement> {
     let array: [u8; 32] = bytes.try_into().ok()?;
     crate::mpc::EncryptionGroupElement::from_byte_array(&array).ok()
+}
+
+/// Why a node must not initiate autonomous on-chain mutations right now.
+#[derive(Debug, Clone, Copy)]
+pub enum HaltReason {
+    /// The bridge is governance-paused (`config.paused()`).
+    Paused,
+    /// This binary supports no live on-chain package version — typically the
+    /// chain has upgraded past this build. Fields are for diagnostics/logging.
+    BinaryUnsupported { supported_max: u64, live_max: u64 },
 }
 
 #[derive(Clone)]
@@ -126,65 +153,6 @@ struct Inner {
     /// limiter immediately — a re-bootstrap can swallow the fully-signed
     /// transitions that advance it.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "incomplete cert table read: {dealer} is referenced by the linked list but absent from \
-     the paginated fields"
-)]
-pub struct IncompleteCertTableRead {
-    pub dealer: Address,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "cert table is not timestamp-ordered: {later} stamped {later_ms} follows {earlier} \
-     stamped {earlier_ms}"
-)]
-pub struct UnorderedCertTableRead {
-    pub earlier: Address,
-    pub earlier_ms: u64,
-    pub later: Address,
-    pub later_ms: u64,
-}
-
-fn walk_cert_table<V>(
-    head: Address,
-    mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>,
-) -> Result<Vec<(Address, V)>> {
-    let mut entries = Vec::with_capacity(nodes.len());
-    let mut current = Some(head);
-    while let Some(dealer) = current {
-        let Some(node) = nodes.remove(&dealer) else {
-            return Err(IncompleteCertTableRead { dealer }.into());
-        };
-        entries.push((dealer, node.value));
-        current = node.next;
-    }
-    Ok(entries)
-}
-
-fn ensure_timestamp_ordered(
-    certs: &[(Address, move_types::StampedDealerSubmissionV1)],
-) -> Result<()> {
-    if let Some(bad) = certs
-        .windows(2)
-        .find(|w| w[1].1.timestamp_ms < w[0].1.timestamp_ms)
-    {
-        return Err(UnorderedCertTableRead {
-            earlier: bad[0].0,
-            earlier_ms: bad[0].1.timestamp_ms,
-            later: bad[1].0,
-            later_ms: bad[1].1.timestamp_ms,
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn stamped_certs_supported(enabled_versions: &std::collections::BTreeSet<u64>) -> bool {
-    enabled_versions.contains(&crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
 }
 
 #[derive(Debug)]
@@ -324,6 +292,52 @@ impl OnchainState {
         self.0.state.read().unwrap()
     }
 
+    /// How this binary's [`crate::constants::SUPPORTED_PACKAGE_VERSIONS`]
+    /// relate to the current on-chain enabled+published versions.
+    pub fn version_support(&self) -> version::VersionSupport {
+        self.state()
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+    }
+
+    /// The on-chain package version this binary should operate at, or `None`
+    /// when the chain is ahead of / incompatible with this build.
+    pub fn active_package_version(&self) -> Option<u64> {
+        self.version_support().active_version()
+    }
+
+    /// Resolved from a single read guard: a torn read could pair a version with
+    /// an id from a different snapshot, which is the drift this pairing exists
+    /// to prevent.
+    pub fn active_package(&self) -> Option<(Address, u64)> {
+        let state = self.state();
+        let version = state
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()?;
+        let id = state.package_versions.get(version)?;
+        Some((id, version))
+    }
+
+    /// Reason autonomous on-chain work must halt (governance pause, or an
+    /// unsupported on-chain version), or `None` to proceed. Reads state once so
+    /// callers get a single consistent snapshot. Mirrors — and subsumes — the
+    /// existing `config.paused()` gate.
+    pub fn autonomous_halt_reason(&self) -> Option<HaltReason> {
+        let state = self.state();
+        if state.hashi().config.paused() {
+            return Some(HaltReason::Paused);
+        }
+        match state.version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS) {
+            version::VersionSupport::Unsupported {
+                supported_max,
+                live_max,
+            } => Some(HaltReason::BinaryUnsupported {
+                supported_max,
+                live_max,
+            }),
+            version::VersionSupport::Active(_) | version::VersionSupport::NotReady => None,
+        }
+    }
+
     // NOTE: This function must remain private to this module so that only this module and its
     // submodules are able to update the state
     fn state_mut(&self) -> RwLockWriteGuard<'_, State> {
@@ -454,6 +468,26 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
+    pub async fn read_side_checkpoint_timestamp_ms(&self) -> Result<u64> {
+        let info = self
+            .0
+            .client
+            .clone()
+            .ledger_client()
+            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        let ts = info
+            .timestamp
+            .ok_or_else(|| anyhow!("service info carried no timestamp"))?;
+        let seconds = u64::try_from(ts.seconds)
+            .map_err(|_| anyhow!("service info timestamp is before the epoch: {}", ts.seconds))?;
+        let millis = seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| anyhow!("service info timestamp overflows ms: {seconds}s"))?;
+        Ok(millis + u64::from(ts.nanos.max(0) as u32) / 1_000_000)
+    }
+
     pub fn package_id_original(&self) -> Address {
         self.0.ids.package_id
     }
@@ -488,21 +522,6 @@ impl OnchainState {
 
     pub fn client(&self) -> Client {
         self.0.client.clone()
-    }
-
-    pub async fn read_side_checkpoint_timestamp_ms(&self) -> Result<u64> {
-        let info = self
-            .0
-            .client
-            .clone()
-            .ledger_client()
-            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
-            .await?
-            .into_inner();
-        let ts = info
-            .timestamp
-            .ok_or_else(|| anyhow!("service info carried no timestamp"))?;
-        Ok(ts.seconds as u64 * 1_000 + u64::from(ts.nanos.max(0) as u32) / 1_000_000)
     }
 
     /// Returns the latest package id (highest version).
@@ -872,28 +891,17 @@ impl OnchainState {
             .map(|c| c.mpc_service_client())
     }
 
+    /// Returns None if no certs exist for this key. The two bucket structs are
+    /// BCS-identical, so one decode serves both; the layout selects the node
+    /// type, and callers must dispatch on it rather than on the package version
+    /// — a bucket created before a v1→v2 upgrade is still bare after it.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
-    pub async fn fetch_certs(
+    async fn fetch_epoch_certs_with_layout(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        let Some(epoch_certs) = self
-            .fetch_epoch_certs_bucket::<move_types::EpochCertsV1>(epoch, batch_index, protocol_type)
-            .await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(self.fetch_cert_table(&epoch_certs.certs).await?))
-    }
-
-    async fn fetch_epoch_certs_bucket<T: serde::de::DeserializeOwned>(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<T>> {
+    ) -> Result<Option<(versioned_decode::TobCertLayout, move_types::EpochCertsV1)>> {
         let tob_id = self.tob_id();
         let key = TobKey {
             epoch,
@@ -912,33 +920,38 @@ impl OnchainState {
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
                         DynamicField::path_builder().value().finish(),
+                        DynamicField::path_builder().value_type(),
                     ])),
             )
             .pipe(Box::pin);
+        // Cloned once up front: the guard must not be held across the stream's
+        // await points, and identification below resolves defining addresses
+        // through this map.
+        let packages = self.state().package_versions().clone();
         while let Some(field) = stream.try_next().await? {
             if field.name().value() == key_bcs.as_slice() {
-                return Ok(Some(field.value().deserialize()?));
+                let value_type = versioned_decode::field_value_type(&field)?;
+                let layout =
+                    versioned_decode::TobCertLayout::from_struct_tag(&packages, &value_type)?;
+                let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
+                return Ok(Some((layout, epoch_certs)));
             }
         }
         Ok(None)
     }
 
-    async fn fetch_cert_table<V: serde::de::DeserializeOwned>(
+    async fn collect_table_nodes<V: serde::de::DeserializeOwned>(
         &self,
-        table: &move_types::LinkedTable<Address>,
-    ) -> Result<Vec<(Address, V)>> {
-        let Some(head) = table.head else {
-            return Ok(vec![]);
-        };
-        let mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>> =
-            std::collections::HashMap::new();
+        table_id: Address,
+    ) -> Result<std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>> {
+        let mut nodes = std::collections::HashMap::new();
         let mut stream = self
             .0
             .client
             .clone()
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(table.id)
+                    .with_parent(table_id)
                     .with_page_size(SCRAPE_PAGE_SIZE)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -951,70 +964,192 @@ impl OnchainState {
             let node = field.value().deserialize()?;
             nodes.insert(dealer, node);
         }
-        walk_cert_table(head, nodes)
+        Ok(nodes)
     }
 
-    pub async fn fetch_stamped_certs(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
-        let Some(epoch_certs) = self
-            .fetch_epoch_certs_bucket::<move_types::StampedEpochCertsV1>(
-                epoch,
-                batch_index,
-                protocol_type,
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let certs = self.fetch_cert_table(&epoch_certs.certs).await?;
-        ensure_timestamp_ordered(&certs)?;
-        Ok(Some(certs))
-    }
-
-    pub fn supports_stamped_nonce_certs(&self) -> bool {
-        stamped_certs_supported(&self.state().hashi().config.enabled_versions)
-    }
-
+    /// Bare buckets, written before the v1→v2 upgrade, report `timestamp_ms: 0`,
+    /// which never trips the window's cutoff. A bucket's layout is fixed by
+    /// whichever version created it and never converts, so the layout the chain
+    /// reports — not the active version — decides how to decode.
     pub async fn fetch_nonce_certs_stamped_or_bare(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
     ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
-        if self.supports_stamped_nonce_certs() {
-            self.fetch_stamped_certs(
-                epoch,
-                batch_index,
-                move_types::ProtocolType::NonceGeneration,
-            )
-            .await
-        } else {
-            let bare = self
-                .fetch_certs(
-                    epoch,
-                    batch_index,
-                    move_types::ProtocolType::NonceGeneration,
-                )
-                .await?;
-            Ok(bare.map(|certs| {
-                certs
-                    .into_iter()
-                    .map(|(dealer, submission)| {
-                        (
-                            dealer,
-                            move_types::StampedDealerSubmissionV1 {
-                                submission,
-                                timestamp_ms: 0,
-                            },
-                        )
-                    })
-                    .collect()
-            }))
-        }
+        let protocol_type = move_types::ProtocolType::NonceGeneration;
+        self.retry_inconsistent_listing(epoch, protocol_type, || async {
+            let Some((layout, epoch_certs)) = self
+                .fetch_epoch_certs_with_layout(epoch, batch_index, protocol_type)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let Some(head) = epoch_certs.certs.head else {
+                return Ok(Some(vec![]));
+            };
+            let size = epoch_certs.certs.size;
+            let table_id = epoch_certs.certs.id;
+            let certs = match layout {
+                versioned_decode::TobCertLayout::Stamped => {
+                    let nodes = self.collect_table_nodes(table_id).await?;
+                    let stamped = walk_linked_table(head, size, nodes).map_err(|e| {
+                        inconsistent_listing(format!(
+                            "incomplete stamped cert listing for epoch {epoch} {protocol_type:?}: \
+                             {e}"
+                        ))
+                    })?;
+                    ensure_timestamp_ordered(&stamped)?;
+                    stamped
+                }
+                versioned_decode::TobCertLayout::Bare => {
+                    let nodes = self.collect_table_nodes(table_id).await?;
+                    walk_linked_table(head, size, nodes)
+                        .map_err(|e| {
+                            inconsistent_listing(format!(
+                                "incomplete cert listing for epoch {epoch} {protocol_type:?}: {e}"
+                            ))
+                        })?
+                        .into_iter()
+                        .map(|(dealer, submission)| {
+                            (
+                                dealer,
+                                move_types::StampedDealerSubmissionV1 {
+                                    submission,
+                                    timestamp_ms: 0,
+                                },
+                            )
+                        })
+                        .collect()
+                }
+            };
+            Ok(Some(certs))
+        })
+        .await
     }
+
+    async fn retry_inconsistent_listing<T, F, Fut>(
+        &self,
+        epoch: u64,
+        protocol_type: move_types::ProtocolType,
+        read: F,
+    ) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        for attempt in 1..CERT_LISTING_ATTEMPTS {
+            match read().await {
+                Ok(v) => return Ok(v),
+                Err(e) if is_inconsistent_listing(&e) => {
+                    tracing::debug!(
+                        "epoch {epoch} {protocol_type:?}: {e}; re-reading (attempt {attempt} of \
+                         {CERT_LISTING_ATTEMPTS})"
+                    );
+                    tokio::time::sleep(CERT_LISTING_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        read().await
+    }
+
+    pub async fn fetch_certs(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        self.retry_inconsistent_listing(epoch, protocol_type, || async {
+            self.fetch_certs_once(epoch, batch_index, protocol_type)
+                .await
+        })
+        .await
+    }
+
+    async fn fetch_certs_once(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        let Some((layout, epoch_certs)) = self
+            .fetch_epoch_certs_with_layout(epoch, batch_index, protocol_type)
+            .await?
+        else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            layout == versioned_decode::TobCertLayout::Bare,
+            "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses the \
+             {layout:?} cert layout, which this read path cannot decode"
+        );
+        let Some(head) = epoch_certs.certs.head else {
+            return Ok(Some(vec![]));
+        };
+        let nodes = self.collect_table_nodes(epoch_certs.certs.id).await?;
+        walk_linked_table(head, epoch_certs.certs.size, nodes)
+            .map_err(|e| {
+                inconsistent_listing(format!(
+                    "incomplete cert listing for epoch {epoch} {protocol_type:?}: {e}"
+                ))
+            })
+            .map(Some)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "cert table is not timestamp-ordered: {later} stamped {later_ms} follows {earlier} \
+     stamped {earlier_ms}"
+)]
+pub struct UnorderedCertTableRead {
+    pub earlier: Address,
+    pub earlier_ms: u64,
+    pub later: Address,
+    pub later_ms: u64,
+}
+
+fn ensure_timestamp_ordered(
+    certs: &[(Address, move_types::StampedDealerSubmissionV1)],
+) -> Result<()> {
+    if let Some(bad) = certs
+        .windows(2)
+        .find(|w| w[1].1.timestamp_ms < w[0].1.timestamp_ms)
+    {
+        return Err(UnorderedCertTableRead {
+            earlier: bad[0].0,
+            earlier_ms: bad[0].1.timestamp_ms,
+            later: bad[1].0,
+            later_ms: bad[1].1.timestamp_ms,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn walk_linked_table<V>(
+    head: Address,
+    size: u64,
+    mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>,
+) -> Result<Vec<(Address, V)>> {
+    let mut entries = Vec::with_capacity(nodes.len());
+    let mut current = Some(head);
+    while let Some(key) = current {
+        let Some(node) = nodes.remove(&key) else {
+            return Err(anyhow!(
+                "the linked list references {key} but the dynamic-field listing did not return it"
+            ));
+        };
+        entries.push((key, node.value));
+        current = node.next;
+    }
+    if (entries.len() as u64) < size {
+        return Err(anyhow!(
+            "walked {} entries but the table reported {size}",
+            entries.len()
+        ));
+    }
+    Ok(entries)
 }
 
 impl State {
@@ -1024,6 +1159,18 @@ impl State {
 
     pub fn hashi(&self) -> &types::Hashi {
         &self.hashi
+    }
+
+    /// Resolve version support from this snapshot against `supported` (the
+    /// binary's [`crate::constants::SUPPORTED_PACKAGE_VERSIONS`]). Kept on
+    /// `State` so callers that already hold a read guard resolve without
+    /// re-locking or racing a second snapshot.
+    pub fn version_support(&self, supported: &[u64]) -> version::VersionSupport {
+        version::resolve_version_support(
+            &self.hashi.config.enabled_versions,
+            &self.package_versions,
+            supported,
+        )
     }
 
     async fn scrape(
@@ -2025,19 +2172,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn pre_enabled_version_does_not_switch_on_the_stamped_abi() {
-        use std::collections::BTreeSet;
-        let set = |v: &[u64]| v.iter().copied().collect::<BTreeSet<u64>>();
-
-        assert!(!stamped_certs_supported(&set(&[1])), "v1 only");
-        assert!(stamped_certs_supported(&set(&[1, 2])), "fresh v2 publish");
-        assert!(
-            !stamped_certs_supported(&set(&[1, 3])),
-            "pre-enabling an undeployed version must not switch on the stamped ABI"
-        );
-    }
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::KeyPair;
     use fastcrypto::traits::ToFromBytes;
@@ -2129,132 +2263,6 @@ mod tests {
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());
     }
-
-    #[test]
-    fn stamped_dealer_submission_bcs_round_trips_with_timestamp() {
-        use move_types::CommitteeSignature;
-        use move_types::DealerMessagesHashV1;
-        use move_types::DealerSubmissionV1;
-        use move_types::LinkedTableNode;
-        use move_types::StampedDealerSubmissionV1;
-        let dealer = Address::new([7u8; 32]);
-        let node: LinkedTableNode<Address, StampedDealerSubmissionV1> = LinkedTableNode {
-            prev: None,
-            next: Some(dealer),
-            value: StampedDealerSubmissionV1 {
-                submission: DealerSubmissionV1 {
-                    message: DealerMessagesHashV1 {
-                        dealer_address: dealer,
-                        messages_hash: vec![1, 2, 3],
-                    },
-                    signature: CommitteeSignature {
-                        epoch: 9,
-                        signature: vec![0xaa],
-                        signers_bitmap: vec![0x01],
-                    },
-                },
-                timestamp_ms: 123_456,
-            },
-        };
-        let bytes = bcs::to_bytes(&node).unwrap();
-        let decoded: LinkedTableNode<Address, StampedDealerSubmissionV1> =
-            bcs::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.value.timestamp_ms, 123_456);
-        assert_eq!(decoded.value.submission.message.dealer_address, dealer);
-        assert_eq!(decoded.next, Some(dealer));
-    }
-
-    fn stamped(
-        dealer: Address,
-        next: Option<Address>,
-        timestamp_ms: u64,
-    ) -> move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1> {
-        move_types::LinkedTableNode {
-            prev: None,
-            next,
-            value: move_types::StampedDealerSubmissionV1 {
-                submission: move_types::DealerSubmissionV1 {
-                    message: move_types::DealerMessagesHashV1 {
-                        dealer_address: dealer,
-                        messages_hash: vec![],
-                    },
-                    signature: move_types::CommitteeSignature {
-                        epoch: 1,
-                        signature: vec![],
-                        signers_bitmap: vec![],
-                    },
-                },
-                timestamp_ms,
-            },
-        }
-    }
-
-    #[test]
-    fn dangling_link_fails_the_read_instead_of_returning_a_short_prefix() {
-        let (a, b, c) = (
-            Address::new([1u8; 32]),
-            Address::new([2u8; 32]),
-            Address::new([3u8; 32]),
-        );
-        let full = |missing: Option<Address>| {
-            [(c, Some(a)), (a, Some(b)), (b, None)]
-                .into_iter()
-                .filter(|(d, _)| Some(*d) != missing)
-                .map(|(d, next)| (d, stamped(d, next, 10)))
-                .collect::<std::collections::HashMap<_, _>>()
-        };
-
-        let walked = walk_cert_table(c, full(None)).expect("complete table walks");
-        assert_eq!(
-            walked.iter().map(|(d, _)| *d).collect::<Vec<_>>(),
-            vec![c, a, b],
-            "the walk must follow next pointers, not map iteration or address order"
-        );
-
-        let headless = walk_cert_table(c, full(Some(c))).expect_err("absent head must fail");
-        assert_eq!(
-            headless
-                .downcast_ref::<IncompleteCertTableRead>()
-                .expect("absent head is a raced read, not an empty table")
-                .dealer,
-            c,
-        );
-
-        let err = walk_cert_table(c, full(Some(a))).expect_err("dangling link must fail");
-        assert_eq!(
-            err.downcast_ref::<IncompleteCertTableRead>()
-                .expect("typed so pollers can retry it and sizing can treat it as fatal")
-                .dealer,
-            a,
-            "the error must name the absent node, not the head or the tail"
-        );
-    }
-
-    #[test]
-    fn timestamp_ordering_rejects_only_a_decreasing_pair() {
-        let d = |n: u8| Address::new([n; 32]);
-        let list = |stamps: &[u64]| {
-            stamps
-                .iter()
-                .enumerate()
-                .map(|(i, ms)| (d(i as u8), stamped(d(i as u8), None, *ms).value))
-                .collect::<Vec<_>>()
-        };
-
-        ensure_timestamp_ordered(&list(&[])).expect("empty");
-        ensure_timestamp_ordered(&list(&[5])).expect("single");
-        ensure_timestamp_ordered(&list(&[10, 10, 10])).expect("equal stamps are ordered");
-        ensure_timestamp_ordered(&list(&[1, 10, 10, 20])).expect("non-decreasing");
-
-        let err =
-            ensure_timestamp_ordered(&list(&[1, 20, 10])).expect_err("a decreasing pair must fail");
-        let unordered = err
-            .downcast_ref::<UnorderedCertTableRead>()
-            .expect("typed so publish can tolerate it while the window walks cannot");
-        assert_eq!((unordered.earlier_ms, unordered.later_ms), (20, 10));
-        // The addresses must track their stamps, or the message names the wrong dealer.
-        assert_eq!((unordered.earlier, unordered.later), (d(1), d(2)));
-    }
 }
 
 #[cfg(test)]
@@ -2276,5 +2284,79 @@ mod key_rotation_epoch_tests {
     #[test]
     fn an_empty_committee_history_answers_dkg() {
         assert!(!OnchainState::epoch_after_first_committee(None, 9));
+    }
+}
+
+#[cfg(test)]
+mod walk_linked_table_tests {
+    use super::walk_linked_table;
+    use hashi_types::move_types::LinkedTableNode;
+    use std::collections::HashMap;
+    use sui_sdk_types::Address;
+
+    fn addr(byte: u8) -> Address {
+        Address::new([byte; 32])
+    }
+
+    fn chain(keys: &[u8]) -> HashMap<Address, LinkedTableNode<Address, u32>> {
+        keys.iter()
+            .enumerate()
+            .map(|(i, &k)| {
+                (
+                    addr(k),
+                    LinkedTableNode {
+                        prev: (i > 0).then(|| addr(keys[i - 1])),
+                        next: keys.get(i + 1).map(|&n| addr(n)),
+                        value: u32::from(k),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_complete_listing_walks_in_insertion_order() {
+        let entries = walk_linked_table(addr(1), 3, chain(&[1, 2, 3])).unwrap();
+        assert_eq!(
+            entries,
+            vec![(addr(1), 1u32), (addr(2), 2u32), (addr(3), 3u32)]
+        );
+    }
+
+    #[test]
+    fn a_listing_missing_a_referenced_node_is_an_error() {
+        let mut nodes = chain(&[1, 2, 3]);
+        nodes.remove(&addr(2));
+        let err = walk_linked_table(addr(1), 3, nodes)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did not return it"), "{err}");
+    }
+
+    #[test]
+    fn a_walk_shorter_than_the_reported_size_is_an_error() {
+        let err = walk_linked_table(addr(1), 5, chain(&[1, 2, 3]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("walked 3 entries"), "{err}");
+    }
+
+    #[test]
+    fn a_listing_newer_than_the_reported_size_is_accepted() {
+        let entries = walk_linked_table(addr(1), 1, chain(&[1, 2, 3])).unwrap();
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn an_inconsistent_listing_error_is_recognised_for_retry() {
+        let err = super::inconsistent_listing("walked 3 entries but the table reported 5".into());
+        assert!(super::is_inconsistent_listing(&err));
+    }
+
+    #[test]
+    fn an_unrelated_error_is_not_retried() {
+        assert!(!super::is_inconsistent_listing(&anyhow::anyhow!(
+            "Sui RPC transport failure"
+        )));
     }
 }

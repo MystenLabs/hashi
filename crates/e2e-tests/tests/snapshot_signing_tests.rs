@@ -17,10 +17,9 @@
 //! rolled out before the on-chain package is upgraded. A full withdrawal here
 //! proves that configuration can still sign.
 //!
-//! With the version-gated stamped nonce-cert path in place, a v1-only snapshot
-//! chain is exactly the *bare* cert path (`supports_stamped_nonce_certs() ==
-//! false`, timestamps synthesized to `0`) that no fresh-publish harness
-//! exercises, and the assertion below pins this test to it.
+//! A v1-only snapshot chain is also exactly the *bare* cert path (timestamps
+//! synthesized to `0`) that no fresh-publish harness exercises, and the
+//! assertions below pin this test to it.
 
 use anyhow::Result;
 use e2e_tests::TestNetworksBuilder;
@@ -46,10 +45,12 @@ use tracing::info;
 async fn snapshot_v1_signs_withdrawal_end_to_end() -> Result<()> {
     init_test_logging();
 
-    // v1 = the checked-in deployed bytecode snapshot, not a source build.
+    // v1 = the checked-in deployed bytecode snapshot, not a source build —
+    // and no auto-upgrade: signing against the deployed bytecode is the point.
     let mut networks = TestNetworksBuilder::new()
         .with_nodes(4)
         .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
+        .without_upgrade()
         .build()
         .await?;
 
@@ -74,9 +75,11 @@ async fn snapshot_v1_signs_withdrawal_end_to_end() -> Result<()> {
         1,
         "snapshot chain should be a single-version (v1) package before any upgrade"
     );
-    assert!(
-        !node0.onchain_state().supports_stamped_nonce_certs(),
-        "a v1-only snapshot chain must not enable the stamped nonce-cert ABI"
+    assert_eq!(
+        node0.onchain_state().active_package(),
+        Some((hashi_ids.package_id, 1)),
+        "a v1-only snapshot chain must resolve to the original package at version 1, so the \
+         call target and the ABI it is shaped for agree"
     );
 
     // ── Deposit ─────────────────────────────────────────────────────────

@@ -7,6 +7,8 @@
 //! exposing it would let anyone wedge the guardian. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
+use std::sync::Arc;
+
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::proto;
@@ -17,17 +19,23 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use crate::roster::RosterCache;
+use crate::widlog::LogStore;
+
 /// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
 /// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
 #[derive(Clone)]
-pub struct Forwarding {
+pub struct Forwarding<L> {
     client: GuardianServiceClient<Channel>,
+    /// Shared with the relay so a cert rotation can drop the cached roster.
+    roster: Arc<RosterCache<L>>,
 }
 
-impl Forwarding {
-    pub fn new(channel: Channel) -> Self {
+impl<L: LogStore> Forwarding<L> {
+    pub fn new(channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
+            roster,
         }
     }
 }
@@ -53,7 +61,7 @@ fn verify_provisioner_rotate_cert_signature(
 // Each method clones the cheap channel-backed client and forwards the whole
 // `Request<T>` so client deadlines/metadata propagate.
 #[tonic::async_trait]
-impl GuardianService for Forwarding {
+impl<L: LogStore> GuardianService for Forwarding<L> {
     async fn get_guardian_info(
         &self,
         request: Request<proto::GetGuardianInfoRequest>,
@@ -89,11 +97,14 @@ impl GuardianService for Forwarding {
         // Admission control only: reject unsigned or corrupt traffic before an
         // enclave round-trip. The enclave repeats verification and authorizes
         // the signer against the latest encrypted-share roster.
-        // TODO: Once proxy authorization uses the S3-backed roster, check the
-        // signer here and invalidate the cached roster after a successful
-        // rotation so the next request observes the replacement cert.
+        // TODO: check the signer against the roster here too.
         verify_provisioner_rotate_cert_signature(request.get_ref())?;
-        self.client.clone().provisioner_rotate_cert(request).await
+        let response = self.client.clone().provisioner_rotate_cert(request).await?;
+        // The enclave has committed the replacement cert to the share log, so
+        // drop the cached roster: otherwise the new cert is rejected until the
+        // TTL lapses.
+        self.roster.invalidate().await;
+        Ok(response)
     }
 
     // --- Rejected: operator/ceremony surface ---
@@ -246,9 +257,11 @@ mod tests {
         })
     }
 
+    type StubStore = crate::widlog::test_store::MemStore;
+
     async fn spawn_stub_proxy() -> (
         StubGuardian,
-        CachingGuardianGrpc<Forwarding, crate::widlog::test_store::MemStore>,
+        CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
     ) {
         let stub = StubGuardian::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -268,8 +281,8 @@ mod tests {
             .unwrap()
             .connect_lazy();
         let cache = CachingGuardianGrpc::new(
-            Forwarding::new(channel),
-            crate::widlog::test_store::MemStore::default(),
+            Forwarding::new(channel, Arc::new(RosterCache::new(StubStore::default()))),
+            StubStore::default(),
             bitcoin::Network::Regtest,
             std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
         );

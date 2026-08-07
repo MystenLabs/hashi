@@ -17,9 +17,8 @@ pub struct MonitorConfig {
     pub network: Network,
 
     /// Peers for P2P connections, identified by hostname (or IP) and port.
-    /// Hostnames are resolved at connection time; the monitor's supervisor
-    /// rebuilds the kyoto node on disconnect, which re-resolves them so IP
-    /// changes (e.g. Kubernetes pod rotation) are followed.
+    /// Hostnames are resolved at each connection attempt, so IP changes
+    /// (e.g. Kubernetes pod rotation) are followed.
     pub trusted_peers: Vec<kyoto::TrustedPeer>,
 
     /// Starting block height for synchronization
@@ -40,7 +39,7 @@ impl Default for MonitorConfig {
         Self {
             network: Network::Bitcoin,
             trusted_peers: Vec::new(),
-            start_height: 800_000,
+            start_height: DEFAULT_START_HEIGHT,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
             bitcoind_rpc_auth: corepc_client::client_sync::Auth::None,
             data_dir: None,
@@ -184,6 +183,21 @@ pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
     .find(|&net| genesis_block(net).block_hash() == hash)
 }
 
+/// Fallback start height when `bitcoin-start-height` is unset. On Mainnet any
+/// height past Taproot activation works; it maps to the Taproot checkpoint.
+const DEFAULT_START_HEIGHT: u32 = 800_000;
+
+/// Anchors Signet nodes below the Hashi Testnet deployment (~height 313343).
+/// Only ever lower this; deposits below the anchor are never seen.
+const SIGNET_DEFAULT_START_HEIGHT: u32 = 300_000;
+
+pub fn default_start_height(network: Network) -> u32 {
+    match network {
+        Network::Signet => SIGNET_DEFAULT_START_HEIGHT,
+        _ => DEFAULT_START_HEIGHT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +224,13 @@ mod tests {
     fn test_regtest_genesis_mapping() {
         let network = network_from_chain_id(crate::constants::BITCOIN_REGTEST_CHAIN_ID);
         assert_eq!(network, Some(Network::Regtest));
+    }
+
+    #[test]
+    fn default_start_height_is_network_aware() {
+        assert_eq!(default_start_height(Network::Signet), 300_000);
+        assert_eq!(default_start_height(Network::Bitcoin), 800_000);
+        assert_eq!(default_start_height(Network::Testnet4), 800_000);
+        assert_eq!(default_start_height(Network::Regtest), 800_000);
     }
 }
