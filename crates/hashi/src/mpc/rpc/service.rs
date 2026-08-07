@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
+use crate::mpc::MpcManager;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
@@ -49,9 +50,8 @@ impl MpcService for HttpService {
             .mpc_rpc_handler_process_duration_seconds
             .with_label_values(&[label])
             .start_timer();
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let signed = {
-                let mut mgr = mpc_manager.write().unwrap();
+        let response =
+            MpcManager::with_manager_blocking_mut(&mpc_manager, move |mgr| -> Result<_, Status> {
                 validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
                 mgr.handle_send_messages_request(sender, &internal_request)
                     .map_err(|e| {
@@ -61,13 +61,11 @@ impl MpcService for HttpService {
                             tracing::warn!("send_messages from {sender:?} failed: {e}");
                         }
                         mpc_error_to_status(e)
-                    })?
-            };
-            Ok(SendMessagesResponse::from(&signed))
-        })
-        .await?;
+                    })
+            })
+            .await?;
         drop(_timer);
-        Ok(tonic::Response::new(response))
+        Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -129,9 +127,8 @@ impl MpcService for HttpService {
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let complaint = {
-                let mut mgr = mpc_manager.write().unwrap();
+        let response =
+            MpcManager::with_manager_blocking_mut(&mpc_manager, move |mgr| -> Result<_, Status> {
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
                     mgr.previous_epoch,
@@ -141,12 +138,10 @@ impl MpcService for HttpService {
                     .map_err(|e| {
                         tracing::warn!("complain failed: {e}");
                         mpc_error_to_status(e)
-                    })?
-            };
-            Ok(ComplainResponse::from(&complaint))
-        })
-        .await?;
-        Ok(tonic::Response::new(response))
+                    })
+            })
+            .await?;
+        Ok(tonic::Response::new(ComplainResponse::from(&response)))
     }
 
     #[tracing::instrument(skip(self, request))]

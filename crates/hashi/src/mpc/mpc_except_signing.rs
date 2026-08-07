@@ -407,7 +407,7 @@ impl MpcManager {
     }
 
     /// Run `f` against a write-locked manager on a blocking thread.
-    fn with_manager_blocking_mut<T: Send + 'static>(
+    pub(crate) fn with_manager_blocking_mut<T: Send + 'static>(
         mpc_manager: &Arc<RwLock<Self>>,
         f: impl FnOnce(&mut Self) -> T + Send + 'static,
     ) -> Pin<Box<dyn Future<Output = T> + Send>> {
@@ -1605,19 +1605,18 @@ impl MpcManager {
         metrics: &Metrics,
     ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
-        let _timer = metrics
-            .mpc_dealer_crypto_duration_seconds
-            .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-            .start_timer();
         let dealer_data = {
             let previous = previous.clone();
             let mut rng = StdRng::from_entropy();
-            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                mgr.prepare_rotation_dealer_flow(&previous, &mut rng)
-            })
+            time_async(
+                &metrics.mpc_dealer_crypto_duration_seconds,
+                MPC_LABEL_KEY_ROTATION,
+                Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
+                    mgr.prepare_rotation_dealer_flow(&previous, &mut rng)
+                }),
+            )
             .await?
         };
-        drop(_timer);
         let mut aggregator = BlsSignatureAggregator::new_reduced(
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
@@ -1788,26 +1787,29 @@ impl MpcManager {
                 }
             }
             {
-                let _timer = metrics
-                    .mpc_message_process_duration_seconds
-                    .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                    .start_timer();
                 let previous = previous.clone();
                 let share_indices = dealer_share_indices.clone();
-                Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                    if share_indices.iter().any(|idx| {
-                        !mgr.dealer_outputs
-                            .contains_key(&DealerOutputsKey::Rotation(dealer, *idx))
-                            && !mgr
-                                .complaints_to_process
-                                .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
-                    }) {
-                        mgr.process_certified_rotation_message(&dealer, &previous, &share_indices)?;
-                    }
-                    Ok::<_, MpcError>(())
-                })
+                time_async(
+                    &metrics.mpc_message_process_duration_seconds,
+                    MPC_LABEL_KEY_ROTATION,
+                    Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
+                        if share_indices.iter().any(|idx| {
+                            !mgr.dealer_outputs
+                                .contains_key(&DealerOutputsKey::Rotation(dealer, *idx))
+                                && !mgr
+                                    .complaints_to_process
+                                    .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
+                        }) {
+                            mgr.process_certified_rotation_message(
+                                &dealer,
+                                &previous,
+                                &share_indices,
+                            )?;
+                        }
+                        Ok::<_, MpcError>(())
+                    }),
+                )
                 .await?;
-                drop(_timer);
             }
             let (signers, epoch, rotation_msgs) = {
                 let mgr = mpc_manager.read().unwrap();
@@ -1873,18 +1875,17 @@ impl MpcManager {
             );
         }
         tracing::info!("run_key_rotation_as_party: threshold met, calling complete_key_rotation",);
-        let _timer = metrics
-            .mpc_completion_duration_seconds
-            .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-            .start_timer();
         let output = {
             let previous = previous.clone();
-            Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
-                mgr.complete_key_rotation(&previous, &certified_share_indices)
-            })
+            time_async(
+                &metrics.mpc_completion_duration_seconds,
+                MPC_LABEL_KEY_ROTATION,
+                Self::with_manager_blocking_mut(mpc_manager, move |mgr| {
+                    mgr.complete_key_rotation(&previous, &certified_share_indices)
+                }),
+            )
             .await?
         };
-        drop(_timer);
         Ok(output)
     }
 
@@ -5579,20 +5580,25 @@ impl MpcManager {
                 Ok(output) => output,
                 Err(e) => {
                     tracing::info!("Reconstruction failed ({e}), falling back to new-member path");
-                    let _fetch_timer = metrics
-                        .mpc_prepare_previous_fetch_public_output_duration_seconds
-                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                        .start_timer();
-                    Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt)
-                        .await?
+                    time_async(
+                        &metrics.mpc_prepare_previous_fetch_public_output_duration_seconds,
+                        MPC_LABEL_KEY_ROTATION,
+                        Self::fetch_and_build_public_output(
+                            mpc_manager,
+                            p2p_channel,
+                            threshold_opt,
+                        ),
+                    )
+                    .await?
                 }
             }
         } else {
-            let _fetch_timer = metrics
-                .mpc_prepare_previous_fetch_public_output_duration_seconds
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
-                .start_timer();
-            Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt).await?
+            time_async(
+                &metrics.mpc_prepare_previous_fetch_public_output_duration_seconds,
+                MPC_LABEL_KEY_ROTATION,
+                Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt),
+            )
+            .await?
         };
         tracing::info!(
             "prepare_previous_output: is_member_of_previous_committee={is_member_of_previous_committee}, \
