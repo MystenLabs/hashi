@@ -143,7 +143,6 @@ pub enum ProtocolType {
     Dkg,
     KeyRotation,
     NonceGeneration { batch_index: u32 },
-    Signing { message_hash: MessagesHash },
 }
 
 impl SessionId {
@@ -225,7 +224,7 @@ pub enum Messages {
 }
 
 impl Messages {
-    pub fn compute_hash(&self) -> MessagesHash {
+    pub(crate) fn compute_hash(&self) -> MessagesHash {
         let bytes = bcs::to_bytes(self).expect(EXPECT_SERIALIZATION_SUCCESS);
         MessagesHash::from(Blake2b256::digest(&bytes).digest)
     }
