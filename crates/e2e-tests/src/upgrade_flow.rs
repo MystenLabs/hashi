@@ -40,17 +40,28 @@ pub async fn wait_for_package_convergence(
 ) -> Result<()> {
     tracing::info!("waiting for all nodes to detect the new package version...");
     let wait_start = std::time::Instant::now();
+    // Only nodes that are actually running: a pending member (the key-rotation
+    // tests hold one back to start mid-test) has no Hashi instance yet — its
+    // accessor panics — and when it does boot, its fresh scrape sees the
+    // post-upgrade chain, so there is nothing to converge.
     loop {
         let all_updated = networks
             .hashi_network
             .nodes()
             .iter()
+            .filter(|node| node.is_running())
             .all(|node| node.hashi().onchain_state().package_id() == Some(package_id));
         if all_updated {
             return Ok(());
         }
         if wait_start.elapsed() > max_wait {
-            for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+            for (i, node) in networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .filter(|node| node.is_running())
+                .enumerate()
+            {
                 let latest = node.hashi().onchain_state().package_id();
                 let versions = node
                     .hashi()
@@ -283,7 +294,16 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// Returns the new package ID on success.
 pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address> {
-    let nodes = networks.hashi_network.nodes();
+    // Running nodes only: a pending member (started mid-test by the
+    // key-rotation tests) has no Hashi instance to read state from or vote
+    // with — and is not a registered committee member yet anyway.
+    let nodes: Vec<_> = networks
+        .hashi_network
+        .nodes()
+        .iter()
+        .filter(|node| node.is_running())
+        .collect();
+    anyhow::ensure!(!nodes.is_empty(), "no running nodes to drive the upgrade");
     let hashi_ids = networks.hashi_network.ids();
 
     let mut executors: Vec<SuiTxExecutor> = nodes
