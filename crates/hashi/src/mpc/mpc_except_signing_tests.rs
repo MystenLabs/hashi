@@ -7363,7 +7363,13 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             rotation_setup.setup.address(3),
         ] {
             let party_id = prev_committee.index_of(&addr).unwrap() as u16;
-            certified_share_indices.extend(prev_nodes.share_ids_of(party_id).unwrap());
+            certified_share_indices.extend(
+                prev_nodes
+                    .share_ids_of(party_id)
+                    .unwrap()
+                    .into_iter()
+                    .map(|idx| (addr, idx)),
+            );
         }
         ref_manager
             .complete_key_rotation(&ref_dkg_output, &certified_share_indices)
@@ -8363,19 +8369,28 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     // Rotation: outputs keyed by share index
     let share1_original_output = receiver_manager
         .dealer_outputs
-        .get(&DealerOutputsKey::Rotation(share1_index))
+        .get(&DealerOutputsKey::Rotation(
+            rotation_dealer_addr,
+            share1_index,
+        ))
         .expect("Share 1 should have output")
         .clone();
 
     // Remove share 2's output (will be re-processed)
     receiver_manager
         .dealer_outputs
-        .remove(&DealerOutputsKey::Rotation(share2_index));
+        .remove(&DealerOutputsKey::Rotation(
+            rotation_dealer_addr,
+            share2_index,
+        ));
 
     // Remove share 3's output and add a complaint
     receiver_manager
         .dealer_outputs
-        .remove(&DealerOutputsKey::Rotation(share3_index));
+        .remove(&DealerOutputsKey::Rotation(
+            rotation_dealer_addr,
+            share3_index,
+        ));
 
     // Create a real complaint using a cheating message for share 3
     let share3_value = dealer_dkg_output
@@ -8433,7 +8448,10 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     // Rotation: outputs keyed by share index
     let share1_output_after = receiver_manager
         .dealer_outputs
-        .get(&DealerOutputsKey::Rotation(share1_index))
+        .get(&DealerOutputsKey::Rotation(
+            rotation_dealer_addr,
+            share1_index,
+        ))
         .expect("Share 1 should still have output");
     assert_eq!(
         share1_output_after.my_shares.shares.len(),
@@ -8445,7 +8463,10 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     assert!(
         receiver_manager
             .dealer_outputs
-            .contains_key(&DealerOutputsKey::Rotation(share2_index)),
+            .contains_key(&DealerOutputsKey::Rotation(
+                rotation_dealer_addr,
+                share2_index
+            )),
         "Share 2 should be re-processed"
     );
 
@@ -8453,7 +8474,10 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     assert!(
         !receiver_manager
             .dealer_outputs
-            .contains_key(&DealerOutputsKey::Rotation(share3_index)),
+            .contains_key(&DealerOutputsKey::Rotation(
+                rotation_dealer_addr,
+                share3_index
+            )),
         "Share 3 should not have output (skipped due to complaint)"
     );
     assert!(
@@ -8617,7 +8641,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     assert!(
         !test_manager
             .dealer_outputs
-            .contains_key(&DealerOutputsKey::Rotation(first_share_index)),
+            .contains_key(&DealerOutputsKey::Rotation(dealer_addr, first_share_index)),
         "Should not have output before recovery"
     );
 
@@ -8650,7 +8674,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         let mgr = test_manager.read().unwrap();
         assert!(
             !mgr.dealer_outputs
-                .contains_key(&DealerOutputsKey::Rotation(first_share_index)),
+                .contains_key(&DealerOutputsKey::Rotation(dealer_addr, first_share_index)),
             "recover_rotation_shares_via_complaints must not touch the global dealer_outputs"
         );
         assert!(
@@ -8822,6 +8846,14 @@ fn test_handle_complain_request_success() {
         "Response should be cached"
     );
 
+    let served_from_cache = responder_manager
+        .handle_complain_request(rotation_setup.setup.address(victim_idx), &request);
+    assert!(
+        served_from_cache.is_ok(),
+        "Repeat request must still be served from cache: {:?}",
+        served_from_cache.err()
+    );
+
     // Share-index discrimination: the same complaint must NOT validate against
     // a different share_index's AVSS instance.
     if let Some(&other_share_index) = valid_rotation_map.keys().find(|&&k| k != first_share_index) {
@@ -8839,6 +8871,224 @@ fn test_handle_complain_request_success() {
              against share_index {other_share_index}"
         );
     }
+}
+
+#[test]
+fn test_handle_complain_request_rejects_dealer_that_does_not_own_the_share_index() {
+    let rotation_setup = RotationTestSetup::new();
+    let mut rng = rand::thread_rng();
+
+    let victim_idx = 2;
+    let (victim_manager, victim_dkg_output) =
+        rotation_setup.create_receiver_with_memory_store(victim_idx);
+
+    let dealer_idx = 0;
+    let (_, dealer_dkg_output, valid_rotation_messages) =
+        rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
+    let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+    let valid_rotation_map = match &valid_rotation_messages {
+        Messages::Rotation(map) => map.clone(),
+        Messages::Dkg(_)
+        | Messages::NonceGeneration(_)
+        | Messages::NonceGenerationAvid(_)
+        | Messages::AvidNonceRetrieval(_) => {
+            panic!("Expected rotation messages")
+        }
+    };
+    let first_share_index = *valid_rotation_map.keys().next().unwrap();
+    let share_value = dealer_dkg_output
+        .key_shares
+        .shares
+        .iter()
+        .find(|s| s.index == first_share_index)
+        .map(|s| s.value)
+        .unwrap();
+
+    let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
+        &rotation_setup.setup,
+        &victim_manager.current_session_id(),
+        &dealer_addr,
+        share_value,
+        first_share_index,
+        victim_idx as u16,
+        &mut rng,
+    );
+    let mut cheating_map = valid_rotation_map.clone();
+    cheating_map.insert(cheating_share_index, cheating_message.clone());
+    let cheating_messages = Messages::Rotation(cheating_map);
+
+    let session_id = victim_manager
+        .current_session_id()
+        .rotation_session_id(&dealer_addr, first_share_index);
+    let commitment = victim_dkg_output
+        .commitments
+        .get(&first_share_index)
+        .copied();
+    let receiver = avss::Receiver::new(
+        victim_manager.mpc_config.nodes.clone(),
+        victim_manager.party_id,
+        Parameters {
+            t: victim_manager.mpc_config.threshold,
+            f: victim_manager.mpc_config.max_faulty,
+        },
+        session_id.to_vec(),
+        commitment,
+        victim_manager.encryption_key.clone(),
+    )
+    .unwrap();
+    let complaint = match receiver
+        .process_message(&cheating_message, &mut rand::thread_rng())
+        .unwrap()
+    {
+        avss::ProcessedMessage::Complaint(c) => c,
+        _ => panic!("Expected complaint from corrupted share"),
+    };
+
+    let responder_idx = 1;
+    let (mut responder_manager, responder_dkg_output) =
+        rotation_setup.create_receiver_with_memory_store(responder_idx);
+    responder_manager.previous_output = Some(responder_dkg_output.clone());
+
+    if let Messages::Rotation(ref msgs) = cheating_messages {
+        responder_manager
+            .current_rotation_messages
+            .insert(dealer_addr, msgs.clone());
+    }
+    responder_manager
+        .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &cheating_messages)
+        .unwrap();
+
+    let attacker_addr = rotation_setup.setup.address(3);
+    assert_ne!(attacker_addr, dealer_addr);
+    if let Messages::Rotation(ref msgs) = cheating_messages {
+        responder_manager
+            .current_rotation_messages
+            .insert(attacker_addr, msgs.clone());
+    }
+
+    let request = ComplainRequest {
+        dealer: attacker_addr,
+        share_index: Some(first_share_index),
+        batch_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+        protocol_type: ProtocolTypeIndicator::KeyRotation,
+        epoch: responder_manager.mpc_config.epoch,
+    };
+
+    let err = match responder_manager
+        .handle_complain_request(rotation_setup.setup.address(victim_idx), &request)
+    {
+        Ok(_) => panic!(
+            "must reject a complaint naming a dealer that does not own share_index \
+             {first_share_index}"
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains(&format!("does not belong to dealer {attacker_addr}")),
+        "expected the complaint arm's ownership rejection naming {attacker_addr}, got: {err}"
+    );
+}
+
+#[test]
+fn test_rotation_output_lookup_is_not_shared_across_dealers() {
+    let rotation_setup = RotationTestSetup::new();
+
+    let dealer_idx = 0;
+    let (_, dealer_dkg_output, rotation_messages) =
+        rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
+    let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+    let rotation_map = match &rotation_messages {
+        Messages::Rotation(map) => map.clone(),
+        Messages::Dkg(_)
+        | Messages::NonceGeneration(_)
+        | Messages::NonceGenerationAvid(_)
+        | Messages::AvidNonceRetrieval(_) => {
+            panic!("Expected rotation messages")
+        }
+    };
+    let share_index = *rotation_map.keys().next().unwrap();
+    let dealer_message = rotation_map.get(&share_index).unwrap().clone();
+
+    let responder_idx = 1;
+    let (mut responder_manager, responder_dkg_output) =
+        rotation_setup.create_receiver_with_memory_store(responder_idx);
+    responder_manager.previous_output = Some(responder_dkg_output.clone());
+    responder_manager
+        .current_rotation_messages
+        .insert(dealer_addr, rotation_map.clone());
+    responder_manager
+        .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &rotation_messages)
+        .unwrap();
+
+    let cached = responder_manager
+        .dealer_outputs
+        .get(&DealerOutputsKey::Rotation(dealer_addr, share_index))
+        .expect("the dealing dealer's output must be cached")
+        .clone();
+
+    let own_session_id = responder_manager
+        .current_session_id()
+        .rotation_session_id(&dealer_addr, share_index);
+    let own_lookup = responder_manager
+        .get_or_derive_rotation_output(
+            &dealer_addr,
+            share_index,
+            &dealer_message,
+            responder_manager.mpc_config.epoch,
+            &own_session_id,
+        )
+        .expect("the dealing dealer's own lookup must succeed");
+    assert_eq!(
+        bcs::to_bytes(&own_lookup).unwrap(),
+        bcs::to_bytes(&cached).unwrap(),
+        "the dealing dealer's lookup must return its own cached output"
+    );
+
+    let other_dealer = rotation_setup.setup.address(3);
+    assert_ne!(other_dealer, dealer_addr);
+    assert!(
+        !responder_manager
+            .dealer_outputs
+            .contains_key(&DealerOutputsKey::Rotation(other_dealer, share_index)),
+        "share index {share_index} must not resolve for a dealer that did not deal it"
+    );
+
+    let claimed_secret = dealer_dkg_output
+        .key_shares
+        .shares
+        .iter()
+        .find(|s| s.index == share_index)
+        .map(|s| s.value)
+        .unwrap();
+    let (_, other_dealer_message) = create_cheating_rotation_message(
+        &rotation_setup.setup,
+        &responder_manager.current_session_id(),
+        &other_dealer,
+        claimed_secret,
+        share_index,
+        4,
+        &mut rand::thread_rng(),
+    );
+    let other_session_id = responder_manager
+        .current_session_id()
+        .rotation_session_id(&other_dealer, share_index);
+    let derived = responder_manager
+        .get_or_derive_rotation_output(
+            &other_dealer,
+            share_index,
+            &other_dealer_message,
+            responder_manager.mpc_config.epoch,
+            &other_session_id,
+        )
+        .expect("a message authored under the claiming dealer's own session must derive");
+    assert_ne!(
+        bcs::to_bytes(&derived).unwrap(),
+        bcs::to_bytes(&cached).unwrap(),
+        "a lookup naming {other_dealer} returned the output dealt by {dealer_addr}"
+    );
 }
 
 /// Shared store that can be cloned and reused across manager restarts.
@@ -9235,7 +9485,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
     // We need to process them to populate dealer_outputs
     for (dealer_addr, rotation_msgs) in &rotation_messages_map {
         for (share_index, message) in rotation_msgs {
-            let output_key = DealerOutputsKey::Rotation(*share_index);
+            let output_key = DealerOutputsKey::Rotation(*dealer_addr, *share_index);
             let complaint_key = ComplaintsToProcessKey::Rotation(*dealer_addr, *share_index);
             if party_manager.dealer_outputs.contains_key(&output_key) {
                 continue;
@@ -9259,11 +9509,11 @@ fn test_party_restart_uses_stored_rotation_messages() {
     }
 
     // Get certified share indices
-    let certified_share_indices: Vec<ShareIndex> = party_manager
+    let certified_share_indices: Vec<(Address, ShareIndex)> = party_manager
         .dealer_outputs
         .keys()
         .filter_map(|k| match k {
-            DealerOutputsKey::Rotation(idx) => Some(*idx),
+            DealerOutputsKey::Rotation(dealer, idx) => Some((*dealer, *idx)),
             _ => None,
         })
         .collect();

@@ -561,6 +561,27 @@ impl MpcManager {
                         sender: request.dealer,
                         reason: "Rotation complaint requires share_index".into(),
                     })?;
+                if request.epoch == self.mpc_config.epoch {
+                    let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
+                        MpcError::InvalidConfig("Key rotation requires previous committee".into())
+                    })?;
+                    let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+                        MpcError::InvalidConfig("Key rotation requires previous nodes".into())
+                    })?;
+                    let owns = previous_committee
+                        .index_of(&request.dealer)
+                        .and_then(|party_id| previous_nodes.share_ids_of(party_id as PartyId).ok())
+                        .is_some_and(|indices| indices.contains(&share_index));
+                    if !owns {
+                        return Err(MpcError::InvalidMessage {
+                            sender: caller,
+                            reason: format!(
+                                "Share index {} does not belong to dealer {}",
+                                share_index, request.dealer
+                            ),
+                        });
+                    }
+                }
                 ComplaintResponsesKey::Rotation {
                     dealer: request.dealer,
                     share_index,
@@ -704,6 +725,7 @@ impl MpcManager {
                     .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
                     .rotation_session_id(&request.dealer, complained_share_index);
                 let complained_output = self.get_or_derive_rotation_output(
+                    &request.dealer,
                     complained_share_index,
                     complained_message,
                     request.epoch,
@@ -1584,7 +1606,7 @@ impl MpcManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
-        let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
+        let mut certified_share_indices: Vec<(Address, ShareIndex)> = Vec::new();
         let mut certified_dealers = HashSet::new();
         tracing::info!(
             "run_key_rotation_as_party: waiting for certs (threshold={})",
@@ -1697,7 +1719,8 @@ impl MpcManager {
                 {
                     let mut mgr = mpc_manager.write().unwrap();
                     for idx in &dealer_share_indices {
-                        mgr.dealer_outputs.remove(&DealerOutputsKey::Rotation(*idx));
+                        mgr.dealer_outputs
+                            .remove(&DealerOutputsKey::Rotation(dealer, *idx));
                     }
                 }
             }
@@ -1713,7 +1736,7 @@ impl MpcManager {
                     let mut mgr = mgr.write().unwrap();
                     if share_indices.iter().any(|idx| {
                         !mgr.dealer_outputs
-                            .contains_key(&DealerOutputsKey::Rotation(*idx))
+                            .contains_key(&DealerOutputsKey::Rotation(dealer, *idx))
                             && !mgr
                                 .complaints_to_process
                                 .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
@@ -1759,7 +1782,7 @@ impl MpcManager {
                 let mut mgr = mpc_manager.write().unwrap();
                 for (share_index, output) in recovered {
                     mgr.dealer_outputs
-                        .insert(DealerOutputsKey::Rotation(share_index), output);
+                        .insert(DealerOutputsKey::Rotation(dealer, share_index), output);
                     mgr.complaints_to_process
                         .remove(&ComplaintsToProcessKey::Rotation(dealer, share_index));
                 }
@@ -1771,12 +1794,12 @@ impl MpcManager {
             {
                 let mgr = mpc_manager.read().unwrap();
                 for idx in dealer_share_indices {
-                    if !certified_share_indices.contains(&idx)
+                    if !certified_share_indices.iter().any(|(_, i)| *i == idx)
                         && mgr
                             .dealer_outputs
-                            .contains_key(&DealerOutputsKey::Rotation(idx))
+                            .contains_key(&DealerOutputsKey::Rotation(dealer, idx))
                     {
-                        certified_share_indices.push(idx);
+                        certified_share_indices.push((dealer, idx));
                     }
                 }
             }
@@ -3912,7 +3935,7 @@ impl MpcManager {
             .clone();
         let base_sid = self.current_session_id();
         for (share_index, message) in rotation_messages {
-            let output_key = DealerOutputsKey::Rotation(share_index);
+            let output_key = DealerOutputsKey::Rotation(*dealer, share_index);
             let complaint_key = ComplaintsToProcessKey::Rotation(*dealer, share_index);
             if self.dealer_outputs.contains_key(&output_key)
                 || self.complaints_to_process.contains_key(&complaint_key)
@@ -4768,7 +4791,7 @@ impl MpcManager {
             }
             if self
                 .dealer_outputs
-                .contains_key(&DealerOutputsKey::Rotation(share_index))
+                .contains_key(&DealerOutputsKey::Rotation(dealer, share_index))
             {
                 return Err(MpcError::InvalidMessage {
                     sender: dealer,
@@ -4790,7 +4813,7 @@ impl MpcManager {
                 commitment,
             )? {
                 avss::ProcessedMessage::Valid(output) => {
-                    outputs.push((DealerOutputsKey::Rotation(share_index), output));
+                    outputs.push((DealerOutputsKey::Rotation(dealer, share_index), output));
                 }
                 avss::ProcessedMessage::Complaint(_) => {
                     return Err(MpcError::InvalidMessage {
@@ -4818,7 +4841,7 @@ impl MpcManager {
     fn complete_key_rotation(
         &mut self,
         previous_dkg_output: &MpcOutput,
-        certified_share_indices: &[ShareIndex],
+        certified_share_indices: &[(Address, ShareIndex)],
     ) -> MpcResult<MpcOutput> {
         let threshold = previous_dkg_output.threshold;
         tracing::info!(
@@ -4826,20 +4849,22 @@ impl MpcManager {
              previous_vk={}, threshold={threshold}",
             self.mpc_config.epoch,
             certified_share_indices.len(),
-            certified_share_indices,
+            certified_share_indices
+                .iter()
+                .map(|(_, i)| *i)
+                .collect::<Vec<ShareIndex>>(),
             hex::encode(previous_dkg_output.public_key.to_byte_array()),
         );
         let indexed_outputs: Vec<IndexedValue<avss::AvssOutput>> = certified_share_indices
             .iter()
             .take(threshold as usize)
-            .map(|&share_index| {
+            .map(|&(dealer, share_index)| {
                 let output = self
                     .dealer_outputs
-                    .get(&DealerOutputsKey::Rotation(share_index))
+                    .get(&DealerOutputsKey::Rotation(dealer, share_index))
                     .ok_or_else(|| {
                         MpcError::ProtocolFailed(format!(
-                            "No rotation output found for share index: {}",
-                            share_index
+                            "No rotation output found for dealer {dealer} share index: {share_index}"
                         ))
                     })?;
                 Ok(IndexedValue {
@@ -5234,8 +5259,8 @@ impl MpcManager {
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
             self.base_session_id_for_epoch(context.epoch, &ProtocolType::KeyRotation);
-        // Each dealer only rotates their own shares from the previous epoch, so share indices
-        // are unique across dealers (no duplicates in `certified_share_indices`).
+        // Share indices are unique across certified dealers: every honest signer of a
+        // rotation cert rejects unowned indices at ack time.
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
@@ -5269,7 +5294,16 @@ impl MpcManager {
                 });
             }
             for (share_index, message) in rotation_msgs {
-                if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
+                if certified_share_indices.contains(&share_index) {
+                    tracing::warn!(
+                        "reconstruct_rotation: share_index={share_index} was already claimed \
+                         earlier in this certificate set; skipping it for dealer {:?}",
+                        dealer_address,
+                    );
+                    continue;
+                }
+                if let Some(output) =
+                    complaint_cache.get(&DealerOutputsKey::Rotation(dealer_address, share_index))
                 {
                     tracing::info!(
                         "reconstruct_rotation: complaint cache hit for \
@@ -5646,7 +5680,10 @@ impl MpcManager {
                     drop(_recovery_timer);
                     let mut mgr = mpc_manager.write().unwrap();
                     for (share_index, output) in recovered {
-                        complaint_cache.insert(DealerOutputsKey::Rotation(share_index), output);
+                        complaint_cache.insert(
+                            DealerOutputsKey::Rotation(dealer_address, share_index),
+                            output,
+                        );
                         mgr.complaints_to_process
                             .remove(&ComplaintsToProcessKey::Rotation(
                                 dealer_address,
@@ -6148,6 +6185,7 @@ impl MpcManager {
 
     fn get_or_derive_rotation_output(
         &self,
+        dealer: &Address,
         share_index: ShareIndex,
         message: &avss::Message,
         epoch: u64,
@@ -6156,7 +6194,7 @@ impl MpcManager {
         if epoch == self.mpc_config.epoch
             && let Some(output) = self
                 .dealer_outputs
-                .get(&DealerOutputsKey::Rotation(share_index))
+                .get(&DealerOutputsKey::Rotation(*dealer, share_index))
         {
             return Ok(output.clone());
         }
