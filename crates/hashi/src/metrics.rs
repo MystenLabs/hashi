@@ -82,6 +82,7 @@ pub struct Metrics {
 
     // Hashi Onchain state metrics
     epoch: IntGauge,
+    committee_total_weight: IntGauge,
     reconfig_in_progress: IntGauge,
     paused: IntGauge,
     deposit_queue_size: IntGauge,
@@ -583,6 +584,13 @@ impl Metrics {
             epoch: register_int_gauge_with_registry!(
                 "hashi_epoch",
                 "current hashi epoch",
+                registry,
+            )
+            .unwrap(),
+            committee_total_weight: register_int_gauge_with_registry!(
+                "hashi_committee_total_weight",
+                "Total voting weight of the whole current committee, not this \
+                 node's share; 0 when no committee is known",
                 registry,
             )
             .unwrap(),
@@ -1354,6 +1362,14 @@ impl Metrics {
             .inc();
     }
 
+    pub fn record_committee_total_weight(
+        &self,
+        committee: Option<&hashi_types::committee::Committee>,
+    ) {
+        self.committee_total_weight
+            .set(committee.map_or(0, |c| c.total_weight() as i64));
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -1365,6 +1381,7 @@ impl Metrics {
         let hashi = guard.hashi();
 
         self.epoch.set(hashi.committees.epoch() as i64);
+        self.record_committee_total_weight(hashi.committees.current_committee());
         self.reconfig_in_progress
             .set(if hashi.committees.pending_epoch_change().is_some() {
                 1
@@ -1654,8 +1671,50 @@ async fn metrics(
 mod tests {
     use super::*;
     use crate::guardian_limiter::LocalLimiterError;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
+    use sui_sdk_types::Address;
+
+    #[test]
+    fn committee_total_weight_is_the_whole_committee_not_one_members_share() {
+        let mut rng = rand::thread_rng();
+        let weights = [3u64, 5, 7];
+        let members: Vec<_> = weights
+            .iter()
+            .enumerate()
+            .map(|(i, weight)| {
+                let signing_key = Bls12381PrivateKey::generate(&mut rng);
+                let encryption_key = EncryptionPrivateKey::new(&mut rng);
+                CommitteeMember::new(
+                    Address::new([i as u8; 32]),
+                    signing_key.public_key(),
+                    EncryptionPublicKey::from_private_key(&encryption_key),
+                    *weight,
+                )
+            })
+            .collect();
+        let committee = Committee::new(members, 7, 6667, 0, 3333, 0);
+
+        let metrics = Metrics::new(&Registry::new());
+        metrics.record_committee_total_weight(Some(&committee));
+
+        assert_eq!(metrics.committee_total_weight.get(), 15);
+    }
+
+    #[test]
+    fn committee_total_weight_resets_to_zero_when_no_committee_is_known() {
+        let metrics = Metrics::new(&Registry::new());
+        metrics.committee_total_weight.set(100);
+
+        metrics.record_committee_total_weight(None);
+
+        assert_eq!(metrics.committee_total_weight.get(), 0);
+    }
 
     #[test]
     fn record_sui_address_balance_sweep_updates_completed_sweep_metrics() {
