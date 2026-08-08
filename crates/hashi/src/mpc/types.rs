@@ -746,7 +746,7 @@ impl RotationComplainContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DealerOutputsKey {
     Dkg(Address),
-    Rotation(ShareIndex),
+    Rotation(Address, ShareIndex),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
