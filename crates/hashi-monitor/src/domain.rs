@@ -6,9 +6,10 @@
 //! We model the cross-system withdrawal flow as a sequence of events:
 //! - E1 or E_hashi: Hashi approval event on sui (corresponds to WithdrawalPickedForProcessing)
 //! - E2 or E_guardian: Guardian approval event on S3 (corresponds to NormalWithdrawalSuccess)
-//! - E3 or E_btc: BTC tx broadcast
+//! - E3 or E_btc: BTC transaction confirmed
 //!
-//! Predecessor checks: for every E_{i+1}, there exists a corresponding E_i within a small clock skew.
+//! Predecessor checks: every E_{i+1} has a corresponding E_i, and E_i does not
+//! occur more than `clock_skew` after E_{i+1}.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 //!
 //! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
@@ -18,6 +19,7 @@ use std::fmt;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use bitcoin::OutPoint;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -60,10 +62,143 @@ impl fmt::Display for UtcTimestamp {
     }
 }
 
+/// Seconds rendered as a compact human-readable duration.
+pub struct HumanDuration(UnixSeconds);
+
+pub fn human_duration(seconds: UnixSeconds) -> HumanDuration {
+    HumanDuration(seconds)
+}
+
+impl fmt::Display for HumanDuration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hours = self.0 / 3_600;
+        let minutes = (self.0 % 3_600) / 60;
+        let seconds = self.0 % 60;
+
+        if hours > 0 {
+            write!(formatter, "{hours}h")?;
+        }
+        if minutes > 0 || hours > 0 {
+            write!(formatter, "{minutes}m")?;
+        }
+        write!(formatter, "{seconds}s")
+    }
+}
+
+/// Signed difference between two Unix timestamps, rendered compactly.
+pub struct HumanTimestampDelta(i128);
+
+pub fn human_timestamp_delta(later: UnixSeconds, earlier: UnixSeconds) -> HumanTimestampDelta {
+    HumanTimestampDelta(i128::from(later) - i128::from(earlier))
+}
+
+impl fmt::Display for HumanTimestampDelta {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 < 0 {
+            formatter.write_str("-")?;
+        }
+
+        let total_seconds = self.0.unsigned_abs();
+        let hours = total_seconds / 3_600;
+        let minutes = (total_seconds % 3_600) / 60;
+        let seconds = total_seconds % 60;
+
+        if hours > 0 {
+            write!(formatter, "{hours}h")?;
+        }
+        if minutes > 0 || hours > 0 {
+            write!(formatter, "{minutes}m")?;
+        }
+        write!(formatter, "{seconds}s")
+    }
+}
+
+/// Parse the monitor's sole public timestamp format: whole-second UTC RFC 3339.
+pub fn parse_utc_timestamp(value: &str) -> Result<UnixSeconds, String> {
+    if !value.ends_with('Z') {
+        return Err(
+            "timestamp must be UTC and end in `Z` (for example, 2026-08-04T19:00:00Z)".to_string(),
+        );
+    }
+
+    let datetime =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .map_err(|error| format!("invalid UTC timestamp `{value}`: {error}"))?;
+    let timestamp = UnixSeconds::try_from(datetime.unix_timestamp())
+        .map_err(|_| "timestamp must not precede 1970-01-01T00:00:00Z".to_string())?;
+    if utc_timestamp(timestamp).to_string() != value {
+        return Err(
+            "timestamp must use exactly `YYYY-MM-DDTHH:MM:SSZ` with no fractional seconds"
+                .to_string(),
+        );
+    }
+
+    Ok(timestamp)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MonitorEvent {
     Withdrawal(MonitorWithdrawalEvent),
     Deposit(MonitorDepositEvent),
+}
+
+impl fmt::Display for MonitorEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Withdrawal(event) => write!(
+                formatter,
+                "Withdrawal(type={:?}, wid={}, timestamp={}, btc_txid={})",
+                event.event_type,
+                event.wid,
+                utc_timestamp(event.timestamp_secs),
+                event.btc_txid,
+            ),
+            Self::Deposit(event) => write!(
+                formatter,
+                "Deposit(type={:?}, deposit_id={}, timestamp={})",
+                event.event_type,
+                event.deposit_id,
+                utc_timestamp(event.timestamp_secs),
+            ),
+        }
+    }
+}
+
+/// Stable identifier for a monitored deposit: its Bitcoin outpoint.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DepositId(OutPoint);
+
+impl DepositId {
+    pub fn new(txid: Txid, vout: u32) -> Self {
+        Self(OutPoint { txid, vout })
+    }
+
+    pub fn txid(self) -> Txid {
+        self.0.txid
+    }
+}
+
+impl fmt::Display for DepositId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Correlation identifier for an event in the monitor's withdrawal or deposit model.
+/// This is not a chain-native event ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MonitorEventId {
+    Withdrawal(WithdrawalID),
+    Deposit(DepositId),
+}
+
+impl fmt::Display for MonitorEventId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Withdrawal(wid) => write!(formatter, "wid={wid}"),
+            Self::Deposit(deposit_id) => write!(formatter, "deposit_id={deposit_id}"),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -80,7 +215,7 @@ pub struct MonitorWithdrawalEvent {
     /// Stable withdrawal identifier.
     pub wid: WithdrawalID,
 
-    /// Unix timestamp of sui checkpoint / s3 log / btc block
+    /// Unix timestamp embedded in the Sui event / S3 log / BTC block.
     pub timestamp_secs: UnixSeconds,
 
     /// btc txid
@@ -103,8 +238,7 @@ pub enum WithdrawalEventType {
 pub struct MonitorDepositEvent {
     pub event_type: DepositEventType,
     pub timestamp_secs: UnixSeconds,
-    pub btc_txid: Txid,
-    pub btc_vout: u32,
+    pub deposit_id: DepositId,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -169,4 +303,31 @@ impl Cursors {
 pub enum PollOutcome {
     CursorAdvanced(Vec<MonitorEvent>),
     CursorUnmoved,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utc_timestamp_round_trip() {
+        let input = "2026-08-04T19:45:38Z";
+        let timestamp = parse_utc_timestamp(input).unwrap();
+        assert_eq!(utc_timestamp(timestamp).to_string(), input);
+    }
+
+    #[test]
+    fn timestamp_parser_requires_canonical_utc_format() {
+        assert!(parse_utc_timestamp("1785872738").is_err());
+        assert!(parse_utc_timestamp("2026-08-04T19:45:38+00:00").is_err());
+        assert!(parse_utc_timestamp("2026-08-04T19:45:38.000Z").is_err());
+    }
+
+    #[test]
+    fn duration_uses_compact_human_readable_format() {
+        assert_eq!(human_duration(0).to_string(), "0s");
+        assert_eq!(human_duration(191).to_string(), "3m11s");
+        assert_eq!(human_duration(4_028).to_string(), "1h7m8s");
+        assert_eq!(human_timestamp_delta(100, 120).to_string(), "-20s");
+    }
 }
