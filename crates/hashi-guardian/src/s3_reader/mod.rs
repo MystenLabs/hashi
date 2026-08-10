@@ -15,6 +15,7 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
+use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
@@ -265,7 +266,7 @@ impl GuardianReader {
 
     /// Read the latest ceremony together with the latest KP-share state for its
     /// `sharing_seq`, accepting any allowlisted build.
-    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<Option<CeremonyState>> {
+    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
         self.read_latest_ceremony_state_with_build_policy(BuildPolicy::AnyAllowlisted)
             .await
     }
@@ -274,21 +275,23 @@ impl GuardianReader {
     /// `sharing_seq`, requiring both records to come from the current build.
     pub async fn read_latest_ceremony_state_from_current_build(
         &mut self,
-    ) -> GuardianResult<Option<CeremonyState>> {
+    ) -> GuardianResult<CeremonyState> {
         self.read_latest_ceremony_state_with_build_policy(BuildPolicy::Current)
             .await
     }
 
-    /// Return `None` only when no ceremony exists. Once a ceremony is present,
-    /// its matching KP-share state must also exist because writers publish
-    /// `kp-shares/` before `ceremony/`.
+    /// Once a ceremony is present, its matching KP-share state must also exist
+    /// because writers publish `kp-shares/` before `ceremony/`.
     async fn read_latest_ceremony_state_with_build_policy(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> GuardianResult<Option<CeremonyState>> {
-        let Some(ceremony) = self.read_latest_ceremony_log(build_policy).await? else {
-            return Ok(None);
-        };
+    ) -> GuardianResult<CeremonyState> {
+        let ceremony = self
+            .read_latest_ceremony_log(build_policy)
+            .await?
+            .ok_or_else(|| {
+                InvalidInputs("no ceremony log found; setup_new_key has not run".into())
+            })?;
         let sharing_seq = ceremony.sharing_seq();
         let kp_share_state = self
             .read_latest_kp_share_state_log(sharing_seq, build_policy)
@@ -298,9 +301,8 @@ impl GuardianReader {
                     "no kp-shares log found for latest ceremony sharing_seq {sharing_seq}"
                 ))
             })?;
-        Ok(Some(CeremonyState::new(ceremony, kp_share_state).expect(
-            "ceremony and KP share state must have a consistent shape",
-        )))
+        Ok(CeremonyState::new(ceremony, kp_share_state)
+            .expect("ceremony and KP share state must have a consistent shape"))
     }
 
     /// Read the latest serving committee.

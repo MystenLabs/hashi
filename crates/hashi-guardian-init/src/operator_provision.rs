@@ -146,10 +146,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let ceremony_state = reader
-        .read_latest_ceremony_state()
-        .await?
-        .context("no ceremony log found in S3; key setup has not run")?;
+    let ceremony_state = reader.read_latest_ceremony_state().await?;
     ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     ceremony_state
         .encrypted_shares

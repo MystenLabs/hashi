@@ -210,8 +210,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
     let logged = reader
         .read_latest_ceremony_state_from_current_build()
-        .await?
-        .context("no ceremony logs found in guardian S3 bucket")?;
+        .await?;
     logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         logged == live,

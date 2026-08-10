@@ -62,10 +62,7 @@ impl OIWithdrawModeInstall {
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let ceremony_state = reader
-            .read_latest_ceremony_state()
-            .await?
-            .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
+        let ceremony_state = reader.read_latest_ceremony_state().await?;
 
         Ok(Self::from_parts(config, ceremony_state, genesis_state))
     }
