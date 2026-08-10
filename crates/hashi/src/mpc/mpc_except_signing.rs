@@ -1400,6 +1400,8 @@ impl MpcManager {
                     .dealer_outputs
                     .remove(&DealerOutputsKey::Dkg(dealer));
             }
+            // Seed off-lock so the entropy read can't poison the manager lock.
+            let mut rng = StdRng::from_entropy();
             let has_complaint = time_async(
                 &metrics.mpc_message_process_duration_seconds,
                 MPC_LABEL_DKG,
@@ -1411,7 +1413,7 @@ impl MpcManager {
                             .complaints_to_process
                             .contains_key(&ComplaintsToProcessKey::Dkg(dealer))
                     {
-                        mgr.process_certified_dkg_message(dealer)?;
+                        mgr.process_certified_dkg_message(dealer, &mut rng)?;
                     }
                     Ok::<_, MpcError>(
                         mgr.complaints_to_process
@@ -1709,6 +1711,8 @@ impl MpcManager {
             {
                 let previous = previous.clone();
                 let share_indices = dealer_share_indices.clone();
+                // Seed off-lock so the entropy read can't poison the manager lock.
+                let mut rng = StdRng::from_entropy();
                 time_async(
                     &metrics.mpc_message_process_duration_seconds,
                     MPC_LABEL_KEY_ROTATION,
@@ -1720,7 +1724,7 @@ impl MpcManager {
                                     .complaints_to_process
                                     .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
                         }) {
-                            mgr.process_certified_rotation_message(&dealer, &previous)?;
+                            mgr.process_certified_rotation_message(&dealer, &previous, &mut rng)?;
                         }
                         Ok::<_, MpcError>(())
                     }),
@@ -2204,7 +2208,7 @@ impl MpcManager {
             }
         };
         let dealer_session_id = self.current_session_id().dealer_session_id(&dealer);
-        let result = process_avss_message(
+        let result = verify_avss_message(
             &self.encryption_key,
             self.mpc_config.nodes.clone(),
             self.party_id,
@@ -2214,7 +2218,7 @@ impl MpcManager {
             None, // commitment: None for initial DKG
         )?;
         match result {
-            avss::ProcessedMessage::Valid(output) => {
+            Some(output) => {
                 self.dealer_outputs
                     .insert(DealerOutputsKey::Dkg(dealer), output);
                 let dkg_message = DealerMessagesHash {
@@ -2226,7 +2230,7 @@ impl MpcManager {
                         .sign(self.mpc_config.epoch, self.address, &dkg_message);
                 Ok(signature.signature().clone())
             }
-            avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
+            None => Err(MpcError::InvalidMessage {
                 sender: dealer,
                 reason: "Invalid shares".to_string(),
             }),
@@ -3752,7 +3756,11 @@ impl MpcManager {
         });
     }
 
-    fn process_certified_dkg_message(&mut self, dealer: Address) -> MpcResult<()> {
+    fn process_certified_dkg_message(
+        &mut self,
+        dealer: Address,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> MpcResult<()> {
         let output_key = DealerOutputsKey::Dkg(dealer);
         let complaint_key = ComplaintsToProcessKey::Dkg(dealer);
         let message = self
@@ -3770,6 +3778,7 @@ impl MpcManager {
             None,
             output_key,
             complaint_key,
+            rng,
         )
     }
 
@@ -3831,6 +3840,7 @@ impl MpcManager {
         &mut self,
         dealer: &Address,
         previous_dkg_output: &MpcOutput,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<()> {
         let rotation_messages = self
             .current_rotation_messages
@@ -3857,6 +3867,7 @@ impl MpcManager {
                 commitment,
                 output_key,
                 complaint_key,
+                rng,
             )
             .map_err(|e| {
                 tracing::error!(
@@ -3880,6 +3891,7 @@ impl MpcManager {
         commitment: Option<G>,
         output_key: DealerOutputsKey,
         complaint_key: ComplaintsToProcessKey,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<()> {
         match process_avss_message(
             &self.encryption_key,
@@ -3892,6 +3904,7 @@ impl MpcManager {
             session_id,
             message,
             commitment,
+            rng,
         )? {
             avss::ProcessedMessage::Valid(output) => {
                 self.dealer_outputs.insert(output_key, output);
@@ -4696,7 +4709,7 @@ impl MpcManager {
             }
             let session_id = base_sid.rotation_session_id(&dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
-            match process_avss_message(
+            match verify_avss_message(
                 &self.encryption_key,
                 self.mpc_config.nodes.clone(),
                 self.party_id,
@@ -4705,10 +4718,10 @@ impl MpcManager {
                 message,
                 commitment,
             )? {
-                avss::ProcessedMessage::Valid(output) => {
+                Some(output) => {
                     outputs.push((DealerOutputsKey::Rotation(share_index), output));
                 }
-                avss::ProcessedMessage::Complaint(_) => {
+                None => {
                     return Err(MpcError::InvalidMessage {
                         sender: dealer,
                         reason: format!("Invalid rotation share for index {}", share_index),
@@ -4798,13 +4811,14 @@ impl MpcManager {
         &self,
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<ReconstructionOutcome> {
         match certificates.first().map(VerifiedCertificateV1::inner) {
             Some(CertificateV1::Dkg(_)) | None => {
-                self.reconstruct_previous_dkg_output(certificates, complaint_cache)
+                self.reconstruct_previous_dkg_output(certificates, complaint_cache, rng)
             }
             Some(CertificateV1::Rotation(_)) => {
-                self.reconstruct_previous_rotation_output(certificates, complaint_cache)
+                self.reconstruct_previous_rotation_output(certificates, complaint_cache, rng)
             }
             Some(CertificateV1::NonceGeneration { .. }) => {
                 unreachable!(
@@ -4818,6 +4832,7 @@ impl MpcManager {
         &self,
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<ReconstructionOutcome> {
         let committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
@@ -4848,7 +4863,7 @@ impl MpcManager {
             output_max_faulty,
             epoch: self.previous_epoch,
         };
-        self.reconstruct_dkg_output_locally(&context, certificates, complaint_cache)
+        self.reconstruct_dkg_output_locally(&context, certificates, complaint_cache, rng)
     }
 
     pub fn reconstruct_current_dkg_output(
@@ -4859,6 +4874,8 @@ impl MpcManager {
         if onchain_mpc_key.is_empty() {
             return MpcOutputRecoveryOutcome::NotApplicable;
         }
+        // Seed off-lock so the entropy read can't poison the manager lock.
+        let mut rng = StdRng::from_entropy();
         let candidate = {
             let mgr = mpc_manager.read().unwrap();
             let context = DkgReconstructionContext {
@@ -4874,6 +4891,7 @@ impl MpcManager {
                 &context,
                 certificates,
                 &HashMap::new(),
+                &mut rng,
             )) {
                 Ok(output) => output,
                 Err(outcome) => return outcome,
@@ -4902,6 +4920,8 @@ impl MpcManager {
         if onchain_mpc_key.is_empty() {
             return MpcOutputRecoveryOutcome::NotApplicable;
         }
+        // Seed off-lock so the entropy read can't poison the manager lock.
+        let mut rng = StdRng::from_entropy();
         let (current, previous) = {
             let mgr = mpc_manager.read().unwrap();
             let Some(input_threshold) = mgr.previous_reconfig_output_threshold else {
@@ -4921,13 +4941,16 @@ impl MpcManager {
                     &current_context,
                     current_certificates,
                     &HashMap::new(),
+                    &mut rng,
                 )) {
                     Ok(output) => output,
                     Err(outcome) => return outcome,
                 };
-            let previous = match Self::classify_reconstruction(
-                mgr.reconstruct_previous_output(previous_certificates, &HashMap::new()),
-            ) {
+            let previous = match Self::classify_reconstruction(mgr.reconstruct_previous_output(
+                previous_certificates,
+                &HashMap::new(),
+                &mut rng,
+            )) {
                 Ok(output) => output,
                 Err(outcome) => return outcome,
             };
@@ -4979,6 +5002,7 @@ impl MpcManager {
         context: &DkgReconstructionContext<'_>,
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id = self.base_session_id_for_epoch(context.epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::AvssOutput> = HashMap::new();
@@ -5042,6 +5066,7 @@ impl MpcManager {
                 &session_id,
                 &message,
                 None,
+                rng,
             )? {
                 avss::ProcessedMessage::Valid(output) => {
                     outputs.insert(dealer_party_id, output);
@@ -5099,6 +5124,7 @@ impl MpcManager {
         &self,
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<ReconstructionOutcome> {
         let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
@@ -5138,7 +5164,7 @@ impl MpcManager {
             input_threshold,
             epoch: self.previous_epoch,
         };
-        self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache)
+        self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache, rng)
     }
 
     /// Makes no peer calls, but `complaint_cache` may hold outputs recovered from peers.
@@ -5147,6 +5173,7 @@ impl MpcManager {
         context: &RotationReconstructionContext<'_>,
         certificates: &[VerifiedCertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
             self.base_session_id_for_epoch(context.epoch, &ProtocolType::KeyRotation);
@@ -5209,6 +5236,7 @@ impl MpcManager {
                     &session_id,
                     &message,
                     None,
+                    rng,
                 )? {
                     avss::ProcessedMessage::Valid(output) => {
                         local_outputs.insert(share_index, output);
@@ -5445,11 +5473,13 @@ impl MpcManager {
         loop {
             let certs = previous_certificates.to_vec();
             let cache_snapshot = complaint_cache.clone();
+            // Seed off-lock so the entropy read can't poison the manager lock.
+            let mut rng = StdRng::from_entropy();
             let outcome = time_async(
                 &metrics.mpc_prepare_previous_reconstruct_duration_seconds,
                 MPC_LABEL_KEY_ROTATION,
                 Self::with_manager_blocking(mpc_manager, move |mgr| {
-                    mgr.reconstruct_previous_output(&certs, &cache_snapshot)
+                    mgr.reconstruct_previous_output(&certs, &cache_snapshot, &mut rng)
                 }),
             )
             .await?;
@@ -6038,7 +6068,7 @@ impl MpcManager {
         }
         // Cross-epoch fallback: re-derive from message
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
-        match process_avss_message(
+        verify_avss_message(
             self.encryption_key_for_epoch(epoch)?,
             nodes,
             party_id,
@@ -6046,12 +6076,12 @@ impl MpcManager {
             session_id,
             message,
             None,
-        )? {
-            avss::ProcessedMessage::Valid(output) => Ok(output),
-            avss::ProcessedMessage::Complaint(_) => Err(MpcError::NotFound(
+        )?
+        .ok_or_else(|| {
+            MpcError::NotFound(
                 "Peer is also a victim of this dealer — cannot help with complaint".into(),
-            )),
-        }
+            )
+        })
     }
 
     fn get_or_derive_rotation_output(
@@ -6069,7 +6099,7 @@ impl MpcManager {
             return Ok(output.clone());
         }
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
-        match process_avss_message(
+        verify_avss_message(
             self.encryption_key_for_epoch(epoch)?,
             nodes,
             party_id,
@@ -6077,12 +6107,12 @@ impl MpcManager {
             session_id,
             message,
             None,
-        )? {
-            avss::ProcessedMessage::Valid(output) => Ok(output),
-            avss::ProcessedMessage::Complaint(_) => Err(MpcError::NotFound(
+        )?
+        .ok_or_else(|| {
+            MpcError::NotFound(
                 "Peer is also a victim of this dealer — cannot help with rotation complaint".into(),
-            )),
-        }
+            )
+        })
     }
 
     fn get_dealer_messages(
@@ -6352,7 +6382,10 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
     }
 }
 
-fn process_avss_message(
+// Build a receiver and verify/decrypt this node's shares from a dealing.
+// Deterministic (no rng); logs the dealing context on error. Returns the
+// receiver too, so a caller that needs to complain can reuse it.
+fn verify_avss_shares(
     encryption_key: &PrivateKey<EncryptionGroupElement>,
     nodes: Nodes<EncryptionGroupElement>,
     party_id: u16,
@@ -6360,7 +6393,7 @@ fn process_avss_message(
     session_id: &SessionId,
     message: &avss::Message,
     commitment: Option<G>,
-) -> MpcResult<avss::ProcessedMessage> {
+) -> MpcResult<(avss::Receiver, Option<avss::AvssOutput>)> {
     let commitment_hex = commitment
         .as_ref()
         .map(|c| hex::encode(c.to_byte_array()))
@@ -6377,17 +6410,66 @@ fn process_avss_message(
         commitment,
         encryption_key.clone(),
     )?;
-    match receiver.process_message(message, &mut rand::thread_rng()) {
-        Ok(pm) => Ok(pm),
-        Err(e) => {
-            tracing::error!(
-                "process_avss_message failed: err={e}, \
-                 total_weight={total_weight}, num_nodes={num_nodes}, \
-                 commitment={commitment_hex}, session_id={session_id_hex}"
-            );
-            Err(MpcError::from(e))
-        }
-    }
+    let output = receiver.verify_message(message).map_err(|e| {
+        tracing::error!(
+            "verify_avss_shares failed: err={e}, \
+             total_weight={total_weight}, num_nodes={num_nodes}, \
+             commitment={commitment_hex}, session_id={session_id_hex}"
+        );
+        MpcError::from(e)
+    })?;
+    Ok((receiver, output))
+}
+
+// Verify-only: `Some` = valid share, `None` = invalid shares (complaint-eligible),
+// `Err` = malformed message. No rng — use `process_avss_message` when a complaint
+// must be produced.
+fn verify_avss_message(
+    encryption_key: &PrivateKey<EncryptionGroupElement>,
+    nodes: Nodes<EncryptionGroupElement>,
+    party_id: u16,
+    params: Parameters,
+    session_id: &SessionId,
+    message: &avss::Message,
+    commitment: Option<G>,
+) -> MpcResult<Option<avss::AvssOutput>> {
+    Ok(verify_avss_shares(
+        encryption_key,
+        nodes,
+        party_id,
+        params,
+        session_id,
+        message,
+        commitment,
+    )?
+    .1)
+}
+
+// Verify, and build a complaint (needs rng) if the shares are invalid.
+#[allow(clippy::too_many_arguments)]
+fn process_avss_message(
+    encryption_key: &PrivateKey<EncryptionGroupElement>,
+    nodes: Nodes<EncryptionGroupElement>,
+    party_id: u16,
+    params: Parameters,
+    session_id: &SessionId,
+    message: &avss::Message,
+    commitment: Option<G>,
+    rng: &mut impl fastcrypto::traits::AllowedRng,
+) -> MpcResult<avss::ProcessedMessage> {
+    let (receiver, output) = verify_avss_shares(
+        encryption_key,
+        nodes,
+        party_id,
+        params,
+        session_id,
+        message,
+        commitment,
+    )?;
+    Ok(match output {
+        Some(output) => avss::ProcessedMessage::Valid(output),
+        None => avss::ProcessedMessage::Complaint(receiver.create_complaint(message, rng)),
+    })
 }
 
 fn build_reduced_nodes(

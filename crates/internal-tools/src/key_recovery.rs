@@ -224,7 +224,11 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         }
 
         let outcome = manager
-            .reconstruct_previous_output(&verified, &std::collections::HashMap::new())
+            .reconstruct_previous_output(
+                &verified,
+                &std::collections::HashMap::new(),
+                &mut rand::thread_rng(),
+            )
             .map_err(|e| anyhow!("reconstruction failed: {e}"))?;
 
         match outcome {

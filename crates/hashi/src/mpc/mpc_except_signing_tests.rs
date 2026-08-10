@@ -2499,7 +2499,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
         .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_1_addr, &dealer_1_msg)
         .unwrap();
     party_manager
-        .process_certified_dkg_message(dealer_1_addr)
+        .process_certified_dkg_message(dealer_1_addr, &mut rand::thread_rng())
         .unwrap();
     // DKG: complaints keyed by dealer address
     assert!(
@@ -4383,7 +4383,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
-        .process_certified_dkg_message(dealer_addr)
+        .process_certified_dkg_message(dealer_addr, &mut rand::thread_rng())
         .unwrap();
     // DKG: complaints keyed by dealer address
     assert!(
@@ -4459,7 +4459,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
-        .process_certified_dkg_message(dealer_addr)
+        .process_certified_dkg_message(dealer_addr, &mut rand::thread_rng())
         .unwrap();
     // DKG: complaints keyed by dealer address
     assert!(
@@ -4654,7 +4654,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
-        .process_certified_dkg_message(dealer_addr)
+        .process_certified_dkg_message(dealer_addr, &mut rand::thread_rng())
         .unwrap();
     // DKG: complaints keyed by dealer address
     assert!(
@@ -4736,7 +4736,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
         .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
-        .process_certified_dkg_message(dealer_addr)
+        .process_certified_dkg_message(dealer_addr, &mut rand::thread_rng())
         .unwrap();
 
     // Pre-collect complaint responses from parties 3 and 4
@@ -4870,7 +4870,7 @@ async fn test_retrieve_dealer_message_success() {
     party_manager
         .write()
         .unwrap()
-        .process_certified_dkg_message(dealer_address)
+        .process_certified_dkg_message(dealer_address, &mut rand::thread_rng())
         .unwrap();
     assert!(
         party_manager
@@ -5814,7 +5814,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
     receiver_manager
         .write()
         .unwrap()
-        .process_certified_dkg_message(dealer_addr)
+        .process_certified_dkg_message(dealer_addr, &mut rand::thread_rng())
         .unwrap();
 
     let mgr = receiver_manager.read().unwrap();
@@ -7809,7 +7809,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
             test_manager
                 .read()
                 .unwrap()
-                .reconstruct_previous_output(&previous_certs, &HashMap::new()),
+                .reconstruct_previous_output(&previous_certs, &HashMap::new(), &mut rand::thread_rng()),
             Err(MpcError::StoredMessageDiverged { dealer }) if dealer == diverged_dealer
         ),
         "reconstruction must reject the diverged copy by variant, before any repair",
@@ -8038,7 +8038,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
             test_manager
                 .read()
                 .unwrap()
-                .reconstruct_previous_output(&rotation_certs, &HashMap::new()),
+                .reconstruct_previous_output(&rotation_certs, &HashMap::new(), &mut rand::thread_rng()),
             Err(MpcError::StoredMessageDiverged { dealer }) if dealer == diverged_dealer
         ),
         "reconstruction must reject the diverged copy by variant, before any repair",
@@ -8426,7 +8426,11 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
 
     // Call process_certified_rotation_message
     receiver_manager
-        .process_certified_rotation_message(&rotation_dealer_addr, &dealer_dkg_output)
+        .process_certified_rotation_message(
+            &rotation_dealer_addr,
+            &dealer_dkg_output,
+            &mut rand::thread_rng(),
+        )
         .unwrap();
 
     // Verify share 1: output unchanged (skipped because already had output)
@@ -9253,6 +9257,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
                     None,
                     output_key,
                     complaint_key,
+                    &mut rand::thread_rng(),
                 )
                 .unwrap();
         }
@@ -9422,7 +9427,11 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     // if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_dkg_output(
+                &certificates,
+                &HashMap::new(),
+                &mut rand::thread_rng(),
+            )
             .unwrap(),
     );
 
@@ -9489,7 +9498,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     target_manager.dealer_outputs.clear();
     for &i in &dealer_indices {
         target_manager
-            .process_certified_dkg_message(setup.address(i))
+            .process_certified_dkg_message(setup.address(i), &mut rand::thread_rng())
             .unwrap();
     }
     let key_all = target_manager
@@ -9590,7 +9599,11 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     // and produces key_threshold.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_dkg_output(
+                &certificates,
+                &HashMap::new(),
+                &mut rand::thread_rng(),
+            )
             .unwrap(),
     );
 
@@ -9721,7 +9734,11 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     .unwrap();
     let reconstructed = unwrap_reconstruction_success(
         manager_with_prev
-            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
+            .reconstruct_previous_dkg_output(
+                &certificates,
+                &HashMap::new(),
+                &mut rand::thread_rng(),
+            )
             .unwrap(),
     );
     assert_eq!(
@@ -9747,8 +9764,11 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         &test_metrics(),
     )
     .unwrap();
-    let result =
-        manager_without_prev.reconstruct_previous_dkg_output(&certificates, &HashMap::new());
+    let result = manager_without_prev.reconstruct_previous_dkg_output(
+        &certificates,
+        &HashMap::new(),
+        &mut rand::thread_rng(),
+    );
     let Err(err) = result else {
         panic!("missing previous_encryption_key must error, got Ok");
     };
@@ -9908,7 +9928,12 @@ fn test_recover_current_dkg() {
         };
         assert!(
             matches!(
-                guard.reconstruct_dkg_output_locally(&context, &certificates, &HashMap::new()),
+                guard.reconstruct_dkg_output_locally(
+                    &context,
+                    &certificates,
+                    &HashMap::new(),
+                    &mut rand::thread_rng(),
+                ),
                 Err(MpcError::StoredMessageDiverged { .. })
             ),
             "the hash check, not a downstream AVSS failure, must reject the swapped message",
@@ -10280,7 +10305,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_previous_rotation_output(&rotation_certificates, &HashMap::new())
+            .reconstruct_previous_rotation_output(
+                &rotation_certificates,
+                &HashMap::new(),
+                &mut rand::thread_rng(),
+            )
             .unwrap(),
     );
 
