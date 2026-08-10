@@ -241,59 +241,9 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
 }
 
-// ---------------------------------------
-//    Ceremony mode requests and responses
-// ---------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SetupNewKeyRequest {
-    key_provisioner_certs_roster: KpCertsRoster,
-    params: SecretSharingParams,
-}
-
-/// `GuardianSignedResponse<SetupNewKeyResponse>`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct SetupNewKeyResponse {
-    pub encrypted_shares: KPEncryptedSharesRoster,
-    pub secret_sharing_instance: SecretSharingInstance,
-    /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
-    /// as `guardian_btc_public_key` before the guardian is provisioned.
-    pub btc_master_pubkey: BitcoinPubkey,
-}
-
-/// Ceremony-mode rotation request, assembled by the operator from the current KPs'
-/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
-/// rotation target `state`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RotateKpsRequest {
-    encrypted_old_shares: Vec<GuardianEncryptedShare>,
-    old_instance: SecretSharingInstance,
-    state: RotateKpsState,
-}
-
-/// The shared rotation target all current KPs authorize. Each binds
-/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
-/// ones that agree on it. Old/new (`n`, `t`) may differ.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RotateKpsState {
-    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
-    /// `new_params.num_shares()`.
-    new_kp_certs_roster: KpCertsRoster,
-    new_params: SecretSharingParams,
-}
-
-/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
-/// shares, returned by `rotate_kps`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RotateKpsResponse {
-    pub encrypted_shares: KPEncryptedSharesRoster,
-    pub new_instance: SecretSharingInstance,
-}
-
-/// `KpSigned<ProvisionerRotateCertRequest>`. Replaces one certificate in a KP
-/// roster entry without changing the BTC key, sharing instance,
-/// commitments, share ids, or threshold. The signing certificate may be the
-/// target or another certificate assigned to the same KP/share entry.
+/// `KpSigned<ProvisionerRotateCertRequest>`.
+/// Replaces one certificate in a KP roster entry. Request must be signed
+/// with a certificate assigned to the same KP (including the to-be-deleted one).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProvisionerRotateCertRequest {
     expected_session_id: SessionID,
@@ -309,6 +259,64 @@ pub struct ProvisionerRotateCertRequest {
 pub struct ProvisionerRotateCertResponse {
     pub cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
+}
+
+// ---------------------------------------
+//    Ceremony mode requests and responses
+// ---------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupNewKeyRequest {
+    /// The KP certs. Each KP can have more than one cert.
+    key_provisioner_certs_roster: KpCertsRoster,
+    /// The secret-sharing params (n, t).
+    params: SecretSharingParams,
+}
+
+/// `GuardianSignedResponse<SetupNewKeyResponse>`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SetupNewKeyResponse {
+    /// Encryptions to each KP's cert. Each KP can have more than one cert.
+    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// Params + share commitments.
+    pub secret_sharing_instance: SecretSharingInstance,
+    /// The Guardian BTC pubkey.
+    pub btc_master_pubkey: BitcoinPubkey,
+}
+
+/// KP rotation endpoint. Request is assembled by the operator from the current KPs'
+/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
+/// rotation target `state`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotateKpsRequest {
+    /// |n| encrypted shares, each bound to `state.digest()` as HPKE AAD.
+    encrypted_old_shares: Vec<GuardianEncryptedShare>,
+    /// Existing secret-sharing instance.
+    old_instance: SecretSharingInstance,
+    /// The shared rotation target state.
+    state: RotateKpsState,
+}
+
+/// The shared rotation target all current KPs authorize. Each binds
+/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
+/// ones that agree on it. Old/new (`n`, `t`) may differ.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RotateKpsState {
+    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// `new_params.num_shares()`.
+    new_kp_certs_roster: KpCertsRoster,
+    /// The new secret-sharing params (n, t).
+    new_params: SecretSharingParams,
+}
+
+/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
+/// shares, returned by `rotate_kps`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RotateKpsResponse {
+    /// Encryptions to each new KP's cert. Each KP can have more than one cert.
+    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// The new secret-sharing params and commitments.
+    pub new_instance: SecretSharingInstance,
 }
 
 // ---------------------------------
