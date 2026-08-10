@@ -145,14 +145,14 @@ pub async fn operator_init(
             EnclaveMode::Ceremony,
             OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }),
         ) => (s3_config, None),
-        (
-            EnclaveMode::Withdraw,
-            OperatorInitRequest::Withdraw(WithdrawOperatorInitRequest {
+        (EnclaveMode::Withdraw, OperatorInitRequest::Withdraw(request)) => {
+            let WithdrawOperatorInitRequest {
                 s3_config,
                 init_config,
                 genesis_state,
-            }),
-        ) => (s3_config, Some((init_config, genesis_state))),
+            } = *request;
+            (s3_config, Some((init_config, genesis_state)))
+        }
         (EnclaveMode::Ceremony, OperatorInitRequest::Withdraw(_)) => {
             return Err(InvalidInputs(
                 "ceremony-mode guardian received a withdraw operator-init request".into(),

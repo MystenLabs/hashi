@@ -207,11 +207,13 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
                         ))
                     })
                     .transpose()?;
-                Ok(OperatorInitRequest::Withdraw(WithdrawOperatorInitRequest {
-                    s3_config,
-                    init_config,
-                    genesis_state,
-                }))
+                Ok(OperatorInitRequest::Withdraw(Box::new(
+                    WithdrawOperatorInitRequest {
+                        s3_config,
+                        init_config,
+                        genesis_state,
+                    },
+                )))
             }
         }
     }
@@ -679,17 +681,22 @@ pub fn operator_init_request_to_pb(
                 s3_config: Some(s3_config_to_pb(s3_config)),
             })
         }
-        OperatorInitRequest::Withdraw(WithdrawOperatorInitRequest {
-            s3_config,
-            init_config,
-            genesis_state,
-        }) => pb::operator_init_request::Request::Withdraw(pb::WithdrawOperatorInitRequest {
-            s3_config: Some(s3_config_to_pb(s3_config)),
-            init_config: Some(init_config_to_pb(init_config)?),
-            genesis_state: genesis_state.map(|state| pb::GenesisState {
-                committee: Some(move_committee_to_pb(&state.into_committee())),
-            }),
-        }),
+        OperatorInitRequest::Withdraw(request) => {
+            let WithdrawOperatorInitRequest {
+                s3_config,
+                init_config,
+                genesis_state,
+            } = *request;
+            pb::operator_init_request::Request::Withdraw(Box::new(
+                pb::WithdrawOperatorInitRequest {
+                    s3_config: Some(s3_config_to_pb(s3_config)),
+                    init_config: Some(init_config_to_pb(init_config)?),
+                    genesis_state: genesis_state.map(|state| pb::GenesisState {
+                        committee: Some(move_committee_to_pb(&state.into_committee())),
+                    }),
+                },
+            ))
+        }
     };
     Ok(pb::OperatorInitRequest {
         request: Some(request),

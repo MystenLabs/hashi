@@ -75,7 +75,7 @@ use std::ops::Deref;
 #[derive(Debug, Clone, PartialEq)]
 pub enum OperatorInitRequest {
     Ceremony(CeremonyOperatorInitRequest),
-    Withdraw(WithdrawOperatorInitRequest),
+    Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -456,11 +456,11 @@ impl OperatorInitRequest {
         init_config: InitConfig,
         genesis_state: Option<GenesisState>,
     ) -> Self {
-        Self::Withdraw(WithdrawOperatorInitRequest {
+        Self::Withdraw(Box::new(WithdrawOperatorInitRequest {
             s3_config,
             init_config,
             genesis_state,
-        })
+        }))
     }
 }
 

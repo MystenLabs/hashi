@@ -2001,7 +2001,7 @@ pub mod operator_init_request {
         #[prost(message, tag = "1")]
         Ceremony(super::CeremonyOperatorInitRequest),
         #[prost(message, tag = "2")]
-        Withdraw(super::WithdrawOperatorInitRequest),
+        Withdraw(::prost::alloc::boxed::Box<super::WithdrawOperatorInitRequest>),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
