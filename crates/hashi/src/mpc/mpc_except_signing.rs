@@ -416,7 +416,7 @@ impl MpcManager {
         Box::pin(async move { spawn_blocking(move || f(&mut mgr.write().unwrap())).await })
     }
 
-    /// The AVSS threshold parameters (`t`, `f`) for this manager's epoch.
+    /// Threshold parameters (`t`, `f`) for the current `mpc_config` epoch.
     pub(crate) fn params(&self) -> Parameters {
         Parameters {
             t: self.mpc_config.threshold,
