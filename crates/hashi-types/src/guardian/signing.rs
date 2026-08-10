@@ -17,7 +17,8 @@ use super::LogEntry;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
-use super::RotateKpsResponse;
+use super::ProvisionerRotateKpSetRequest;
+use super::RotateKpSetResponse;
 use super::SetupNewKeyResponse;
 use super::StandardWithdrawalResponse;
 use super::UnixMillis;
@@ -45,8 +46,8 @@ pub enum GuardianSigningIntentType {
     StandardWithdrawalResponse = 2,
     /// Intent for GuardianInfo.
     GuardianInfo = 3,
-    /// Intent for RotateKpsResponse.
-    RotateKpsResponse = 4,
+    /// Intent for RotateKpSetResponse.
+    RotateKpSetResponse = 4,
     /// Intent for ProvisionerRotateCertResponse.
     ProvisionerRotateCertResponse = 5,
 }
@@ -69,6 +70,8 @@ pub enum KpSigningIntentType {
     ProvisionerInitRequest = 0,
     /// Intent for ProvisionerRotateCertRequest.
     ProvisionerRotateCertRequest = 1,
+    /// Intent for ProvisionerRotateKpSetRequest.
+    ProvisionerRotateKpSetRequest = 2,
 }
 
 /// KP-signed payloads and their intent-based domain separation.
@@ -123,8 +126,8 @@ impl GuardianSigningIntent for GuardianResponse<GuardianInfo> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::GuardianInfo;
 }
 
-impl GuardianSigningIntent for GuardianResponse<RotateKpsResponse> {
-    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpsResponse;
+impl GuardianSigningIntent for GuardianResponse<RotateKpSetResponse> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpSetResponse;
 }
 
 impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
@@ -138,6 +141,10 @@ impl KpSigningIntent for ProvisionerInitRequest {
 
 impl KpSigningIntent for ProvisionerRotateCertRequest {
     const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateCertRequest;
+}
+
+impl KpSigningIntent for ProvisionerRotateKpSetRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateKpSetRequest;
 }
 
 impl<T> GuardianResponse<T> {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::BatchProvisionerInitRequest;
+use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
 use super::GetGuardianInfoResponse;
@@ -26,8 +27,9 @@ use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
+use super::ProvisionerRotateKpSetRequest;
 use super::ResolvedS3Config;
-use super::RotateKpsResponse;
+use super::RotateKpSetResponse;
 use super::S3BucketInfo;
 use super::SecretSharingInstance;
 use super::SessionID;
@@ -190,7 +192,7 @@ impl GuardianSignedResponse<SetupNewKeyResponse> {
     }
 }
 
-impl RotateKpsResponse {
+impl RotateKpSetResponse {
     pub fn mock_for_testing() -> Self {
         Self {
             encrypted_shares: dummy_encrypted_shares(),
@@ -199,11 +201,11 @@ impl RotateKpsResponse {
     }
 }
 
-impl GuardianSignedResponse<RotateKpsResponse> {
+impl GuardianSignedResponse<RotateKpSetResponse> {
     pub fn mock_for_testing() -> Self {
         let signing_kp = SigningKey::from([1u8; 32]);
         GuardianSigned::sign(
-            GuardianResponse::new(RotateKpsResponse::mock_for_testing(), 0),
+            GuardianResponse::new(RotateKpSetResponse::mock_for_testing(), 0),
             &signing_kp,
         )
     }
@@ -270,6 +272,38 @@ impl BatchProvisionerInitRequest {
             crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
             "mock-signature".into(),
         )])
+    }
+}
+
+impl BatchProvisionerRotateKpSetRequest {
+    // NOTE: Incorrect encryption and signature are used. This is only for wire round trips.
+    pub fn mock_for_testing() -> Self {
+        let encrypted_old_share = GuardianEncryptedShare {
+            id: NonZeroU16::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0u8; 32],
+                aes_ciphertext: vec![0u8; 32],
+            },
+        };
+        let request = ProvisionerRotateKpSetRequest::new(
+            "mock-session".into(),
+            mock_pcr_allowlist(),
+            encrypted_old_share,
+            mock_kp_certs_roster(TEST_N),
+            TEST_N,
+            TEST_T,
+        )
+        .unwrap();
+        let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        Self::new(vec![
+            KpSigned::from_parts(
+                request,
+                crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+                "mock-signature".into(),
+            );
+            TEST_T
+        ])
+        .unwrap()
     }
 }
 

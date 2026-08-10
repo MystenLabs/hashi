@@ -137,11 +137,11 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         Err(denied("OperatorActivate"))
     }
 
-    async fn rotate_kps(
+    async fn rotate_kp_set(
         &self,
-        _request: Request<proto::RotateKpsRequest>,
-    ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
-        Err(denied("RotateKps"))
+        _request: Request<proto::BatchProvisionerRotateKpSetRequest>,
+    ) -> Result<Response<proto::SignedRotateKpSetResponse>, Status> {
+        Err(denied("RotateKpSet"))
     }
 }
 
@@ -237,10 +237,10 @@ mod tests {
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
-        async fn rotate_kps(
+        async fn rotate_kp_set(
             &self,
-            _: Request<proto::RotateKpsRequest>,
-        ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
+            _: Request<proto::BatchProvisionerRotateKpSetRequest>,
+        ) -> Result<Response<proto::SignedRotateKpSetResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
     }
@@ -347,9 +347,11 @@ mod tests {
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy
-            .rotate_kps(Request::new(proto::RotateKpsRequest::default()))
+            .rotate_kp_set(Request::new(
+                proto::BatchProvisionerRotateKpSetRequest::default(),
+            ))
             .await
-            .expect_err("rotate_kps must be denied");
+            .expect_err("rotate_kp_set must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
     }
 

@@ -6,6 +6,7 @@ use crate::task_spawner;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::AddressValidation;
+use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
@@ -14,7 +15,6 @@ use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
-use hashi_types::guardian::RotateKpsRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
@@ -108,17 +108,18 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(resp))
     }
 
-    async fn rotate_kps(
+    async fn rotate_kp_set(
         &self,
-        request: Request<proto::RotateKpsRequest>,
-    ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
-        let domain_req: RotateKpsRequest = request.into_inner().try_into().map_err(to_status)?;
+        request: Request<proto::BatchProvisionerRotateKpSetRequest>,
+    ) -> Result<Response<proto::SignedRotateKpSetResponse>, Status> {
+        let domain_req: BatchProvisionerRotateKpSetRequest =
+            request.into_inner().try_into().map_err(to_status)?;
 
-        let signed = task_spawner::rotate_kps(self.enclave.clone(), domain_req)
+        let signed = task_spawner::rotate_kp_set(self.enclave.clone(), domain_req)
             .await
             .map_err(to_status)?;
 
-        let resp = proto_conversions::rotate_kps_response_signed_to_pb(signed);
+        let resp = proto_conversions::rotate_kp_set_response_signed_to_pb(signed);
 
         Ok(Response::new(resp))
     }

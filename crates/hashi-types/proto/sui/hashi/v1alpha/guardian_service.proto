@@ -13,11 +13,10 @@ service GuardianService {
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
 
   // Ceremony mode only: rotate the KP set holding the existing BTC key. The
-  // operator submits the current KPs' encrypted old shares in one request; once
-  // threshold-many verify, the enclave reconstructs the BTC key, re-splits it
-  // for the new KP set, writes the new share state (hashes) to ceremony/, and
-  // returns the new encrypted shares.
-  rpc RotateKps(RotateKpsRequest) returns (SignedRotateKpsResponse);
+  // operator relays threshold-many current-KP-signed contributions; the enclave
+  // verifies them, reconstructs the BTC key, re-splits it for the new KP set,
+  // writes the new share state to ceremony/, and returns the encrypted shares.
+  rpc RotateKpSet(BatchProvisionerRotateKpSetRequest) returns (SignedRotateKpSetResponse);
 
   // Operator initialization: provide stable config before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
@@ -404,36 +403,48 @@ message SignedProvisionerRotateCertResponse {
 }
 
 // ==========================
-//        RotateKps
+//        RotateKpSet
 // ==========================
 
-// Assembled by the operator from the current KPs' encrypted old shares plus the
-// shared rotation target. Each old share binds the same state digest as HPKE
-// AAD, so the enclave only decrypts submissions that agree on the target.
-// Asymmetry between old and new (n, t) is allowed.
-message RotateKpsRequest {
-  repeated GuardianEncryptedShare encrypted_old_shares = 1;
+// One current KP's signed authorization to rotate the KP set. The signature
+// covers the PCR allowlist used to authenticate the existing state, this KP's
+// encrypted old share, and the complete proposed new roster and parameters.
+message SignedProvisionerRotateKpSetRequest {
+  GuardianEncryptedShare encrypted_old_share = 1;
 
-  // OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
-  repeated KpPgpCertSet new_kp_pgp_cert_sets = 2;
+  // The ceremony guardian session this KP verified before encrypting its share.
+  string expected_session_id = 2;
 
-  optional uint32 new_num_shares = 3;
-  optional uint32 new_threshold = 4;
+  // Builds allowed to authenticate the existing ceremony and KP-share state.
+  PcrAllowlist pcr_allowlist = 3;
 
-  // The current key's secret-sharing instance (old commitments + threshold) the
-  // enclave verifies the submitted old shares against.
-  SecretSharingInstance old_instance = 5;
+  // OpenPGP cert sets for the proposed new KP set.
+  repeated KpPgpCertSet new_kp_pgp_cert_sets = 4;
+  optional uint32 new_num_shares = 5;
+  optional uint32 new_threshold = 6;
+
+  // Armored authorizing current-KP cert and detached signature over the
+  // intent-tagged ProvisionerRotateKpSetRequest payload.
+  string signer_cert = 7;
+  string kp_signature = 8;
+}
+
+// Collects threshold-many current-KP-authorized requests. Every submission must
+// agree on the PCR allowlist and proposed new KP set. The enclave loads the
+// authoritative old instance and encrypted-share roster from S3.
+message BatchProvisionerRotateKpSetRequest {
+  repeated SignedProvisionerRotateKpSetRequest submissions = 1;
 }
 
 // Unsigned response payload.
-message RotateKpsResponseData {
+message RotateKpSetResponseData {
   repeated SingleKPEncryptedShares encrypted_shares = 1;
   SecretSharingInstance new_instance = 2;
 }
 
 // Application-layer signed response.
-message SignedRotateKpsResponse {
-  RotateKpsResponseData data = 1;
+message SignedRotateKpSetResponse {
+  RotateKpSetResponseData data = 1;
 
   // Milliseconds since Unix epoch.
   optional uint64 timestamp_ms = 2;

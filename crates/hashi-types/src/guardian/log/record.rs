@@ -398,7 +398,7 @@ mod tests {
     use crate::guardian::LimiterState;
     use crate::guardian::MAINNET_S3_OBJECT_LOCK_POLICY;
     use crate::guardian::NitroAttestation;
-    use crate::guardian::RotateKpsResponse;
+    use crate::guardian::RotateKpSetResponse;
     use crate::guardian::SecretSharingInstance;
     use crate::guardian::ShareCommitment;
     use crate::guardian::ShareCommitments;
@@ -474,7 +474,7 @@ mod tests {
         let (request_sign, request_data) = signed_request.into_parts();
         let request_data: StandardWithdrawalRequestWire = request_data.into();
         let response = StandardWithdrawalResponse::mock_for_testing();
-        let encrypted_shares = RotateKpsResponse::mock_for_testing().encrypted_shares;
+        let encrypted_shares = RotateKpSetResponse::mock_for_testing().encrypted_shares;
         let guardian_info = GuardianInfo::mock_for_testing();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
