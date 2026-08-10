@@ -1,11 +1,13 @@
 # Sample configuration for `hashi-monitor batch` and `hashi-monitor continuous`.
 
-# Liveness delay bounds (seconds)
+# All duration values are expressed in seconds.
+
+# Liveness delay bounds
 next_event_delays:
   - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
   - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
 
-# Clock skew tolerance: E_{i+1} can occur up to clock_skew seconds before E_i (default: 300s)
+# Clock skew tolerance: E_{i+1} can occur up to clock_skew before E_i (default: 300s)
 # clock_skew: 300
 
 # Sui withdrawal history searched before the guardian audit start (default: 1 hour)

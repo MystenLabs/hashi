@@ -117,7 +117,7 @@ impl ContinuousAuditor {
             utc_timestamp(self.inner.get_guardian_cursor()),
             utc_timestamp(self.inner.get_sui_cursor()),
             utc_timestamp(progress.verified_up_to_withdrawals),
-            progress.withdrawal_blockers_summary(),
+            progress.withdrawal_blockers(),
             utc_timestamp(progress.verified_up_to_deposits),
             utc_timestamp(progress.restart_start),
         );
