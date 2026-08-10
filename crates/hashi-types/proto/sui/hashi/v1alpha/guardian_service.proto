@@ -222,15 +222,24 @@ message SignedSetupNewKeyResponse {
 // =======================
 
 message OperatorInitRequest {
-  // S3 connection and retention config.
+  oneof request {
+    CeremonyOperatorInitRequest ceremony = 1;
+    WithdrawOperatorInitRequest withdraw = 2;
+  }
+}
+
+message CeremonyOperatorInitRequest {
+  S3Config s3_config = 1;
+}
+
+message WithdrawOperatorInitRequest {
   S3Config s3_config = 1;
 
-  // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-  // exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
-  InitConfig init_config = 4;
+  // Stable configuration whose digest KPs bind into signed PI submissions.
+  InitConfig init_config = 2;
 
   // First-deploy state to be authorized by KPs during provisioner_init.
-  GenesisState genesis_state = 5;
+  GenesisState genesis_state = 3;
 }
 
 message OperatorInitResponse {}

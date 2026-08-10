@@ -7,6 +7,7 @@
 
 use super::BatchProvisionerInitRequest;
 use super::BuildPcrs;
+use super::CeremonyOperatorInitRequest;
 use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
@@ -54,6 +55,7 @@ use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawOperatorInitRequest;
 use super::WithdrawStage;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
@@ -181,30 +183,36 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
-        let s3_config =
-            super::ResolvedS3Config::try_from(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
-        let genesis_state = req
-            .genesis_state
-            .map(|state| {
-                let committee = state.committee.ok_or_else(|| missing("committee"))?;
-                Ok(GenesisState::from_move_committee(
-                    crate::move_types::Committee::try_from(committee)?,
-                ))
-            })
-            .transpose()?;
-        // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony.
-        match req.init_config.map(InitConfig::try_from).transpose()? {
-            Some(init_config) => Ok(OperatorInitRequest::new_withdraw_mode(
-                s3_config,
-                init_config,
-                genesis_state,
-            )),
-            None if genesis_state.is_none() => {
-                Ok(OperatorInitRequest::new_ceremony_mode(s3_config))
+        match req.request.ok_or_else(|| missing("request"))? {
+            pb::operator_init_request::Request::Ceremony(req) => {
+                let s3_config = super::ResolvedS3Config::try_from(
+                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
+                )?;
+                Ok(OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
+                    s3_config,
+                }))
             }
-            None => Err(InvalidInputs(
-                "genesis_state requires a withdraw-mode InitConfig".into(),
-            )),
+            pb::operator_init_request::Request::Withdraw(req) => {
+                let s3_config = super::ResolvedS3Config::try_from(
+                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
+                )?;
+                let init_config =
+                    InitConfig::try_from(req.init_config.ok_or_else(|| missing("init_config"))?)?;
+                let genesis_state = req
+                    .genesis_state
+                    .map(|state| {
+                        let committee = state.committee.ok_or_else(|| missing("committee"))?;
+                        Ok(GenesisState::from_move_committee(
+                            crate::move_types::Committee::try_from(committee)?,
+                        ))
+                    })
+                    .transpose()?;
+                Ok(OperatorInitRequest::Withdraw(WithdrawOperatorInitRequest {
+                    s3_config,
+                    init_config,
+                    genesis_state,
+                }))
+            }
         }
     }
 }
@@ -665,13 +673,26 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, init_config, genesis_state) = r.into_parts();
-    Ok(pb::OperatorInitRequest {
-        s3_config: Some(s3_config_to_pb(s3_config)),
-        init_config: init_config.map(init_config_to_pb).transpose()?,
-        genesis_state: genesis_state.map(|state| pb::GenesisState {
-            committee: Some(move_committee_to_pb(&state.into_committee())),
+    let request = match r {
+        OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }) => {
+            pb::operator_init_request::Request::Ceremony(pb::CeremonyOperatorInitRequest {
+                s3_config: Some(s3_config_to_pb(s3_config)),
+            })
+        }
+        OperatorInitRequest::Withdraw(WithdrawOperatorInitRequest {
+            s3_config,
+            init_config,
+            genesis_state,
+        }) => pb::operator_init_request::Request::Withdraw(pb::WithdrawOperatorInitRequest {
+            s3_config: Some(s3_config_to_pb(s3_config)),
+            init_config: Some(init_config_to_pb(init_config)?),
+            genesis_state: genesis_state.map(|state| pb::GenesisState {
+                committee: Some(move_committee_to_pb(&state.into_committee())),
+            }),
         }),
+    };
+    Ok(pb::OperatorInitRequest {
+        request: Some(request),
     })
 }
 
@@ -1697,10 +1718,17 @@ mod tests {
 
     #[test]
     fn operator_init_request_round_trip() {
-        let req = OperatorInitRequest::mock_for_testing();
-        let pb = operator_init_request_to_pb(req.clone()).unwrap();
-        let back = OperatorInitRequest::try_from(pb).unwrap();
-        assert_eq!(req, back);
+        let requests = [
+            OperatorInitRequest::mock_for_testing(),
+            OperatorInitRequest::new_ceremony_mode(
+                super::super::ResolvedS3Config::mock_for_testing(),
+            ),
+        ];
+        for request in requests {
+            let pb = operator_init_request_to_pb(request.clone()).unwrap();
+            let round_trip = OperatorInitRequest::try_from(pb).unwrap();
+            assert_eq!(request, round_trip);
+        }
     }
 
     #[test]

@@ -1991,15 +1991,33 @@ pub struct SignedSetupNewKeyResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperatorInitRequest {
-    /// S3 connection and retention config.
+    #[prost(oneof = "operator_init_request::Request", tags = "1, 2")]
+    pub request: ::core::option::Option<operator_init_request::Request>,
+}
+/// Nested message and enum types in `OperatorInitRequest`.
+pub mod operator_init_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Request {
+        #[prost(message, tag = "1")]
+        Ceremony(super::CeremonyOperatorInitRequest),
+        #[prost(message, tag = "2")]
+        Withdraw(super::WithdrawOperatorInitRequest),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CeremonyOperatorInitRequest {
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-    /// exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
-    #[prost(message, optional, tag = "4")]
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WithdrawOperatorInitRequest {
+    #[prost(message, optional, tag = "1")]
+    pub s3_config: ::core::option::Option<S3Config>,
+    /// Stable configuration whose digest KPs bind into signed PI submissions.
+    #[prost(message, optional, tag = "2")]
     pub init_config: ::core::option::Option<InitConfig>,
     /// First-deploy state to be authorized by KPs during provisioner_init.
-    #[prost(message, optional, tag = "5")]
+    #[prost(message, optional, tag = "3")]
     pub genesis_state: ::core::option::Option<GenesisState>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

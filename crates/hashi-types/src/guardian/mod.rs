@@ -71,14 +71,11 @@ use std::ops::Deref;
 //    Common requests and responses
 // ---------------------------------
 
-/// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
-/// `s3_config`; a withdraw-mode enclave additionally carries the stable
-/// `InitConfig` whose digest KPs authenticate during provisioner init.
+/// Mode-specific operator bootstrap accepted by the shared `OperatorInit` RPC.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OperatorInitRequest {
-    s3_config: ResolvedS3Config,
-    init_config: Option<InitConfig>,
-    genesis_state: Option<GenesisState>,
+pub enum OperatorInitRequest {
+    Ceremony(CeremonyOperatorInitRequest),
+    Withdraw(WithdrawOperatorInitRequest),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -144,6 +141,15 @@ pub struct GuardianInfo {
 // ---------------------------------------
 //    Withdraw mode requests and responses
 // ---------------------------------------
+
+/// Withdraw-mode bootstrap carrying the stable configuration KPs authenticate
+/// during provisioner initialization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithdrawOperatorInitRequest {
+    pub s3_config: ResolvedS3Config,
+    pub init_config: InitConfig,
+    pub genesis_state: Option<GenesisState>,
+}
 
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
@@ -264,6 +270,12 @@ pub struct ProvisionerRotateCertResponse {
 // ---------------------------------------
 //    Ceremony mode requests and responses
 // ---------------------------------------
+
+/// Ceremony-mode bootstrap carrying the S3 configuration used for ceremony logs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CeremonyOperatorInitRequest {
+    pub s3_config: ResolvedS3Config,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
@@ -434,6 +446,24 @@ impl ResolvedS3Config {
     }
 }
 
+impl OperatorInitRequest {
+    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
+        Self::Ceremony(CeremonyOperatorInitRequest { s3_config })
+    }
+
+    pub fn new_withdraw_mode(
+        s3_config: ResolvedS3Config,
+        init_config: InitConfig,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
+        Self::Withdraw(WithdrawOperatorInitRequest {
+            s3_config,
+            init_config,
+            genesis_state,
+        })
+    }
+}
+
 impl SetupNewKeyRequest {
     pub fn new(
         kp_certs_roster: KpCertsRoster,
@@ -468,60 +498,6 @@ impl SetupNewKeyRequest {
 
     pub fn threshold(&self) -> usize {
         self.params.threshold()
-    }
-}
-
-impl OperatorInitRequest {
-    /// Build a ceremony-mode request (S3 only).
-    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
-        Self {
-            s3_config,
-            init_config: None,
-            genesis_state: None,
-        }
-    }
-
-    /// Build a withdraw-mode request carrying the stable operator config.
-    pub fn new_withdraw_mode(
-        s3_config: ResolvedS3Config,
-        init_config: InitConfig,
-        genesis_state: Option<GenesisState>,
-    ) -> Self {
-        Self {
-            s3_config,
-            init_config: Some(init_config),
-            genesis_state,
-        }
-    }
-
-    pub fn s3_config(&self) -> &ResolvedS3Config {
-        &self.s3_config
-    }
-
-    pub fn init_config(&self) -> Option<&InitConfig> {
-        self.init_config.as_ref()
-    }
-
-    /// `init_config` must be present iff the enclave runs in withdraw mode;
-    /// optional genesis state is withdraw-only.
-    pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
-        match (
-            mode,
-            self.init_config.is_some(),
-            self.genesis_state.is_some(),
-        ) {
-            (EnclaveMode::Withdraw, false, _) => Err(InvalidInputs(
-                "withdraw-mode operator_init requires an InitConfig".into(),
-            )),
-            (EnclaveMode::Ceremony, true, _) | (EnclaveMode::Ceremony, false, true) => Err(
-                InvalidInputs("ceremony-mode operator_init must carry only S3 config".into()),
-            ),
-            _ => Ok(()),
-        }
-    }
-
-    pub fn into_parts(self) -> (ResolvedS3Config, Option<InitConfig>, Option<GenesisState>) {
-        (self.s3_config, self.init_config, self.genesis_state)
     }
 }
 
