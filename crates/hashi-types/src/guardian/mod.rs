@@ -63,6 +63,7 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Borrow;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Deref;
 
@@ -286,6 +287,7 @@ pub struct RotateKpsState {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
     pub encrypted_shares: KPEncryptedSharesRoster,
+    pub new_instance: SecretSharingInstance,
 }
 
 /// `KpSigned<ProvisionerRotateCertRequest>`. Replaces one certificate in a KP
@@ -749,16 +751,49 @@ impl RotateKpsState {
 }
 
 impl RotateKpsRequest {
+    /// Construct a rotation request after validating all visible old-share
+    /// cardinality and ID invariants. Ciphertexts and commitments are verified
+    /// after decryption inside the enclave.
     pub fn new(
         encrypted_old_shares: Vec<GuardianEncryptedShare>,
         old_instance: SecretSharingInstance,
         state: RotateKpsState,
-    ) -> Self {
-        Self {
+    ) -> GuardianResult<Self> {
+        let share_count = encrypted_old_shares.len();
+        let threshold = old_instance.threshold();
+        let num_shares = old_instance.num_shares();
+        if share_count < threshold {
+            return Err(InvalidInputs(format!(
+                "need at least {threshold} encrypted old shares, got {share_count}"
+            )));
+        }
+        if share_count > num_shares {
+            return Err(InvalidInputs(format!(
+                "at most {num_shares} encrypted old shares are allowed, got {share_count}"
+            )));
+        }
+
+        let mut seen_ids = BTreeSet::new();
+        for share in &encrypted_old_shares {
+            if usize::from(share.id.get()) > num_shares {
+                return Err(InvalidInputs(format!(
+                    "encrypted old share id {} exceeds old instance num_shares {num_shares}",
+                    share.id
+                )));
+            }
+            if !seen_ids.insert(share.id) {
+                return Err(InvalidInputs(format!(
+                    "duplicate encrypted old share id {}",
+                    share.id
+                )));
+            }
+        }
+
+        Ok(Self {
             encrypted_old_shares,
             old_instance,
             state,
-        }
+        })
     }
 
     /// Encrypt one KP's `share` to `enclave_pub_key` with `state.digest()` bound

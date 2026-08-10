@@ -419,6 +419,7 @@ message RotateKpsRequest {
 // Unsigned response payload.
 message RotateKpsResponseData {
   repeated SingleKPEncryptedShares encrypted_shares = 1;
+  SecretSharingInstance new_instance = 2;
 }
 
 // Application-layer signed response.

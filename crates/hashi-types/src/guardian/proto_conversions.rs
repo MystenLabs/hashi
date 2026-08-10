@@ -375,11 +375,7 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
         )?;
 
-        Ok(RotateKpsRequest::new(
-            encrypted_old_shares,
-            old_instance,
-            state,
-        ))
+        RotateKpsRequest::new(encrypted_old_shares, old_instance, state)
     }
 }
 
@@ -398,11 +394,20 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSignedResponse<RotateKpsRe
             .map(KPEncryptedShares::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
+        let new_instance = SecretSharingInstance::try_from(
+            data.new_instance.ok_or_else(|| missing("new_instance"))?,
+        )?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned::from_parts(
-            GuardianResponse::new(RotateKpsResponse { encrypted_shares }, timestamp_ms),
+            GuardianResponse::new(
+                RotateKpsResponse {
+                    encrypted_shares,
+                    new_instance,
+                },
+                timestamp_ms,
+            ),
             signature,
         ))
     }
@@ -612,16 +617,19 @@ pub fn rotate_kps_response_signed_to_pb(
     s: GuardianSignedResponse<RotateKpsResponse>,
 ) -> pb::SignedRotateKpsResponse {
     let (data, signature) = s.into_parts();
+    let RotateKpsResponse {
+        encrypted_shares,
+        new_instance,
+    } = data.response;
 
     pb::SignedRotateKpsResponse {
         data: Some(pb::RotateKpsResponseData {
-            encrypted_shares: data
-                .response
-                .encrypted_shares
+            encrypted_shares: encrypted_shares
                 .into_vec()
                 .into_iter()
                 .map(kp_encrypted_shares_to_pb)
                 .collect(),
+            new_instance: Some(secret_sharing_instance_to_pb(&new_instance)),
         }),
         timestamp_ms: Some(data.timestamp_ms),
         signature: Some(signature.to_bytes().to_vec().into()),

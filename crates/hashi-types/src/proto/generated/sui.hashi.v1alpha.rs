@@ -2189,6 +2189,8 @@ pub struct RotateKpsRequest {
 pub struct RotateKpsResponseData {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
+    #[prost(message, optional, tag = "2")]
+    pub new_instance: ::core::option::Option<SecretSharingInstance>,
 }
 /// Application-layer signed response.
 #[derive(Clone, PartialEq, ::prost::Message)]

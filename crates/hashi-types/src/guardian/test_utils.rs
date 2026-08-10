@@ -194,6 +194,7 @@ impl RotateKpsResponse {
     pub fn mock_for_testing() -> Self {
         Self {
             encrypted_shares: dummy_encrypted_shares(),
+            new_instance: dummy_secret_sharing_instance(),
         }
     }
 }
