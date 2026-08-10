@@ -80,20 +80,29 @@ pub struct ProgressWatermarks {
     pub verified_up_to_withdrawals: UnixSeconds,
     pub verified_up_to_deposits: UnixSeconds,
     pub restart_start: UnixSeconds,
-    withdrawal_blockers: Vec<WithdrawalProgressBlocker>,
+    withdrawal_blockers: WithdrawalProgressBlockers,
 }
 
 impl ProgressWatermarks {
-    fn withdrawal_blockers_summary(&self) -> String {
-        if self.withdrawal_blockers.is_empty() {
-            return "none".to_string();
-        }
+    pub fn withdrawal_blockers(&self) -> &WithdrawalProgressBlockers {
+        &self.withdrawal_blockers
+    }
+}
 
-        self.withdrawal_blockers
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ")
+#[derive(Clone, Debug)]
+pub struct WithdrawalProgressBlockers(Vec<WithdrawalProgressBlocker>);
+
+impl fmt::Display for WithdrawalProgressBlockers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some((first, rest)) = self.0.split_first() else {
+            return f.write_str("none");
+        };
+
+        write!(f, "{first}")?;
+        for blocker in rest {
+            write!(f, "; {blocker}")?;
+        }
+        Ok(())
     }
 }
 
@@ -365,7 +374,7 @@ impl AuditorCore {
             verified_up_to_withdrawals,
             verified_up_to_deposits,
             restart_start: verified_up_to_withdrawals.min(verified_up_to_deposits),
-            withdrawal_blockers,
+            withdrawal_blockers: WithdrawalProgressBlockers(withdrawal_blockers),
         }
     }
 

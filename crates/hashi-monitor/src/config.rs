@@ -13,12 +13,14 @@ use serde::Deserialize;
 use crate::domain::WithdrawalEventType;
 
 /// Configuration shared by the batch and continuous monitor modes.
+///
+/// All duration values are expressed in seconds.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     /// Maximum allowed delay between consecutive events.
     pub next_event_delays: NextEventDelays,
 
-    /// E_{i+1} is allowed to occur up to clock_skew seconds before E_i (default: 300s).
+    /// E_{i+1} is allowed to occur up to `clock_skew` before E_i (default: 300s).
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
@@ -34,7 +36,7 @@ pub struct Config {
     pub btc: BtcConfig,
 }
 
-/// The maximum allowed delay between an event and its successor, in seconds.
+/// The maximum allowed delay between an event and its successor.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "Vec<(WithdrawalEventType, u64)>")]
 pub struct NextEventDelays(Vec<(WithdrawalEventType, u64)>);
