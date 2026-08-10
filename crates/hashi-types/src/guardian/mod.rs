@@ -185,12 +185,12 @@ pub struct ActivationState {
 /// collected enough. The enclave verifies every KP signature, session pin, and
 /// config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitRequest(pub Vec<KpSigned<SingleProvisionerInitRequest>>);
+pub struct BatchProvisionerInitRequest(pub Vec<KpSigned<ProvisionerInitRequest>>);
 
 /// Relay-facing request carrying one KP's signed contribution toward
 /// `ProvisionerInit` for a specific guardian session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SingleProvisionerInitRequest {
+pub struct ProvisionerInitRequest {
     expected_session_id: SessionID,
     #[serde(with = "hex::serde")]
     expected_config_hash: [u8; 32],
@@ -645,7 +645,7 @@ impl InitConfig {
     }
 }
 
-impl SingleProvisionerInitRequest {
+impl ProvisionerInitRequest {
     /// Build one KP's PI contribution, encrypting `share` to the enclave's
     /// session key. Agreement on the stable config is authenticated by the KP
     /// signature over this request, not by HPKE AAD.

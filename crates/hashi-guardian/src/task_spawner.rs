@@ -22,6 +22,7 @@ use crate::withdraw_mode::provisioner_init as provisioner_init_domain;
 use crate::withdraw_mode::provisioner_rotate_cert as provisioner_rotate_cert_domain;
 use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
+use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -29,7 +30,6 @@ use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::ProvisionerRotateCertResponse;
 use hashi_types::guardian::RotateKpsRequest;
@@ -69,7 +69,7 @@ pub async fn operator_init(
 
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
-    request: ProvisionerInitRequest,
+    request: BatchProvisionerInitRequest,
 ) -> GuardianResult<()> {
     enclave
         .spawn_control_task(request, provisioner_init_domain::provisioner_init)

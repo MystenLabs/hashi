@@ -15,7 +15,7 @@ import "sui/hashi/v1alpha/guardian_service.proto";
 // session key, so a malicious or buggy relay can stall provisioning but cannot
 // read shares or forge a key.
 service GuardianRelayService {
-  rpc SingleProvisionerInit(SignedSingleProvisionerInitRequest) returns (SingleProvisionerInitResponse);
+  rpc SingleProvisionerInit(SignedProvisionerInitRequest) returns (SingleProvisionerInitResponse);
 
   // GuardianInfo of the guardian KPs are provisioning: the proxy's standby
   // backend when one is configured, else the active guardian (first deploy).

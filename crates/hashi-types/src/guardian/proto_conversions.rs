@@ -5,6 +5,7 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::BatchProvisionerInitRequest;
 use super::BuildPcrs;
 use super::CeremonyStage;
 use super::Ciphertext;
@@ -50,7 +51,6 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::ShareID;
 use super::SignedStandardWithdrawalRequestWire;
-use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
@@ -249,24 +249,24 @@ pub fn secret_sharing_instance_to_pb(
     }
 }
 
-impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
+impl TryFrom<pb::BatchProvisionerInitRequest> for BatchProvisionerInitRequest {
     type Error = GuardianError;
 
-    fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::BatchProvisionerInitRequest) -> Result<Self, Self::Error> {
         let submissions = req
             .submissions
             .into_iter()
-            .map(KpSigned::<SingleProvisionerInitRequest>::try_from)
+            .map(KpSigned::<ProvisionerInitRequest>::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest(submissions))
+        Ok(BatchProvisionerInitRequest(submissions))
     }
 }
 
-impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisionerInitRequest> {
+impl TryFrom<pb::SignedProvisionerInitRequest> for KpSigned<ProvisionerInitRequest> {
     type Error = GuardianError;
 
-    fn try_from(req: pb::SignedSingleProvisionerInitRequest) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::SignedProvisionerInitRequest) -> Result<Self, Self::Error> {
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
@@ -295,7 +295,7 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         )?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
-        let request = SingleProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::new(
             req.expected_session_id.into(),
             expected_config_hash,
             expected_genesis_state_hash,
@@ -681,20 +681,20 @@ pub fn operator_activate_request_to_pb(r: OperatorActivateRequest) -> pb::Operat
     }
 }
 
-pub fn provisioner_init_request_to_pb(
-    r: ProvisionerInitRequest,
-) -> GuardianResult<pb::ProvisionerInitRequest> {
-    Ok(pb::ProvisionerInitRequest {
+pub fn batch_provisioner_init_request_to_pb(
+    r: BatchProvisionerInitRequest,
+) -> GuardianResult<pb::BatchProvisionerInitRequest> {
+    Ok(pb::BatchProvisionerInitRequest {
         submissions: r
             .0
             .into_iter()
-            .map(pb::SignedSingleProvisionerInitRequest::from)
+            .map(pb::SignedProvisionerInitRequest::from)
             .collect(),
     })
 }
 
-impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisionerInitRequest {
-    fn from(r: KpSigned<SingleProvisionerInitRequest>) -> Self {
+impl From<KpSigned<ProvisionerInitRequest>> for pb::SignedProvisionerInitRequest {
+    fn from(r: KpSigned<ProvisionerInitRequest>) -> Self {
         let (request, signer_cert, signature) = r.into_parts();
         let (
             expected_session_id,
@@ -1704,25 +1704,24 @@ mod tests {
     }
 
     #[test]
-    fn provisioner_init_request_round_trip() {
-        let req = ProvisionerInitRequest::mock_for_testing();
-        let pb = provisioner_init_request_to_pb(req.clone()).unwrap();
-        let back = ProvisionerInitRequest::try_from(pb).unwrap();
+    fn batch_provisioner_init_request_round_trip() {
+        let req = BatchProvisionerInitRequest::mock_for_testing();
+        let pb = batch_provisioner_init_request_to_pb(req.clone()).unwrap();
+        let back = BatchProvisionerInitRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
     }
 
     #[test]
-    fn signed_single_provisioner_init_request_round_trip_and_verifies() {
+    fn signed_provisioner_init_request_round_trip_and_verifies() {
         use crate::pgp::test_utils::mock_pgp_keypair;
         use crate::pgp::test_utils::sign_detached_in_process;
 
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let (_, _, _, encrypted_share) =
-            SingleProvisionerInitRequest::mock_for_testing().into_parts();
+        let (_, _, _, encrypted_share) = ProvisionerInitRequest::mock_for_testing().into_parts();
         let expected_config_hash = [9u8; 32];
         let expected_genesis_state_hash = Some([10u8; 32]);
-        let request = SingleProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::new(
             "session-a".into(),
             expected_config_hash,
             expected_genesis_state_hash,
@@ -1732,8 +1731,8 @@ mod tests {
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
         let signed = KpSigned::from_parts(request, cert.clone(), signature);
 
-        let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
-        let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
+        let pb = pb::SignedProvisionerInitRequest::from(signed);
+        let back = KpSigned::<ProvisionerInitRequest>::try_from(pb.clone()).unwrap();
         let data = back.verify_signature().unwrap();
         assert_eq!(data.expected_session_id(), "session-a");
         assert_eq!(data.expected_config_hash(), &expected_config_hash);
@@ -1746,7 +1745,7 @@ mod tests {
 
         let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
-        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify_signature().is_err(),
             "signature must bind the expected guardian session"
@@ -1754,7 +1753,7 @@ mod tests {
 
         let mut tampered = pb;
         tampered.expected_config_hash = Some(vec![8u8; 32].into());
-        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify_signature().is_err(),
             "signature must bind the expected operator-init config hash"
