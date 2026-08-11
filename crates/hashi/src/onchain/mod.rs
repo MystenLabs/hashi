@@ -162,11 +162,23 @@ pub struct State {
     withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
 
-#[derive(serde_derive::Serialize, serde_derive::Deserialize)]
-struct TobKey {
-    epoch: u64,
-    batch_index: Option<u32>,
-    protocol_type: move_types::ProtocolType,
+/// Rust mirror of the Move `hashi::tob::TobKey` dynamic-field name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Serialize, serde_derive::Deserialize)]
+pub struct TobKey {
+    pub epoch: u64,
+    pub batch_index: Option<u32>,
+    pub protocol_type: move_types::ProtocolType,
+}
+
+/// One TOB bucket the leader's GC has selected for on-chain destruction.
+/// `KeyGen` covers both the Dkg and KeyRotation buckets of an epoch — the
+/// Move entry (`cert_submission::destroy_key_gen_certs`) probes both keys, so
+/// the caller never needs to know whether the epoch was genesis or a
+/// rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TobPruneTarget {
+    KeyGen { epoch: u64 },
+    NonceBatch { epoch: u64, batch_index: u32 },
 }
 
 impl OnchainState {
@@ -974,6 +986,44 @@ impl OnchainState {
             }
         }
         Ok(None)
+    }
+
+    /// List every TOB bucket key in the on-chain bag, for the leader's GC.
+    ///
+    /// Decodes dynamic-field NAMES only — the `TobKey` layout is frozen — so
+    /// bucket VALUE layouts this binary cannot decode never fail the sweep.
+    /// Whether a bucket's stored type is supported for removal is decided
+    /// on-chain by the destroy entry. A name that fails to decode as a
+    /// `TobKey` is skipped with a warning rather than failing the listing.
+    pub async fn list_tob_keys(&self) -> Result<Vec<TobKey>> {
+        let tob_id = self.tob_id();
+        let mut stream = self
+            .0
+            .client
+            .clone()
+            .list_dynamic_fields(
+                ListDynamicFieldsRequest::default()
+                    .with_parent(tob_id)
+                    .with_page_size(SCRAPE_PAGE_SIZE)
+                    // field_id rides along solely for the skip-warning
+                    // below: a masked-out field would log an empty default.
+                    .with_read_mask(FieldMask::from_paths([
+                        DynamicField::path_builder().field_id(),
+                        DynamicField::path_builder().name().finish(),
+                    ])),
+            )
+            .pipe(Box::pin);
+        let mut keys = Vec::new();
+        while let Some(field) = stream.try_next().await? {
+            match bcs::from_bytes::<TobKey>(field.name().value()) {
+                Ok(key) => keys.push(key),
+                Err(e) => tracing::warn!(
+                    field_id = %field.field_id(),
+                    "Skipping TOB bag entry whose name does not decode as a TobKey: {e}"
+                ),
+            }
+        }
+        Ok(keys)
     }
 
     async fn collect_table_nodes<V: serde::de::DeserializeOwned>(
