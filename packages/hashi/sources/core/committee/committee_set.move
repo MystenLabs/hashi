@@ -497,6 +497,24 @@ public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
     self.committees.contains_with_type<u64, Committee>(epoch)
 }
 
+/// True iff at least one committee epoch lies strictly between `epoch` and
+/// the current epoch — i.e. `epoch` is strictly older than the previous
+/// committee's epoch. Committee epochs are Sui epochs and can gap (a reconfig
+/// may not run every Sui epoch), so this walks down from `current - 1` rather
+/// than assuming `current - 1` is the previous committee. The walk is bounded
+/// by the current↔previous committee gap in every case: it returns at the
+/// first committee found descending, and in the not-found case the range
+/// (epoch, current) contains no committee at all. A pending committee's epoch
+/// is `> current` and is never visited.
+public(package) fun is_before_previous_committee(self: &CommitteeSet, epoch: u64): bool {
+    let mut e = self.epoch;
+    while (e > epoch + 1) {
+        e = e - 1;
+        if (self.has_committee(e)) return true
+    };
+    false
+}
+
 public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
     if (self.pending_epoch_change.is_some()) {
         option::some(self.pending_epoch_change.borrow().epoch)
@@ -841,6 +859,11 @@ public fun create_pre_genesis_for_testing(
 /// Drop a test CommitteeSet (Bag fields prevent plain drop).
 public fun destroy_for_testing(self: CommitteeSet) {
     std::unit_test::destroy(self)
+}
+
+#[test_only]
+public fun insert_committee_for_testing(self: &mut CommitteeSet, committee: Committee) {
+    self.insert_committee(committee)
 }
 
 #[test_only]
