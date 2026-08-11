@@ -55,6 +55,8 @@ pub async fn list_members(config: &CliConfig, epoch: Option<u64>) -> Result<()> 
         operator: String,
         #[tabled(rename = "Ignored")]
         ignored: String,
+        #[tabled(rename = "Resigned")]
+        resigned: String,
     }
 
     let rows: Vec<MemberRow> = members
@@ -65,6 +67,11 @@ pub async fn list_members(config: &CliConfig, epoch: Option<u64>) -> Result<()> 
             // Registry view: shows the governance flag as soon as it is set,
             // before the epoch-boundary effect on the committee.
             ignored: if m.ignored {
+                "yes".to_string()
+            } else {
+                String::new()
+            },
+            resigned: if m.resigned {
                 "yes".to_string()
             } else {
                 String::new()
@@ -118,6 +125,12 @@ pub async fn view_member(config: &CliConfig, address: &str) -> Result<()> {
                 println!(
                     "  {} yes (excluded from the next committee formation)",
                     "Ignored:".bold()
+                );
+            }
+            if m.resigned {
+                println!(
+                    "  {} yes (removed at the next epoch transition)",
+                    "Resigned:".bold()
                 );
             }
             println!("{}", "━".repeat(60).dimmed());

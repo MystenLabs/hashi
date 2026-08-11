@@ -39,6 +39,15 @@ enum Commands {
     },
 
     /// Committee information commands
+    /// Validator lifecycle commands (resign / withdraw a resignation)
+    Validator {
+        #[clap(flatten)]
+        cli_opts: hashi::cli::CliGlobalOpts,
+
+        #[clap(subcommand)]
+        action: hashi::cli::ValidatorCommands,
+    },
+
     Committee {
         #[clap(flatten)]
         cli_opts: hashi::cli::CliGlobalOpts,
@@ -129,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Server { config } => run_server(config).await,
         Commands::Proposal { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Proposal { action }).await
+        }
+        Commands::Validator { cli_opts, action } => {
+            hashi::cli::run(cli_opts, hashi::cli::CliCommand::Validator { action }).await
         }
         Commands::Committee { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Committee { action }).await

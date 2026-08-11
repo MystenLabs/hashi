@@ -353,6 +353,18 @@ impl Hashi {
         self: &Arc<Self>,
         epoch: u64,
     ) -> anyhow::Result<Option<u64>> {
+        // Resignation latch: a running node must not reverse its own exit.
+        // Registration/key-upload is triggered on every Sui epoch change and
+        // right after end_reconfig, so without this gate a resigned-and-
+        // removed validator would auto-re-register within one trigger.
+        if self.resignation_latch_engaged()? {
+            tracing::warn!(
+                epoch,
+                "resignation latch engaged — skipping validator \
+                 registration and next-epoch key upload"
+            );
+            return Ok(None);
+        }
         let keys = self.prepare_next_epoch_keys(epoch)?;
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
         executor
@@ -363,6 +375,60 @@ impl Hashi {
                 Some(&keys.signing_private_key),
             )
             .await
+    }
+
+    /// True while this validator is exiting: its on-chain registration is
+    /// flagged resigned, or a resignation was previously observed and the
+    /// registration has since been removed. Tracked by a marker file in the
+    /// node's db directory so the latch survives both the registry removal
+    /// (after which there is no MemberInfo left to read the flag from) and
+    /// node restarts.
+    ///
+    /// Self-clearing: when the chain shows the member registered and not
+    /// resigned again (`withdraw_resignation`, or an explicit operator
+    /// re-registration via the CLI), the marker is removed and normal
+    /// registration maintenance resumes.
+    fn resignation_latch_engaged(&self) -> anyhow::Result<bool> {
+        let own_address = self
+            .config
+            .operator_private_key()?
+            .verifying_key()
+            .derive_address();
+        let marker = self.resignation_marker_path()?;
+        match self.onchain_state().committee_member(&own_address) {
+            Some(member) if member.resigned => {
+                if !marker.exists() {
+                    std::fs::write(&marker, b"resigned\n")?;
+                    tracing::warn!(
+                        marker = %marker.display(),
+                        "on-chain resignation observed for this validator; \
+                         suppressing auto-registration and key uploads until \
+                         it is withdrawn"
+                    );
+                }
+                Ok(true)
+            }
+            Some(_) => {
+                if marker.exists() {
+                    std::fs::remove_file(&marker)?;
+                    tracing::info!(
+                        "validator is registered and not resigned; clearing \
+                         the resignation latch"
+                    );
+                }
+                Ok(false)
+            }
+            None => Ok(marker.exists()),
+        }
+    }
+
+    fn resignation_marker_path(&self) -> anyhow::Result<PathBuf> {
+        let db_path = self
+            .config
+            .db
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
+        Ok(db_path.join("resigned.marker"))
     }
 
     pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
