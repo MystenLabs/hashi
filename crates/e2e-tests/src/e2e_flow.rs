@@ -1197,6 +1197,132 @@ mod tests {
         Ok(())
     }
 
+    /// A committee-voted ignore takes effect at the epoch boundary: the next
+    /// committee forms without the member, total weight re-sums, and the
+    /// smaller committee still confirms deposits and withdrawals end to end
+    /// (BLS certs, MPC reshare, and the guardian all follow the members
+    /// vector).
+    ///
+    /// Runs on the default snapshot-v1 + upgrade harness, so it also proves
+    /// the v2-only ignore_member surface is addressed at the upgraded
+    /// package id.
+    #[tokio::test]
+    async fn test_ignored_member_excluded_at_epoch_boundary() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+
+        let hashi_ids = networks.hashi_network.ids();
+
+        let (latest_package_id, members_before, weight_before, target, initial_epoch) = {
+            let nodes = networks.hashi_network.nodes();
+
+            // The v2-only ignore_member surface lives at the upgraded
+            // package id, not the snapshot-v1 publish id in `hashi_ids`.
+            let latest_package_id = nodes[0]
+                .hashi()
+                .onchain_state()
+                .package_id()
+                .ok_or_else(|| anyhow!("no package versions known"))?;
+
+            let committee = nodes[0]
+                .hashi()
+                .onchain_state()
+                .current_committee()
+                .ok_or_else(|| anyhow!("no current committee"))?;
+
+            let mut executors: Vec<SuiTxExecutor> = nodes
+                .iter()
+                .map(|node| {
+                    let hashi = node.hashi();
+                    SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+                })
+                .collect::<Result<_>>()?;
+            let target = executors
+                .last()
+                .ok_or_else(|| anyhow!("no executors"))?
+                .sender();
+            assert!(committee.index_of(&target).is_some());
+
+            let ignore_member_type_tag =
+                sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
+                    latest_package_id,
+                    sui_sdk_types::Identifier::from_static("ignore_member"),
+                    sui_sdk_types::Identifier::from_static("IgnoreMember"),
+                    vec![],
+                )));
+            crate::submit_proposal_through_quorum(
+                hashi_ids,
+                latest_package_id,
+                &mut executors,
+                hashi::cli::client::CreateProposalParams::IgnoreMember {
+                    target_validator_address: target,
+                    ignored: true,
+                    metadata: vec![],
+                },
+                ignore_member_type_tag,
+                "ignore_member",
+                "IgnoreMember",
+            )
+            .await?;
+
+            let initial_epoch = nodes[0]
+                .current_epoch()
+                .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
+
+            (
+                latest_package_id,
+                committee.members().len(),
+                committee.total_weight(),
+                target,
+                initial_epoch,
+            )
+        };
+        info!(
+            ?target,
+            latest_package_id = %latest_package_id,
+            "ignore executed on-chain; closing the epoch"
+        );
+
+        networks.sui_network.force_close_epoch().await?;
+        let target_epoch = initial_epoch + 1;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+
+        // The new committee excludes the ignored member and total weight
+        // re-sums without them.
+        {
+            let nodes = networks.hashi_network.nodes();
+            let committee = nodes[0]
+                .hashi()
+                .onchain_state()
+                .current_committee()
+                .ok_or_else(|| anyhow!("no committee after epoch change"))?;
+            assert_eq!(committee.members().len(), members_before - 1);
+            assert!(committee.index_of(&target).is_none());
+            assert!(committee.total_weight() < weight_before);
+        }
+
+        // The smaller committee still drives the full deposit and
+        // withdrawal paths: BLS certs, MPC signing with the reshared key,
+        // and the guardian's committee-handoff-derived thresholds.
+        create_deposit_and_wait(&mut networks, 100_000).await?;
+        crate::test_helpers::create_withdrawal_and_wait(&mut networks, 30_000).await?;
+
+        Ok(())
+    }
+
     /// Waits for a `WithdrawalPickedForProcessing` that contains at least
     /// `min_requests` request IDs in a single batch, indicating that the new
     /// multi-request coin selection algorithm batched them together.
