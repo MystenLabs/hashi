@@ -27,9 +27,13 @@ use sui::{
 /// before this key existed need no migration.
 ///
 /// The flag lives in `extra_fields` only because `MemberInfo`'s layout is
-/// frozen on the deployed network; when testnet is wiped before mainnet,
-/// promote it to a real `ignored: bool` field on `MemberInfo` and delete
-/// this key.
+/// frozen on the deployed network.
+///
+/// TODO(pre-mainnet-wipe): when testnet is wiped and the Move versions are
+/// squashed before mainnet, promote this to a root-level `ignored: bool`
+/// field on `MemberInfo` and delete this key (and its Rust mirror
+/// `MEMBER_IGNORED_KEY` / the `extra_fields` decode in
+/// `convert_move_member_info`).
 const MEMBER_IGNORED_KEY: vector<u8> = b"ignored";
 
 // ~~~~~~~ Errors ~~~~~~~
@@ -519,11 +523,7 @@ fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
 /// Whether governance has flagged this member as ignored. An absent key
 /// means not ignored.
 fun is_ignored(self: &MemberInfo): bool {
-    self
-        .extra_fields
-        .try_get(MEMBER_IGNORED_KEY)
-        .map!(|value| value.as_bool())
-        .destroy_or!(false)
+    self.extra_fields.try_get(MEMBER_IGNORED_KEY).map!(|value| value.as_bool()).destroy_or!(false)
 }
 
 fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {

@@ -5,13 +5,7 @@
 #[allow(implicit_const_copy)]
 module hashi::ignore_member_tests;
 
-use hashi::{
-    committee,
-    ignore_member::{Self, IgnoreMember},
-    mpc_config,
-    proposal,
-    test_utils
-};
+use hashi::{committee, ignore_member::{Self, IgnoreMember}, mpc_config, proposal, test_utils};
 use sui::{clock, vec_map};
 
 // ======== Test Addresses ========
