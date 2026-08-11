@@ -270,6 +270,25 @@ pub struct ProvisionerRotateCertResponse {
     pub encrypted_shares: KPEncryptedShares,
 }
 
+/// A KP-signed request bound to one guardian session.
+pub trait SessionBoundRequest {
+    const REQUEST_CONTEXT: &'static str;
+
+    fn expected_session(&self) -> &SessionID;
+
+    fn validate_session(&self, live_session: &SessionID) -> GuardianResult<()> {
+        if self.expected_session() != live_session {
+            return Err(InvalidInputs(format!(
+                "{} expected guardian session {}, live session is {}",
+                Self::REQUEST_CONTEXT,
+                self.expected_session(),
+                live_session,
+            )));
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------
 //    Ceremony mode requests and responses
 // ---------------------------------------
@@ -724,6 +743,14 @@ impl ProvisionerInitRequest {
     }
 }
 
+impl SessionBoundRequest for ProvisionerInitRequest {
+    const REQUEST_CONTEXT: &'static str = "PI submission";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+}
+
 impl BatchProvisionerRotateKpSetRequest {
     pub fn new(submissions: Vec<KpSigned<ProvisionerRotateKpSetRequest>>) -> GuardianResult<Self> {
         if submissions.is_empty() {
@@ -829,6 +856,14 @@ impl ProvisionerRotateKpSetRequest {
     }
 }
 
+impl SessionBoundRequest for ProvisionerRotateKpSetRequest {
+    const REQUEST_CONTEXT: &'static str = "KP rotation submission";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+}
+
 impl ProvisionerRotateCertRequest {
     pub fn new<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
@@ -909,6 +944,14 @@ impl ProvisionerRotateCertRequest {
             self.new_kp_pgp_cert,
             self.encrypted_share,
         )
+    }
+}
+
+impl SessionBoundRequest for ProvisionerRotateCertRequest {
+    const REQUEST_CONTEXT: &'static str = "provisioner_rotate_cert request";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
     }
 }
 
@@ -1122,6 +1165,23 @@ impl From<&ActivationState> for ActivationStateRepr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_bound_request_validates_live_session() {
+        let request = ProvisionerInitRequest::mock_for_testing();
+        request
+            .validate_session(&SessionID::from("mock-session"))
+            .unwrap();
+
+        let err = request
+            .validate_session(&SessionID::from("other-session"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            InvalidInputs(message)
+                if message == "PI submission expected guardian session mock-session, live session is other-session"
+        ));
+    }
 
     #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {

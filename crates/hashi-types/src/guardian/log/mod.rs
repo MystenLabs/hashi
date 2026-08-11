@@ -48,7 +48,7 @@ impl ObjectKeyPattern {
         match self {
             Self::Fixed(key) => key,
             Self::RandomSuffix(prefix) => {
-                format!("{prefix}{:08x}.json", rand::random::<u32>())
+                format!("{prefix}{:032x}.json", rand::random::<u128>())
             }
         }
     }

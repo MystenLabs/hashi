@@ -30,8 +30,6 @@ pub struct S3ObjectLockPolicy {
     pub short_lived: Duration,
 }
 
-// TODO: Retire this enum once the repository has a canonical
-// Hashi network enum from which the retention policy can be derived.
 /// Hashi deployment class used to select an S3 object-lock policy.
 ///
 /// This is intentionally independent of `bitcoin::Network`: a Hashi

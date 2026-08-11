@@ -868,8 +868,8 @@ mod tests {
         let original_key = log.object_key();
         let stem = original_key.strip_suffix(".json").unwrap();
         let (prefix, suffix_hex) = stem.rsplit_once('-').unwrap();
-        let suffix = u32::from_str_radix(suffix_hex, 16).unwrap();
-        let relocated_key = format!("{prefix}-{:08x}.json", suffix ^ 1);
+        let suffix = u128::from_str_radix(suffix_hex, 16).unwrap();
+        let relocated_key = format!("{prefix}-{:032x}.json", suffix ^ 1);
 
         let mut record_read_from_s3: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
