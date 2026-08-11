@@ -155,6 +155,29 @@ const WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS: usize = 43;
 const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
 const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 
+/// Runtime-object cost model for the deferred `archive_confirmed_withdrawals`
+/// GC (v2 package): ~3 objects per archived txn (hot-bag `Field` + child
+/// borrow, new cold-bag `Field`; the remove reuses the cache) and ~3 per
+/// request (the `requests` removal `Field` + child + the new `processed`
+/// `Field`; the pre-upgrade-leftover fallback path costs the same bound).
+/// Conservative upper bounds pending sui-replay measurement; the executor's
+/// greedy packer sizes each GC transaction from these.
+pub(crate) const WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS: usize = 12;
+pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN: usize = 3;
+pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
+pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET: usize = WITHDRAWAL_RUNTIME_OBJECT_BUDGET;
+
+// A whole txn's requests archive together (the entry has no partial-archival
+// mode), so the largest committable batch must fit one GC transaction.
+const _: () = assert!(
+    WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS
+        + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
+        + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST
+            * CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        <= WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET,
+    "a max-size withdrawal txn must archive in a single GC transaction"
+);
+
 /// How many inputs fit in [`WITHDRAWAL_RUNTIME_OBJECT_BUDGET`] after the
 /// fixed overhead and the per-request cost of `request_count` requests.
 fn runtime_object_input_budget(

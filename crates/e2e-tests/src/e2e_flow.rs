@@ -37,6 +37,7 @@ mod tests {
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
+    use crate::test_helpers::wait_for_withdrawal_archival;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -576,6 +577,12 @@ mod tests {
         // must now clean them from its mirror, and the eventless cleanup
         // deletions must reach every node's mirror via the object stream.
         wait_for_spent_utxo_cleanup(&networks, Duration::from_secs(60)).await?;
+
+        // The confirm left the withdrawal txn (and its requests) in the hot
+        // bags; the leader's deferred-archival GC must move them to the
+        // archive bags on-chain, observable as the ids draining from every
+        // node's mirror. This pins the deferred-archival GC end-to-end.
+        wait_for_withdrawal_archival(&networks, Duration::from_secs(60)).await?;
 
         let guardian_state = networks
             .guardian_harness
@@ -1496,6 +1503,13 @@ mod tests {
         drop(miner);
 
         info!("Batch withdrawal confirmed on Sui");
+
+        // The confirm left the batched txn (and both requests) in the hot
+        // bags; the leader's deferred-archival GC must drain them from every
+        // node's mirror. This pins the deferred-archival GC end-to-end for
+        // the batched (multi-request) shape.
+        wait_for_withdrawal_archival(&networks, Duration::from_secs(60)).await?;
+
         info!("=== Batch Withdrawal Test Passed ===");
         Ok(())
     }

@@ -17,6 +17,7 @@ use hashi::sui_tx_executor::SuiTxExecutor;
 use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::move_types::DepositConfirmed;
 use hashi_types::move_types::WithdrawalConfirmed;
+use hashi_types::move_types::WithdrawalStatus;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -393,6 +394,71 @@ pub async fn wait_for_spent_utxo_cleanup(networks: &TestNetworks, timeout: Durat
             return Err(anyhow!(
                 "Timeout after {timeout:?} waiting for the spent-UTXO cleanup: node {index}'s \
                  mirror still shows {pending} spent record(s) and {tombstones} tombstone(s)"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Wait until every node's object mirror shows the deferred withdrawal
+/// archival completed: no withdrawal transaction with
+/// `confirmed_timestamp_ms` set is still sitting in the hot
+/// `withdrawal_txns` bag, and no request in a post-commit status
+/// (Processing/Signed/Confirmed) is lingering in the hot `requests` bag.
+///
+/// Under the v2 package `confirm_withdrawal` leaves the transaction (and
+/// its requests) in the hot bags; the leader's deferred-archival GC
+/// (`archive_confirmed_withdrawals`, armed by the confirm) later moves
+/// them to `confirmed_txns`/`processed`. The mirror does not track those
+/// archive bags, so "archived" is observable exactly as the ids draining
+/// from every node's hot-bag mirror.
+pub async fn wait_for_withdrawal_archival(
+    networks: &TestNetworks,
+    timeout: Duration,
+) -> Result<()> {
+    info!("Waiting for the withdrawal archival to reach every node's mirror...");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let laggard =
+            networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    let state = node.hashi().onchain_state();
+                    let confirmed_txns = state
+                        .withdrawal_txns()
+                        .iter()
+                        .filter(|txn| txn.is_confirmed())
+                        .count();
+                    let terminal_requests = state
+                        .withdrawal_requests()
+                        .iter()
+                        .filter(|request| {
+                            matches!(
+                                request.status,
+                                WithdrawalStatus::Processing
+                                    | WithdrawalStatus::Signed
+                                    | WithdrawalStatus::Confirmed
+                            )
+                        })
+                        .count();
+                    (confirmed_txns > 0 || terminal_requests > 0).then_some((
+                        index,
+                        confirmed_txns,
+                        terminal_requests,
+                    ))
+                });
+        let Some((index, confirmed_txns, terminal_requests)) = laggard else {
+            info!("Every node's mirror shows the confirmed withdrawals archived");
+            return Ok(());
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "Timeout after {timeout:?} waiting for the withdrawal archival: node {index}'s \
+                 mirror still shows {confirmed_txns} confirmed txn(s) in the hot bag and \
+                 {terminal_requests} post-commit request(s)"
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

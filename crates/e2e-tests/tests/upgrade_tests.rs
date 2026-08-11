@@ -9,11 +9,14 @@
 //! - Package ID routing updates correctly in OnchainState
 
 use anyhow::Result;
+use anyhow::anyhow;
 use e2e_tests::TestNetworksBuilder;
 use e2e_tests::snapshot;
+use e2e_tests::test_helpers::BackgroundMiner;
 use e2e_tests::test_helpers::create_deposit_and_wait;
 use e2e_tests::test_helpers::get_hbtc_balance;
 use e2e_tests::test_helpers::init_test_logging;
+use e2e_tests::test_helpers::subscribe_withdrawal_confirmations;
 use e2e_tests::upgrade_flow;
 use hashi::sui_tx_executor::SuiTxExecutor;
 use std::time::Duration;
@@ -324,5 +327,176 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     info!("v2 canary module call succeeded");
 
     info!("=== SNAPSHOT UPGRADE TEST PASSED ===");
+    Ok(())
+}
+
+/// A withdrawal committed and fully signed under the deployed **v1 bytecode**
+/// must complete after the governance upgrade to the current source:
+/// confirmation runs through the v2 `confirm_withdrawal` (which defers
+/// archival), and the leader's archival GC — armed by the confirm and
+/// version-gated on active >= 2 — then drains it.
+///
+/// This is the mid-flight rollout window the deferred-archival change has to
+/// survive: v1's commit moved the requests into the unmirrored `processed`
+/// bag, so the upgraded package confirms and archives a transaction whose
+/// requests never sat in the v2 hot-bag layout. The final assertion is that
+/// nothing wedges — signing/confirm completes and both hot-bag mirrors drain
+/// to empty on every node.
+///
+/// Parking the withdrawal fully-signed-but-unconfirmed needs no
+/// block-withholding machinery: commit and signing are driven purely by Sui
+/// checkpoints, while confirmation additionally requires the signed Bitcoin
+/// transaction to be mined — so simply not mining regtest blocks holds the
+/// flow at fully-signed under v1 (the same seam the signature-chunking tests
+/// use to observe `WithdrawalSigned` before starting their miner).
+#[tokio::test]
+async fn test_withdrawal_committed_under_v1_completes_after_upgrade() -> Result<()> {
+    init_test_logging();
+
+    // v1 = the checked-in deployed bytecode snapshot; no auto-upgrade — this
+    // test drives the upgrade itself, mid-withdrawal.
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
+        .without_upgrade()
+        .build()
+        .await?;
+
+    let hashi_ids = networks.hashi_network.ids();
+    info!("snapshot-published v1 package ID: {}", hashi_ids.package_id);
+
+    // Committee/DKG must complete before anything can be signed (and before
+    // the upgrade proposal can pass at its 100% quorum).
+    networks.hashi_network.nodes()[0]
+        .wait_for_mpc_key(Duration::from_secs(120))
+        .await?;
+
+    // ── Deposit under v1 ────────────────────────────────────────────────
+    let deposit_sats = 100_000u64;
+    let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_sats).await?;
+
+    // ── Withdrawal: commit + full signing under v1, confirmation withheld ──
+    let node0 = networks.hashi_network.nodes()[0].hashi().clone();
+    let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+    let withdrawal_sats = 30_000u64;
+    let btc_destination = networks.bitcoin_node.get_new_address()?;
+    let destination_bytes = extract_witness_program(&btc_destination)?;
+
+    let mut executor = SuiTxExecutor::from_config(&node0.config, node0.onchain_state())?
+        .with_signer(user_key.into());
+    let withdrawal_request_id = executor
+        .execute_create_withdrawal_request(withdrawal_sats, destination_bytes)
+        .await?;
+    info!("withdrawal request created under v1: {withdrawal_request_id}");
+
+    // With no regtest blocks being mined the flow parks at
+    // fully-signed-but-unconfirmed: presig generation, MPC signing, and the
+    // guardian finalize all complete (Sui-driven), the signed Bitcoin tx is
+    // broadcast, but the leader cannot observe it mined and so cannot
+    // confirm.
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        if node0
+            .onchain_state()
+            .withdrawal_txns()
+            .iter()
+            .any(|txn| txn.is_fully_signed() && !txn.is_confirmed())
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for the withdrawal to fully sign under the v1 bytecode"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Still a single-version chain: commit + signing really ran under v1.
+    assert_eq!(
+        node0
+            .onchain_state()
+            .state()
+            .package_versions()
+            .versions()
+            .len(),
+        1,
+        "the withdrawal must be committed and fully signed before any upgrade"
+    );
+    info!("withdrawal fully signed under v1 (unconfirmed; no regtest blocks mined)");
+
+    // ── Governance upgrade to the current source, mid-withdrawal ────────
+    let new_package_id = upgrade_flow::execute_full_upgrade(&mut networks).await?;
+    assert_ne!(
+        new_package_id, hashi_ids.package_id,
+        "upgrade should mint a new package id"
+    );
+    upgrade_flow::wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30))
+        .await?;
+    info!("upgraded mid-withdrawal: new package {new_package_id}");
+
+    // ── Complete the flow under v2: confirm, then archival GC ───────────
+    //
+    // Subscribe before the miner starts: the parked withdrawal cannot
+    // confirm until its Bitcoin tx is mined, so the subscription provably
+    // precedes the event.
+    let confirmations =
+        subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+    let miner = BackgroundMiner::start(&networks.bitcoin_node);
+    let confirmed = confirmations
+        .wait_for(withdrawal_request_id, Duration::from_secs(300))
+        .await?;
+    drop(miner);
+    info!(
+        "v1-committed withdrawal confirmed via the v2 package: txid={}",
+        confirmed.txid
+    );
+
+    // The hBTC actually burned — the withdrawal completed, not merely landed.
+    assert_eq!(
+        get_hbtc_balance(
+            &mut networks.sui_network.client,
+            hashi_ids.package_id,
+            hbtc_recipient,
+        )
+        .await?,
+        deposit_sats - withdrawal_sats,
+        "withdrawal committed under v1 should burn hBTC once confirmed under v2"
+    );
+
+    // The v2 confirm left the txn in the hot bag with
+    // `confirmed_timestamp_ms` set; the archival GC must now move it to
+    // `confirmed_txns`. The v1-committed requests lived in the unmirrored
+    // `processed` bag since commit time, and the archive bags are unmirrored
+    // too — so completion is observable exactly as both hot-bag mirrors
+    // draining to empty on every node, and nothing may wedge on the
+    // cross-version state.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let laggard =
+            networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    let state = node.hashi().onchain_state();
+                    let txns = state.withdrawal_txns().len();
+                    let requests = state.withdrawal_requests().len();
+                    (txns > 0 || requests > 0).then_some((index, txns, requests))
+                });
+        let Some((index, txns, requests)) = laggard else {
+            break;
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "node {index}'s mirror still shows {txns} withdrawal txn(s) and {requests} \
+                 request(s) after the post-upgrade archival window"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    info!("withdrawal_txns and withdrawal_requests empty on every node");
+
+    info!("=== V1-COMMITTED WITHDRAWAL COMPLETES AFTER UPGRADE TEST PASSED ===");
     Ok(())
 }

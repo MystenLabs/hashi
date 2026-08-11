@@ -59,6 +59,35 @@ impl crate::leader::retry::RetryPolicy for UtxoCleanupErrorKind {
     }
 }
 
+// Cap the archival scan so one GC task stays bounded; a larger backlog
+// drains over successive checkpoints, oldest confirmations first.
+const MAX_WITHDRAWAL_ARCHIVES_PER_GC: usize = 500;
+
+// `archive_confirmed_withdrawals` first exists in the v2 package, and
+// pre-upgrade there is nothing to archive (v1 confirm archives inline).
+const WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION: u64 = 2;
+
+/// Failure kind for the withdrawal archival GC. Unbounded retries for the
+/// same reason as [`UtxoCleanupErrorKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WithdrawalArchiveErrorKind {
+    Failed,
+}
+
+impl crate::leader::retry::RetryPolicy for WithdrawalArchiveErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        5_000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        5 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        u32::MAX
+    }
+}
+
 impl LeaderService {
     /// Check for and delete expired deposit requests.
     /// Deposit requests are sorted by timestamp and deleted if they are older than
@@ -267,6 +296,101 @@ impl LeaderService {
         Ok(utxo_ids.len())
     }
 
+    /// Kick the deferred-archival GC for confirmed withdrawals. Shape and
+    /// arming protocol mirror [`Self::check_cleanup_spent_utxos`]; the extra
+    /// version gate exists because the archival entry only exists in v2
+    /// bytecode (and gating on the ACTIVE version also keeps the task off a
+    /// chain whose semantics this binary does not implement).
+    pub(super) fn check_archive_confirmed_withdrawals(&mut self, checkpoint_timestamp_ms: u64) {
+        if self.withdrawal_archive_gc_task.is_some() {
+            debug!("Withdrawal archival GC task already in-flight, skipping");
+            return;
+        }
+
+        let Some(active) = self.inner.onchain_state().active_package_version() else {
+            return;
+        };
+        if active < WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION {
+            return;
+        }
+
+        if !self.withdrawal_archive_scan_needed {
+            return;
+        }
+
+        if self
+            .withdrawal_archive_retry
+            .should_skip(checkpoint_timestamp_ms)
+        {
+            debug!("Withdrawal archival GC in backoff, skipping");
+            return;
+        }
+
+        self.withdrawal_archive_scan_needed = false;
+        let inner = self.inner.clone();
+        let scan_target = self.withdrawal_archive_scan_target;
+        self.withdrawal_archive_gc_task =
+            Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
+                Self::archive_confirmed_withdrawals(inner, scan_target).await
+            })));
+    }
+
+    /// Scan the mirror for confirmed-but-unarchived withdrawal txns and
+    /// archive them (moving each txn to `confirmed_txns` and its requests to
+    /// `processed` on-chain). Returns how many were archived so the caller
+    /// can re-arm past the per-GC cap. Freshness protocol identical to
+    /// [`Self::cleanup_spent_utxos`].
+    async fn archive_confirmed_withdrawals(
+        inner: Arc<crate::Hashi>,
+        scan_target: u64,
+    ) -> anyhow::Result<usize> {
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(scan_target),
+        )
+        .await
+        .is_err()
+        {
+            anyhow::bail!(
+                "mirror did not reach the archival scan target checkpoint {scan_target} within \
+                 {VISIBILITY_TIMEOUT:?}"
+            );
+        }
+        let withdrawal_txns = inner.onchain_state().withdrawal_txns();
+        let victims = find_confirmed_withdrawals_pending_archive(&withdrawal_txns);
+        if victims.is_empty() {
+            return Ok(0);
+        }
+
+        info!(
+            txn_count = victims.len(),
+            "Archiving confirmed withdrawal(s) pending archival",
+        );
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let landed_at = executor
+            .execute_archive_confirmed_withdrawals(&victims)
+            .await?;
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(landed_at),
+        )
+        .await
+        .is_err()
+        {
+            warn!(
+                landed_at,
+                "Timeout waiting for the mirror to reach the archival checkpoint; \
+                 the next scan may resubmit already-archived txns"
+            );
+        }
+        info!(
+            txn_count = victims.len(),
+            "Successfully archived confirmed withdrawals",
+        );
+        Ok(victims.len())
+    }
+
     async fn delete_expired_proposals(
         inner: Arc<crate::Hashi>,
         expired_proposals: Vec<Proposal>,
@@ -389,6 +513,24 @@ fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>)
         .filter(|(_, record)| record.spent_epoch.is_some())
         .map(|(id, _)| *id)
         .take(MAX_UTXO_CLEANUPS_PER_GC)
+        .collect()
+}
+
+/// Confirmed-but-unarchived withdrawal txns, oldest confirmation first so a
+/// capped backlog drains FIFO. Each victim carries its request count so the
+/// executor can pack GC transactions against the runtime-object budget.
+fn find_confirmed_withdrawals_pending_archive(
+    withdrawal_txns: &[crate::onchain::types::WithdrawalTransaction],
+) -> Vec<(Address, usize)> {
+    let mut confirmed: Vec<_> = withdrawal_txns
+        .iter()
+        .filter(|txn| txn.is_confirmed())
+        .collect();
+    confirmed.sort_by_key(|txn| txn.confirmed_timestamp_ms);
+    confirmed
+        .into_iter()
+        .take(MAX_WITHDRAWAL_ARCHIVES_PER_GC)
+        .map(|txn| (txn.id, txn.request_ids.len()))
         .collect()
 }
 
