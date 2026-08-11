@@ -8,6 +8,7 @@ use anyhow::Context;
 use bitcoin::Network;
 use hashi::config::HashiIds;
 use hashi::onchain::OnchainState;
+use hashi::onchain::ScrapeScope;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::UnresolvedS3Config;
 use serde::Deserialize;
@@ -102,9 +103,19 @@ impl<'de> Deserialize<'de> for HashiOnchainConfig {
 
 impl HashiOnchainConfig {
     pub async fn onchain_state(&self) -> anyhow::Result<OnchainState> {
-        let (state, _watcher) = OnchainState::new(&self.sui_rpc, self.hashi_ids, None, None, None)
-            .await
-            .with_context(|| format!("failed to connect to Sui RPC at {}", self.sui_rpc))?;
-        Ok(state)
+        // Every provisioning command reads only committee/governance data
+        // (verifying key, committee members), so skip the Bitcoin
+        // collections: a full scrape walks the entire withdrawal queue and
+        // UTXO pool — minutes of sequential paging on testnet — for state
+        // none of these commands touch. One-shot reader: the commands act
+        // on the snapshot, no watcher needed.
+        OnchainState::new_reader(
+            &self.sui_rpc,
+            self.hashi_ids,
+            None,
+            ScrapeScope::GovernanceOnly,
+        )
+        .await
+        .with_context(|| format!("failed to connect to Sui RPC at {}", self.sui_rpc))
     }
 }
