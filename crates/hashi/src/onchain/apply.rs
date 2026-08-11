@@ -216,6 +216,13 @@ pub(super) enum Effect {
     /// transaction (2-of-2 witness complete). Drives the local limiter
     /// and the pick-to-sign metric.
     WithdrawalTxnFullySigned(Box<types::WithdrawalTransaction>),
+    /// A withdrawal transaction's `confirmed_timestamp_ms` went from
+    /// `None` to `Some` in this transaction: the v2 in-place confirm,
+    /// which leaves the txn in the in-flight bag until a later archival
+    /// GC moves it out. Drives the sign-to-confirm and total duration
+    /// metrics in the deferred-archival world (under v1 bytecode the
+    /// confirm moves the txn instead, so this never fires there).
+    WithdrawalTxnConfirmed(Box<types::WithdrawalTransaction>),
     /// A withdrawal transaction left the in-flight bag (confirmed and
     /// moved to the historical record, or deleted).
     WithdrawalTxnRemoved(Box<types::WithdrawalTransaction>),
@@ -624,13 +631,16 @@ fn apply_write(
             decode::<move_types::WithdrawalTransaction>(contents, &id).map(|txn| {
                 let txn_id = txn.id;
                 let withdrawal_queue = &mut hashi.bitcoin_mut().withdrawal_queue;
-                let was_fully_signed = withdrawal_queue
-                    .withdrawal_txns
-                    .get(&txn_id)
-                    .is_some_and(|t| t.is_fully_signed());
+                let old = withdrawal_queue.withdrawal_txns.get(&txn_id);
+                let was_fully_signed = old.is_some_and(|t| t.is_fully_signed());
+                let was_confirmed = old.is_some_and(|t| t.confirmed_timestamp_ms.is_some());
                 if !was_fully_signed && txn.is_fully_signed() {
                     out.effects
                         .push(Effect::WithdrawalTxnFullySigned(Box::new(txn.clone())));
+                }
+                if !was_confirmed && txn.is_confirmed() {
+                    out.effects
+                        .push(Effect::WithdrawalTxnConfirmed(Box::new(txn.clone())));
                 }
                 withdrawal_queue.withdrawal_txns.insert(txn_id, txn);
                 TrackedKind::WithdrawalTxn(txn_id)
@@ -1403,8 +1413,10 @@ mod tests {
         ))]));
         assert!(out.effects.is_empty());
 
-        // Confirmed: the value moves to the confirmed_txns bag (new
-        // wrapper, old wrapper deleted).
+        // Confirmed the v1 way: the value moves to the confirmed_txns
+        // bag (new wrapper, old wrapper deleted) with no prior in-place
+        // confirm, so the removal carries `confirmed_timestamp_ms:
+        // None` — the mirror observes the durations at this point.
         let wrapper2 = addr(0x53);
         let out = fixture.apply(&tx(vec![
             written(wrapper_object(wrapper2, value_id, 3, confirmed_txns_id())),
@@ -1412,7 +1424,61 @@ mod tests {
             TxChange::Deleted { id: wrapper1 },
         ]));
         assert!(
-            matches!(out.effects.as_slice(), [Effect::WithdrawalTxnRemoved(txn)] if txn.id == value_id)
+            matches!(out.effects.as_slice(), [Effect::WithdrawalTxnRemoved(txn)]
+                if txn.id == value_id && txn.confirmed_timestamp_ms.is_none())
+        );
+        assert!(
+            fixture
+                .hashi
+                .bitcoin()
+                .withdrawal_queue
+                .withdrawal_txns
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn withdrawal_txn_in_place_confirm_then_deferred_archival() {
+        let mut fixture = Fixture::new();
+        let wrapper1 = addr(0x51);
+        let value_id = addr(0x52);
+
+        let signed = withdrawal_txn(value_id, true);
+        fixture.apply(&tx(vec![
+            written(wrapper_object(wrapper1, value_id, 1, withdrawal_txns_id())),
+            written(withdrawal_txn_object(&signed, 1, wrapper1)),
+        ]));
+
+        // v2 in-place confirm: a value-only mutation flips
+        // `confirmed_timestamp_ms` None -> Some exactly once.
+        let mut confirmed = signed.clone();
+        confirmed.confirmed_timestamp_ms = Some(8);
+        let out = fixture.apply(&tx(vec![written(withdrawal_txn_object(
+            &confirmed, 2, wrapper1,
+        ))]));
+        assert!(
+            matches!(out.effects.as_slice(), [Effect::WithdrawalTxnConfirmed(txn)]
+                if txn.id == value_id && txn.confirmed_timestamp_ms == Some(8))
+        );
+
+        // Replay of the same frame (Some -> Some): no duplicate effect.
+        let out = fixture.apply(&tx(vec![written(withdrawal_txn_object(
+            &confirmed, 2, wrapper1,
+        ))]));
+        assert!(out.effects.is_empty());
+
+        // The later archival GC moves the value to the confirmed_txns
+        // bag; the removal carries the mirror copy's Some timestamp —
+        // the key the mirror's duration-dedup skip relies on.
+        let wrapper2 = addr(0x53);
+        let out = fixture.apply(&tx(vec![
+            written(wrapper_object(wrapper2, value_id, 3, confirmed_txns_id())),
+            written(withdrawal_txn_object(&confirmed, 3, wrapper2)),
+            TxChange::Deleted { id: wrapper1 },
+        ]));
+        assert!(
+            matches!(out.effects.as_slice(), [Effect::WithdrawalTxnRemoved(txn)]
+                if txn.id == value_id && txn.confirmed_timestamp_ms == Some(8))
         );
         assert!(
             fixture
