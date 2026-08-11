@@ -283,7 +283,9 @@ pub struct MemberInfo {
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Vec<u8>,
 
-    /// Open-ended per-member extension slot. Empty today.
+    /// Open-ended per-member extension slot. Carries the governance flags
+    /// ([`MEMBER_IGNORED_KEY`]) as typed values while `MemberInfo`'s layout
+    /// is frozen on the deployed network.
     pub extra_fields: Config,
 }
 
@@ -422,6 +424,20 @@ impl Config {
             .find(|(k, _)| k == key)
             .and_then(|(_, v)| match v {
                 ConfigValue::U64(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(default)
+    }
+
+    /// Read a `bool` value by key, falling back to `default` if the key is
+    /// absent or not a `Bool` (matches the Move accessors' default-on-absent
+    /// behavior).
+    pub fn get_bool(&self, key: &str, default: bool) -> bool {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                ConfigValue::Bool(b) => Some(*b),
                 _ => None,
             })
             .unwrap_or(default)
@@ -924,6 +940,24 @@ pub struct AbortReconfig {
 pub struct UpdateGuardian {
     pub url: String,
 }
+
+/// Rust version of the Move hashi::ignore_member::IgnoreMember type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct IgnoreMember {
+    pub validator_address: Address,
+    pub ignored: bool,
+}
+
+impl MoveType for IgnoreMember {
+    /// Introduced by the v2 upgrade; the defining address is v2's forever.
+    const PACKAGE_VERSION: u64 = 2;
+    const MODULE: &'static str = "ignore_member";
+    const NAME: &'static str = "IgnoreMember";
+}
+
+/// `MemberInfo.extra_fields` key holding the governance "ignored" flag.
+/// Mirrors `MEMBER_IGNORED_KEY` in `committee_set.move`.
+pub const MEMBER_IGNORED_KEY: &str = "ignored";
 
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -1798,6 +1832,21 @@ mod tests {
     use super::*;
 
     use sui_sdk_types::Identifier;
+
+    #[test]
+    fn config_get_bool_reads_present_absent_and_wrong_variant() {
+        let config = Config::from_entries(vec![
+            ("ignored".to_string(), ConfigValue::Bool(true)),
+            ("cleared".to_string(), ConfigValue::Bool(false)),
+            ("numeric".to_string(), ConfigValue::U64(1)),
+        ]);
+        assert!(config.get_bool("ignored", false));
+        assert!(!config.get_bool("cleared", true));
+        // Absent key and wrong variant both fall back to the default.
+        assert!(!config.get_bool("missing", false));
+        assert!(config.get_bool("missing", true));
+        assert!(!config.get_bool("numeric", false));
+    }
 
     fn tag(address: Address, module: &str, name: &str, type_params: Vec<TypeTag>) -> StructTag {
         StructTag::new(

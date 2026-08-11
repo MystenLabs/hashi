@@ -713,6 +713,12 @@ impl OnchainState {
         self.state().hashi.committees.current_committee().cloned()
     }
 
+    /// The next epoch a reconfiguration is currently transitioning to, if
+    /// one is in flight.
+    pub fn pending_epoch_change(&self) -> Option<u64> {
+        self.state().hashi.committees.pending_epoch_change()
+    }
+
     pub fn current_committee_members(&self) -> Option<Vec<CommitteeMember>> {
         self.state()
             .hashi()
@@ -1630,7 +1636,7 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
         endpoint_url,
         tls_public_key,
         next_epoch_encryption_public_key,
-        extra_fields: _,
+        extra_fields,
     } = info;
     types::MemberInfo {
         validator_address,
@@ -1642,6 +1648,7 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
             next_epoch_encryption_public_key.as_slice(),
         )
         .map(Into::into),
+        ignored: extra_fields.get_bool(move_types::MEMBER_IGNORED_KEY, false),
     }
 }
 
@@ -2162,6 +2169,7 @@ fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposa
         types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
         types::ProposalType::AbortReconfig => parse::<move_types::AbortReconfig>(contents),
         types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
+        types::ProposalType::IgnoreMember => parse::<move_types::IgnoreMember>(contents),
         types::ProposalType::Unknown(_) => None,
     }?;
     Some(types::Proposal {
@@ -2198,6 +2206,7 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
         ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
+        ("ignore_member", "IgnoreMember") => types::ProposalType::IgnoreMember,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
 }
@@ -2285,6 +2294,63 @@ mod tests {
     use crate::mpc::EncryptionGroupElement;
 
     use super::*;
+
+    #[test]
+    fn test_convert_move_member_info_reads_ignored_flag() {
+        let mut rng = rand::thread_rng();
+        let validator_address =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
+        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
+        let uncompressed_pubkey =
+            blst::min_pk::PublicKey::uncompress(signing_keypair.public().as_bytes())
+                .unwrap()
+                .serialize()
+                .to_vec();
+
+        let member = |extra_fields: move_types::Config| move_types::MemberInfo {
+            validator_address,
+            operator_address: validator_address,
+            next_epoch_public_key: uncompressed_pubkey.clone(),
+            endpoint_url: String::new(),
+            tls_public_key: vec![],
+            next_epoch_encryption_public_key: vec![],
+            extra_fields,
+        };
+
+        // Absent key (the state of every member registered before the flag
+        // existed) means not ignored.
+        let converted = convert_move_member_info(member(move_types::Config::from_entries(vec![])));
+        assert!(!converted.ignored);
+
+        let converted = convert_move_member_info(member(move_types::Config::from_entries(vec![(
+            move_types::MEMBER_IGNORED_KEY.to_string(),
+            move_types::ConfigValue::Bool(true),
+        )])));
+        assert!(converted.ignored);
+    }
+
+    #[test]
+    fn test_parse_proposal_type_ignore_member() {
+        use sui_sdk_types::Identifier;
+        use sui_sdk_types::StructTag;
+
+        let package =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+                .unwrap();
+        let inner = TypeTag::Struct(Box::new(StructTag::new(
+            package,
+            Identifier::new("ignore_member").unwrap(),
+            Identifier::new("IgnoreMember").unwrap(),
+            vec![],
+        )));
+        let tag = TypeTag::Struct(Box::new(StructTag::new(
+            package,
+            Identifier::new("proposal").unwrap(),
+            Identifier::new("Proposal").unwrap(),
+            vec![inner],
+        )));
+        assert_eq!(parse_proposal_type(&tag), types::ProposalType::IgnoreMember);
+    }
 
     #[test]
     fn test_convert_move_committee_member() {

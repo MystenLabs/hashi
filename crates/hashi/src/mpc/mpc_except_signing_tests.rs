@@ -140,6 +140,7 @@ impl TestSetup {
                     endpoint_url: None,
                     tls_public_key: None,
                     next_epoch_encryption_public_key,
+                    ignored: false,
                 };
                 (addr, member_info)
             })
@@ -225,6 +226,7 @@ impl TestSetup {
                     endpoint_url: None,
                     tls_public_key: None,
                     next_epoch_encryption_public_key,
+                    ignored: false,
                 };
                 (addr, member_info)
             })
@@ -1077,6 +1079,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
                 next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
                     &encryption_keys[i],
                 )),
+                ignored: false,
             };
             (addr, member_info)
         })
@@ -1170,6 +1173,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
                 next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
                     &encryption_keys[i],
                 )),
+                ignored: false,
             };
             (addr, info)
         })
@@ -1255,6 +1259,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
                 next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
                     &encryption_keys[i],
                 )),
+                ignored: false,
             };
             (addr, info)
         })
@@ -1360,6 +1365,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
                 next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
                     &encryption_keys[i],
                 )),
+                ignored: false,
             };
             (addr, info)
         })

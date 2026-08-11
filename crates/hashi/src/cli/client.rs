@@ -73,6 +73,12 @@ pub enum CreateProposalParams {
         pause: bool,
         metadata: Vec<(String, String)>,
     },
+    IgnoreMember {
+        target_validator_address: Address,
+        /// `true` proposes ignoring the member; `false` proposes re-admitting.
+        ignored: bool,
+        metadata: Vec<(String, String)>,
+    },
 }
 
 /// Live on-chain proposal detail fields not cached by `OnchainState`.
@@ -389,6 +395,11 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize UpdateGuardian")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::IgnoreMember => {
+                        let p: move_types::Proposal<move_types::IgnoreMember> =
+                            bcs::from_bytes(value_bytes).context("deserialize IgnoreMember")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::Unknown(s) => {
                         anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
                     }
@@ -517,6 +528,16 @@ impl HashiClient {
         Ok(builder)
     }
 
+    /// The full deployed version -> package id history.
+    pub fn package_versions(&self) -> hashi_types::move_types::PackageVersions {
+        self.onchain_state.state().package_versions().clone()
+    }
+
+    /// The scraped on-chain state backing this client.
+    pub fn onchain_state(&self) -> &OnchainState {
+        &self.onchain_state
+    }
+
     /// Build a proposal creation transaction.
     pub fn build_create_proposal_transaction(
         &self,
@@ -559,6 +580,7 @@ impl HashiClient {
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
+            ProposalType::IgnoreMember => "ignore_member",
             ProposalType::Upgrade | ProposalType::UpgradeV2 => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
@@ -621,6 +643,10 @@ impl HashiClient {
 /// Build a `TransactionBuilder` for creating a proposal, given `HashiIds` and params.
 ///
 /// This is a standalone function so it can be reused outside `HashiClient` (e.g. in tests).
+///
+/// `call_package` is the active package id. Proposal modules introduced by an
+/// upgrade (such as `ignore_member`) only exist at an upgraded address, and
+/// all governance calls use one package generation consistently.
 pub fn build_create_proposal_transaction(
     hashi_ids: HashiIds,
     call_package: Address,
@@ -836,6 +862,31 @@ pub fn build_create_proposal_transaction(
                 ],
             );
         }
+        CreateProposalParams::IgnoreMember {
+            target_validator_address,
+            ignored,
+            metadata,
+        } => {
+            let target_arg = builder.pure(&target_validator_address);
+            let ignored_arg = builder.pure(&ignored);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    // The ignore_member module exists only from v2 on.
+                    call_package,
+                    Identifier::from_static("ignore_member"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    target_arg,
+                    ignored_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
     }
 
     builder
@@ -1002,6 +1053,11 @@ pub fn build_vote_transaction(
 
 /// Get the TypeTag for a proposal type (from on-chain type)
 ///
+/// `package_id` must be the type's DEFINING package (a Move type's tag
+/// carries that address forever) — resolve it via
+/// [`HashiClient::proposal_type_arg`], which routes each proposal type to
+/// the package version that introduced it.
+///
 /// Returns an error if the proposal type is `Unknown`.
 pub fn get_proposal_type_arg(
     package_id: Address,
@@ -1018,6 +1074,7 @@ pub fn get_proposal_type_arg(
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
         ProposalType::AbortReconfig => ("abort_reconfig", "AbortReconfig"),
         ProposalType::UpdateGuardian => ("update_guardian", "UpdateGuardian"),
+        ProposalType::IgnoreMember => ("ignore_member", "IgnoreMember"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

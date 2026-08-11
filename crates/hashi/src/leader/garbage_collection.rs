@@ -425,6 +425,7 @@ impl LeaderService {
         );
 
         // Add a move call for each expired proposal
+        let package_versions = inner.onchain_state().state().package_versions().clone();
         for proposal in &expired_proposals {
             let proposal_id_arg = builder.pure(&proposal.id);
 
@@ -493,6 +494,12 @@ impl LeaderService {
                     type_package_id,
                     Identifier::from_static("update_guardian"),
                     Identifier::from_static("UpdateGuardian"),
+                    vec![],
+                ))),
+                ProposalType::IgnoreMember => TypeTag::Struct(Box::new(StructTag::new(
+                    type_package_id,
+                    Identifier::from_static("ignore_member"),
+                    Identifier::from_static("IgnoreMember"),
                     vec![],
                 ))),
                 ProposalType::Unknown(type_name) => {
