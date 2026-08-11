@@ -169,6 +169,17 @@ impl MpcService {
         let mut reconcile_tick = tokio::time::interval(RECONCILE_TICK);
         reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            self.inner.metrics.task_heartbeat("mpc_service");
+            // Re-sample the presig pool every iteration (at least each
+            // RECONCILE_TICK): the signing-time update in
+            // `forward_signing_results` alone leaves the gauge frozen — at 0
+            // after a restart — whenever no withdrawals are flowing.
+            if let Some(manager) = self.inner.current_signing_manager() {
+                self.inner
+                    .metrics
+                    .presig_pool_remaining
+                    .set(manager.presignatures_remaining() as i64);
+            }
             // Check for pending reconfig before blocking on `recv()`.
             if let Some(epoch) = self.get_pending_epoch_change() {
                 self.handle_reconfig(epoch).await;

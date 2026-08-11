@@ -100,6 +100,15 @@ pub struct Metrics {
     /// 1 when this binary supports no live on-chain package version (chain
     /// ahead of the binary); autonomous mutations are halted. 0 otherwise.
     package_version_unsupported: IntGauge,
+    /// Highest version in `SUPPORTED_PACKAGE_VERSIONS` — constant per build.
+    /// `package_version_active` reads the same for old and new binaries until
+    /// the chain upgrades, so only this gauge can count how much of the fleet
+    /// already runs a build that implements the next version.
+    package_version_supported_max: IntGauge,
+    /// Unix seconds of each long-running task loop's last iteration. A stale
+    /// entry means that task is wedged or dead inside a process whose other
+    /// metrics still look alive.
+    task_last_iteration_timestamp_seconds: IntGaugeVec,
 
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
@@ -664,6 +673,19 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            package_version_supported_max: register_int_gauge_with_registry!(
+                "hashi_package_version_supported_max",
+                "highest package version this build implements (fleet rollout census)",
+                registry,
+            )
+            .unwrap(),
+            task_last_iteration_timestamp_seconds: register_int_gauge_vec_with_registry!(
+                "hashi_task_last_iteration_timestamp_seconds",
+                "unix seconds of each task loop's last iteration; stale = task wedged",
+                &["task"],
+                registry,
+            )
+            .unwrap(),
             deposits_confirmed_total: register_int_counter_with_registry!(
                 "hashi_deposits_confirmed_total",
                 "Total number of deposits successfully confirmed on Sui",
@@ -1165,6 +1187,19 @@ impl Metrics {
             .inc_by(coin_objects as u64);
     }
 
+    /// Record a liveness heartbeat for a long-running task loop. Alert on
+    /// `time() - hashi_task_last_iteration_timestamp_seconds` staleness to
+    /// catch a single wedged task inside an otherwise-healthy process.
+    pub fn task_heartbeat(&self, task: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.task_last_iteration_timestamp_seconds
+            .with_label_values(&[task])
+            .set(now);
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -1341,6 +1376,13 @@ impl Metrics {
             .set(support.active_version().map(|v| v as i64).unwrap_or(0));
         self.package_version_unsupported
             .set(i64::from(support.must_halt()));
+        self.package_version_supported_max.set(
+            crate::constants::SUPPORTED_PACKAGE_VERSIONS
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0) as i64,
+        );
     }
 }
 

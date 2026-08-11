@@ -247,6 +247,9 @@ impl LeaderService {
                     };
 
                     let is_leader = self.is_current_leader(checkpoint_height);
+                    // Heartbeat before the non-leader `continue` so followers
+                    // report liveness too.
+                    self.inner.metrics.task_heartbeat("leader_loop");
                     self.inner.metrics.is_leader.set(i64::from(is_leader));
                     if is_leader {
                         was_leader = true;
