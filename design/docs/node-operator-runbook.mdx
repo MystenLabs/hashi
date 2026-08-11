@@ -6,11 +6,49 @@ keywords: [ operator, node, runbook, validator, committee, configuration, genesi
 
 This runbook is for **Sui validators joining the Hashi committee**. It covers prerequisites, configuration, genesis, ongoing operations, and governance.
 
-Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. Committee members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key.
+Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](committee.mdx) members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](deposit.mdx) and [withdrawal](withdraw.mdx) flows, plus [reconfiguration](reconfiguration.mdx) at every epoch boundary.
 
 This is a **living document**. Hashi launches on Testnet first. This document adds Mainnet parameters to the [Networks](#networks) table below as the team finalizes them. Wherever the runbook shows a network-specific value, use the column for your **target network** (the worked examples use Testnet).
 
 This document assumes familiarity with Sui validator operations, Linux system administration, and basic Bitcoin infrastructure.
+
+## Joining the committee
+
+Onboarding takes 6 steps. The remaining sections cover the detail, the defaults, and the failure modes:
+
+1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
+2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [2.2](#22-tls-key-dedicated), [2.4](#24-operator-key-day-to-day-signing), and [2.5](#25-backup-key-openpgp).
+3. **Write the validator config:** use your target network's column in [Networks](#networks). See [3.1](#31-validator-config).
+4. **Register your validator:** run `hashi register --print-only` and sign the result offline with your Sui validator account key. See [2.3](#23-registration-must-be-signed-by-the-account-key) and [5.3](#53-step-2-register-your-validator).
+5. **Start the node:** run `hashi server` and keep it online, including across epoch boundaries. See [5.4](#54-step-3-start-the-server) and [9](#9-epoch-changes-reconfiguration).
+6. **Monitor the node:** watch the key metrics and push them to the Mysten collection endpoint. See [8](#8-monitoring-and-metrics).
+
+These details trip up most operators:
+
+- Your Sui validator account key must sign the initial registration. The operator key cannot. See [2.3](#23-registration-must-be-signed-by-the-account-key).
+- Hashi defaults `bitcoin-rpc` to port `8332`, the Mainnet port. On Signet you must set `38332` explicitly. See [1.5](#15-bitcoin-node).
+- Fund the operator address with at least 2 SUI. Exactly 1 SUI fails with `InsufficientCoinBalance`. See [2.4](#24-operator-key-day-to-day-signing).
+
+## On this page
+
+| Section | What it covers |
+|---------|----------------|
+| [Networks](#networks) | Per-network chain IDs, endpoints, ports, and package IDs |
+| [1. Prerequisites](#1-prerequisites) | Hardware sizing, the Bitcoin and Sui dependencies, and building the binary |
+| [2. Key management and security](#2-key-management-and-security) | Which keys exist, which you generate, and which one signs what |
+| [3. Configuration](#3-configuration) | Validator config template, CLI config, and environment variables |
+| [4. Network and firewall](#4-network-and-firewall) | Inbound and outbound ports, metrics binding, and TLS |
+| [5. Genesis procedure](#5-genesis-procedure) | Registering, starting the node, and the launch and DKG steps that follow |
+| [6. CLI reference](#6-cli-reference) | Every subcommand, plus the flag placement that causes most CLI errors |
+| [7. Governance participation](#7-governance-participation) | Proposal types, thresholds, and voting |
+| [8. Monitoring and metrics](#8-monitoring-and-metrics) | Prometheus endpoint, metrics push, key metrics, and suggested alerts |
+| [9. Epoch changes (reconfiguration)](#9-epoch-changes-reconfiguration) | What happens each epoch, and what you are responsible for |
+| [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
+| [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
+| [12. Coming soon](#12-coming-soon) | Planned capabilities that are not yet available |
+| [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
+
+For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
 
 ## Networks
 
@@ -565,7 +603,7 @@ hashi register --config /path/to/validator.toml \
 # the sui keytool sign / sui client execute-signed-tx commands
 ```
 
-The registration transaction writes your BLS12-381 public key, Ed25519 TLS public key, ECIES encryption public key, endpoint URL, and operator address to the chain.
+The registration transaction writes your BLS12-381 public key, Ed25519 TLS public key, ECIES encryption public key, endpoint URL, and operator address to the chain. [Committee](committee.mdx#registration-information) explains how the protocol uses each of these fields, and [why the committee is not exactly the set of Sui validators](committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators).
 
 ### 5.4 Step 3: start the server
 
@@ -789,7 +827,7 @@ hashi withdraw list [--json]
 hashi balance <sui-address> [--json]
 ```
 
-These are primarily for testing or admin use, not routine operator tasks.
+These are primarily for testing or admin use, not routine operator tasks. For what the protocol does with each request, see the [Deposit](deposit.mdx) flow ([request](deposit.mdx#request), [approve](deposit.mdx#approve), [confirm](deposit.mdx#confirm), and [mint](deposit.mdx#mint)) and the [Withdraw](withdraw.mdx) flow ([request](withdraw.mdx#request), [approve](withdraw.mdx#approve), [build](withdraw.mdx#build-tx), [sign](withdraw.mdx#sign), and [broadcast](withdraw.mdx#broadcast)).
 
 ### 6.9 Publish (admin only)
 
@@ -827,7 +865,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 > EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
 
-**Configurable protocol parameters:**
+**Configurable protocol parameters.** The deposit and withdrawal flows read these settings directly: the confirmation threshold and the time delay gate the [deposit confirm step](deposit.mdx#confirm), and the cancellation cooldown gates a user's ability to cancel a [withdrawal request](withdraw.mdx#request):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -941,6 +979,8 @@ hashi committee -c hashi-cli.toml view 0x<addr>   # one validator's details
 hashi committee -c hashi-cli.toml epoch           # current epoch info
 ```
 
+See [Committee](committee.mdx) for what membership means and how Hashi derives the member set from the Sui validator set.
+
 > The **CLI is the status of record** for committee membership. This runbook does not link a public explorer view for Hashi committee state, because none is confirmed; do not rely on a third-party dashboard to determine whether your node is in the committee.
 
 ### 8.4 Suggested alerts
@@ -971,6 +1011,8 @@ On every Sui epoch change, the Hashi committee reconfigures:
 4. Validators exchange BLS signatures; once 2/3 weight signs, `end_reconfig` is submitted.
 5. The new committee generates presignatures.
 6. Normal operations resume.
+
+[Reconfiguration](reconfiguration.mdx) covers the onchain detail behind each step: [start reconfig](reconfiguration.mdx#start-reconfig), [DKG or key rotation](reconfiguration.mdx#dkg-or-key-rotation), [end reconfig](reconfiguration.mdx#end-reconfig), and [abort reconfig](reconfiguration.mdx#abort-reconfig).
 
 ### 9.2 Operator responsibilities
 
@@ -1241,11 +1283,11 @@ The following capabilities are planned but not yet available.
 
 ---
 
-## 12. Testnet releases
+## 13. Testnet releases
 
 Testnet releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi testnet <short-sha>` and tagged `testnet-<full-sha>`.
 
-### 12.1 Binary
+### 13.1 Binary
 
 Download `hashi-linux-amd64` and `SHA256SUMS` from the same release into one directory. Verify that the binary's SHA-256 matches the checksum published with the release:
 
@@ -1266,7 +1308,7 @@ gh attestation verify hashi-linux-amd64 --repo MystenLabs/hashi
 chmod +x hashi-linux-amd64
 ```
 
-### 12.2 Container image
+### 13.2 Container image
 
 The matching public image uses the same release tag:
 
@@ -1280,7 +1322,7 @@ The release notes include the image's immutable OCI digest. Pin that digest when
 mysten/hashi@sha256:<digest>
 ```
 
-### 12.3 Rolling the Mysten testnet nodes
+### 13.3 Rolling the Mysten Testnet nodes
 
 The six Mysten validators (`mysten1`–`mysten6`) are single-replica Deployments in namespace `hashi-testnet` on `workloads-secondary-use4`, managed by the `mysten/testnet` stack of `pulumi/services/hashi-server` in sui-operations. Each mounts a ReadWriteOnce PVC, which is why the Deployments use the `Recreate` strategy — never switch them back to `RollingUpdate`; a surge pod would double-mount the DB volume.
 

@@ -47,6 +47,25 @@ function trackPlausibleEvent(request, visitorType) {
   }).catch(() => {});
 }
 
+// Canonical URL form, matching `trailingSlash: true` in docusaurus.config.js:
+// every page URL ends in `/`. GitHub Pages already enforces this on its own
+// (it 301s `/foo` to `/foo/`), so this is a no-op there; it matters on an edge
+// deploy, where nothing would otherwise stop `/foo` and `/foo/` from both
+// serving the page and splitting analytics and search indexing across two URLs.
+//
+// Paths with a file extension (`.md`, `.txt`, `.html`, assets) are real files
+// and are left alone.
+function canonicalRedirect(request) {
+  const url = new URL(request.url);
+  const { pathname } = url;
+
+  if (pathname.endsWith('/')) return null;
+  if (/\.[^/]+$/.test(pathname)) return null;
+
+  url.pathname = `${pathname}/`;
+  return Response.redirect(url.toString(), 301);
+}
+
 export const config = {
   matcher: [
     '/((?!_next|api|static|img|fonts|favicon).*)',
@@ -54,6 +73,9 @@ export const config = {
 };
 
 export default async function middleware(request) {
+  const redirect = canonicalRedirect(request);
+  if (redirect) return redirect;
+
   const visitorType = detectServerVisitorType(request);
   if (visitorType === 'agent') {
     trackPlausibleEvent(request, visitorType);

@@ -125,6 +125,40 @@ function convertAlerts(text) {
   return out.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Stale-fact corrections
+// ---------------------------------------------------------------------------
+//
+// The upstream README sometimes lags the SDK it documents. Each entry below
+// repairs one such gap so the published page is not wrong for as long as the
+// README takes to catch up. Keep this list SHORT, and DELETE an entry once the
+// README lands the fix: a correction whose pattern no longer matches is a
+// silent no-op, so a stale entry is dead weight rather than a safeguard.
+//
+// Current entries:
+//   - ts-sdks#1159 (merged 2026-07-27) moved the default GraphQL URLs off the
+//     fullnode-served `/graphql` endpoints, which are being retired — testnet
+//     already returns 404 — and onto the dedicated `graphql.<network>.sui.io`
+//     hosts. The README still documents the old default.
+const STALE_FACT_FIXES = [
+  {
+    from: /https:\/\/fullnode\.\{network\}\.sui\.io:443\/graphql/g,
+    to: "https://graphql.{network}.sui.io/graphql",
+    note: "ts-sdks#1159 — default GraphQL URLs now graphql.<network>.sui.io",
+  },
+];
+
+function applyStaleFactFixes(body) {
+  for (const fix of STALE_FACT_FIXES) {
+    const next = body.replace(fix.from, fix.to);
+    if (next !== body) {
+      console.log(`   ↳ correction applied: ${fix.note}`);
+    }
+    body = next;
+  }
+  return body;
+}
+
 function deriveDescription(body) {
   for (const block of body.split(/\n\s*\n/)) {
     const t = block.trim();
@@ -139,6 +173,10 @@ function deriveDescription(body) {
 
 function format(readme) {
   let body = readme.replace(/\r\n?/g, "\n");
+
+  // Repair known-stale facts before anything else, so the corrections apply to
+  // prose and code fences alike.
+  body = applyStaleFactFixes(body);
 
   // Drop the leading H1 — Docusaurus renders the title from front matter.
   body = body.replace(/^\s*#\s+.*\n/, "");
