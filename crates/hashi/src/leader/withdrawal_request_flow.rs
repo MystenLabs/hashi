@@ -384,10 +384,18 @@ impl LeaderService {
             let err_msg = format!("{e}");
             error!("approve_request PTB failed: {err_msg}");
 
-            // Try to identify which request caused the failure by checking
-            // which ones no longer exist in the queue (canceled).
+            // Try to identify which request caused the failure by dropping
+            // every request that is no longer approvable: cancelled requests
+            // vanish from the queue, and with deferred archival a request
+            // that some earlier PTB already approved or committed lingers
+            // with an advanced status (re-approving it would abort the PTB).
             let before_len = certified.len();
-            certified.retain(|(id, _)| inner.onchain_state().withdrawal_request(id).is_some());
+            certified.retain(|(id, _)| {
+                inner
+                    .onchain_state()
+                    .withdrawal_request(id)
+                    .is_some_and(|r| is_still_approvable(&r))
+            });
 
             if certified.len() == before_len {
                 error!("Could not identify failed request, aborting retry");
@@ -819,6 +827,52 @@ impl WithdrawalTxCommitment {
                 })
                 .collect(),
             txid: self.txid.as_bytes().to_vec().into(),
+        }
+    }
+}
+
+/// A request is worth retrying in an approval PTB only while its status is
+/// still Requested. Cancelled requests vanish from the queue entirely; under
+/// deferred archival, approved/committed/terminal requests linger in the
+/// queue with an advanced status, and re-approving any of them aborts the
+/// whole PTB on-chain.
+fn is_still_approvable(request: &hashi_types::move_types::WithdrawalRequest) -> bool {
+    request.status.is_requested()
+}
+
+#[cfg(test)]
+mod approvable_tests {
+    use super::*;
+    use hashi_types::move_types::WithdrawalStatus;
+
+    fn request_with_status(status: WithdrawalStatus) -> hashi_types::move_types::WithdrawalRequest {
+        hashi_types::move_types::WithdrawalRequest {
+            id: sui_sdk_types::Address::new([1; 32]),
+            sender: sui_sdk_types::Address::new([2; 32]),
+            btc_amount: 1,
+            bitcoin_address: vec![0; 20],
+            created_timestamp_ms: 0,
+            status,
+            approval_cert: None,
+            approved_timestamp_ms: None,
+            withdrawal_txn_id: None,
+            sui_tx_digest: sui_sdk_types::Digest::new([0; 32]),
+            btc: 1,
+        }
+    }
+
+    #[test]
+    fn only_requested_is_approvable() {
+        assert!(is_still_approvable(&request_with_status(
+            WithdrawalStatus::Requested
+        )));
+        for status in [
+            WithdrawalStatus::Approved,
+            WithdrawalStatus::Processing,
+            WithdrawalStatus::Signed,
+            WithdrawalStatus::Confirmed,
+        ] {
+            assert!(!is_still_approvable(&request_with_status(status)));
         }
     }
 }

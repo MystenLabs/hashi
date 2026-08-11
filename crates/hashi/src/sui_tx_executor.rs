@@ -1780,6 +1780,143 @@ impl SuiTxExecutor {
         }
         Ok(max_checkpoint)
     }
+
+    /// Package id of the version this binary operates at. Entry functions
+    /// introduced by an upgrade only exist in the upgraded bytecode, so
+    /// calling them through the original package id fails; targets for such
+    /// calls must resolve through the active version.
+    fn active_version_package(&self) -> anyhow::Result<Address> {
+        let onchain_state = self
+            .onchain_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("executor has no onchain state to resolve versions"))?;
+        let state = onchain_state.state();
+        let version = state
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()
+            .ok_or_else(|| anyhow::anyhow!("no active package version resolved"))?;
+        state
+            .package_versions()
+            .get(version)
+            .ok_or_else(|| anyhow::anyhow!("active version {version} has no published package"))
+    }
+
+    /// Submit `withdraw::archive_confirmed_withdrawals` for the given
+    /// confirmed txns, greedily packed so every transaction stays inside the
+    /// runtime-object budget (a whole txn's requests archive together, so
+    /// packing is by per-victim cost, not count). `victims` pairs each txn id
+    /// with its request count. Returns the max landed checkpoint.
+    ///
+    /// The entry only exists in the v2 package; the caller gates on the
+    /// active version, and the target resolves through it.
+    pub async fn execute_archive_confirmed_withdrawals(
+        &mut self,
+        victims: &[(Address, usize)],
+    ) -> anyhow::Result<u64> {
+        let package_id = self.active_version_package()?;
+        let mut max_checkpoint = 0;
+        for chunk in chunk_archive_victims(victims) {
+            let mut builder = TransactionBuilder::new();
+            let hashi_arg = builder.object(
+                ObjectInput::new(self.hashi_ids.hashi_object_id)
+                    .as_shared()
+                    .with_mutable(true),
+            );
+            let ids_arg = builder.pure(&chunk);
+            builder.move_call(
+                Function::new(
+                    package_id,
+                    Identifier::from_static("withdraw"),
+                    Identifier::from_static("archive_confirmed_withdrawals"),
+                ),
+                vec![hashi_arg, ids_arg],
+            );
+
+            let response = self.execute(builder).await?;
+            if !response.transaction().effects().status().success() {
+                anyhow::bail!(
+                    "archive_confirmed_withdrawals failed: {:?}",
+                    response.transaction().effects().status()
+                );
+            }
+            let checkpoint = response.transaction().checkpoint_opt().ok_or_else(|| {
+                anyhow::anyhow!("archive_confirmed_withdrawals response missing checkpoint")
+            })?;
+            max_checkpoint = max_checkpoint.max(checkpoint);
+        }
+        Ok(max_checkpoint)
+    }
+}
+
+/// Greedy-pack archival victims into per-transaction chunks under the
+/// runtime-object budget. A single victim always fits alone (the
+/// `withdrawals.rs` compile-time assert guarantees a max-size txn does).
+fn chunk_archive_victims(victims: &[(Address, usize)]) -> Vec<Vec<Address>> {
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN;
+
+    let budget =
+        WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET - WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS;
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut used = 0usize;
+    for (id, request_count) in victims {
+        let cost = WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
+            + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST * request_count;
+        if !current.is_empty() && used + cost > budget {
+            chunks.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push(*id);
+        used += cost;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+#[cfg(test)]
+mod archive_chunking_tests {
+    use super::*;
+
+    fn addr(byte: u8) -> Address {
+        Address::new([byte; 32])
+    }
+
+    #[test]
+    fn empty_input_yields_no_chunks() {
+        assert!(chunk_archive_victims(&[]).is_empty());
+    }
+
+    #[test]
+    fn one_max_size_txn_fits_alone() {
+        use crate::utxo_pool::CoinSelectionParams;
+        let chunks =
+            chunk_archive_victims(&[(addr(1), CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)]);
+        assert_eq!(chunks, vec![vec![addr(1)]]);
+    }
+
+    #[test]
+    fn small_victims_pack_together() {
+        let victims: Vec<_> = (0..10u8).map(|i| (addr(i), 1usize)).collect();
+        let chunks = chunk_archive_victims(&victims);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 10);
+    }
+
+    #[test]
+    fn budget_boundary_splits() {
+        // Each 100-request victim costs 3 + 300 = 303; the 910-object budget
+        // fits three (909) and the fourth spills into a second chunk.
+        let victims: Vec<_> = (0..4u8).map(|i| (addr(i), 100usize)).collect();
+        let chunks = chunk_archive_victims(&victims);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 3);
+        assert_eq!(chunks[1].len(), 1);
+    }
 }
 
 /// Build the PTB for a single deposit request. Pure (no signer / no network),

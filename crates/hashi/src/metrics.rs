@@ -1185,22 +1185,62 @@ impl Metrics {
         self.paused.set(if hashi.config.paused() { 1 } else { 0 });
         self.deposit_queue_size
             .set(hashi.bitcoin().deposit_queue.requests().len() as i64);
-        let (requested, approved) = hashi
-            .bitcoin()
-            .withdrawal_queue
-            .requests()
-            .values()
-            .partition::<Vec<_>, _>(|r| r.status.is_requested());
-        // Three on-chain withdrawal-txn states, distinguished for operator
-        // visibility now that signing spans a multi-checkpoint window:
-        //   signed  = fully signed (2-of-2 witness assembled), broadcast-ready
-        //   signing = some inputs MPC-signed but not yet finalized (in progress)
-        //   pending = committed on-chain but no inputs signed yet
+        // Four mirrored withdrawal-request states. With deferred archival a
+        // request stays in the mirrored `requests` map after commitment (BTC
+        // drained) until the archival GC moves it out, so the post-approval
+        // states must be split from the actionable queue:
+        //   requested                 = awaiting committee approval
+        //   approved                  = approved, awaiting commitment into a txn
+        //   committed                 = committed into a withdrawal txn
+        //                               (Processing or Signed)
+        //   confirmed_pending_archive = confirmed on Bitcoin, awaiting the
+        //                               archival GC
+        {
+            use crate::onchain::types::WithdrawalStatus;
+            let mut requested = Vec::new();
+            let mut approved = Vec::new();
+            let mut committed = Vec::new();
+            let mut confirmed_pending_archive = Vec::new();
+            for r in hashi.bitcoin().withdrawal_queue.requests().values() {
+                match r.status {
+                    WithdrawalStatus::Requested => requested.push(r),
+                    WithdrawalStatus::Approved => approved.push(r),
+                    WithdrawalStatus::Processing | WithdrawalStatus::Signed => committed.push(r),
+                    WithdrawalStatus::Confirmed => confirmed_pending_archive.push(r),
+                }
+            }
+            for (label, class) in [
+                ("requested", &requested),
+                ("approved", &approved),
+                ("committed", &committed),
+                ("confirmed_pending_archive", &confirmed_pending_archive),
+            ] {
+                self.withdrawal_queue_size
+                    .with_label_values(&[label])
+                    .set(class.len() as i64);
+                self.withdrawal_queue_value
+                    .with_label_values(&[label, "BTC"])
+                    .set(class.iter().map(|r| r.btc_amount).sum::<u64>() as i64);
+            }
+        }
+        // Four on-chain withdrawal-txn states, distinguished for operator
+        // visibility now that signing spans a multi-checkpoint window and
+        // archival is deferred to a batched GC:
+        //   confirmed = Bitcoin-confirmed, lingering in `withdrawal_txns`
+        //               until the archival GC moves it out. This count is the
+        //               archival-backlog signal: a persistently growing value
+        //               means the archival GC is stalled.
+        //   signed    = fully signed (2-of-2 witness assembled), broadcast-ready
+        //   signing   = some inputs MPC-signed but not yet finalized (in progress)
+        //   pending   = committed on-chain but no inputs signed yet
+        let mut confirmed = Vec::new();
         let mut signed = Vec::new();
         let mut signing = Vec::new();
         let mut pending = Vec::new();
         for w in hashi.bitcoin().withdrawal_queue.withdrawal_txns().values() {
-            if w.is_fully_signed() {
+            if w.is_confirmed() {
+                confirmed.push(w);
+            } else if w.is_fully_signed() {
                 signed.push(w);
             } else if w.signing.signed_count() > 0 {
                 signing.push(w);
@@ -1208,54 +1248,25 @@ impl Metrics {
                 pending.push(w);
             }
         }
-        self.withdrawal_queue_size
-            .with_label_values(&["requested"])
-            .set(requested.len() as i64);
-        self.withdrawal_queue_value
-            .with_label_values(&["requested", "BTC"])
-            .set(requested.iter().map(|r| r.btc_amount).sum::<u64>() as i64);
-        self.withdrawal_queue_size
-            .with_label_values(&["approved"])
-            .set(approved.len() as i64);
-        self.withdrawal_queue_value
-            .with_label_values(&["approved", "BTC"])
-            .set(approved.iter().map(|r| r.btc_amount).sum::<u64>() as i64);
-        self.withdrawal_queue_size
-            .with_label_values(&["pending"])
-            .set(pending.len() as i64);
-        self.withdrawal_queue_value
-            .with_label_values(&["pending", "BTC"])
-            .set(
-                pending
-                    .iter()
-                    .flat_map(|w| &w.withdrawal_outputs)
-                    .map(|o| o.amount)
-                    .sum::<u64>() as i64,
-            );
-        self.withdrawal_queue_size
-            .with_label_values(&["signing"])
-            .set(signing.len() as i64);
-        self.withdrawal_queue_value
-            .with_label_values(&["signing", "BTC"])
-            .set(
-                signing
-                    .iter()
-                    .flat_map(|w| &w.withdrawal_outputs)
-                    .map(|o| o.amount)
-                    .sum::<u64>() as i64,
-            );
-        self.withdrawal_queue_size
-            .with_label_values(&["signed"])
-            .set(signed.len() as i64);
-        self.withdrawal_queue_value
-            .with_label_values(&["signed", "BTC"])
-            .set(
-                signed
-                    .iter()
-                    .flat_map(|w| &w.withdrawal_outputs)
-                    .map(|o| o.amount)
-                    .sum::<u64>() as i64,
-            );
+        for (label, class) in [
+            ("confirmed", &confirmed),
+            ("signed", &signed),
+            ("signing", &signing),
+            ("pending", &pending),
+        ] {
+            self.withdrawal_queue_size
+                .with_label_values(&[label])
+                .set(class.len() as i64);
+            self.withdrawal_queue_value
+                .with_label_values(&[label, "BTC"])
+                .set(
+                    class
+                        .iter()
+                        .flat_map(|w| &w.withdrawal_outputs)
+                        .map(|o| o.amount)
+                        .sum::<u64>() as i64,
+                );
+        }
         // Track three views of utxo_records:
         // - available:         all selectable UTXOs (spent_by = None), whether
         //                      confirmed or not; this is the coin-selection pool

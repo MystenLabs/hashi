@@ -128,6 +128,15 @@ pub(crate) struct LeaderService {
     // confirm. Zero at boot: the bootstrap mirror is fresh by construction.
     utxo_cleanup_scan_target: u64,
 
+    // Singleton task that archives confirmed withdrawals (moving them and
+    // their requests to the cold bags on-chain); resolves to how many txns
+    // it archived. Same arming/retry/freshness shape as the UTXO cleanup;
+    // only spawned once the active package version has the archival entry.
+    withdrawal_archive_gc_task: Option<AbortOnDropHandle<anyhow::Result<usize>>>,
+    withdrawal_archive_retry: GlobalRetryTracker<garbage_collection::WithdrawalArchiveErrorKind>,
+    withdrawal_archive_scan_needed: bool,
+    withdrawal_archive_scan_target: u64,
+
     // Singleton task that reconciles the guardian committee with the on-chain committee.
     guardian_committee_reconcile_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     // Last hashi epoch we triggered a guardian-committee reconcile for, so
@@ -167,6 +176,12 @@ impl LeaderService {
             utxo_cleanup_retry: GlobalRetryTracker::new(),
             utxo_cleanup_scan_needed: true,
             utxo_cleanup_scan_target: 0,
+            withdrawal_archive_gc_task: None,
+            withdrawal_archive_retry: GlobalRetryTracker::new(),
+            // Armed at boot for crash-between-confirm-and-archive recovery;
+            // a no-op pre-upgrade (the version gate skips the spawn).
+            withdrawal_archive_scan_needed: true,
+            withdrawal_archive_scan_target: 0,
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
         }
@@ -268,6 +283,7 @@ impl LeaderService {
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                     self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
+                    self.check_archive_confirmed_withdrawals(checkpoint_timestamp_ms);
                     self.process_stale_unapproved_deposits_if_new_epoch();
                     self.process_approved_deposit_requests();
                 }
@@ -348,6 +364,25 @@ impl LeaderService {
                         }
                     }
                     Self::log_task_result("utxo_cleanup_gc", result);
+                }
+                Some(result) = OptionFuture::from(self.withdrawal_archive_gc_task.as_mut()) => {
+                    self.withdrawal_archive_gc_task = None;
+                    // Same re-arm policy as the UTXO cleanup arm above.
+                    match &result {
+                        Ok(Ok(0)) => self.withdrawal_archive_retry.clear(),
+                        Ok(Ok(_)) => {
+                            self.withdrawal_archive_retry.clear();
+                            self.withdrawal_archive_scan_needed = true;
+                        }
+                        _ => {
+                            self.withdrawal_archive_retry.record_failure(
+                                garbage_collection::WithdrawalArchiveErrorKind::Failed,
+                                checkpoint_rx.borrow().timestamp_ms,
+                            );
+                            self.withdrawal_archive_scan_needed = true;
+                        }
+                    }
+                    Self::log_task_result("withdrawal_archive_gc", result);
                 }
                 Some(result) = OptionFuture::from(self.guardian_committee_reconcile_task.as_mut()) => {
                     self.guardian_committee_reconcile_task = None;

@@ -579,6 +579,17 @@ impl WithdrawalStatus {
     pub fn is_requested(&self) -> bool {
         matches!(self, Self::Requested)
     }
+
+    /// Lowercase status name, for metric labels and CLI rendering.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Approved => "approved",
+            Self::Processing => "processing",
+            Self::Signed => "signed",
+            Self::Confirmed => "confirmed",
+        }
+    }
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
@@ -724,6 +735,11 @@ impl WithdrawalTransaction {
     /// Whether the 2-of-2 witness is fully assembled and the txn is broadcast-ready.
     pub fn is_fully_signed(&self) -> bool {
         self.signing.is_complete() && self.guardian_signatures.is_some()
+    }
+
+    /// Whether the Bitcoin transaction has been confirmed on-chain.
+    pub fn is_confirmed(&self) -> bool {
+        self.confirmed_timestamp_ms.is_some()
     }
 
     /// Dense per-input MPC signatures, available only once fully signed (the
