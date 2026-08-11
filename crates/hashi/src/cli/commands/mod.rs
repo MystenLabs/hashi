@@ -9,6 +9,7 @@ pub mod committee;
 pub mod config;
 pub mod deposit;
 pub mod proposal;
+pub mod validator;
 pub mod withdraw;
 
 use anyhow::Context;

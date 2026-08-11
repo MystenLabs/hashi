@@ -1649,6 +1649,7 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
         )
         .map(Into::into),
         ignored: extra_fields.get_bool(move_types::MEMBER_IGNORED_KEY, false),
+        resigned: extra_fields.get_bool(move_types::MEMBER_RESIGNED_KEY, false),
     }
 }
 

@@ -365,6 +365,23 @@ pub struct MetadataArgs {
     pub metadata: Vec<String>,
 }
 
+/// Validator lifecycle commands (resign / withdraw a resignation).
+#[derive(Subcommand)]
+pub enum ValidatorCommands {
+    /// Voluntarily resign from the committee.
+    ///
+    /// Takes effect at the next committee formation: the node keeps serving
+    /// the current epoch (keep it RUNNING until then), and the registration
+    /// is removed at the epoch transition that stops including it. After
+    /// removal, re-joining requires a full re-registration (`hashi
+    /// register`). Revocable with `withdraw-resignation` until consumed. The
+    /// node suppresses its own auto-registration while the resignation is
+    /// pending.
+    Resign,
+    /// Withdraw a pending resignation.
+    WithdrawResignation,
+}
+
 #[derive(Subcommand)]
 pub enum CommitteeCommands {
     /// List current committee members
@@ -900,6 +917,9 @@ pub enum CliCommand {
     Proposal {
         action: ProposalCommands,
     },
+    Validator {
+        action: ValidatorCommands,
+    },
     Committee {
         action: CommitteeCommands,
     },
@@ -1129,6 +1149,14 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     .await?;
                 }
             },
+        },
+        CliCommand::Validator { action } => match action {
+            ValidatorCommands::Resign => {
+                commands::validator::resign(&config, &tx_opts).await?;
+            }
+            ValidatorCommands::WithdrawResignation => {
+                commands::validator::withdraw_resignation(&config, &tx_opts).await?;
+            }
         },
         CliCommand::Committee { action } => match action {
             CommitteeCommands::List { epoch } => {
