@@ -708,8 +708,9 @@ pub(crate) async fn apply_onchain_config_overrides(
     Ok(())
 }
 
-/// `execute_package_id` must be the chain's latest package: calling the
+/// `execute_package_id` must be the chain's active package: calling the
 /// original id after an upgrade executes the old bytecode.
+#[allow(clippy::too_many_arguments)]
 async fn submit_proposal_through_quorum(
     hashi_ids: hashi::config::HashiIds,
     hashi_initial_shared_version: u64,
