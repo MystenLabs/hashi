@@ -277,11 +277,21 @@ impl LeaderService {
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         let hashi_ids = inner.config.hashi_ids();
+        let hashi_initial_shared_version = crate::cli::client::fetch_initial_shared_version(
+            &mut inner.onchain_state().client(),
+            hashi_ids.hashi_object_id,
+        )
+        .await?;
 
         let mut builder = TransactionBuilder::new();
 
+        // Fully-resolved shared inputs: expired proposals may carry
+        // upgrade-introduced type args (e.g. IgnoreMember), which the
+        // fullnode's simulate-time resolver cannot inspect on sui >= 1.76
+        // unless every shared input is pre-resolved.
         let hashi_arg = builder.object(
             ObjectInput::new(hashi_ids.hashi_object_id)
+                .with_version(hashi_initial_shared_version)
                 .as_shared()
                 .with_mutable(true),
         );
@@ -289,6 +299,7 @@ impl LeaderService {
         // Clock object (0x6) - immutable shared object
         let clock_arg = builder.object(
             ObjectInput::new(Address::from_static("0x6"))
+                .with_version(1)
                 .as_shared()
                 .with_mutable(false),
         );
@@ -313,6 +324,9 @@ impl LeaderService {
                 }
             };
 
+            // Active package: the type arg may name an upgrade-introduced
+            // type, and calling the original package alongside it is a
+            // linkage conflict (see build_vote_transaction).
             builder.move_call(
                 Function::new(
                     executor.active_call_package_id(),

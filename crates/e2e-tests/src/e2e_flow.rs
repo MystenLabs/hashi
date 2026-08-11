@@ -1234,6 +1234,11 @@ mod tests {
                 .sender();
             assert!(committee.index_of(&target).is_some());
 
+            info!(
+                v1 = %hashi_ids.package_id,
+                latest = %latest_package_id,
+                "package ids in play"
+            );
             let ignore_member_type_tag =
                 sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
                     latest_package_id,
@@ -1241,8 +1246,14 @@ mod tests {
                     sui_sdk_types::Identifier::from_static("IgnoreMember"),
                     vec![],
                 )));
+            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                &mut networks.sui_network.client.clone(),
+                hashi_ids.hashi_object_id,
+            )
+            .await?;
             crate::submit_proposal_through_quorum(
                 hashi_ids,
+                hashi_isv,
                 latest_package_id,
                 &mut executors,
                 hashi::cli::client::CreateProposalParams::IgnoreMember {
@@ -1735,8 +1746,14 @@ mod tests {
         use hashi::cli::client::build_create_proposal_transaction;
 
         let validator_address = executor.sender();
+        let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+            &mut networks.sui_network.client.clone(),
+            hashi_ids.hashi_object_id,
+        )
+        .await?;
         let builder = build_create_proposal_transaction(
             hashi_ids,
+            hashi_isv,
             hashi_ids.package_id,
             validator_address,
             CreateProposalParams::UpdateConfig {
@@ -1833,11 +1850,17 @@ mod tests {
         let hashi_ids = networks.hashi_network.ids();
         let mut executor = SuiTxExecutor::from_config(&healthy.config, healthy.onchain_state())?;
         let creator = executor.sender();
+        let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+            &mut networks.sui_network.client.clone(),
+            hashi_ids.hashi_object_id,
+        )
+        .await?;
         let mut proposal_ids = Vec::new();
         let mut last_checkpoint = 0u64;
         for i in 0..3u64 {
             let builder = build_create_proposal_transaction(
                 hashi_ids,
+                hashi_isv,
                 hashi_ids.package_id,
                 creator,
                 CreateProposalParams::UpdateConfig {

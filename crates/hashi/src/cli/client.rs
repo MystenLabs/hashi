@@ -106,6 +106,11 @@ pub struct HashiClient {
     onchain_state: OnchainState,
     /// Hashi package and object IDs
     hashi_ids: HashiIds,
+    /// The Hashi shared object's initial shared version, fetched once at
+    /// construction. Immutable for the object's lifetime, and needed to
+    /// build fully-resolved shared inputs (see
+    /// [`build_create_proposal_transaction`]).
+    hashi_initial_shared_version: u64,
     /// Optional executor for signing and submitting transactions
     executor: Option<SuiTxExecutor>,
 }
@@ -165,6 +170,10 @@ impl HashiClient {
         .await
         .context("Failed to initialize on-chain state")?;
 
+        let hashi_initial_shared_version =
+            fetch_initial_shared_version(&mut onchain_state.client(), hashi_ids.hashi_object_id)
+                .await?;
+
         // Try to create executor if keypair is available
         let executor = match config.load_keypair()? {
             Some(signer) => {
@@ -184,6 +193,7 @@ impl HashiClient {
         Ok(Self {
             onchain_state,
             hashi_ids,
+            hashi_initial_shared_version,
             executor,
         })
     }
@@ -471,6 +481,7 @@ impl HashiClient {
         let validator_address = self.resolve_validator_address()?;
         Ok(build_vote_transaction(
             self.hashi_ids,
+            self.hashi_initial_shared_version,
             self.call_package(),
             validator_address,
             proposal_id,
@@ -490,14 +501,17 @@ impl HashiClient {
 
         let mut builder = TransactionBuilder::new();
 
+        // Fully-resolved shared input: see build_vote_transaction.
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
                 .as_shared()
                 .with_mutable(true),
         );
         let validator_address_arg = builder.pure(&validator_address);
         let proposal_id_arg = builder.pure(&proposal_id);
 
+        // Active package for the same linkage reason as build_vote_transaction.
         builder.move_call(
             Function::new(
                 self.call_package(),
@@ -529,6 +543,7 @@ impl HashiClient {
         let validator_address = self.resolve_validator_address()?;
         Ok(build_create_proposal_transaction(
             self.hashi_ids,
+            self.hashi_initial_shared_version,
             self.call_package(),
             validator_address,
             params,
@@ -575,14 +590,17 @@ impl HashiClient {
         };
 
         let mut builder = TransactionBuilder::new();
+        // Fully-resolved shared inputs: see build_create_proposal_transaction.
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
                 .as_shared()
                 .with_mutable(true),
         );
         let proposal_id_arg = builder.pure(&proposal_id);
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .with_version(1)
                 .as_shared()
                 .with_mutable(false),
         );
@@ -609,19 +627,27 @@ impl HashiClient {
 /// all governance calls use one package generation consistently.
 pub fn build_create_proposal_transaction(
     hashi_ids: HashiIds,
+    hashi_initial_shared_version: u64,
     call_package: Address,
     validator_address: Address,
     params: CreateProposalParams,
 ) -> TransactionBuilder {
     let mut builder = TransactionBuilder::new();
 
+    // Shared inputs are fully resolved (initial shared version + mutability)
+    // so the fullnode's simulate-time resolver never has to inspect the
+    // called function's signature: that inspection fails with
+    // INVALID_LINKAGE on sui >= 1.76 fullnodes for modules introduced by a
+    // package upgrade (e.g. ignore_member).
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
+            .with_version(hashi_initial_shared_version)
             .as_shared()
             .with_mutable(true),
     );
     let clock_arg = builder.object(
         ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .with_version(1)
             .as_shared()
             .with_mutable(false),
     );
@@ -957,14 +983,20 @@ fn build_metadata(
 /// committee member.
 pub fn build_vote_transaction(
     hashi_ids: HashiIds,
+    hashi_initial_shared_version: u64,
     call_package: Address,
     validator_address: Address,
     proposal_id: Address,
     type_arg: TypeTag,
 ) -> TransactionBuilder {
     let mut builder = TransactionBuilder::new();
+    // Fully-resolved shared inputs: the type arg may name an
+    // upgrade-introduced type, and the fullnode's simulate-time resolver
+    // fails with INVALID_LINKAGE on those when it has to inspect the call
+    // to infer input mutability (sui >= 1.76).
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
+            .with_version(hashi_initial_shared_version)
             .as_shared()
             .with_mutable(true),
     );
@@ -972,10 +1004,16 @@ pub fn build_vote_transaction(
     let proposal_id_arg = builder.pure(&proposal_id);
     let clock_arg = builder.object(
         ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .with_version(1)
             .as_shared()
             .with_mutable(false),
     );
 
+    // Call through the active package: a transaction's linkage cannot call
+    // the original package while a type argument references an
+    // upgrade-introduced type (exact-v1 vs at-least-v2 conflict). Every
+    // module rides along in an upgrade, and v1-era type args unify fine
+    // under a v2 call, so latest is always safe.
     builder.move_call(
         Function::new(
             call_package,
