@@ -53,6 +53,8 @@ pub async fn list_members(config: &CliConfig, epoch: Option<u64>) -> Result<()> 
         validator: String,
         #[tabled(rename = "Operator Address")]
         operator: String,
+        #[tabled(rename = "Ignored")]
+        ignored: String,
     }
 
     let rows: Vec<MemberRow> = members
@@ -60,6 +62,13 @@ pub async fn list_members(config: &CliConfig, epoch: Option<u64>) -> Result<()> 
         .map(|m| MemberRow {
             validator: display::format_address(&m.validator_address),
             operator: display::format_address(&m.operator_address),
+            // Registry view: shows the governance flag as soon as it is set,
+            // before the epoch-boundary effect on the committee.
+            ignored: if m.ignored {
+                "yes".to_string()
+            } else {
+                String::new()
+            },
         })
         .collect();
 
@@ -104,6 +113,12 @@ pub async fn view_member(config: &CliConfig, address: &str) -> Result<()> {
             );
             if let Some(uri) = &m.endpoint_url {
                 println!("  {} {}", "Endpoint:".bold(), uri);
+            }
+            if m.ignored {
+                println!(
+                    "  {} yes (excluded from the next committee formation)",
+                    "Ignored:".bold()
+                );
             }
             println!("{}", "━".repeat(60).dimmed());
         }

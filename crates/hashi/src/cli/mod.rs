@@ -288,6 +288,27 @@ pub enum CreateProposalCommands {
         #[clap(flatten)]
         metadata: MetadataArgs,
     },
+
+    /// Propose ignoring a registered member (or re-admitting with
+    /// `--unignore`).
+    ///
+    /// An ignored member is treated as no longer part of the committee. The
+    /// flag takes effect at the next committee FORMATION: the current
+    /// committee is unchanged, and if a reconfiguration is already in
+    /// flight the change lands one epoch later. The member stays registered
+    /// and keeps proposal/vote authorization throughout.
+    IgnoreMember {
+        /// The target member's Sui validator address.
+        #[clap(long)]
+        validator: String,
+
+        /// Propose re-admitting the member instead of ignoring them.
+        #[clap(long)]
+        unignore: bool,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
 }
 
 /// Shared metadata arguments for proposal creation
@@ -979,6 +1000,20 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     commands::proposal::create_emergency_pause_proposal(
                         &config,
                         unpause,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::IgnoreMember {
+                    validator,
+                    unignore,
+                    metadata,
+                } => {
+                    commands::proposal::create_ignore_member_proposal(
+                        &config,
+                        &validator,
+                        unignore,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

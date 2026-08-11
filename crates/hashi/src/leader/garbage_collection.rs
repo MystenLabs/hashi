@@ -6,7 +6,6 @@
 use super::LeaderService;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
-use crate::onchain::types::ProposalType;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::sui_tx_executor::SuiTxExecutor;
@@ -272,8 +271,6 @@ impl LeaderService {
         expired_proposals: Vec<Proposal>,
     ) -> anyhow::Result<()> {
         use sui_sdk_types::Identifier;
-        use sui_sdk_types::StructTag;
-        use sui_sdk_types::TypeTag;
         use sui_transaction_builder::Function;
         use sui_transaction_builder::ObjectInput;
         use sui_transaction_builder::TransactionBuilder;
@@ -297,58 +294,21 @@ impl LeaderService {
         );
 
         // Add a move call for each expired proposal
+        let packages = inner.onchain_state().state().package_versions().clone();
         for proposal in &expired_proposals {
             let proposal_id_arg = builder.pure(&proposal.id);
 
-            // Get the type argument for the proposal
-            let type_arg = match &proposal.proposal_type {
-                ProposalType::UpdateConfig => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("update_config"),
-                    Identifier::from_static("UpdateConfig"),
-                    vec![],
-                ))),
-                ProposalType::EnableVersion => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("enable_version"),
-                    Identifier::from_static("EnableVersion"),
-                    vec![],
-                ))),
-                ProposalType::DisableVersion => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("disable_version"),
-                    Identifier::from_static("DisableVersion"),
-                    vec![],
-                ))),
-                ProposalType::Upgrade => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("upgrade"),
-                    Identifier::from_static("Upgrade"),
-                    vec![],
-                ))),
-                ProposalType::EmergencyPause => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("emergency_pause"),
-                    Identifier::from_static("EmergencyPause"),
-                    vec![],
-                ))),
-                ProposalType::AbortReconfig => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("abort_reconfig"),
-                    Identifier::from_static("AbortReconfig"),
-                    vec![],
-                ))),
-                ProposalType::UpdateGuardian => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
-                    Identifier::from_static("update_guardian"),
-                    Identifier::from_static("UpdateGuardian"),
-                    vec![],
-                ))),
-                ProposalType::Unknown(type_name) => {
-                    error!(
-                        "Cannot delete proposal {:?} with unknown type: {}",
-                        proposal.id, type_name
-                    );
+            // Get the type argument for the proposal. This resolves each
+            // type's DEFINING package address (v1-era types at the original
+            // id, upgrade-introduced types at their defining version's id).
+            let type_arg = match crate::cli::client::get_proposal_type_arg(
+                &packages,
+                hashi_ids.package_id,
+                &proposal.proposal_type,
+            ) {
+                Ok(type_arg) => type_arg,
+                Err(error) => {
+                    error!("Cannot delete proposal {:?}: {error:#}", proposal.id);
                     continue;
                 }
             };
