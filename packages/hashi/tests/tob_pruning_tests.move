@@ -240,6 +240,65 @@ fun keygen_pending_epoch_bucket_protected() {
     abort
 }
 
+/// The floors assert before the presence probe: a premature call must abort
+/// even when the bucket does not exist, so a too-early call can never
+/// silently "succeed".
+#[test]
+#[expected_failure(abort_code = cert_submission::ETooEarlyToDestroyNonceCerts)]
+fun nonce_below_floor_aborts_even_when_bucket_absent() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
+    let mut hashi = hashi_at_current_epoch(ctx);
+
+    cert_submission::destroy_nonce_certs(&mut hashi, 9, 0);
+
+    abort
+}
+
+#[test]
+#[expected_failure(abort_code = cert_submission::ETooEarlyToDestroyKeyGenCerts)]
+fun keygen_below_floor_aborts_even_when_bucket_absent() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
+    let mut hashi = hashi_at_current_epoch(ctx);
+    insert_committee_at(&mut hashi, 5);
+
+    cert_submission::destroy_key_gen_certs(&mut hashi, 4);
+
+    abort
+}
+
+/// GC entries are deliberately not gated on pause or reconfig (see
+/// design/docs/move-model-lifecycle.mdx): dead state must stay sheddable
+/// during an emergency pause and mid-handoff.
+#[test]
+fun destroy_callable_while_paused_and_reconfiguring() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
+    let mut hashi = hashi_at_current_epoch(ctx);
+    add_bucket(&mut hashi, nonce_key(8, 0), ctx);
+    hashi.config_mut().set_paused(true);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(committee_at(12));
+
+    cert_submission::destroy_nonce_certs(&mut hashi, 8, 0);
+
+    assert!(!hashi.tob_contains(nonce_key(8, 0)));
+    std::unit_test::destroy(hashi);
+}
+
+/// The destroy entries probe by STORED type: a bucket written under a
+/// different value layout (e.g. a future StampedEpochCertsV1) is left in
+/// place for the module version that understands it — no abort, no
+/// wrong-typed destruction.
+#[test]
+fun destroy_leaves_foreign_typed_bucket_in_place() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
+    let mut hashi = hashi_at_current_epoch(ctx);
+    hashi.tob_mut().add(nonce_key(8, 0), 42u64);
+
+    cert_submission::destroy_nonce_certs(&mut hashi, 8, 0);
+
+    assert!(hashi.tob_contains(nonce_key(8, 0)));
+    std::unit_test::destroy(hashi);
+}
+
 // ~~~~~~~ Bucket Draining ~~~~~~~
 
 #[test]
