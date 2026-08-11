@@ -168,6 +168,8 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         cfg.limiter_config,
         master_g,
         allowlist.clone(),
+        guardian_s3.bucket_info.clone(),
+        guardian_s3.retention_environment,
         cfg.bitcoin_network,
     )?;
     let config_hash = init_config.digest();
@@ -184,7 +186,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "calling OperatorInit (withdraw mode)"
     );
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_withdraw_mode(
-        guardian_s3.clone(),
+        guardian_s3.credentials.clone(),
         init_config.clone(),
         genesis_state,
     ))

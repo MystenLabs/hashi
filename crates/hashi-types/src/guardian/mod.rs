@@ -145,7 +145,7 @@ pub struct GuardianInfo {
 /// during provisioner initialization.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithdrawOperatorInitRequest {
-    pub s3_config: ResolvedS3Config,
+    pub s3_credentials: S3Credentials,
     pub init_config: InitConfig,
     pub genesis_state: Option<GenesisState>,
 }
@@ -161,6 +161,10 @@ pub struct InitConfig {
     hashi_btc_master_pubkey: HashiMasterG,
     /// Guardian build PCR pins used to verify attested guardian sessions.
     pcr_allowlist: PcrAllowlist,
+    /// S3 bucket and region used for Guardian state.
+    bucket_info: S3BucketInfo,
+    /// Hashi deployment class selecting the S3 object-lock policy.
+    retention_environment: S3RetentionEnvironment,
     /// BTC network.
     network: Network,
 }
@@ -276,6 +280,8 @@ pub struct CeremonyOperatorInitRequest {
     pub s3_config: ResolvedS3Config,
 }
 
+/// TODO: Replace the operator-authored setup request with a batch of new-KP-signed
+/// approvals binding the session, roster, sharing params, and S3 policy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     /// The KP certs. Each KP can have more than one cert.
@@ -397,32 +403,38 @@ impl fmt::Display for SessionID {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct S3BucketInfo {
+    pub bucket: String,
+    pub region: String,
+}
+
 /// S3 configuration as supplied by a config file, before AWS credentials have
 /// been resolved.
 #[derive(Clone, Debug, Deserialize)]
 pub struct UnresolvedS3Config {
-    pub bucket: String,
-    pub region: String,
+    #[serde(flatten)]
+    pub bucket_info: S3BucketInfo,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
-    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
     pub retention_environment: S3RetentionEnvironment,
 }
 
 /// Runtime S3 configuration with concrete credentials.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ResolvedS3Config {
-    pub access_key: String,
-    pub secret_key: String,
-    pub session_token: Option<String>,
+    pub credentials: S3Credentials,
     pub bucket_info: S3BucketInfo,
     pub retention_environment: S3RetentionEnvironment,
 }
 
+/// Concrete credentials used to access the S3 policy authenticated through
+/// withdraw-mode `InitConfig`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct S3BucketInfo {
-    pub bucket: String,
-    pub region: String,
+pub struct S3Credentials {
+    pub access_key: String,
+    pub secret_key: String,
+    pub session_token: Option<String>,
 }
 
 // ---------------------------------
@@ -445,12 +457,12 @@ impl OperatorInitRequest {
     }
 
     pub fn new_withdraw_mode(
-        s3_config: ResolvedS3Config,
+        s3_credentials: S3Credentials,
         init_config: InitConfig,
         genesis_state: Option<GenesisState>,
     ) -> Self {
         Self::Withdraw(Box::new(WithdrawOperatorInitRequest {
-            s3_config,
+            s3_credentials,
             init_config,
             genesis_state,
         }))
@@ -579,21 +591,36 @@ impl InitConfig {
         limiter_config: LimiterConfig,
         hashi_btc_master_pubkey: HashiMasterG,
         pcr_allowlist: PcrAllowlist,
+        bucket_info: S3BucketInfo,
+        retention_environment: S3RetentionEnvironment,
         network: Network,
     ) -> GuardianResult<Self> {
         Ok(Self {
             limiter_config,
             hashi_btc_master_pubkey,
             pcr_allowlist,
+            bucket_info,
+            retention_environment,
             network,
         })
     }
 
-    pub fn into_parts(self) -> (LimiterConfig, HashiMasterG, PcrAllowlist, Network) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        LimiterConfig,
+        HashiMasterG,
+        PcrAllowlist,
+        S3BucketInfo,
+        S3RetentionEnvironment,
+        Network,
+    ) {
         (
             self.limiter_config,
             self.hashi_btc_master_pubkey,
             self.pcr_allowlist,
+            self.bucket_info,
+            self.retention_environment,
             self.network,
         )
     }
@@ -608,6 +635,14 @@ impl InitConfig {
 
     pub fn pcr_allowlist(&self) -> &PcrAllowlist {
         &self.pcr_allowlist
+    }
+
+    pub fn resolved_s3_config(&self, credentials: S3Credentials) -> ResolvedS3Config {
+        ResolvedS3Config {
+            credentials,
+            bucket_info: self.bucket_info.clone(),
+            retention_environment: self.retention_environment,
+        }
     }
 
     pub fn network(&self) -> Network {
@@ -988,6 +1023,8 @@ struct InitConfigRepr {
     pub limiter_config: LimiterConfig,
     pub hashi_btc_master_pubkey: HashiMasterG,
     pub pcr_allowlist: PcrAllowlist,
+    pub bucket_info: S3BucketInfo,
+    pub retention_environment: S3RetentionEnvironment,
     pub network: String,
 }
 
@@ -1050,12 +1087,20 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
 
 impl From<&InitConfig> for InitConfigRepr {
     fn from(config: &InitConfig) -> Self {
-        let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
-            config.clone().into_parts();
+        let (
+            limiter_config,
+            hashi_btc_master_pubkey,
+            pcr_allowlist,
+            bucket_info,
+            retention_environment,
+            network,
+        ) = config.clone().into_parts();
         Self {
             limiter_config,
             hashi_btc_master_pubkey,
             pcr_allowlist,
+            bucket_info,
+            retention_environment,
             network: network.to_string(),
         }
     }

@@ -323,7 +323,6 @@ fn verify_provisioned_standby_info(
     let mpc_master_g = info
         .mpc_master_g
         .context("Guardian info missing MPC master G")?;
-
     ensure!(
         info.limiter_state.is_none(),
         "Guardian has limiter_state => operator activation already ran"
@@ -350,11 +349,12 @@ fn verify_provisioned_standby_info(
         master_g,
         mpc_master_g
     );
-
     let init_config = InitConfig::new(
         cfg.limiter_config,
         *master_g,
         allowlist.clone(),
+        guardian_s3.bucket_info.clone(),
+        guardian_s3.retention_environment,
         cfg.bitcoin_network,
     )?;
     let expected_config_hash = init_config.digest();

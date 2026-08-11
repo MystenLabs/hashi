@@ -110,7 +110,8 @@ It:
 3. Fetches on-chain MPC master `G`, and reads the latest `committee-update/` or
    `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
-   master `G`, the KP PCR allowlist, and configured Bitcoin network.
+   master `G`, the KP PCR allowlist, S3 bucket and retention policy, and
+   configured Bitcoin network.
 5. Requires the observed serving-committee state to agree with the
    `--do-genesis` intent marker. On first deploy, the flag causes it to build an
    optional `GenesisState` from the current on-chain committee; otherwise a
@@ -153,8 +154,8 @@ re-encrypt it. It:
    (commitments + N + T + sharing_seq) the new guardian was booted with, and
    confirms it matches.
 4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
-   `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
-   enclave.
+   `G`, PCR allowlist, S3 bucket and retention policy, and network, then confirms
+   its `config_hash` matches the enclave.
 5. Requires the observed serving-committee state to agree with the
    `--do-genesis` intent marker. With the flag, independently derives the
    current on-chain committee's `genesis_state_hash`; confirms the optional hash

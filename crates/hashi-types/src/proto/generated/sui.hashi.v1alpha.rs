@@ -2012,7 +2012,7 @@ pub struct CeremonyOperatorInitRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WithdrawOperatorInitRequest {
     #[prost(message, optional, tag = "1")]
-    pub s3_config: ::core::option::Option<S3Config>,
+    pub s3_credentials: ::core::option::Option<S3Credentials>,
     /// Stable configuration whose digest KPs bind into signed PI submissions.
     #[prost(message, optional, tag = "2")]
     pub init_config: ::core::option::Option<InitConfig>,
@@ -2042,6 +2042,15 @@ pub struct S3Config {
     /// Hashi deployment class used to select the Guardian S3 object-lock policy.
     #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
     pub retention_environment: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct S3Credentials {
+    #[prost(string, optional, tag = "1")]
+    pub access_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    pub secret_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub session_token: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
 /// and buffer these submissions, but the enclave is the authoritative verifier.
@@ -2112,6 +2121,12 @@ pub struct InitConfig {
     /// BTC network.
     #[prost(enumeration = "Network", optional, tag = "4")]
     pub network: ::core::option::Option<i32>,
+    /// S3 bucket and region used for Guardian state.
+    #[prost(message, optional, tag = "5")]
+    pub bucket_info: ::core::option::Option<S3BucketInfo>,
+    /// Hashi deployment class selecting the S3 object-lock policy.
+    #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
+    pub retention_environment: i32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {

@@ -232,7 +232,7 @@ message CeremonyOperatorInitRequest {
 }
 
 message WithdrawOperatorInitRequest {
-  S3Config s3_config = 1;
+  S3Credentials s3_credentials = 1;
 
   // Stable configuration whose digest KPs bind into signed PI submissions.
   InitConfig init_config = 2;
@@ -262,6 +262,12 @@ message S3Config {
   optional string session_token = 5;
   // Hashi deployment class used to select the Guardian S3 object-lock policy.
   S3RetentionEnvironment retention_environment = 6;
+}
+
+message S3Credentials {
+  optional string access_key = 1;
+  optional string secret_key = 2;
+  optional string session_token = 3;
 }
 
 enum Network {
@@ -335,6 +341,12 @@ message InitConfig {
 
   // BTC network.
   optional Network network = 4;
+
+  // S3 bucket and region used for Guardian state.
+  S3BucketInfo bucket_info = 5;
+
+  // Hashi deployment class selecting the S3 object-lock policy.
+  S3RetentionEnvironment retention_environment = 6;
 }
 
 message LimiterState {
