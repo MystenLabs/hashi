@@ -36,6 +36,21 @@ const config = {
   url: 'https://mystenlabs.github.io',
   baseUrl,
 
+  // One canonical URL per page, and it is the trailing-slash form.
+  //
+  // The site is served by GitHub Pages, which resolves `/foo` to `foo/index.html`
+  // with a 301 to `/foo/` — a server behavior we cannot turn off or invert. With
+  // the Docusaurus default (undefined) the generated links, canonical tags, and
+  // sitemap all used the *no-slash* form, so every canonical URL redirected to a
+  // different URL, and a single page was reported under two paths: `/foo` for
+  // in-app (SPA) navigations and `/foo/` for direct hits and refreshes.
+  //
+  // `true` aligns everything Docusaurus emits with what the host actually serves,
+  // collapsing the duplicates. It does not change the build layout (pages are
+  // still written as `foo/index.html`), so existing `/foo/` links keep working and
+  // `/foo` keeps 301-ing onto the canonical form.
+  trailingSlash: true,
+
   organizationName: 'MystenLabs',
   projectName: 'hashi',
 
@@ -153,10 +168,14 @@ const config = {
           { from: '/introduction', to: '/' },
         ],
         createRedirects(existingPath) {
-          if (existingPath === '/' || existingPath.endsWith('.html')) {
+          // Under `trailingSlash: true` route paths arrive as `/foo/`. The
+          // `.html` compatibility URL is `/foo.html` — strip the slash first,
+          // or the redirect lands at the unreachable `/foo/.html`.
+          const routePath = existingPath.replace(/\/+$/, '');
+          if (routePath === '' || routePath.endsWith('.html')) {
             return undefined;
           }
-          return [`${existingPath}.html`];
+          return [`${routePath}.html`];
         },
       },
     ],
