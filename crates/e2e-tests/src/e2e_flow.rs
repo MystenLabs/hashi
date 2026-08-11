@@ -1334,6 +1334,201 @@ mod tests {
         Ok(())
     }
 
+    /// A voluntary resignation takes effect at the epoch boundary: the
+    /// member serves the current epoch, the next formation excludes them,
+    /// and the transition removes their registration. Crucially, the
+    /// resigned node KEEPS RUNNING throughout and across a second epoch
+    /// boundary without re-registering itself — the node-side resignation
+    /// latch suppresses its epoch-triggered auto-registration, which would
+    /// otherwise reverse the exit within seconds. Explicit re-registration
+    /// afterwards works and re-admits the member at the following formation.
+    #[tokio::test]
+    async fn test_resigned_member_removed_at_epoch_boundary() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+
+        let hashi_ids = networks.hashi_network.ids();
+
+        let (latest_package_id, hashi_isv, target, initial_epoch) = {
+            let nodes = networks.hashi_network.nodes();
+            let latest_package_id = nodes[0]
+                .hashi()
+                .onchain_state()
+                .package_id()
+                .ok_or_else(|| anyhow!("no package versions known"))?;
+            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                &mut networks.sui_network.client.clone(),
+                hashi_ids.hashi_object_id,
+            )
+            .await?;
+
+            // Node 3 resigns through its own executor (validator::resign is
+            // v2-only surface: latest package + resolved shared inputs).
+            let resigning = nodes[3].hashi().clone();
+            let mut executor =
+                SuiTxExecutor::from_config(&resigning.config, resigning.onchain_state())?;
+            let target = executor.sender();
+
+            let mut b = sui_transaction_builder::TransactionBuilder::new();
+            let hashi_arg = b.object(
+                sui_transaction_builder::ObjectInput::new(hashi_ids.hashi_object_id)
+                    .with_version(hashi_isv)
+                    .as_shared()
+                    .with_mutable(true),
+            );
+            let validator_arg = b.pure(&target);
+            b.move_call(
+                sui_transaction_builder::Function::new(
+                    latest_package_id,
+                    sui_sdk_types::Identifier::from_static("validator"),
+                    sui_sdk_types::Identifier::from_static("resign"),
+                ),
+                vec![hashi_arg, validator_arg],
+            );
+            let resp = executor.execute(b).await?;
+            anyhow::ensure!(
+                resp.transaction().effects().status().success(),
+                "resign transaction failed"
+            );
+
+            let initial_epoch = nodes[0]
+                .current_epoch()
+                .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
+            (latest_package_id, hashi_isv, target, initial_epoch)
+        };
+        info!(?target, "resignation submitted; closing the epoch");
+
+        // First boundary: formation skips the resigned member and the
+        // transition removes the registration.
+        networks.sui_network.force_close_epoch().await?;
+        let target_epoch = initial_epoch + 1;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+
+        {
+            let nodes = networks.hashi_network.nodes();
+            let committee = nodes[0]
+                .hashi()
+                .onchain_state()
+                .current_committee()
+                .ok_or_else(|| anyhow!("no committee after epoch change"))?;
+            assert_eq!(committee.members().len(), 3);
+            assert!(committee.index_of(&target).is_none());
+            assert!(
+                nodes[0]
+                    .hashi()
+                    .onchain_state()
+                    .committee_member(&target)
+                    .is_none(),
+                "registration should be removed at the transition"
+            );
+        }
+
+        // Second boundary with the ex-member's node STILL RUNNING: the
+        // resignation latch must keep it from auto-re-registering on the
+        // epoch trigger.
+        networks.sui_network.force_close_epoch().await?;
+        let second_epoch = target_epoch + 1;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .take(3)
+            .map(|n| n.wait_for_epoch(second_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {second_epoch}: {e}"));
+        }
+
+        {
+            let nodes = networks.hashi_network.nodes();
+            assert!(
+                nodes[0]
+                    .hashi()
+                    .onchain_state()
+                    .committee_member(&target)
+                    .is_none(),
+                "latched node must not re-register across epoch boundaries"
+            );
+            let committee = nodes[0]
+                .hashi()
+                .onchain_state()
+                .current_committee()
+                .ok_or_else(|| anyhow!("no committee after second epoch change"))?;
+            assert!(committee.index_of(&target).is_none());
+        }
+
+        // Explicit re-registration re-admits the member (and clears the
+        // node's latch once the mirror shows it registered and unflagged).
+        {
+            let nodes = networks.hashi_network.nodes();
+            let rejoining = nodes[3].hashi().clone();
+            let mut executor =
+                SuiTxExecutor::from_config(&rejoining.config, rejoining.onchain_state())?;
+            let mut b = sui_transaction_builder::TransactionBuilder::new();
+            let hashi_arg = b.object(
+                sui_transaction_builder::ObjectInput::new(hashi_ids.hashi_object_id)
+                    .with_version(hashi_isv)
+                    .as_shared()
+                    .with_mutable(true),
+            );
+            let sui_system_arg = b.object(
+                sui_transaction_builder::ObjectInput::new(Address::from_static("0x5"))
+                    .with_version(1)
+                    .as_shared()
+                    .with_mutable(false),
+            );
+            b.move_call(
+                sui_transaction_builder::Function::new(
+                    latest_package_id,
+                    sui_sdk_types::Identifier::from_static("validator"),
+                    sui_sdk_types::Identifier::from_static("register"),
+                ),
+                vec![hashi_arg, sui_system_arg],
+            );
+            let resp = executor.execute(b).await?;
+            anyhow::ensure!(
+                resp.transaction().effects().status().success(),
+                "re-registration failed"
+            );
+        }
+
+        // The mirror on another node sees the fresh registration.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let registered = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state()
+                .committee_member(&target)
+                .is_some();
+            if registered {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!("re-registration not observed by the mirror");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        Ok(())
+    }
+
     /// Waits for a `WithdrawalPickedForProcessing` that contains at least
     /// `min_requests` request IDs in a single batch, indicating that the new
     /// multi-request coin selection algorithm batched them together.
