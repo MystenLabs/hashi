@@ -1835,6 +1835,121 @@ impl SuiTxExecutor {
         }
         Ok(max_checkpoint)
     }
+
+    /// Destroy dead TOB cert buckets via the v2 GC entries
+    /// (`cert_submission::destroy_key_gen_certs` / `destroy_nonce_certs`).
+    ///
+    /// One move call per bucket — scalar pure args only, so the builder's
+    /// pure-input dedup is harmless. The binding per-transaction limit is
+    /// Sui's 2048 deleted-object-ids cap: destroying a bucket deletes its bag
+    /// `Field`, its `LinkedTable`, and one node per dealer (committee-sized,
+    /// ~80 ids today), and a `KeyGen` target may destroy TWO buckets. Bucket
+    /// sizes are unknowable here (candidate discovery decodes field names
+    /// only) and grow with committee size, so instead of a sizing model the
+    /// chunking is adaptive: start at `TOB_DESTROYS_PER_TX` calls per
+    /// transaction and HALVE any failing chunk down to singletons.
+    /// Transient RPC failures take the split path too — harmless, they just
+    /// retry at a smaller size — and only a singleton failure propagates, so
+    /// an over-limit chunk can never permanently wedge the sweep behind an
+    /// unbounded identical retry.
+    ///
+    /// The entries are v2-introduced, so the calls route to the ACTIVE
+    /// package (they do not exist in the original package) and the Hashi
+    /// shared input is pre-resolved: sui >= 1.76 fullnodes fail simulation
+    /// with INVALID_LINKAGE when inferring an unresolved shared input's
+    /// mutability requires inspecting an upgraded package's module (see
+    /// `delete_expired_proposals`).
+    pub async fn execute_destroy_tob_certs(
+        &mut self,
+        targets: &[crate::onchain::TobPruneTarget],
+    ) -> anyhow::Result<()> {
+        let call_package_id = self.active_call_package_id();
+        let hashi_initial_shared_version = crate::cli::client::fetch_initial_shared_version(
+            &mut self.client,
+            self.hashi_ids.hashi_object_id,
+        )
+        .await?;
+
+        let mut queue: std::collections::VecDeque<&[crate::onchain::TobPruneTarget]> =
+            targets.chunks(Self::TOB_DESTROYS_PER_TX).collect();
+        while let Some(chunk) = queue.pop_front() {
+            match self
+                .destroy_tob_chunk(chunk, call_package_id, hashi_initial_shared_version)
+                .await
+            {
+                Ok(()) => {}
+                Err(e) if chunk.len() > 1 => {
+                    let mid = chunk.len() / 2;
+                    tracing::warn!(
+                        chunk_len = chunk.len(),
+                        "destroy TOB certs chunk failed; splitting and retrying: {e:#}"
+                    );
+                    queue.push_front(&chunk[mid..]);
+                    queue.push_front(&chunk[..mid]);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Initial destroy-calls-per-transaction for [`Self::execute_destroy_tob_certs`].
+    /// 10 full ~80-id buckets is ~800 deleted ids against the 2048 cap;
+    /// larger committees are absorbed by the adaptive halving.
+    const TOB_DESTROYS_PER_TX: usize = 10;
+
+    /// One destroy transaction for `chunk`; see [`Self::execute_destroy_tob_certs`].
+    async fn destroy_tob_chunk(
+        &mut self,
+        chunk: &[crate::onchain::TobPruneTarget],
+        call_package_id: Address,
+        hashi_initial_shared_version: u64,
+    ) -> anyhow::Result<()> {
+        use crate::onchain::TobPruneTarget;
+
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(hashi_initial_shared_version)
+                .as_shared()
+                .with_mutable(true),
+        );
+        for target in chunk {
+            match target {
+                TobPruneTarget::KeyGen { epoch } => {
+                    let epoch_arg = builder.pure(epoch);
+                    builder.move_call(
+                        Function::new(
+                            call_package_id,
+                            Identifier::from_static("cert_submission"),
+                            Identifier::from_static("destroy_key_gen_certs"),
+                        ),
+                        vec![hashi_arg, epoch_arg],
+                    );
+                }
+                TobPruneTarget::NonceBatch { epoch, batch_index } => {
+                    let epoch_arg = builder.pure(epoch);
+                    let batch_index_arg = builder.pure(batch_index);
+                    builder.move_call(
+                        Function::new(
+                            call_package_id,
+                            Identifier::from_static("cert_submission"),
+                            Identifier::from_static("destroy_nonce_certs"),
+                        ),
+                        vec![hashi_arg, epoch_arg, batch_index_arg],
+                    );
+                }
+            }
+        }
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "destroy TOB certs transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
 }
 
 // TODO: the builders below take the call target, but `cli/commands/{deposit,
