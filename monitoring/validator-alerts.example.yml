@@ -1,0 +1,95 @@
+# Example Prometheus alerting rules for a hashi validator node.
+# See docs/validator-alerts.md for the rationale behind each rule and for
+# the list of metrics you should NOT alert on.
+#
+# Drop this into your Prometheus rule_files and adjust thresholds/labels to
+# your paging setup. Expressions assume your node's hashi metrics are
+# scraped into the local Prometheus without extra relabeling.
+
+groups:
+  - name: hashi-validator-node-health
+    rules:
+      - alert: HashiBtcViewFrozen
+        expr: changes(hashi_kyoto_best_height[90m]) == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "BTC view frozen"
+          description: >-
+            hashi_kyoto_best_height has not changed in 90 minutes. Signet
+            ticks roughly every 10 minutes, so the node's Bitcoin view is
+            stuck (kyoto wedged, no peers, or bitcoind issue).
+
+      - alert: HashiBtcNotSynced
+        expr: hashi_kyoto_synced == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BTC view not synced for 15m"
+          description: >-
+            Brief resyncs after a restart are normal; sustained unsync is
+            not. Check hashi_kyoto_sync_percent and peer count.
+
+      - alert: HashiNoBtcPeers
+        expr: hashi_kyoto_connected_peers < 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "no BTC peers connected"
+          description: "Without peers the BTC tip will go stale next."
+
+      - alert: HashiSuiMirrorStale
+        expr: time() - (hashi_latest_checkpoint_timestamp_ms / 1000) > 120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Sui state mirror stale"
+          description: >-
+            No Sui checkpoint has been applied to the node's bridge-state
+            mirror for over 2 minutes. The watcher, mirror, or fullnode RPC
+            is wedged; the node is acting on stale state even if other
+            metrics look healthy.
+
+      - alert: HashiTaskWedged
+        expr: time() - hashi_task_last_iteration_timestamp_seconds > 600
+        labels:
+          severity: critical
+        annotations:
+          summary: "task loop {{ $labels.task }} wedged"
+          description: >-
+            The {{ $labels.task }} loop has not iterated in 10 minutes; all
+            heartbeat-labeled loops iterate at least every 15 seconds. A
+            task inside the process has panicked or deadlocked.
+
+      - alert: HashiReconfigNotTracking
+        expr: changes(hashi_epoch[3h]) == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "committee epoch not advancing"
+          description: >-
+            Testnet reconfigures roughly every 40 minutes. Check the
+            operator channel first: if the fleet is reconfiguring and your
+            epoch is not moving, your node is stuck.
+
+      - alert: HashiLowGas
+        expr: hashi_sui_balance < 1e9
+        labels:
+          severity: warning
+        annotations:
+          summary: "operator wallet below 1 SUI"
+          description: "Refill the operator gas wallet."
+
+      - alert: HashiBinaryBehindChain
+        expr: hashi_package_version_unsupported == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "binary does not support the live package version"
+          description: >-
+            The chain has moved past every package version this build
+            implements; autonomous writes are halted. Upgrade the node
+            binary immediately.
