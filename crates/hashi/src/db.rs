@@ -98,8 +98,7 @@ const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
 // Generation names for the epoch-scoped keyspaces. Generation 0 keeps the
-// pre-split name so that rows written before this node rotated generations land
-// in a generation that `retire_epochs_below` eventually drops.
+// pre-split name, so rows written before the split are retired as usual.
 const NONCE_MESSAGES_CF_NAMES: [&str; 2] = ["nonce_messages", "nonce_messages_g1"];
 const AVID_ROUND_STATES_CF_NAMES: [&str; 2] = ["avid_round_states", "avid_round_states_g1"];
 const AVID_DEALER_BUILDERS_CF_NAMES: [&str; 2] =
@@ -108,28 +107,23 @@ const AVID_HELD_ECHOES_CF_NAMES: [&str; 2] = ["avid_held_echoes", "avid_held_ech
 
 const RETENTION_EXTRA_EPOCHS: u64 = 7;
 
+/// Number of generations an [`EpochGenerations`] keyspace is split across.
+const GENERATIONS: usize = 2;
+
 /// A keyspace whose rows are scoped to a single MPC epoch, split into two
-/// generations selected by the parity of that epoch.
+/// generations selected by epoch parity so that retiring an epoch can drop a
+/// whole generation.
 ///
-/// Nonce and AVID rows are dead as soon as the next epoch is installed, and
-/// there are a lot of them: one nonce message is hundreds of kilobytes and every
-/// batch stores one per dealer. Deleting them row by row does not give the space
-/// back — a tombstone is a few dozen bytes against the value it shadows, so
-/// leveled compaction never accumulates enough write pressure to rewrite the
-/// bottom level, and the bytes stay on disk for as long as the node runs.
-///
-/// Splitting by parity makes retirement a whole-generation drop: the keyspace is
-/// deleted and recreated empty, which unlinks its files instead of leaving
-/// tombstones behind for a compaction that never comes.
+/// Deleting these rows one by one never frees the disk: a tombstone is a few
+/// dozen bytes against a value of hundreds of kilobytes, so leveled compaction
+/// gets nowhere near enough write pressure to rewrite the bottom level.
 struct EpochGenerations {
-    names: [&'static str; 2],
-    // Swapped out wholesale by `retire_epochs_below`, so the handles cannot be
-    // borrowed for longer than a single operation.
-    generations: std::sync::RwLock<[Keyspace; 2]>,
+    names: [&'static str; GENERATIONS],
+    generations: std::sync::RwLock<[Keyspace; GENERATIONS]>,
 }
 
 impl EpochGenerations {
-    fn open(db: &fjall::Database, names: [&'static str; 2]) -> Result<Self> {
+    fn open(db: &fjall::Database, names: [&'static str; GENERATIONS]) -> Result<Self> {
         Ok(Self {
             names,
             generations: std::sync::RwLock::new([
@@ -147,20 +141,17 @@ impl EpochGenerations {
         self.generations.read().unwrap()[index].clone()
     }
 
-    /// The generation that owns `epoch`. Every write for `epoch` lands here.
+    /// The generation that owns `epoch`; every write for `epoch` lands here.
     fn owner(&self, epoch: u64) -> Keyspace {
         self.generation(Self::index(epoch))
     }
 
-    /// The generation that cannot own `epoch`.
+    /// The generation that cannot own `epoch`. Read as a fallback, so that rows
+    /// written before the split stay visible while their epoch is still live.
     fn other(&self, epoch: u64) -> Keyspace {
         self.generation(Self::index(epoch) ^ 1)
     }
 
-    /// Point-read a key belonging to `epoch`.
-    ///
-    /// Falls back to the other generation so that rows written before the
-    /// keyspace was split stay readable for whichever epoch is still live.
     fn get(&self, epoch: u64, key: &[u8]) -> Result<Option<fjall::UserValue>> {
         match self.owner(epoch).get(key)? {
             Some(value) => Ok(Some(value)),
@@ -172,19 +163,17 @@ impl EpochGenerations {
         self.owner(epoch).insert(key, value)
     }
 
-    /// Delete a key from both generations, so that it stops resolving through
-    /// the pre-split fallback in [`Self::get`] as well.
+    /// Delete a key from both generations, so it stops resolving through the
+    /// fallback in [`Self::other`] too.
     fn remove(&self, key: Vec<u8>) -> Result<()> {
-        for generation in self.generations.read().unwrap().iter() {
-            generation.remove(key.clone())?;
+        for index in 0..GENERATIONS {
+            self.generation(index).remove(key.clone())?;
         }
         Ok(())
     }
 
     /// List `(Address, T)` pairs under `prefix`, which must begin with `epoch`.
-    ///
-    /// Both generations are scanned for the same pre-split reason as [`Self::get`];
-    /// the owning generation wins where a key is present in both.
+    /// The owning generation wins where a key is in both.
     fn list_by_prefix<T: DeserializeOwned>(
         &self,
         epoch: u64,
@@ -198,38 +187,27 @@ impl EpochGenerations {
         Ok(rows.into_iter().collect())
     }
 
-    /// Discard the rows for epochs below `cutoff_epoch`.
+    /// Discard the rows for epochs below `cutoff_epoch`, which must be the epoch
+    /// being installed.
     ///
-    /// Only the generation that cannot own `cutoff_epoch` is discarded. That is
-    /// sound because `cutoff_epoch` is the epoch being installed, and every
-    /// writer of these keyspaces stores under the node's own current MPC epoch,
-    /// which `handle_reconfig` sets to `cutoff_epoch` before any of this work
-    /// starts — so no row above `cutoff_epoch` exists yet and the newest row the
-    /// discarded generation can hold is `cutoff_epoch - 1`. Being unconditional,
-    /// this cannot race a peer persisting the new epoch's messages.
+    /// Dropping the generation that cannot own `cutoff_epoch` needs no check:
+    /// every writer stores under the node's own current MPC epoch, which
+    /// `handle_reconfig` sets to `cutoff_epoch` before any of this runs, so the
+    /// newest row that generation can hold is `cutoff_epoch - 1`. Older rows
+    /// sharing the live generation's parity go at the next epoch change, leaving
+    /// at most two epochs on disk.
     ///
-    /// Rows for `cutoff_epoch - 2` and older share the live generation's parity
-    /// and are discarded by the next epoch change instead, so these keyspaces
-    /// hold at most two epochs at a time.
-    ///
-    /// The generation is deleted and recreated rather than cleared: fjall only
-    /// unlinks a table file once a compaction marks it deleted, so clearing a
-    /// keyspace orphans its files until the next recovery, whereas dropping the
-    /// keyspace removes the directory as soon as the last handle goes away.
+    /// Deleted and recreated rather than cleared, because fjall only unlinks a
+    /// table once a compaction marks it deleted — clearing would orphan the
+    /// files until the next recovery.
     fn retire_epochs_below(&self, db: &fjall::Database, cutoff_epoch: u64) -> Result<()> {
-        // No epoch is below 0; without this the parity rule would discard the
-        // generation holding the odd epochs.
         if cutoff_epoch == 0 {
             return Ok(());
         }
         let index = Self::index(cutoff_epoch) ^ 1;
         let mut generations = self.generations.write().unwrap();
-        // Unregisters the name and flags the keyspace for removal; the handle
-        // this clone was made from is what actually triggers it, below.
         db.delete_keyspace(generations[index].clone())?;
-        // Dropping the last handle is what unlinks the directory. Concurrent
-        // readers holding a clone keep it alive until they are done, which fjall
-        // supports and which only defers the reclaim.
+        // Overwriting the last handle is what unlinks the directory.
         generations[index] = db.keyspace(self.names[index], KeyspaceCreateOptions::default)?;
         Ok(())
     }
@@ -748,8 +726,7 @@ impl Database {
             retention_cutoff,
             is_referenced_epoch,
         )?;
-        // Epoch-scoped keyspaces are retired a generation at a time rather than
-        // a row at a time, so the space is actually returned to the filesystem.
+        // Retired a generation at a time so the space is actually freed.
         self.nonce_messages
             .retire_epochs_below(&self.db, cutoff_epoch)?;
         self.avid_round_states
@@ -1822,8 +1799,8 @@ pub(crate) mod tests {
                 .unwrap();
             db.store_rotation_messages(epoch, &dealer, &rotation_msgs)
                 .unwrap();
-            // Nonce and AVID rows are only ever written for the node's own
-            // current epoch, so nothing above the cutoff exists at prune time.
+            // These are only written for the node's own current epoch, so
+            // nothing above the cutoff exists at prune time.
             if epoch <= cutoff {
                 db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
                     .unwrap();
@@ -1864,9 +1841,8 @@ pub(crate) mod tests {
                 "rotation messages at epoch {epoch} should be retained (>= cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
         }
-        // Retiring epoch `cutoff` drops the generation that cannot hold it, i.e.
-        // every epoch below it of the opposite parity. The rest of the retired
-        // epochs share the live generation and go at the next epoch change.
+        // Only the opposite parity goes now; the rest share the live
+        // generation and go at the next epoch change.
         for epoch in (1..cutoff).filter(|epoch| epoch % 2 != cutoff % 2) {
             assert!(
                 db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
@@ -1929,9 +1905,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The bug this split exists to fix: point-deleting nonce rows left the
-    /// bytes on disk, because the tombstones were far too small next to the
-    /// values they shadowed to make leveled compaction rewrite the bottom level.
+    /// The bug this split exists to fix: point-deleting the rows left the bytes
+    /// on disk.
     #[test]
     fn test_retiring_an_epoch_returns_the_bytes_to_the_filesystem() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
@@ -1947,8 +1922,8 @@ pub(crate) mod tests {
         for keyspace in db.nonce_messages.generations.read().unwrap().iter() {
             keyspace.rotate_memtable_and_wait().unwrap();
         }
-        // Measure the files themselves: dereferencing the tables is not the
-        // property that matters, unlinking them is.
+        // Measure the files, not fjall's accounting: unlinking is the property
+        // that matters, and dereferencing the tables is not enough.
         let occupied = bytes_on_disk(&db.nonce_messages);
         assert!(occupied > 0, "epoch 1 should be on disk before retirement");
 
@@ -1988,8 +1963,7 @@ pub(crate) mod tests {
             .sum()
     }
 
-    /// Tables are unlinked once the version that referenced them is dropped,
-    /// which a background worker does, so give it a moment to catch up.
+    /// A concurrent reader holding a handle defers the unlink, so allow for it.
     fn wait_for_bytes_on_disk_below(generations: &super::EpochGenerations, target: u64) -> u64 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -2001,8 +1975,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Retirement swaps in a brand new keyspace behind the same name, so the
-    /// database has to come back up on it.
+    /// Retirement puts a brand new keyspace behind the same name.
     #[test]
     fn test_retired_generation_reopens() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
@@ -2026,8 +1999,28 @@ pub(crate) mod tests {
         assert!(db.get_nonce_message(2, 0, &dealer).unwrap().is_none());
     }
 
-    /// Deleting a row must beat the pre-split fallback in `get`, otherwise the
-    /// e2e recovery tests would not actually be losing the message they delete.
+    /// Write a nonce message the way a binary that predates the generation split
+    /// would have: straight into the generation carrying the pre-split name.
+    fn store_pre_split_nonce_message(
+        db: &Database,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        message: &batch_avss::Message,
+    ) {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        db.nonce_messages.generations.read().unwrap()[0]
+            .insert(key, bcs::to_bytes(message).unwrap())
+            .unwrap();
+    }
+
+    /// Deleting a row has to beat the pre-split fallback, or the e2e recovery
+    /// tests would not lose the message they delete.
     #[test]
     fn test_delete_nonce_message_clears_both_generations() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
@@ -2037,19 +2030,9 @@ pub(crate) mod tests {
         let dealer2 = Address::new([2u8; 32]);
         let message = create_test_nonce_message();
 
-        // Epoch 3 is owned by generation 1; put dealer1's row in generation 0
-        // the way a binary that predates the split would have.
-        db.nonce_messages.generations.read().unwrap()[0]
-            .insert(
-                [
-                    3u64.to_be_bytes().as_slice(),
-                    0u32.to_be_bytes().as_slice(),
-                    dealer1.as_bytes(),
-                ]
-                .concat(),
-                bcs::to_bytes(&message).unwrap(),
-            )
-            .unwrap();
+        // Epoch 3 is owned by generation 1, so dealer1's row lands in the
+        // generation that does not own it.
+        store_pre_split_nonce_message(&db, 3, 0, &dealer1, &message);
         db.store_nonce_message(3, 0, &dealer2, &message).unwrap();
         assert_eq!(db.list_nonce_messages(3, 0).unwrap().len(), 2);
 
@@ -2063,8 +2046,7 @@ pub(crate) mod tests {
         db.delete_nonce_message(3, 1, &dealer2).unwrap();
     }
 
-    /// A generation shares its parity with every other epoch, so a single epoch
-    /// change cannot drop everything. Two consecutive ones must.
+    /// One epoch change only drops one parity; two must drop everything.
     #[test]
     fn test_two_epoch_changes_retire_every_earlier_epoch() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
@@ -2090,27 +2072,16 @@ pub(crate) mod tests {
         }
     }
 
-    /// Rows written before the keyspace was split live in whichever generation
-    /// carries the pre-split name, which is not always the one that owns their
-    /// epoch. They have to stay readable until an epoch change retires them.
+    /// Pre-split rows sit in the generation carrying the pre-split name, which
+    /// is not always the one that owns their epoch.
     #[test]
     fn test_rows_in_the_non_owning_generation_are_still_readable() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
 
-        // Epoch 3 is owned by generation 1; write it into generation 0 the way
-        // a binary that predates the split would have.
+        // Epoch 3 is owned by generation 1.
         let dealer = Address::new([1u8; 32]);
-        let key = [
-            3u64.to_be_bytes().as_slice(),
-            0u32.to_be_bytes().as_slice(),
-            dealer.as_bytes(),
-        ]
-        .concat();
-        let nonce_msg = create_test_nonce_message();
-        db.nonce_messages.generations.read().unwrap()[0]
-            .insert(key, bcs::to_bytes(&nonce_msg).unwrap())
-            .unwrap();
+        store_pre_split_nonce_message(&db, 3, 0, &dealer, &create_test_nonce_message());
 
         assert!(db.get_nonce_message(3, 0, &dealer).unwrap().is_some());
         assert_eq!(db.list_nonce_messages(3, 0).unwrap().len(), 1);
