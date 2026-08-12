@@ -137,6 +137,21 @@ impl EpochGenerations {
         (epoch % 2) as usize
     }
 
+    /// The name this keyspace had before it was split, which generation 0 keeps.
+    fn name(&self) -> &'static str {
+        self.names[0]
+    }
+
+    /// Bytes fjall accounts to this keyspace across both generations.
+    fn disk_space(&self) -> u64 {
+        self.generations
+            .read()
+            .unwrap()
+            .iter()
+            .map(Keyspace::disk_space)
+            .sum()
+    }
+
     fn generation(&self, index: usize) -> Keyspace {
         self.generations.read().unwrap()[index].clone()
     }
@@ -310,6 +325,46 @@ impl Database {
 
     pub(crate) fn snapshot(&self) -> fjall::Snapshot {
         self.db.snapshot()
+    }
+
+    /// Bytes fjall accounts to each keyspace, with the epoch-scoped ones summed
+    /// across their generations.
+    pub fn keyspace_disk_space(&self) -> Vec<(&'static str, u64)> {
+        vec![
+            (ENCRYPTION_KEYS_CF_NAME, self.encryption_keys.disk_space()),
+            (SIGNING_KEYS_CF_NAME, self.signing_keys.disk_space()),
+            (
+                ENCRYPTION_EPOCH_INDEX_CF_NAME,
+                self.encryption_epoch_index.disk_space(),
+            ),
+            (
+                SIGNING_EPOCH_INDEX_CF_NAME,
+                self.signing_epoch_index.disk_space(),
+            ),
+            (DEALER_MESSAGES_CF_NAME, self.dealer_messages.disk_space()),
+            (
+                ROTATION_MESSAGES_CF_NAME,
+                self.rotation_messages.disk_space(),
+            ),
+            (self.nonce_messages.name(), self.nonce_messages.disk_space()),
+            (
+                self.avid_round_states.name(),
+                self.avid_round_states.disk_space(),
+            ),
+            (
+                self.avid_dealer_builders.name(),
+                self.avid_dealer_builders.disk_space(),
+            ),
+            (
+                self.avid_held_echoes.name(),
+                self.avid_held_echoes.disk_space(),
+            ),
+        ]
+    }
+
+    /// Bytes fjall accounts to the whole database, journals included.
+    pub fn total_disk_space(&self) -> Result<u64> {
+        self.db.disk_space()
     }
 
     /// Store an encryption private key, keyed by its public key, plus the
@@ -1973,6 +2028,41 @@ pub(crate) mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// The gauge has to name a keyspace an operator can act on, and has to fall
+    /// when that keyspace is retired.
+    #[test]
+    fn test_keyspace_disk_space_reports_the_epoch_scoped_keyspaces() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let nonce_msg = create_test_nonce_message();
+        for batch_index in 0..64 {
+            db.store_nonce_message(1, batch_index, &Address::new([1u8; 32]), &nonce_msg)
+                .unwrap();
+        }
+        for keyspace in db.nonce_messages.generations.read().unwrap().iter() {
+            keyspace.rotate_memtable_and_wait().unwrap();
+        }
+
+        let reported = |db: &Database| {
+            db.keyspace_disk_space()
+                .into_iter()
+                .find(|(name, _)| *name == "nonce_messages")
+                .expect("nonce_messages must be reported under its logical name")
+                .1
+        };
+        let occupied = reported(&db);
+        assert!(
+            occupied > 0,
+            "the written epoch should show up in the gauge"
+        );
+        assert!(db.total_disk_space().unwrap() >= occupied);
+
+        db.prune_messages_below(2, &PruningReferences::default())
+            .unwrap();
+        assert_eq!(reported(&db), 0, "retiring epoch 1 should drop the gauge");
     }
 
     /// Retirement puts a brand new keyspace behind the same name.
