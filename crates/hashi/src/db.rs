@@ -330,36 +330,29 @@ impl Database {
     /// Bytes fjall accounts to each keyspace, with the epoch-scoped ones summed
     /// across their generations.
     pub fn keyspace_disk_space(&self) -> Vec<(&'static str, u64)> {
-        vec![
-            (ENCRYPTION_KEYS_CF_NAME, self.encryption_keys.disk_space()),
-            (SIGNING_KEYS_CF_NAME, self.signing_keys.disk_space()),
-            (
-                ENCRYPTION_EPOCH_INDEX_CF_NAME,
-                self.encryption_epoch_index.disk_space(),
-            ),
-            (
-                SIGNING_EPOCH_INDEX_CF_NAME,
-                self.signing_epoch_index.disk_space(),
-            ),
-            (DEALER_MESSAGES_CF_NAME, self.dealer_messages.disk_space()),
-            (
-                ROTATION_MESSAGES_CF_NAME,
-                self.rotation_messages.disk_space(),
-            ),
-            (self.nonce_messages.name(), self.nonce_messages.disk_space()),
-            (
-                self.avid_round_states.name(),
-                self.avid_round_states.disk_space(),
-            ),
-            (
-                self.avid_dealer_builders.name(),
-                self.avid_dealer_builders.disk_space(),
-            ),
-            (
-                self.avid_held_echoes.name(),
-                self.avid_held_echoes.disk_space(),
-            ),
-        ]
+        let keyspaces = [
+            (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
+            (SIGNING_KEYS_CF_NAME, &self.signing_keys),
+            (ENCRYPTION_EPOCH_INDEX_CF_NAME, &self.encryption_epoch_index),
+            (SIGNING_EPOCH_INDEX_CF_NAME, &self.signing_epoch_index),
+            (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
+            (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
+        ];
+        let epoch_scoped = [
+            &self.nonce_messages,
+            &self.avid_round_states,
+            &self.avid_dealer_builders,
+            &self.avid_held_echoes,
+        ];
+        keyspaces
+            .into_iter()
+            .map(|(name, keyspace)| (name, keyspace.disk_space()))
+            .chain(
+                epoch_scoped
+                    .into_iter()
+                    .map(|keyspace| (keyspace.name(), keyspace.disk_space())),
+            )
+            .collect()
     }
 
     /// Bytes fjall accounts to the whole database, journals included.
