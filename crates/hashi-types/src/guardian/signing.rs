@@ -14,11 +14,11 @@ use super::GuardianError::InternalError;
 use super::GuardianInfo;
 use super::GuardianResult;
 use super::LogEntry;
+use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
 use super::SetupNewKeyResponse;
-use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalResponse;
 use super::UnixMillis;
 use crate::pgp::Fingerprint;
@@ -65,8 +65,8 @@ pub trait GuardianSigningIntent: Serialize {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KpSigningIntentType {
-    /// Intent for SingleProvisionerInitRequest.
-    SingleProvisionerInitRequest = 0,
+    /// Intent for ProvisionerInitRequest.
+    ProvisionerInitRequest = 0,
     /// Intent for ProvisionerRotateCertRequest.
     ProvisionerRotateCertRequest = 1,
 }
@@ -132,8 +132,8 @@ impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
         GuardianSigningIntentType::ProvisionerRotateCertResponse;
 }
 
-impl KpSigningIntent for SingleProvisionerInitRequest {
-    const INTENT: KpSigningIntentType = KpSigningIntentType::SingleProvisionerInitRequest;
+impl KpSigningIntent for ProvisionerInitRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerInitRequest;
 }
 
 impl KpSigningIntent for ProvisionerRotateCertRequest {

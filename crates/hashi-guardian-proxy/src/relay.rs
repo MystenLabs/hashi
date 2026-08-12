@@ -28,8 +28,8 @@ use crate::roster::RosterCache;
 use crate::widlog::LogStore;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::KpSigned;
+use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::pgp::Fingerprint;
 use hashi_types::proto;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayService;
@@ -48,7 +48,7 @@ use tracing::warn;
 #[derive(Default)]
 struct Accumulator {
     session_id: Option<String>,
-    submissions: BTreeMap<u32, proto::SignedSingleProvisionerInitRequest>,
+    submissions: BTreeMap<u32, proto::SignedProvisionerInitRequest>,
     completed: bool,
 }
 
@@ -62,7 +62,7 @@ impl Accumulator {
         }
     }
 
-    fn insert(&mut self, id: u32, submission: proto::SignedSingleProvisionerInitRequest) {
+    fn insert(&mut self, id: u32, submission: proto::SignedProvisionerInitRequest) {
         self.submissions.insert(id, submission);
     }
 
@@ -70,7 +70,7 @@ impl Accumulator {
         self.submissions.len()
     }
 
-    fn batch(&self) -> Vec<proto::SignedSingleProvisionerInitRequest> {
+    fn batch(&self) -> Vec<proto::SignedProvisionerInitRequest> {
         self.submissions.values().cloned().collect()
     }
 
@@ -136,8 +136,8 @@ impl<L: LogStore> Relay<L> {
     /// roster read. DoS guard only; the enclave re-verifies authoritatively.
     async fn verify_kp_submission<'a>(
         &self,
-        signed_request: &'a KpSigned<SingleProvisionerInitRequest>,
-    ) -> Result<&'a SingleProvisionerInitRequest, Status> {
+        signed_request: &'a KpSigned<ProvisionerInitRequest>,
+    ) -> Result<&'a ProvisionerInitRequest, Status> {
         let request = signed_request
             .verify_signature()
             .map_err(|error| Status::unauthenticated(error.to_string()))?;
@@ -214,7 +214,7 @@ enum Matched<'a> {
 /// submission complete. (The share is HPKE-encrypted to the pinned session too,
 /// so a restarted backend could not use it either.)
 fn match_backend<'a>(
-    request: &SingleProvisionerInitRequest,
+    request: &ProvisionerInitRequest,
     status: &'a BackendStatus,
 ) -> Result<Matched<'a>, Status> {
     let expected_session_id = request.expected_session_id();
@@ -327,10 +327,10 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
 
     async fn single_provisioner_init(
         &self,
-        request: Request<proto::SignedSingleProvisionerInitRequest>,
+        request: Request<proto::SignedProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
         let submission = request.into_inner();
-        let signed_request = KpSigned::<SingleProvisionerInitRequest>::try_from(submission.clone())
+        let signed_request = KpSigned::<ProvisionerInitRequest>::try_from(submission.clone())
             .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
 
         // Authenticate before the lock or any backend read: junk submissions
@@ -373,7 +373,7 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
         match self
             .client
             .clone()
-            .provisioner_init(proto::ProvisionerInitRequest { submissions })
+            .provisioner_init(proto::BatchProvisionerInitRequest { submissions })
             .await
         {
             Ok(_) => {
@@ -426,8 +426,8 @@ mod tests {
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::KpSigned;
+    use hashi_types::guardian::ProvisionerInitRequest;
     use hashi_types::guardian::ShareID;
-    use hashi_types::guardian::SingleProvisionerInitRequest;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;
@@ -443,8 +443,8 @@ mod tests {
         Relay::new(channel, Arc::new(RosterCache::new(store)))
     }
 
-    fn submission(id: u32) -> proto::SignedSingleProvisionerInitRequest {
-        proto::SignedSingleProvisionerInitRequest {
+    fn submission(id: u32) -> proto::SignedProvisionerInitRequest {
+        proto::SignedProvisionerInitRequest {
             encrypted_share: Some(proto::GuardianEncryptedShare {
                 id: Some(proto::GuardianShareId { id: Some(id) }),
                 ciphertext: None,
@@ -470,8 +470,8 @@ mod tests {
 
     /// A submission's pins: the session and config hash the KP read off
     /// `GetProvisioningTargetInfo` before signing.
-    fn pinned(session: &str, config_hash: [u8; 32]) -> SingleProvisionerInitRequest {
-        SingleProvisionerInitRequest::new(
+    fn pinned(session: &str, config_hash: [u8; 32]) -> ProvisionerInitRequest {
+        ProvisionerInitRequest::new(
             session.to_string().into(),
             config_hash,
             None,
@@ -577,14 +577,14 @@ mod tests {
         let relay = relay_with_roster(MemStore::default());
 
         let request = |session: &str, share_id: u16| {
-            SingleProvisionerInitRequest::new(
+            ProvisionerInitRequest::new(
                 session.to_string().into(),
                 [7u8; 32],
                 None,
                 signed_share(share_id),
             )
         };
-        let sign = |req: &SingleProvisionerInitRequest| {
+        let sign = |req: &ProvisionerInitRequest| {
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(req))
         };
         let good_sig = sign(&request("sess-a", 1));
@@ -693,7 +693,7 @@ mod tests {
         }
         async fn provisioner_init(
             &self,
-            _: Request<proto::ProvisionerInitRequest>,
+            _: Request<proto::BatchProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
             unimplemented!("not exercised by tests")
         }

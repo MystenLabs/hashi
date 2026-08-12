@@ -139,7 +139,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
 
     async fn provisioner_init(
         &self,
-        request: Request<proto::ProvisionerInitRequest>,
+        request: Request<proto::BatchProvisionerInitRequest>,
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
         let domain_req = request.into_inner().try_into().map_err(to_status)?;
 

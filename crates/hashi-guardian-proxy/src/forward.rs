@@ -125,7 +125,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 
     async fn provisioner_init(
         &self,
-        _request: Request<proto::ProvisionerInitRequest>,
+        _request: Request<proto::BatchProvisionerInitRequest>,
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
         Err(denied("ProvisionerInit (use SingleProvisionerInit)"))
     }
@@ -209,7 +209,7 @@ mod tests {
         }
         async fn provisioner_init(
             &self,
-            _: Request<proto::ProvisionerInitRequest>,
+            _: Request<proto::BatchProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy
-            .provisioner_init(Request::new(proto::ProvisionerInitRequest::default()))
+            .provisioner_init(Request::new(proto::BatchProvisionerInitRequest::default()))
             .await
             .expect_err("provisioner_init must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);

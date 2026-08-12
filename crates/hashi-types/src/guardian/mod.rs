@@ -63,6 +63,7 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Borrow;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Deref;
 
@@ -70,14 +71,11 @@ use std::ops::Deref;
 //    Common requests and responses
 // ---------------------------------
 
-/// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
-/// `s3_config`; a withdraw-mode enclave additionally carries the stable
-/// `InitConfig` whose digest KPs authenticate during provisioner init.
+/// Mode-specific operator bootstrap accepted by the shared `OperatorInit` RPC.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OperatorInitRequest {
-    s3_config: ResolvedS3Config,
-    init_config: Option<InitConfig>,
-    genesis_state: Option<GenesisState>,
+pub enum OperatorInitRequest {
+    Ceremony(CeremonyOperatorInitRequest),
+    Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -144,6 +142,15 @@ pub struct GuardianInfo {
 //    Withdraw mode requests and responses
 // ---------------------------------------
 
+/// Withdraw-mode bootstrap carrying the stable configuration KPs authenticate
+/// during provisioner initialization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithdrawOperatorInitRequest {
+    pub s3_config: ResolvedS3Config,
+    pub init_config: InitConfig,
+    pub genesis_state: Option<GenesisState>,
+}
+
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
 /// and that the enclave exposes via `GuardianInfo`.
@@ -184,12 +191,12 @@ pub struct ActivationState {
 /// collected enough. The enclave verifies every KP signature, session pin, and
 /// config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitRequest(pub Vec<KpSigned<SingleProvisionerInitRequest>>);
+pub struct BatchProvisionerInitRequest(pub Vec<KpSigned<ProvisionerInitRequest>>);
 
 /// Relay-facing request carrying one KP's signed contribution toward
 /// `ProvisionerInit` for a specific guardian session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SingleProvisionerInitRequest {
+pub struct ProvisionerInitRequest {
     expected_session_id: SessionID,
     #[serde(with = "hex::serde")]
     expected_config_hash: [u8; 32],
@@ -240,58 +247,9 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
 }
 
-// ---------------------------------------
-//    Ceremony mode requests and responses
-// ---------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SetupNewKeyRequest {
-    key_provisioner_certs_roster: KpCertsRoster,
-    params: SecretSharingParams,
-}
-
-/// `GuardianSignedResponse<SetupNewKeyResponse>`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct SetupNewKeyResponse {
-    pub encrypted_shares: KPEncryptedSharesRoster,
-    pub secret_sharing_instance: SecretSharingInstance,
-    /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
-    /// as `guardian_btc_public_key` before the guardian is provisioned.
-    pub btc_master_pubkey: BitcoinPubkey,
-}
-
-/// Ceremony-mode rotation request, assembled by the operator from the current KPs'
-/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
-/// rotation target `state`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RotateKpsRequest {
-    encrypted_old_shares: Vec<GuardianEncryptedShare>,
-    old_instance: SecretSharingInstance,
-    state: RotateKpsState,
-}
-
-/// The shared rotation target all current KPs authorize. Each binds
-/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
-/// ones that agree on it. Old/new (`n`, `t`) may differ.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RotateKpsState {
-    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
-    /// `new_params.num_shares()`.
-    new_kp_certs_roster: KpCertsRoster,
-    new_params: SecretSharingParams,
-}
-
-/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
-/// shares, returned by `rotate_kps`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RotateKpsResponse {
-    pub encrypted_shares: KPEncryptedSharesRoster,
-}
-
-/// `KpSigned<ProvisionerRotateCertRequest>`. Replaces one certificate in a KP
-/// roster entry without changing the BTC key, sharing instance,
-/// commitments, share ids, or threshold. The signing certificate may be the
-/// target or another certificate assigned to the same KP/share entry.
+/// `KpSigned<ProvisionerRotateCertRequest>`.
+/// Replaces one certificate in a KP roster entry. Request must be signed
+/// with a certificate assigned to the same KP (including the to-be-deleted one).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProvisionerRotateCertRequest {
     expected_session_id: SessionID,
@@ -307,6 +265,70 @@ pub struct ProvisionerRotateCertRequest {
 pub struct ProvisionerRotateCertResponse {
     pub cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
+}
+
+// ---------------------------------------
+//    Ceremony mode requests and responses
+// ---------------------------------------
+
+/// Ceremony-mode bootstrap carrying the S3 configuration used for ceremony logs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CeremonyOperatorInitRequest {
+    pub s3_config: ResolvedS3Config,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupNewKeyRequest {
+    /// The KP certs. Each KP can have more than one cert.
+    key_provisioner_certs_roster: KpCertsRoster,
+    /// The secret-sharing params (n, t).
+    params: SecretSharingParams,
+}
+
+/// `GuardianSignedResponse<SetupNewKeyResponse>`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SetupNewKeyResponse {
+    /// Encryptions to each KP's cert. Each KP can have more than one cert.
+    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// Params + share commitments.
+    pub secret_sharing_instance: SecretSharingInstance,
+    /// The Guardian BTC pubkey.
+    pub btc_master_pubkey: BitcoinPubkey,
+}
+
+/// KP rotation endpoint. Request is assembled by the operator from the current KPs'
+/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
+/// rotation target `state`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotateKpsRequest {
+    /// |n| encrypted shares, each bound to `state.digest()` as HPKE AAD.
+    encrypted_old_shares: Vec<GuardianEncryptedShare>,
+    /// Existing secret-sharing instance.
+    old_instance: SecretSharingInstance,
+    /// The shared rotation target state.
+    state: RotateKpsState,
+}
+
+/// The shared rotation target all current KPs authorize. Each binds
+/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
+/// ones that agree on it. Old/new (`n`, `t`) may differ.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RotateKpsState {
+    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// `new_params.num_shares()`.
+    new_kp_certs_roster: KpCertsRoster,
+    /// The new secret-sharing params (n, t).
+    new_params: SecretSharingParams,
+}
+
+/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
+/// shares, returned by `rotate_kps`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RotateKpsResponse {
+    /// Encryptions to each new KP's cert. Each KP can have more than one cert.
+    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// The new secret-sharing params and commitments.
+    pub new_instance: SecretSharingInstance,
 }
 
 // ---------------------------------
@@ -424,6 +446,24 @@ impl ResolvedS3Config {
     }
 }
 
+impl OperatorInitRequest {
+    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
+        Self::Ceremony(CeremonyOperatorInitRequest { s3_config })
+    }
+
+    pub fn new_withdraw_mode(
+        s3_config: ResolvedS3Config,
+        init_config: InitConfig,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
+        Self::Withdraw(Box::new(WithdrawOperatorInitRequest {
+            s3_config,
+            init_config,
+            genesis_state,
+        }))
+    }
+}
+
 impl SetupNewKeyRequest {
     pub fn new(
         kp_certs_roster: KpCertsRoster,
@@ -458,60 +498,6 @@ impl SetupNewKeyRequest {
 
     pub fn threshold(&self) -> usize {
         self.params.threshold()
-    }
-}
-
-impl OperatorInitRequest {
-    /// Build a ceremony-mode request (S3 only).
-    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
-        Self {
-            s3_config,
-            init_config: None,
-            genesis_state: None,
-        }
-    }
-
-    /// Build a withdraw-mode request carrying the stable operator config.
-    pub fn new_withdraw_mode(
-        s3_config: ResolvedS3Config,
-        init_config: InitConfig,
-        genesis_state: Option<GenesisState>,
-    ) -> Self {
-        Self {
-            s3_config,
-            init_config: Some(init_config),
-            genesis_state,
-        }
-    }
-
-    pub fn s3_config(&self) -> &ResolvedS3Config {
-        &self.s3_config
-    }
-
-    pub fn init_config(&self) -> Option<&InitConfig> {
-        self.init_config.as_ref()
-    }
-
-    /// `init_config` must be present iff the enclave runs in withdraw mode;
-    /// optional genesis state is withdraw-only.
-    pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
-        match (
-            mode,
-            self.init_config.is_some(),
-            self.genesis_state.is_some(),
-        ) {
-            (EnclaveMode::Withdraw, false, _) => Err(InvalidInputs(
-                "withdraw-mode operator_init requires an InitConfig".into(),
-            )),
-            (EnclaveMode::Ceremony, true, _) | (EnclaveMode::Ceremony, false, true) => Err(
-                InvalidInputs("ceremony-mode operator_init must carry only S3 config".into()),
-            ),
-            _ => Ok(()),
-        }
-    }
-
-    pub fn into_parts(self) -> (ResolvedS3Config, Option<InitConfig>, Option<GenesisState>) {
-        (self.s3_config, self.init_config, self.genesis_state)
     }
 }
 
@@ -643,7 +629,7 @@ impl InitConfig {
     }
 }
 
-impl SingleProvisionerInitRequest {
+impl ProvisionerInitRequest {
     /// Build one KP's PI contribution, encrypting `share` to the enclave's
     /// session key. Agreement on the stable config is authenticated by the KP
     /// signature over this request, not by HPKE AAD.
@@ -749,16 +735,49 @@ impl RotateKpsState {
 }
 
 impl RotateKpsRequest {
+    /// Construct a rotation request after validating all visible old-share
+    /// cardinality and ID invariants. Ciphertexts and commitments are verified
+    /// after decryption inside the enclave.
     pub fn new(
         encrypted_old_shares: Vec<GuardianEncryptedShare>,
         old_instance: SecretSharingInstance,
         state: RotateKpsState,
-    ) -> Self {
-        Self {
+    ) -> GuardianResult<Self> {
+        let share_count = encrypted_old_shares.len();
+        let threshold = old_instance.threshold();
+        let num_shares = old_instance.num_shares();
+        if share_count < threshold {
+            return Err(InvalidInputs(format!(
+                "need at least {threshold} encrypted old shares, got {share_count}"
+            )));
+        }
+        if share_count > num_shares {
+            return Err(InvalidInputs(format!(
+                "at most {num_shares} encrypted old shares are allowed, got {share_count}"
+            )));
+        }
+
+        let mut seen_ids = BTreeSet::new();
+        for share in &encrypted_old_shares {
+            if usize::from(share.id.get()) > num_shares {
+                return Err(InvalidInputs(format!(
+                    "encrypted old share id {} exceeds old instance num_shares {num_shares}",
+                    share.id
+                )));
+            }
+            if !seen_ids.insert(share.id) {
+                return Err(InvalidInputs(format!(
+                    "duplicate encrypted old share id {}",
+                    share.id
+                )));
+            }
+        }
+
+        Ok(Self {
             encrypted_old_shares,
             old_instance,
             state,
-        }
+        })
     }
 
     /// Encrypt one KP's `share` to `enclave_pub_key` with `state.digest()` bound

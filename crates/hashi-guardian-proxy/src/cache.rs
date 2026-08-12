@@ -331,7 +331,7 @@ where
 
     async fn provisioner_init(
         &self,
-        request: Request<proto::ProvisionerInitRequest>,
+        request: Request<proto::BatchProvisionerInitRequest>,
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
         self.inner.provisioner_init(request).await
     }
@@ -489,7 +489,7 @@ mod tests {
         }
         async fn provisioner_init(
             &self,
-            _: Request<proto::ProvisionerInitRequest>,
+            _: Request<proto::BatchProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
             unimplemented!("not exercised by tests")
         }

@@ -5,7 +5,9 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::BatchProvisionerInitRequest;
 use super::BuildPcrs;
+use super::CeremonyOperatorInitRequest;
 use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
@@ -50,10 +52,10 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::ShareID;
 use super::SignedStandardWithdrawalRequestWire;
-use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawOperatorInitRequest;
 use super::WithdrawStage;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
@@ -181,30 +183,38 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
-        let s3_config =
-            super::ResolvedS3Config::try_from(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
-        let genesis_state = req
-            .genesis_state
-            .map(|state| {
-                let committee = state.committee.ok_or_else(|| missing("committee"))?;
-                Ok(GenesisState::from_move_committee(
-                    crate::move_types::Committee::try_from(committee)?,
-                ))
-            })
-            .transpose()?;
-        // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony.
-        match req.init_config.map(InitConfig::try_from).transpose()? {
-            Some(init_config) => Ok(OperatorInitRequest::new_withdraw_mode(
-                s3_config,
-                init_config,
-                genesis_state,
-            )),
-            None if genesis_state.is_none() => {
-                Ok(OperatorInitRequest::new_ceremony_mode(s3_config))
+        match req.request.ok_or_else(|| missing("request"))? {
+            pb::operator_init_request::Request::Ceremony(req) => {
+                let s3_config = super::ResolvedS3Config::try_from(
+                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
+                )?;
+                Ok(OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
+                    s3_config,
+                }))
             }
-            None => Err(InvalidInputs(
-                "genesis_state requires a withdraw-mode InitConfig".into(),
-            )),
+            pb::operator_init_request::Request::Withdraw(req) => {
+                let s3_config = super::ResolvedS3Config::try_from(
+                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
+                )?;
+                let init_config =
+                    InitConfig::try_from(req.init_config.ok_or_else(|| missing("init_config"))?)?;
+                let genesis_state = req
+                    .genesis_state
+                    .map(|state| {
+                        let committee = state.committee.ok_or_else(|| missing("committee"))?;
+                        Ok(GenesisState::from_move_committee(
+                            crate::move_types::Committee::try_from(committee)?,
+                        ))
+                    })
+                    .transpose()?;
+                Ok(OperatorInitRequest::Withdraw(Box::new(
+                    WithdrawOperatorInitRequest {
+                        s3_config,
+                        init_config,
+                        genesis_state,
+                    },
+                )))
+            }
         }
     }
 }
@@ -249,24 +259,24 @@ pub fn secret_sharing_instance_to_pb(
     }
 }
 
-impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
+impl TryFrom<pb::BatchProvisionerInitRequest> for BatchProvisionerInitRequest {
     type Error = GuardianError;
 
-    fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::BatchProvisionerInitRequest) -> Result<Self, Self::Error> {
         let submissions = req
             .submissions
             .into_iter()
-            .map(KpSigned::<SingleProvisionerInitRequest>::try_from)
+            .map(KpSigned::<ProvisionerInitRequest>::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest(submissions))
+        Ok(BatchProvisionerInitRequest(submissions))
     }
 }
 
-impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisionerInitRequest> {
+impl TryFrom<pb::SignedProvisionerInitRequest> for KpSigned<ProvisionerInitRequest> {
     type Error = GuardianError;
 
-    fn try_from(req: pb::SignedSingleProvisionerInitRequest) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::SignedProvisionerInitRequest) -> Result<Self, Self::Error> {
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
@@ -295,7 +305,7 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         )?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
-        let request = SingleProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::new(
             req.expected_session_id.into(),
             expected_config_hash,
             expected_genesis_state_hash,
@@ -375,11 +385,7 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
         )?;
 
-        Ok(RotateKpsRequest::new(
-            encrypted_old_shares,
-            old_instance,
-            state,
-        ))
+        RotateKpsRequest::new(encrypted_old_shares, old_instance, state)
     }
 }
 
@@ -398,11 +404,20 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSignedResponse<RotateKpsRe
             .map(KPEncryptedShares::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
+        let new_instance = SecretSharingInstance::try_from(
+            data.new_instance.ok_or_else(|| missing("new_instance"))?,
+        )?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned::from_parts(
-            GuardianResponse::new(RotateKpsResponse { encrypted_shares }, timestamp_ms),
+            GuardianResponse::new(
+                RotateKpsResponse {
+                    encrypted_shares,
+                    new_instance,
+                },
+                timestamp_ms,
+            ),
             signature,
         ))
     }
@@ -612,16 +627,19 @@ pub fn rotate_kps_response_signed_to_pb(
     s: GuardianSignedResponse<RotateKpsResponse>,
 ) -> pb::SignedRotateKpsResponse {
     let (data, signature) = s.into_parts();
+    let RotateKpsResponse {
+        encrypted_shares,
+        new_instance,
+    } = data.response;
 
     pb::SignedRotateKpsResponse {
         data: Some(pb::RotateKpsResponseData {
-            encrypted_shares: data
-                .response
-                .encrypted_shares
+            encrypted_shares: encrypted_shares
                 .into_vec()
                 .into_iter()
                 .map(kp_encrypted_shares_to_pb)
                 .collect(),
+            new_instance: Some(secret_sharing_instance_to_pb(&new_instance)),
         }),
         timestamp_ms: Some(data.timestamp_ms),
         signature: Some(signature.to_bytes().to_vec().into()),
@@ -657,13 +675,31 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, init_config, genesis_state) = r.into_parts();
+    let request = match r {
+        OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }) => {
+            pb::operator_init_request::Request::Ceremony(pb::CeremonyOperatorInitRequest {
+                s3_config: Some(s3_config_to_pb(s3_config)),
+            })
+        }
+        OperatorInitRequest::Withdraw(request) => {
+            let WithdrawOperatorInitRequest {
+                s3_config,
+                init_config,
+                genesis_state,
+            } = *request;
+            pb::operator_init_request::Request::Withdraw(Box::new(
+                pb::WithdrawOperatorInitRequest {
+                    s3_config: Some(s3_config_to_pb(s3_config)),
+                    init_config: Some(init_config_to_pb(init_config)?),
+                    genesis_state: genesis_state.map(|state| pb::GenesisState {
+                        committee: Some(move_committee_to_pb(&state.into_committee())),
+                    }),
+                },
+            ))
+        }
+    };
     Ok(pb::OperatorInitRequest {
-        s3_config: Some(s3_config_to_pb(s3_config)),
-        init_config: init_config.map(init_config_to_pb).transpose()?,
-        genesis_state: genesis_state.map(|state| pb::GenesisState {
-            committee: Some(move_committee_to_pb(&state.into_committee())),
-        }),
+        request: Some(request),
     })
 }
 
@@ -673,20 +709,20 @@ pub fn operator_activate_request_to_pb(r: OperatorActivateRequest) -> pb::Operat
     }
 }
 
-pub fn provisioner_init_request_to_pb(
-    r: ProvisionerInitRequest,
-) -> GuardianResult<pb::ProvisionerInitRequest> {
-    Ok(pb::ProvisionerInitRequest {
+pub fn batch_provisioner_init_request_to_pb(
+    r: BatchProvisionerInitRequest,
+) -> GuardianResult<pb::BatchProvisionerInitRequest> {
+    Ok(pb::BatchProvisionerInitRequest {
         submissions: r
             .0
             .into_iter()
-            .map(pb::SignedSingleProvisionerInitRequest::from)
+            .map(pb::SignedProvisionerInitRequest::from)
             .collect(),
     })
 }
 
-impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisionerInitRequest {
-    fn from(r: KpSigned<SingleProvisionerInitRequest>) -> Self {
+impl From<KpSigned<ProvisionerInitRequest>> for pb::SignedProvisionerInitRequest {
+    fn from(r: KpSigned<ProvisionerInitRequest>) -> Self {
         let (request, signer_cert, signature) = r.into_parts();
         let (
             expected_session_id,
@@ -1689,32 +1725,38 @@ mod tests {
 
     #[test]
     fn operator_init_request_round_trip() {
-        let req = OperatorInitRequest::mock_for_testing();
-        let pb = operator_init_request_to_pb(req.clone()).unwrap();
-        let back = OperatorInitRequest::try_from(pb).unwrap();
+        let requests = [
+            OperatorInitRequest::mock_for_testing(),
+            OperatorInitRequest::new_ceremony_mode(
+                super::super::ResolvedS3Config::mock_for_testing(),
+            ),
+        ];
+        for request in requests {
+            let pb = operator_init_request_to_pb(request.clone()).unwrap();
+            let round_trip = OperatorInitRequest::try_from(pb).unwrap();
+            assert_eq!(request, round_trip);
+        }
+    }
+
+    #[test]
+    fn batch_provisioner_init_request_round_trip() {
+        let req = BatchProvisionerInitRequest::mock_for_testing();
+        let pb = batch_provisioner_init_request_to_pb(req.clone()).unwrap();
+        let back = BatchProvisionerInitRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
     }
 
     #[test]
-    fn provisioner_init_request_round_trip() {
-        let req = ProvisionerInitRequest::mock_for_testing();
-        let pb = provisioner_init_request_to_pb(req.clone()).unwrap();
-        let back = ProvisionerInitRequest::try_from(pb).unwrap();
-        assert_eq!(req, back);
-    }
-
-    #[test]
-    fn signed_single_provisioner_init_request_round_trip_and_verifies() {
+    fn signed_provisioner_init_request_round_trip_and_verifies() {
         use crate::pgp::test_utils::mock_pgp_keypair;
         use crate::pgp::test_utils::sign_detached_in_process;
 
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let (_, _, _, encrypted_share) =
-            SingleProvisionerInitRequest::mock_for_testing().into_parts();
+        let (_, _, _, encrypted_share) = ProvisionerInitRequest::mock_for_testing().into_parts();
         let expected_config_hash = [9u8; 32];
         let expected_genesis_state_hash = Some([10u8; 32]);
-        let request = SingleProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::new(
             "session-a".into(),
             expected_config_hash,
             expected_genesis_state_hash,
@@ -1724,8 +1766,8 @@ mod tests {
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
         let signed = KpSigned::from_parts(request, cert.clone(), signature);
 
-        let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
-        let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
+        let pb = pb::SignedProvisionerInitRequest::from(signed);
+        let back = KpSigned::<ProvisionerInitRequest>::try_from(pb.clone()).unwrap();
         let data = back.verify_signature().unwrap();
         assert_eq!(data.expected_session_id(), "session-a");
         assert_eq!(data.expected_config_hash(), &expected_config_hash);
@@ -1738,7 +1780,7 @@ mod tests {
 
         let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
-        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify_signature().is_err(),
             "signature must bind the expected guardian session"
@@ -1746,7 +1788,7 @@ mod tests {
 
         let mut tampered = pb;
         tampered.expected_config_hash = Some(vec![8u8; 32].into());
-        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify_signature().is_err(),
             "signature must bind the expected operator-init config hash"

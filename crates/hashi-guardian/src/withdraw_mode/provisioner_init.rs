@@ -29,7 +29,7 @@ struct PIInstall {
 impl PIInstall {
     async fn from_request(
         enclave: &Enclave,
-        request: ProvisionerInitRequest,
+        request: BatchProvisionerInitRequest,
     ) -> GuardianResult<Self> {
         let initialization = enclave
             .temporary_init_state()
@@ -89,7 +89,7 @@ impl PIInstall {
 /// commitment-checking any share.
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
-    request: ProvisionerInitRequest,
+    request: BatchProvisionerInitRequest,
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
@@ -137,7 +137,7 @@ async fn commit_provisioner_init(enclave: &Enclave, install: PIInstall) {
 }
 
 fn verify_signed_submissions(
-    request: &ProvisionerInitRequest,
+    request: &BatchProvisionerInitRequest,
     live_session_id: &SessionID,
     live_config_hash: &[u8; 32],
     live_genesis_state_hash: Option<[u8; 32]>,
@@ -296,7 +296,7 @@ mod tests {
             signer_index: usize,
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
-        ) -> KpSigned<SingleProvisionerInitRequest> {
+        ) -> KpSigned<ProvisionerInitRequest> {
             self.signed_submission_with_key_and_genesis_hash(
                 share,
                 &self.kp_keys[signer_index],
@@ -317,7 +317,7 @@ mod tests {
             signer: &(PgpPublicCert, String),
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
-        ) -> KpSigned<SingleProvisionerInitRequest> {
+        ) -> KpSigned<ProvisionerInitRequest> {
             self.signed_submission_with_key_and_genesis_hash(
                 share,
                 signer,
@@ -339,7 +339,7 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
             expected_genesis_state_hash: Option<[u8; 32]>,
-        ) -> KpSigned<SingleProvisionerInitRequest> {
+        ) -> KpSigned<ProvisionerInitRequest> {
             self.signed_submission_with_key_and_genesis_hash(
                 share,
                 &self.kp_keys[signer_index],
@@ -356,8 +356,8 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
             expected_genesis_state_hash: Option<[u8; 32]>,
-        ) -> KpSigned<SingleProvisionerInitRequest> {
-            let request = SingleProvisionerInitRequest::build_from_share(
+        ) -> KpSigned<ProvisionerInitRequest> {
+            let request = ProvisionerInitRequest::build_from_share(
                 expected_session_id,
                 expected_config_hash,
                 expected_genesis_state_hash,
@@ -370,7 +370,7 @@ mod tests {
             KpSigned::from_parts(request, cert.clone(), signature)
         }
 
-        fn request(&self, shares: &[Share]) -> ProvisionerInitRequest {
+        fn request(&self, shares: &[Share]) -> BatchProvisionerInitRequest {
             let session_id = self.enclave.s3_session_id();
             let config_hash = self.config_hash();
             let submissions = shares
@@ -384,10 +384,10 @@ mod tests {
                     )
                 })
                 .collect();
-            ProvisionerInitRequest(submissions)
+            BatchProvisionerInitRequest(submissions)
         }
 
-        async fn provision(&self, request: ProvisionerInitRequest) -> GuardianResult<()> {
+        async fn provision(&self, request: BatchProvisionerInitRequest) -> GuardianResult<()> {
             provisioner_init(self.enclave.clone(), request).await
         }
     }
@@ -454,7 +454,7 @@ mod tests {
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
 
-        ctx.provision(ProvisionerInitRequest(submissions))
+        ctx.provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect("either cert assigned to the share should authorize PI");
     }
@@ -499,7 +499,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_before_operator_init() {
         let enclave = Enclave::create_with_random_keys();
-        let err = provisioner_init(enclave, ProvisionerInitRequest(vec![]))
+        let err = provisioner_init(enclave, BatchProvisionerInitRequest(vec![]))
             .await
             .expect_err("should fail");
         assert!(matches!(err, LifecycleMismatch { .. }));
@@ -521,7 +521,7 @@ mod tests {
             })
             .collect();
         let err = ctx
-            .provision(ProvisionerInitRequest(submissions))
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -543,7 +543,7 @@ mod tests {
             })
             .collect();
         let err = ctx
-            .provision(ProvisionerInitRequest(submissions))
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -565,7 +565,7 @@ mod tests {
             })
             .collect();
         let err = ctx
-            .provision(ProvisionerInitRequest(submissions))
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -577,7 +577,7 @@ mod tests {
         let mut submissions = ctx.request(&ctx.shares[..TEST_T]).0;
         submissions[0].signature = "invalid signature".into();
         let err = ctx
-            .provision(ProvisionerInitRequest(submissions))
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, Unauthenticated(_)));
@@ -594,7 +594,7 @@ mod tests {
             ctx.config_hash(),
         );
         let err = ctx
-            .provision(ProvisionerInitRequest(submissions))
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(message) if message.contains("assigned to KP")));
@@ -615,7 +615,7 @@ mod tests {
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
         let err = ctx
-            .provision(ProvisionerInitRequest(submissions))
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -631,7 +631,7 @@ mod tests {
             ctx.config_hash(),
         );
         let err = ctx
-            .provision(ProvisionerInitRequest(vec![
+            .provision(BatchProvisionerInitRequest(vec![
                 first.clone(),
                 first,
                 ctx.signed_submission(

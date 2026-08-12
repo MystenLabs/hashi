@@ -48,10 +48,7 @@ pub async fn provisioner_rotate_cert(
 
     let mut reader = enclave.new_guardian_reader()?;
 
-    let latest_state = reader
-        .read_latest_ceremony_state()
-        .await?
-        .ok_or_else(|| InvalidInputs("no ceremony log found during cert rotation".into()))?;
+    let latest_state = reader.read_latest_ceremony_state().await?;
     let enclave_btc_pubkey = enclave.config.enclave_btc_pubkey()?;
     if latest_state.btc_master_pubkey != enclave_btc_pubkey {
         return Err(InvalidInputs(format!(

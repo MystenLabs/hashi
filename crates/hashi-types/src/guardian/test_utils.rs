@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::BatchProvisionerInitRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
 use super::GetGuardianInfoResponse;
@@ -34,7 +35,6 @@ use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
 use super::ShareCommitments;
-use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawStage;
@@ -194,6 +194,7 @@ impl RotateKpsResponse {
     pub fn mock_for_testing() -> Self {
         Self {
             encrypted_shares: dummy_encrypted_shares(),
+            new_instance: dummy_secret_sharing_instance(),
         }
     }
 }
@@ -247,7 +248,7 @@ impl OperatorInitRequest {
     }
 }
 
-impl SingleProvisionerInitRequest {
+impl ProvisionerInitRequest {
     pub fn mock_for_testing() -> Self {
         let encrypted_share = GuardianEncryptedShare {
             id: NonZeroU16::new(1).unwrap(),
@@ -260,12 +261,12 @@ impl SingleProvisionerInitRequest {
     }
 }
 
-impl ProvisionerInitRequest {
+impl BatchProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
         let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
-        ProvisionerInitRequest(vec![KpSigned::from_parts(
-            SingleProvisionerInitRequest::mock_for_testing(),
+        BatchProvisionerInitRequest(vec![KpSigned::from_parts(
+            ProvisionerInitRequest::mock_for_testing(),
             crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
             "mock-signature".into(),
         )])

@@ -23,7 +23,7 @@ service GuardianService {
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
 
   // Provisioner initialization: submit the current KPs' signed share contributions.
-  rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
+  rpc ProvisionerInit(BatchProvisionerInitRequest) returns (ProvisionerInitResponse);
 
   // KP-facing: replace one OpenPGP cert wrapping an already-committed share.
   rpc ProvisionerRotateCert(SignedProvisionerRotateCertRequest) returns (SignedProvisionerRotateCertResponse);
@@ -222,15 +222,24 @@ message SignedSetupNewKeyResponse {
 // =======================
 
 message OperatorInitRequest {
-  // S3 connection and retention config.
+  oneof request {
+    CeremonyOperatorInitRequest ceremony = 1;
+    WithdrawOperatorInitRequest withdraw = 2;
+  }
+}
+
+message CeremonyOperatorInitRequest {
+  S3Config s3_config = 1;
+}
+
+message WithdrawOperatorInitRequest {
   S3Config s3_config = 1;
 
-  // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-  // exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
-  InitConfig init_config = 4;
+  // Stable configuration whose digest KPs bind into signed PI submissions.
+  InitConfig init_config = 2;
 
   // First-deploy state to be authorized by KPs during provisioner_init.
-  GenesisState genesis_state = 5;
+  GenesisState genesis_state = 3;
 }
 
 message OperatorInitResponse {}
@@ -269,7 +278,7 @@ enum Network {
 
 // One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
 // and buffer these submissions, but the enclave is the authoritative verifier.
-message SignedSingleProvisionerInitRequest {
+message SignedProvisionerInitRequest {
   // This KP's share, HPKE-encrypted to the enclave session key without config
   // AAD. The signature below binds the share to the expected config instead.
   GuardianEncryptedShare encrypted_share = 1;
@@ -281,7 +290,7 @@ message SignedSingleProvisionerInitRequest {
   string signer_cert = 3;
 
   // Detached armored OpenPGP signature over the intent-tagged
-  // SingleProvisionerInitRequest payload.
+  // ProvisionerInitRequest payload.
   string kp_signature = 4;
 
   // The operator-init config hash the KP independently recomputed and verified.
@@ -294,8 +303,8 @@ message SignedSingleProvisionerInitRequest {
 // Assembled from the current KPs' signed submissions by the relay once it has
 // collected enough. The enclave re-verifies every submission before using any
 // share.
-message ProvisionerInitRequest {
-  repeated SignedSingleProvisionerInitRequest submissions = 1;
+message BatchProvisionerInitRequest {
+  repeated SignedProvisionerInitRequest submissions = 1;
 }
 
 message OperatorActivateRequest {
@@ -419,6 +428,7 @@ message RotateKpsRequest {
 // Unsigned response payload.
 message RotateKpsResponseData {
   repeated SingleKPEncryptedShares encrypted_shares = 1;
+  SecretSharingInstance new_instance = 2;
 }
 
 // Application-layer signed response.

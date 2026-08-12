@@ -114,13 +114,16 @@ async fn finalize_rotation(
     enclave
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
-            new_instance,
+            new_instance: new_instance.clone(),
             btc_master_pubkey,
         })
         .await?;
 
     info!("Rotation complete.");
-    Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
+    Ok(enclave.sign(RotateKpsResponse {
+        encrypted_shares,
+        new_instance,
+    }))
 }
 
 #[cfg(test)]
@@ -187,7 +190,7 @@ mod tests {
         enclave: &Enclave,
         old_instance: &SecretSharingInstance,
         state: RotateKpsState,
-    ) -> RotateKpsRequest {
+    ) -> GuardianResult<RotateKpsRequest> {
         let submissions = shares
             .iter()
             .map(|s| {
@@ -202,17 +205,13 @@ mod tests {
         RotateKpsRequest::new(submissions, old_instance.clone(), state)
     }
 
-    /// Run one rotation and return its verified response shares.
-    async fn rotate_and_verify(
-        enclave: &Arc<Enclave>,
-        req: RotateKpsRequest,
-    ) -> KPEncryptedSharesRoster {
+    /// Run one rotation and return its verified response.
+    async fn rotate_and_verify(enclave: &Arc<Enclave>, req: RotateKpsRequest) -> RotateKpsResponse {
         let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
         signed
             .verify_into_data(&enclave.signing_pubkey())
             .expect("response signed by enclave")
             .response
-            .encrypted_shares
     }
 
     /// Assert the rotation returned `new_n` PGP-armored shares and produced
@@ -220,11 +219,12 @@ mod tests {
     /// only (no ciphertexts).
     fn assert_rotation_output(
         captures: &CapturedPuts,
-        response_shares: &KPEncryptedSharesRoster,
+        response: &RotateKpsResponse,
         secret_keys: &MockKpSecretKeys,
         new_n: usize,
         new_t: usize,
     ) {
+        let response_shares = &response.encrypted_shares;
         assert_eq!(response_shares.share_count(), new_n);
         for enc in response_shares.iter() {
             for ciphertext in enc.ciphertexts_by_fingerprint.values() {
@@ -272,6 +272,7 @@ mod tests {
         assert_eq!(new_instance.sharing_seq(), 1);
         assert_eq!(new_instance.num_shares(), new_n);
         assert_eq!(new_instance.threshold(), new_t);
+        assert_eq!(&response.new_instance, new_instance);
 
         let decrypted_shares = decrypt_kp_shares(response_shares, secret_keys);
         for share in &decrypted_shares {
@@ -315,9 +316,9 @@ mod tests {
     async fn happy_path_threshold_reached() {
         let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
         let (state, secret_keys) = build_state_with_secrets(TEST_N, TEST_T);
-        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, state);
-        let response_shares = rotate_and_verify(&enclave, req).await;
-        assert_rotation_output(&captures, &response_shares, &secret_keys, TEST_N, TEST_T);
+        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, state).unwrap();
+        let response = rotate_and_verify(&enclave, req).await;
+        assert_rotation_output(&captures, &response, &secret_keys, TEST_N, TEST_T);
     }
 
     #[tokio::test]
@@ -325,9 +326,9 @@ mod tests {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
         let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
         let (state, secret_keys) = build_state_with_secrets(3, 2);
-        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, state);
-        let response_shares = rotate_and_verify(&enclave, req).await;
-        assert_rotation_output(&captures, &response_shares, &secret_keys, 3, 2);
+        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, state).unwrap();
+        let response = rotate_and_verify(&enclave, req).await;
+        assert_rotation_output(&captures, &response, &secret_keys, 3, 2);
     }
 
     #[tokio::test]
@@ -335,11 +336,12 @@ mod tests {
         let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
 
         // First call reaches threshold and finalizes.
-        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
+        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state()).unwrap();
         rotate_kps(enclave.clone(), req).await.expect("ok");
 
         // A second call is rejected outright — no re-split.
-        let req2 = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
+        let req2 =
+            build_request(&shares[..TEST_T], &enclave, &old_instance, build_state()).unwrap();
         let err = rotate_kps(enclave, req2).await.expect_err("should reject");
         assert!(matches!(err, LifecycleMismatch { .. }));
 
@@ -377,24 +379,71 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let req = RotateKpsRequest::new(submissions, old_instance, state);
-
-        let err = rotate_kps(enclave, req).await.expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
+        let err = RotateKpsRequest::new(submissions, old_instance, state)
+            .expect_err("duplicate share id should fail request construction");
+        assert!(matches!(&err, InvalidInputs(_)));
+        assert!(format!("{err}").contains("duplicate encrypted old share id"));
     }
 
     #[tokio::test]
     async fn rejects_below_threshold() {
         let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         // Only T-1 submissions.
-        let req = build_request(
+        let err = build_request(
             &shares[..TEST_T - 1],
             &enclave,
             &old_instance,
             build_state(),
-        );
-        let err = rotate_kps(enclave, req).await.expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
+        )
+        .expect_err("below-threshold shares should fail request construction");
+        assert!(matches!(&err, InvalidInputs(_)));
+        assert!(format!("{err}").contains("need at least"));
+    }
+
+    #[tokio::test]
+    async fn rejects_more_shares_than_old_instance() {
+        let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
+        let state = build_state();
+        let mut submissions = shares
+            .iter()
+            .map(|share| {
+                RotateKpsRequest::build_from_share_and_state(
+                    share,
+                    enclave.encryption_public_key(),
+                    &state,
+                    &mut rand::thread_rng(),
+                )
+            })
+            .collect::<Vec<_>>();
+        submissions.push(submissions[0].clone());
+
+        let err = RotateKpsRequest::new(submissions, old_instance, state)
+            .expect_err("too many shares should fail request construction");
+        assert!(matches!(&err, InvalidInputs(_)));
+        assert!(format!("{err}").contains("at most"));
+    }
+
+    #[tokio::test]
+    async fn rejects_share_id_outside_old_instance() {
+        let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
+        let state = build_state();
+        let mut submissions = shares[..TEST_T]
+            .iter()
+            .map(|share| {
+                RotateKpsRequest::build_from_share_and_state(
+                    share,
+                    enclave.encryption_public_key(),
+                    &state,
+                    &mut rand::thread_rng(),
+                )
+            })
+            .collect::<Vec<_>>();
+        submissions[0].id = std::num::NonZeroU16::new((TEST_N + 1) as u16).unwrap();
+
+        let err = RotateKpsRequest::new(submissions, old_instance, state)
+            .expect_err("out-of-range share id should fail request construction");
+        assert!(matches!(&err, InvalidInputs(_)));
+        assert!(format!("{err}").contains("exceeds old instance num_shares"));
     }
 
     #[tokio::test]
@@ -428,7 +477,7 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let req = RotateKpsRequest::new(submissions, old_instance, state2);
+        let req = RotateKpsRequest::new(submissions, old_instance, state2).unwrap();
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -436,17 +485,13 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_share_not_matching_commitments() {
-        let (_shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
+        let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         let bogus_share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32),
         };
-        let req = build_request(
-            std::slice::from_ref(&bogus_share),
-            &enclave,
-            &old_instance,
-            build_state(),
-        );
+        let submitted_shares = [bogus_share, shares[1], shares[2]];
+        let req = build_request(&submitted_shares, &enclave, &old_instance, build_state()).unwrap();
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
@@ -479,7 +524,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let req = RotateKpsRequest::new(submissions, old_instance, state);
+        let req = RotateKpsRequest::new(submissions, old_instance, state).unwrap();
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, LifecycleMismatch { .. }));
     }
