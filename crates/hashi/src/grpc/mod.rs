@@ -190,10 +190,8 @@ async fn health() -> impl axum::response::IntoResponse {
 }
 
 async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
-    // A poisoned database cannot be recovered without reopening it, so the node
-    // will never persist anything again. Report not-ready rather than keep
-    // serving: the process needs restarting, and on a full volume that also
-    // needs an operator. See `hashi_db_poisoned`.
+    // A poisoned database never persists again without a restart, so stop
+    // serving rather than look healthy. See `hashi_db_poisoned`.
     if hashi.db.is_poisoned() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,

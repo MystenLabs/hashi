@@ -28,11 +28,9 @@ use crate::mpc::types::RotationMessages;
 pub struct Database {
     db: fjall::Database,
 
-    // Latched when fjall poisons the database, which it does on a failed write
-    // — `ENOSPC` above all. Poisoning does not clear in-process: every later
-    // write fails the same way and only reopening recovers. Without this the
-    // node keeps answering RPCs and reporting ready while persisting nothing,
-    // which is how a full volume turned into a silently stalled key rotation.
+    // Latched when fjall poisons the database on a failed write, `ENOSPC`
+    // above all. Nothing recovers in-process, so the node has to stop
+    // reporting ready rather than serve on while persisting nothing.
     poisoned: std::sync::atomic::AtomicBool,
 
     // keyspaces
@@ -337,9 +335,7 @@ impl Database {
     }
 
     /// Pass a write result through, latching if it says fjall is poisoned.
-    ///
-    /// Reads never surface poisoning — fjall only checks the flag on the write
-    /// path — so this is both where it can be seen and where it matters.
+    /// Reads never surface it: fjall only checks the flag when writing.
     fn note_write<T>(&self, result: Result<T>) -> Result<T> {
         if matches!(result, Err(fjall::Error::Poisoned)) {
             self.poisoned
@@ -348,8 +344,8 @@ impl Database {
         result
     }
 
-    /// Whether fjall has poisoned this database. Never clears; only reopening
-    /// the database recovers, so the node needs to be restarted.
+    /// Whether fjall has poisoned this database. Never clears — only reopening
+    /// recovers, so the node has to be restarted.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -775,6 +771,10 @@ impl Database {
         cutoff_epoch: u64,
         pruning_references: &PruningReferences,
     ) -> Result<()> {
+        self.note_write(self.prune(cutoff_epoch, pruning_references))
+    }
+
+    fn prune(&self, cutoff_epoch: u64, pruning_references: &PruningReferences) -> Result<()> {
         let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
         // A key is retained if and only if its public key is referenced by a live committee or pending registration,
         // or it was created within the retention buffer.
