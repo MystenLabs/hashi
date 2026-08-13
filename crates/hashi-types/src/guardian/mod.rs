@@ -1,27 +1,24 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod attestation;
 mod ceremony_state;
 pub mod crypto;
 pub mod errors;
-pub mod kp_certs_roster;
 pub mod lifecycle;
 pub mod proto_conversions;
 pub mod s3;
 pub(crate) mod serde;
 mod session;
-pub mod signing;
 pub mod test_utils;
 pub mod time;
 
 pub mod limiter;
 
-pub use attestation::BuildPcrs;
-pub use attestation::GitRevision;
-pub use attestation::NitroAttestation;
-pub use attestation::PcrAllowlist;
 pub use ceremony_state::*;
+pub use crypto::attestation;
+pub use crypto::encryption as kp_certs_roster;
+pub use crypto::signing;
+pub use crypto::*;
 pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
@@ -38,14 +35,6 @@ pub use s3::UnresolvedS3Config;
 pub use s3::log;
 pub use s3::log::*;
 pub use session::*;
-pub use signing::GuardianResponse;
-pub use signing::GuardianSigned;
-pub use signing::GuardianSignedResponse;
-pub use signing::GuardianSigningIntent;
-pub use signing::GuardianSigningIntentType;
-pub use signing::KpSigned;
-pub use signing::KpSigningIntent;
-pub use signing::KpSigningIntentType;
 pub use time::UnixMillis;
 pub use time::now_timestamp_ms;
 pub use time::now_timestamp_secs;
@@ -67,12 +56,10 @@ use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
 use blake2::digest::consts::U32;
-pub use crypto::*;
 pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
-pub use kp_certs_roster::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 
