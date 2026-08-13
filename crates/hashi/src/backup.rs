@@ -1319,10 +1319,8 @@ mod tests {
         let src = tempfile::Builder::new().tempdir().unwrap();
         let db_path = src.path().join("db");
         let node_config_path = src.path().join("config.toml");
-        let node_config = crate::config::Config {
-            db: Some(db_path.clone()),
-            ..Default::default()
-        };
+        let mut node_config = crate::config::Config::new_for_testing();
+        node_config.db = Some(db_path.clone());
         node_config.save(&node_config_path).unwrap();
 
         let db = Database::open(&db_path).unwrap();
@@ -1340,15 +1338,14 @@ mod tests {
         let src = tempfile::Builder::new().tempdir().unwrap();
         let db_path = src.path().join("db");
         let node_config_path = src.path().join("config.toml");
-        let node_config = crate::config::Config {
-            db: Some(db_path.clone()),
-            ..Default::default()
-        };
+        let (public_cert, secret_key) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        let mut node_config = crate::config::Config::new_for_testing();
+        node_config.db = Some(db_path.clone());
+        node_config.backup_pgp_cert = recipient.clone();
         node_config.save(&node_config_path).unwrap();
 
         let db = Database::open(&db_path).unwrap();
-        let (public_cert, secret_key) = mock_pgp_keypair();
-        let recipient = PgpPublicCert::new(public_cert).unwrap();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
         let output_path =

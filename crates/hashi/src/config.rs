@@ -20,13 +20,11 @@ pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 102
 
 fn deserialize_backup_pgp_cert<'de, D>(
     deserializer: D,
-) -> Result<Option<hashi_types::pgp::PgpPublicCert>, D::Error>
+) -> Result<hashi_types::pgp::PgpPublicCert, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let Some(value) = <Option<String> as serde::Deserialize>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
 
     let path = Path::new(&value);
     let armored = if path.is_file() {
@@ -35,12 +33,10 @@ where
         value
     };
 
-    hashi_types::pgp::PgpPublicCert::new(armored)
-        .map(Some)
-        .map_err(serde::de::Error::custom)
+    hashi_types::pgp::PgpPublicCert::new(armored).map_err(serde::de::Error::custom)
 }
 
-#[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,12 +94,8 @@ pub struct Config {
     pub db: Option<PathBuf>,
 
     /// Armored OpenPGP certificate or certificate file path used for node backups.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_backup_pgp_cert",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub backup_pgp_cert: Option<hashi_types::pgp::PgpPublicCert>,
+    #[serde(deserialize_with = "deserialize_backup_pgp_cert")]
+    pub backup_pgp_cert: hashi_types::pgp::PgpPublicCert,
 
     /// Directory to write automatic encrypted backups into.
     ///
@@ -462,7 +454,41 @@ impl Config {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         use std::ops::Deref;
 
-        let mut config = Config::default();
+        let mut config = Config {
+            tls_private_key: None,
+            operator_private_key: None,
+            validator_address: None,
+            listen_address: None,
+            endpoint_url: None,
+            metrics_http_address: None,
+            sui_chain_id: None,
+            bitcoin_chain_id: None,
+            hashi_ids: None,
+            sui_rpc: None,
+            bitcoin_rpc: None,
+            bitcoin_rpc_auth: None,
+            bitcoin_start_height: None,
+            bitcoin_trusted_peers: None,
+            db: None,
+            backup_pgp_cert: hashi_types::pgp::test_utils::mock_pgp_cert(),
+            backup_dir: None,
+            force_run_as_leader: None,
+            test_weight_divisor: None,
+            test_batch_size_per_weight: None,
+            screener_endpoint: None,
+            guardian_endpoint: None,
+            grpc_max_decoding_message_size: None,
+            max_concurrent_leader_job_tasks: None,
+            withdrawal_batching_delay_ms: None,
+            withdrawal_max_batch_size: None,
+            withdrawal_signing_concurrency: None,
+            mpc_signing_chunk_size: None,
+            max_mempool_chain_depth: None,
+            withdrawal_fee_conf_target: None,
+            withdrawal_min_fee_rate_sat_vb: None,
+            test_corrupt_shares_for: None,
+            metrics_push: None,
+        };
 
         let tls_private_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
 
@@ -571,18 +597,19 @@ mod tests {
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
 
         let config = Config::load(&config_path).unwrap();
-        assert_eq!(
-            config.backup_pgp_cert.unwrap().armored(),
-            public_cert.as_str()
-        );
+        assert_eq!(config.backup_pgp_cert.armored(), public_cert.as_str());
+    }
+
+    #[test]
+    fn backup_pgp_cert_is_required() {
+        let error = toml::from_str::<Config>("").unwrap_err().to_string();
+        assert!(error.contains("missing field `backup-pgp-cert`"), "{error}");
     }
 
     #[test]
     fn backup_dir_uses_configured_path() {
-        let config = Config {
-            backup_dir: Some(PathBuf::from("/var/lib/hashi/backups")),
-            ..Default::default()
-        };
+        let mut config = Config::new_for_testing();
+        config.backup_dir = Some(PathBuf::from("/var/lib/hashi/backups"));
         assert_eq!(config.backup_dir(), Path::new("/var/lib/hashi/backups"));
     }
 
@@ -618,52 +645,42 @@ mod tests {
 
     #[test]
     fn test_withdrawal_max_batch_size_defaults_to_absolute_cap() {
-        let config = Config::default();
+        let config = Config::new_for_testing();
         assert_eq!(config.withdrawal_max_batch_size(), 298);
     }
 
     #[test]
     fn bitcoin_start_height_defaults_per_network() {
         // Unset on Signet uses the Signet deployment anchor, not the 800k default.
-        let signet = Config {
-            bitcoin_chain_id: Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string()),
-            bitcoin_start_height: None,
-            ..Config::default()
-        };
+        let mut signet = Config::new_for_testing();
+        signet.bitcoin_chain_id = Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string());
+        signet.bitcoin_start_height = None;
         assert_eq!(signet.bitcoin_start_height(), 300_000);
 
         // Unset on Mainnet keeps the existing default.
-        let mainnet = Config {
-            bitcoin_chain_id: Some(crate::constants::BITCOIN_MAINNET_CHAIN_ID.to_string()),
-            bitcoin_start_height: None,
-            ..Config::default()
-        };
+        let mut mainnet = Config::new_for_testing();
+        mainnet.bitcoin_chain_id = Some(crate::constants::BITCOIN_MAINNET_CHAIN_ID.to_string());
+        mainnet.bitcoin_start_height = None;
         assert_eq!(mainnet.bitcoin_start_height(), 800_000);
 
         // An explicit value always wins.
-        let overridden = Config {
-            bitcoin_chain_id: Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string()),
-            bitcoin_start_height: Some(123_456),
-            ..Config::default()
-        };
+        let mut overridden = Config::new_for_testing();
+        overridden.bitcoin_chain_id = Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string());
+        overridden.bitcoin_start_height = Some(123_456);
         assert_eq!(overridden.bitcoin_start_height(), 123_456);
     }
 
     #[test]
     fn test_withdrawal_max_batch_size_clamps_to_absolute_cap() {
-        let config = Config {
-            withdrawal_max_batch_size: Some(1_000),
-            ..Config::default()
-        };
+        let mut config = Config::new_for_testing();
+        config.withdrawal_max_batch_size = Some(1_000);
         assert_eq!(config.withdrawal_max_batch_size(), 298);
     }
 
     #[test]
     fn test_withdrawal_max_batch_size_accepts_values_below_the_cap() {
-        let config = Config {
-            withdrawal_max_batch_size: Some(70),
-            ..Config::default()
-        };
+        let mut config = Config::new_for_testing();
+        config.withdrawal_max_batch_size = Some(70);
         assert_eq!(config.withdrawal_max_batch_size(), 70);
     }
 }
