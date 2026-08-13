@@ -16,23 +16,12 @@
 //! The monitor is insecure without this check as a malicious hashi committee can include an arbitrary destination address.
 
 use std::fmt;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use bitcoin::OutPoint;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
-
-// TODO: duplicate of `hashi_types::guardian::time_utils::now_timestamp_secs`;
-// remove and migrate the remaining monitor callers.
-pub fn now_unix_seconds() -> UnixSeconds {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 /// Unix seconds rendered in the monitor's canonical UTC timestamp format.
 pub struct UtcTimestamp(UnixSeconds);

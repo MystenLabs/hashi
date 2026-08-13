@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bitcoin::BlockHash;
 use bitcoin::Txid;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::debug;

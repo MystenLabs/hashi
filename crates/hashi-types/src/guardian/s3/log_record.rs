@@ -10,12 +10,12 @@
 //! enforces self-contained record invariants; checks requiring external context
 //! remain explicit reader operations.
 
-use super::ObjectKeyPattern;
-use super::retention::S3ObjectLockPolicy;
-use super::schema::LogMessage;
-use super::schema::LogMessageV1;
-use super::schema::LogMessageV2;
-use super::schema::VersionedLogMessage;
+use super::config::S3ObjectLockPolicy;
+use super::log_layout::ObjectKeyPattern;
+use super::log_schema::LogMessage;
+use super::log_schema::LogMessageV1;
+use super::log_schema::LogMessageV2;
+use super::log_schema::VersionedLogMessage;
 use crate::guardian::GuardianError::InvalidS3Log;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
@@ -70,7 +70,7 @@ struct LogRecordWire {
     session_id: SessionID,
     timestamp_ms: UnixMillis,
     message: Value,
-    #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
+    #[serde(with = "crate::guardian::serde::option_guardian_signature")]
     signature: Option<GuardianSignature>,
 }
 
@@ -81,7 +81,7 @@ struct LogRecordWireRef<'a> {
     session_id: &'a SessionID,
     timestamp_ms: UnixMillis,
     message: &'a VersionedLogMessage,
-    #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
+    #[serde(with = "crate::guardian::serde::option_guardian_signature")]
     signature: Option<GuardianSignature>,
 }
 
@@ -204,7 +204,7 @@ impl LogEntry {
         let Some(attestation_log) = self.message.as_attestation_log() else {
             return Ok(());
         };
-        let super::messages::InitLogMessage::OIAttestationUnsigned {
+        let super::log_messages::InitLogMessage::OIAttestationUnsigned {
             signing_public_key, ..
         } = attestation_log
         else {
@@ -352,7 +352,7 @@ impl LogRecord {
 
     /// Return the object-lock duration selected for the message type.
     pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
-        policy.duration_for(self.data().message.log_type())
+        self.data().message.log_type().object_lock_duration(policy)
     }
 
     /// Consume the record and extract its entry without validation.

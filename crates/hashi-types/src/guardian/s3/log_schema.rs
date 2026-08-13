@@ -2,23 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The versioned `LogMessage` family the enclave emits. The `LogRecord` wrapper
-//! that carries these to S3 lives in `super::record`.
+//! that carries these to S3 lives in `super::log_record`.
 
-use super::LogType;
-use super::ObjectKeyPattern;
-use super::messages::CeremonyLogMessage;
-use super::messages::CommitteeUpdateLogMessage;
-use super::messages::GenesisLogMessage;
-use super::messages::HeartbeatLogMessage;
-use super::messages::InitLogMessage;
-use super::messages::KpShareStateLogMessageV1;
-use super::messages::KpShareStateLogMessageV2;
-use super::messages::WithdrawalLogMessage;
+use super::config::S3ObjectLockPolicy;
+use super::log_layout::ObjectKeyPattern;
+use super::log_messages::CeremonyLogMessage;
+use super::log_messages::CommitteeUpdateLogMessage;
+use super::log_messages::GenesisLogMessage;
+use super::log_messages::HeartbeatLogMessage;
+use super::log_messages::InitLogMessage;
+use super::log_messages::KpShareStateLogMessageV1;
+use super::log_messages::KpShareStateLogMessageV2;
+use super::log_messages::WithdrawalLogMessage;
 use crate::guardian::UnixMillis;
 use serde::Deserialize;
 use serde::Serialize;
+use std::time::Duration;
 
-/// The wire message stored in a [`super::LogRecord`]. Its version is serialized
+/// The wire message stored in a [`crate::guardian::log::LogRecord`]. Its version is serialized
 /// as the record's sibling `schema_version` field rather than as an additional
 /// JSON enum layer.
 ///
@@ -85,6 +86,29 @@ pub enum LogMessageV2 {
 
 /// Writer-facing alias for the log-message schema emitted by guardians.
 pub type LogMessage = LogMessageV2;
+
+pub(super) enum LogType {
+    Heartbeat,
+    Init,
+    Withdrawal,
+    Ceremony,
+    KpShareState,
+    CommitteeUpdate,
+    Genesis,
+}
+
+impl LogType {
+    pub(super) const fn object_lock_duration(self, policy: S3ObjectLockPolicy) -> Duration {
+        match self {
+            Self::Heartbeat | Self::KpShareState => policy.short_lived,
+            Self::Init
+            | Self::Withdrawal
+            | Self::Ceremony
+            | Self::CommitteeUpdate
+            | Self::Genesis => policy.long_lived,
+        }
+    }
+}
 
 trait LogMessageSchema {
     fn log_type(&self) -> LogType;

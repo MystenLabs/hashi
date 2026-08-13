@@ -14,13 +14,13 @@ use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::MonitorWithdrawalEvent;
 use crate::domain::WithdrawalEventType;
-use crate::domain::now_unix_seconds;
 use crate::findings::EventRelation;
 use crate::findings::MonitorFinding;
 use crate::rpc::btc::BtcRpcClient;
 use bitcoin::Txid;
 use hashi_types::guardian::WithdrawalID;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 
 /// A record of all the events tracking a single withdrawal.
 ///
@@ -235,7 +235,7 @@ impl WithdrawalStateMachine {
         }
         let btc_txid = self.btc_txid;
         let wid = self.wid;
-        let cur_time = now_unix_seconds();
+        let cur_time = now_timestamp_secs();
 
         match btc_rpc_client.lookup_confirmation(btc_txid) {
             Ok(Some(block_time)) => {
@@ -340,7 +340,7 @@ impl DepositStateMachine {
         let deadline = self.btc_event_expected_at;
         let deposit_id = self.hashi_deposit_event.deposit_id;
         let btc_txid = deposit_id.txid();
-        let cur_time = now_unix_seconds();
+        let cur_time = now_timestamp_secs();
 
         match btc_rpc_client.lookup_confirmation(btc_txid) {
             Ok(Some(block_time)) => {

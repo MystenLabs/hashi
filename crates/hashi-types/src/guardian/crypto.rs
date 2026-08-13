@@ -131,7 +131,7 @@ pub struct ShareCommitment {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ShareCommitments(
-    #[serde(with = "crate::guardian::serde_utils::hex_map_values")] BTreeMap<ShareID, DigestBytes>,
+    #[serde(with = "crate::guardian::serde::hex_map_values")] BTreeMap<ShareID, DigestBytes>,
 );
 
 /// Public description of the current BTC key's secret-sharing scheme.

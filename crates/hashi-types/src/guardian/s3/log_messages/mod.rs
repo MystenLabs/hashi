@@ -8,13 +8,13 @@
 //! complete bucket-relative key. Types supporting batch reads may additionally
 //! expose `object_key_dir()`, a slash-terminated S3 key prefix.
 
-pub mod ceremony;
-pub mod committee_update;
-pub mod genesis;
-pub mod heartbeat;
-pub mod init;
-pub mod kp_share;
-pub mod withdrawal;
+mod ceremony;
+mod committee_update;
+mod genesis;
+mod heartbeat;
+mod init;
+mod kp_share;
+mod withdrawal;
 
 pub use ceremony::*;
 pub use committee_update::*;

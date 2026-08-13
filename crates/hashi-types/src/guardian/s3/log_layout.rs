@@ -1,9 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::guardian::log::S3_DIR_HEARTBEAT;
-use crate::guardian::log::S3_DIR_WITHDRAW;
-use crate::guardian::time_utils::UnixSeconds;
+use crate::guardian::time::UnixSeconds;
 use anyhow::Context;
 use std::convert::TryFrom;
 use std::fmt;
@@ -12,6 +10,34 @@ use time::Date;
 use time::OffsetDateTime;
 use time::PrimitiveDateTime;
 use time::Time;
+
+pub enum ObjectKeyPattern {
+    Fixed(String),
+    /// Complete key prefix before the random suffix; finalize() appends the suffix.
+    RandomSuffix(String),
+}
+
+impl ObjectKeyPattern {
+    /// Finalizes the pattern into the complete S3 object key.
+    pub fn finalize(self) -> String {
+        match self {
+            Self::Fixed(key) => key,
+            Self::RandomSuffix(prefix) => {
+                format!("{prefix}{:032x}.json", rand::random::<u128>())
+            }
+        }
+    }
+}
+
+/// S3 sub-prefixes used for guardian log streams.
+/// See `crates/hashi-guardian/README.md` for canonical key layout.
+pub const S3_DIR_INIT: &str = "init";
+pub const S3_DIR_WITHDRAW: &str = "withdraw";
+pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
+pub const S3_DIR_CEREMONY: &str = "ceremony";
+pub const S3_DIR_KP_SHARES: &str = "kp-shares";
+pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";
+pub const S3_DIR_GENESIS: &str = "genesis";
 
 pub const SECONDS_PER_HOUR: UnixSeconds = 60 * 60;
 const DIR_WRITES_COMPLETION_DELAY: Duration = Duration::from_mins(10);

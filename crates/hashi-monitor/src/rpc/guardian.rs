@@ -13,9 +13,9 @@ use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::guardian::WithdrawalLogMessage;
-use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::time_utils::UnixSeconds;
-use hashi_types::guardian::time_utils::now_timestamp_secs;
+use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 use hashi_types::guardian::unix_millis_to_seconds;
 use tracing::debug;
 impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {

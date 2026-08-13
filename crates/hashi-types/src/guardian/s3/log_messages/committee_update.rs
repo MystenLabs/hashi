@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::ObjectKeyPattern;
-use super::super::S3_DIR_COMMITTEE_UPDATE;
+use super::super::log_layout::ObjectKeyPattern;
+use super::super::log_layout::S3_DIR_COMMITTEE_UPDATE;
 use crate::committee::CommitteeSignature;
 use serde::Deserialize;
 use serde::Serialize;

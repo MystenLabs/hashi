@@ -1,9 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::ObjectKeyPattern;
+use super::super::log_layout::ObjectKeyPattern;
+use super::super::log_layout::S3HourScopedDirectory;
 use crate::guardian::UnixMillis;
-use crate::guardian::s3_utils::S3HourScopedDirectory;
 use crate::guardian::unix_millis_to_seconds;
 use serde::Deserialize;
 use serde::Serialize;

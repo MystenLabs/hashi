@@ -3,7 +3,7 @@
 
 use super::SessionID;
 use super::lifecycle::EnclaveLifecycle;
-use super::time_utils::UnixSeconds;
+use super::time::UnixSeconds;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GuardianError {
