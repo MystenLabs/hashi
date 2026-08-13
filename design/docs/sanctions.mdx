@@ -1,8 +1,44 @@
 ---
 title: Handling Sanctioned Addresses
-description: How Hashi committee members independently apply sanctions checks to deposits and withdrawals using a configurable screening endpoint.
-keywords: [ sanctions, OFAC, screening, gRPC, deposit, withdrawal ]
+description: >-
+  How Hashi committee members independently apply sanctions checks to deposits
+  and withdrawals using a configurable screening endpoint.
+keywords:
+  - sanctions
+  - OFAC
+  - screening
+  - gRPC
+  - deposit
+  - withdrawal
 sidebar_label: Handling Sanctions
+goal:
+  description: >-
+    Reader understands how Hashi's sanctions screening works, the configurable
+    gRPC endpoint, and when checks apply to deposits and withdrawals
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 200
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Hashi handle sanctioned addresses?
+  - How do Hashi validators screen transactions?
+  - What is the Hashi sanctions screening endpoint?
+  - When do sanctions checks apply in Hashi?
+answer: >-
+  Each Hashi committee member independently screens transactions using a
+  configurable gRPC screening endpoint. The endpoint can check against
+  predefined sanctions lists (like OFAC) or third-party risk services.
+  Sanctions checks apply to deposits (during the approval queue) and
+  withdrawals (before signing), allowing each validator to enforce its own
+  risk tolerance.
 ---
 
 The decision to facilitate a transaction from or to Bitcoin must take into

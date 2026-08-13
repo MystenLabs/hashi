@@ -1,7 +1,45 @@
 ---
 title: Deposit
-description: How Hashi turns BTC sent to a deposit address into hBTC on Sui through the request, approve, confirm, and mint phases.
-keywords: [ deposit, hBTC, mint, approve, confirm, time delay, UTXO, Bitcoin, Sui ]
+description: >-
+  How Hashi turns BTC sent to a deposit address into hBTC on Sui through the
+  request, approve, confirm, and mint phases.
+keywords:
+  - deposit
+  - hBTC
+  - mint
+  - approve
+  - confirm
+  - time delay
+  - UTXO
+  - Bitcoin
+  - Sui
+goal:
+  description: >-
+    Reader understands the four-phase deposit flow (request, approve, confirm,
+    mint) and the time-delay security window
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do Hashi deposits work?
+  - What are the phases of a Hashi deposit?
+  - How does BTC become hBTC on Sui?
+  - What is the deposit time delay in Hashi?
+answer: >-
+  A Hashi deposit moves BTC from a user's Bitcoin wallet into the MPC-managed
+  UTXO pool through four phases: request (send BTC to a Taproot deposit
+  address), approve (committee certifies the deposit), confirm (a configurable
+  time-delay window for operator review), and mint (hBTC is issued to the
+  user's Sui account).
 ---
 
 A deposit moves BTC from a user's Bitcoin wallet into the Hashi-managed UTXO

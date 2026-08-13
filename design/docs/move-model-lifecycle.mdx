@@ -1,7 +1,43 @@
 ---
 title: Move Model Lifecycle
-description: How Hashi's key Move data structures transform between onchain Sui state and offchain Bitcoin state during deposit and withdrawal flows.
-keywords: [ Move, lifecycle, data model, onchain, offchain, deposit flow, withdrawal flow ]
+description: >-
+  How Hashi's key Move data structures transform between onchain Sui state and
+  offchain Bitcoin state during deposit and withdrawal flows.
+keywords:
+  - Move
+  - lifecycle
+  - data model
+  - onchain
+  - offchain
+  - deposit flow
+  - withdrawal flow
+goal:
+  description: >-
+    Reader understands how Hashi Move data structures transition through states
+    during deposit and withdrawal flows, and the entry-function gating principle
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 500
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do Hashi Move data models change during deposits?
+  - How do Hashi Move data models change during withdrawals?
+  - What is the entry-function gating principle in Hashi?
+  - How does Hashi manage onchain state for Bitcoin operations?
+answer: >-
+  Hashi's Move data structures transform between onchain Sui state and offchain
+  Bitcoin state through well-defined lifecycles. The entry-function gating
+  principle ensures operations that move funds or advance state machines also
+  gate on pause and reconfiguration status, while cleanup and registration
+  functions remain callable regardless.
 ---
 
 This document illustrates the lifecycle of key Move models in the deposit and

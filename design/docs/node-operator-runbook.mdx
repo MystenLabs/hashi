@@ -1,7 +1,48 @@
 ---
 title: Hashi Node Operator Runbook
-description: How Sui validators join the Hashi committee, covering prerequisites, configuration, genesis, key management, governance, and monitoring for running a Hashi node.
-keywords: [ operator, node, runbook, validator, committee, configuration, genesis, governance ]
+description: >-
+  How Sui validators join the Hashi committee, covering prerequisites,
+  configuration, genesis, key management, governance, and monitoring for
+  running a Hashi node.
+keywords:
+  - operator
+  - node
+  - runbook
+  - validator
+  - committee
+  - configuration
+  - genesis
+  - governance
+goal:
+  description: >-
+    Reader can onboard as a Hashi node operator — provision dependencies,
+    generate keys, configure the node, register, and participate in governance
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 1000
+      label: Needs comprehensive operational content
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+    - steps_present: 3
+      label: Needs numbered steps for procedural content
+questions:
+  - How do I join the Hashi committee as a Sui validator?
+  - What are the prerequisites for running a Hashi node?
+  - How do I configure a Hashi node?
+  - How do I register as a Hashi committee member?
+  - How do I participate in Hashi governance?
+answer: >-
+  To join the Hashi committee, a Sui validator provisions a Bitcoin archival
+  node and Sui fullnode, generates TLS/operator/backup keys, writes the
+  validator config, registers onchain with their validator key, and starts
+  the hashi service. The runbook covers the full lifecycle including genesis,
+  key management, governance voting, and monitoring.
 ---
 
 This runbook is for **Sui validators joining the Hashi committee**. It covers prerequisites, configuration, genesis, ongoing operations, and governance.

@@ -1,10 +1,45 @@
 ---
 title: Introduction
-description: High-level overview of Hashi, the Sui native Bitcoin orchestrator that secures and manages BTC for use on Sui through threshold cryptography.
-keywords: [ Hashi, Bitcoin, Sui, BTC, hBTC, threshold cryptography, MPC, bridge ]
+description: >-
+  High-level overview of Hashi, the Sui native Bitcoin orchestrator that secures
+  and manages BTC for use on Sui through threshold cryptography.
+keywords:
+  - Hashi
+  - Bitcoin
+  - Sui
+  - BTC
+  - hBTC
+  - threshold cryptography
+  - MPC
+  - bridge
 slug: /
 sidebar_label: Introduction
 sidebar_position: 1
+goal:
+  description: >-
+    Reader understands what Hashi is, how it uses threshold cryptography to
+    manage BTC on Sui, and its core deposit/withdraw capability
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 50
+      label: Needs introductory content
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is Hashi?
+  - How does Hashi manage Bitcoin on Sui?
+  - What is hBTC?
+answer: >-
+  Hashi is a Sui-native Bitcoin orchestrator that secures and manages BTC for
+  use on Sui through threshold cryptography. It lets users deposit BTC into an
+  MPC-managed pool and receive fungible hBTC (Coin<BTC>) on Sui, which can be
+  withdrawn back to native BTC on Bitcoin.
 ---
 
 This is a high-level overview and design doc for `hashi`, the Sui native

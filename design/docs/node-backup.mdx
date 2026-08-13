@@ -1,7 +1,41 @@
 ---
 title: Hashi Node Backups
-description: How node operators encrypt and restore essential node data with armored PGP backups, including YubiKey restore paths.
-keywords: [ operator, backup, PGP, YubiKey, encryption ]
+description: >-
+  How node operators encrypt and restore essential node data with armored PGP
+  backups, including YubiKey restore paths.
+keywords:
+  - operator
+  - backup
+  - PGP
+  - YubiKey
+  - encryption
+goal:
+  description: >-
+    Reader can create PGP backup keys (including YubiKey), configure automatic
+    backups, and restore node data from encrypted archives
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I back up a Hashi node?
+  - How do I restore a Hashi node from backup?
+  - How does Hashi encrypt node backups?
+  - Can I use a YubiKey for Hashi node backups?
+answer: >-
+  Hashi automatically backs up node config, key files, and database snapshots
+  every epoch as a compressed, PGP-encrypted tar archive (.tar.asc). Backups
+  are encrypted with a PGP public key (ideally generated on a YubiKey for
+  hardware-backed security) and can be restored using the matching private key
+  or via gpg-agent forwarding for remote YubiKey-backed restores.
 ---
 
 Hashi automatically backs up the data a node needs to rejoin the committee after
