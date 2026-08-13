@@ -170,6 +170,9 @@ pub struct Metrics {
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
     pub mpc_end_reconfig_duration_seconds: HistogramVec,
+    db_major_compaction_duration_seconds: HistogramVec,
+    db_keyspace_disk_bytes: IntGaugeVec,
+    db_major_compaction_failures_total: IntCounterVec,
     pub mpc_prepare_signing_duration_seconds: HistogramVec,
     pub mpc_total_duration_seconds: HistogramVec,
     pub mpc_dealer_crypto_duration_seconds: HistogramVec,
@@ -929,6 +932,28 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            db_major_compaction_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_db_major_compaction_duration_seconds",
+                "Duration of a post-reconfig major compaction, by keyspace",
+                &["keyspace"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            db_keyspace_disk_bytes: register_int_gauge_vec_with_registry!(
+                "hashi_db_keyspace_disk_bytes",
+                "bytes fjall accounts to each keyspace, sampled after compaction",
+                &["keyspace"],
+                registry,
+            )
+            .unwrap(),
+            db_major_compaction_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_db_major_compaction_failures_total",
+                "Post-reconfig major compactions that failed, by keyspace",
+                &["keyspace"],
+                registry,
+            )
+            .unwrap(),
             mpc_prepare_signing_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_prepare_signing_duration_seconds",
                 "Duration of prepare_signing",
@@ -1206,6 +1231,21 @@ impl Metrics {
         self.task_last_iteration_timestamp_seconds
             .with_label_values(&[task])
             .set(now);
+    }
+
+    pub fn record_major_compaction(&self, keyspace: &crate::db::CompactedKeyspace) {
+        let labels = &[keyspace.name];
+        self.db_major_compaction_duration_seconds
+            .with_label_values(labels)
+            .observe(keyspace.elapsed.as_secs_f64());
+        self.db_keyspace_disk_bytes
+            .with_label_values(labels)
+            .set(keyspace.after.min(i64::MAX as u64) as i64);
+        if keyspace.error.is_some() {
+            self.db_major_compaction_failures_total
+                .with_label_values(labels)
+                .inc();
+        }
     }
 
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {

@@ -103,6 +103,15 @@ const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
 const RETENTION_EXTRA_EPOCHS: u64 = 7;
 
+/// Outcome of compacting one keyspace, for logging and metrics.
+pub struct CompactedKeyspace {
+    pub name: &'static str,
+    pub before: u64,
+    pub after: u64,
+    pub elapsed: std::time::Duration,
+    pub error: Option<fjall::Error>,
+}
+
 /// Keyspaces included in snapshot backups. Add new backup/restore keyspaces here.
 #[derive(Clone, Copy)]
 enum BackupKeyspace {
@@ -203,6 +212,71 @@ impl Database {
 
     pub(crate) fn snapshot(&self) -> fjall::Snapshot {
         self.db.snapshot()
+    }
+
+    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 10] {
+        [
+            (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
+            (SIGNING_KEYS_CF_NAME, &self.signing_keys),
+            (ENCRYPTION_EPOCH_INDEX_CF_NAME, &self.encryption_epoch_index),
+            (SIGNING_EPOCH_INDEX_CF_NAME, &self.signing_epoch_index),
+            (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
+            (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
+            (NONCE_MESSAGES_CF_NAME, &self.nonce_messages),
+            (AVID_ROUND_STATES_CF_NAME, &self.avid_round_states),
+            (AVID_DEALER_BUILDERS_CF_NAME, &self.avid_dealer_builders),
+            (AVID_HELD_ECHOES_CF_NAME, &self.avid_held_echoes),
+        ]
+    }
+
+    /// Rewrite every keyspace into a single run, dropping the rows that
+    /// `prune_messages_below` tombstoned.
+    ///
+    /// Pruning alone does not free the disk. A tombstone is a few dozen bytes
+    /// against a nonce message of hundreds of kilobytes, so leveled compaction
+    /// never accumulates enough write pressure to rewrite the bottom level and
+    /// the shadowed values stay on disk indefinitely.
+    ///
+    /// Blocking and potentially slow — run it off the reconfig path. Each
+    /// keyspace is compacted independently so one failure does not skip the
+    /// rest, and the caller gets a per-keyspace result to log and measure.
+    pub fn major_compact(&self) -> Vec<CompactedKeyspace> {
+        // A compaction only sees what is already in a table, so flush first —
+        // otherwise the prune's tombstones sit in the memtable and the values
+        // they shadow survive the merge.
+        for (name, keyspace) in self.all_keyspaces() {
+            if let Err(e) = keyspace.rotate_memtable_and_wait() {
+                tracing::warn!("flushing {name} before compaction failed: {e}");
+            }
+        }
+        let compacted: Vec<_> = self
+            .all_keyspaces()
+            .into_iter()
+            .map(|(name, keyspace)| {
+                let before = keyspace.disk_space();
+                let started = std::time::Instant::now();
+                let error = keyspace.major_compact().err();
+                CompactedKeyspace {
+                    name,
+                    before,
+                    after: keyspace.disk_space(),
+                    elapsed: started.elapsed(),
+                    error,
+                }
+            })
+            .collect();
+        // Compacting drops the merged-away tables from the current version but
+        // does not unlink them. fjall retires a version — and with it the table
+        // files — while rotating a memtable, and one rotation sweeps every
+        // keyspace. This is best effort: a rotation needs something to flush, so
+        // when every memtable is empty the files are unlinked by the next write
+        // that fills one, which under normal traffic is moments later.
+        for (name, keyspace) in self.all_keyspaces() {
+            if let Err(e) = keyspace.rotate_memtable() {
+                tracing::warn!("rotating {name} after compaction failed: {e}");
+            }
+        }
+        compacted
     }
 
     /// Store an encryption private key, keyed by its public key, plus the
@@ -853,6 +927,8 @@ pub(crate) mod tests {
 
     use super::AvidRoundState;
     use super::Database;
+    use super::Keyspace;
+    use super::NONCE_MESSAGES_CF_NAME;
     use super::PruningReferences;
     use super::RETENTION_EXTRA_EPOCHS;
 
@@ -1826,6 +1902,76 @@ pub(crate) mod tests {
                 "signing key at epoch {epoch} should be kept"
             );
         }
+    }
+
+    /// Total size of the files backing a keyspace.
+    fn bytes_on_disk(keyspace: &Keyspace) -> u64 {
+        let Ok(entries) = std::fs::read_dir(keyspace.path().join("tables")) else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    }
+
+    /// Pruning tombstones the rows but leaves the bytes on disk — the tombstones
+    /// are far too small next to the values they shadow for leveled compaction
+    /// to rewrite the bottom level. Compacting is what actually frees the space.
+    #[test]
+    fn test_major_compaction_frees_what_pruning_only_tombstoned() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let nonce_msg = create_test_nonce_message();
+        for batch_index in 0..256 {
+            for dealer in 0..16u8 {
+                db.store_nonce_message(1, batch_index, &Address::new([dealer; 32]), &nonce_msg)
+                    .unwrap();
+            }
+        }
+        db.nonce_messages.rotate_memtable_and_wait().unwrap();
+        let occupied = bytes_on_disk(&db.nonce_messages);
+        assert!(occupied > 0, "epoch 1 should be on disk before pruning");
+
+        db.prune_messages_below(2, &PruningReferences::default())
+            .unwrap();
+        assert!(
+            db.get_nonce_message(1, 0, &Address::new([0u8; 32]))
+                .unwrap()
+                .is_none(),
+            "pruning must delete the rows",
+        );
+        assert_eq!(
+            bytes_on_disk(&db.nonce_messages),
+            occupied,
+            "pruning alone does not free the disk — this is the bug being fixed",
+        );
+
+        let compacted = db.major_compact();
+        let nonce = compacted
+            .iter()
+            .find(|keyspace| keyspace.name == NONCE_MESSAGES_CF_NAME)
+            .expect("nonce_messages must be compacted");
+        assert!(
+            nonce.error.is_none(),
+            "compaction failed: {:?}",
+            nonce.error
+        );
+        assert_eq!(
+            nonce.after, 0,
+            "every row was pruned, so nothing should be live"
+        );
+
+        // Unlinking lands on the next rotation with something to flush, which
+        // ordinary write traffic supplies.
+        db.store_nonce_message(2, 0, &Address::new([0u8; 32]), &nonce_msg)
+            .unwrap();
+        db.nonce_messages.rotate_memtable_and_wait().unwrap();
+        assert!(
+            bytes_on_disk(&db.nonce_messages) < occupied / 10,
+            "compaction must give back the {occupied} bytes pruning tombstoned",
+        );
     }
 
     #[test]
