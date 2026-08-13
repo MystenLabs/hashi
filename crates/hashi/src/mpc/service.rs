@@ -5,8 +5,6 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -108,7 +106,7 @@ pub struct MpcService {
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
-    compacting: Arc<AtomicBool>,
+    compacting: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MpcService {
@@ -123,7 +121,7 @@ impl MpcService {
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
-            compacting: Arc::new(AtomicBool::new(false)),
+            compacting: Arc::new(tokio::sync::Mutex::new(())),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -1417,29 +1415,29 @@ impl MpcService {
         drop(_reconfig_timer);
     }
 
-    /// Compact the database after an epoch change, so that the rows the prune
-    /// just tombstoned are actually unlinked.
+    /// Compact the database after an epoch change so the rows the prune just
+    /// tombstoned are actually unlinked.
     ///
-    /// Runs detached on a blocking thread: it is not on the reconfig path, and
-    /// fjall only takes its major-compaction lock, so reads and writes carry on
-    /// meanwhile. A run still in progress means the last one is slower than an
-    /// epoch, which is worth knowing about rather than piling onto.
+    /// Detached on a blocking thread, and deliberately before `prepare_signing`
+    /// refills the presig pool: the keyspaces are at their emptiest right after
+    /// the prune, so the merge writes almost nothing. A run still going means
+    /// the last one outlasted an epoch, so skip rather than pile on.
     fn spawn_major_compaction(&self, epoch: u64) {
-        if self.compacting.swap(true, Ordering::AcqRel) {
+        let Ok(guard) = self.compacting.clone().try_lock_owned() else {
             warn!("skipping post-reconfig compaction at epoch {epoch}: previous run still going");
             return;
-        }
+        };
         let db = self.inner.db.clone();
         let metrics = self.inner.metrics.clone();
-        let compacting = self.compacting.clone();
         tokio::task::spawn_blocking(move || {
+            let _guard = guard;
             let started = std::time::Instant::now();
             for keyspace in db.major_compact() {
                 metrics.record_major_compaction(&keyspace);
                 match &keyspace.error {
                     Some(e) => error!("compacting {} failed: {e}", keyspace.name),
                     None => info!(
-                        "compacted {} in {:?}: {} -> {} bytes",
+                        "compacted {} in {:?}: {} -> {} live bytes",
                         keyspace.name, keyspace.elapsed, keyspace.before, keyspace.after,
                     ),
                 }
@@ -1448,7 +1446,6 @@ impl MpcService {
                 "post-reconfig compaction for epoch {epoch} finished in {:?}",
                 started.elapsed()
             );
-            compacting.store(false, Ordering::Release);
         });
     }
 

@@ -214,6 +214,7 @@ impl Database {
         self.db.snapshot()
     }
 
+    /// Every keyspace, for whole-database maintenance. Add new keyspaces here.
     fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 10] {
         [
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
@@ -229,21 +230,16 @@ impl Database {
         ]
     }
 
-    /// Rewrite every keyspace into a single run, dropping the rows that
-    /// `prune_messages_below` tombstoned.
+    /// Rewrite every keyspace into a single run, dropping what
+    /// `prune_messages_below` tombstoned. Pruning alone frees nothing: a
+    /// tombstone is a few dozen bytes against a nonce message of hundreds of
+    /// kilobytes, so leveled compaction never rewrites the bottom level.
     ///
-    /// Pruning alone does not free the disk. A tombstone is a few dozen bytes
-    /// against a nonce message of hundreds of kilobytes, so leveled compaction
-    /// never accumulates enough write pressure to rewrite the bottom level and
-    /// the shadowed values stay on disk indefinitely.
-    ///
-    /// Blocking and potentially slow — run it off the reconfig path. Each
-    /// keyspace is compacted independently so one failure does not skip the
-    /// rest, and the caller gets a per-keyspace result to log and measure.
+    /// Blocking and slow, and it locks out background compaction for each
+    /// keyspace while it runs — keep it off the reconfig path.
     pub fn major_compact(&self) -> Vec<CompactedKeyspace> {
-        // A compaction only sees what is already in a table, so flush first —
-        // otherwise the prune's tombstones sit in the memtable and the values
-        // they shadow survive the merge.
+        // Compaction merges tables, not memtables, so the prune's tombstones
+        // have to reach a table first or the values they shadow survive it.
         for (name, keyspace) in self.all_keyspaces() {
             if let Err(e) = keyspace.rotate_memtable_and_wait() {
                 tracing::warn!("flushing {name} before compaction failed: {e}");
@@ -265,12 +261,10 @@ impl Database {
                 }
             })
             .collect();
-        // Compacting drops the merged-away tables from the current version but
-        // does not unlink them. fjall retires a version — and with it the table
-        // files — while rotating a memtable, and one rotation sweeps every
-        // keyspace. This is best effort: a rotation needs something to flush, so
-        // when every memtable is empty the files are unlinked by the next write
-        // that fills one, which under normal traffic is moments later.
+        // A compaction retires the tables it merged away but does not unlink
+        // them; fjall only does that while rotating a memtable, and one
+        // rotation sweeps every keyspace. Rotating needs something to flush, so
+        // on an idle keyspace the files go back on the next write instead.
         for (name, keyspace) in self.all_keyspaces() {
             if let Err(e) = keyspace.rotate_memtable() {
                 tracing::warn!("rotating {name} after compaction failed: {e}");

@@ -171,7 +171,6 @@ pub struct Metrics {
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
     pub mpc_end_reconfig_duration_seconds: HistogramVec,
     db_major_compaction_duration_seconds: HistogramVec,
-    db_keyspace_disk_bytes: IntGaugeVec,
     db_major_compaction_failures_total: IntCounterVec,
     pub mpc_prepare_signing_duration_seconds: HistogramVec,
     pub mpc_total_duration_seconds: HistogramVec,
@@ -940,13 +939,6 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            db_keyspace_disk_bytes: register_int_gauge_vec_with_registry!(
-                "hashi_db_keyspace_disk_bytes",
-                "bytes fjall accounts to each keyspace, sampled after compaction",
-                &["keyspace"],
-                registry,
-            )
-            .unwrap(),
             db_major_compaction_failures_total: register_int_counter_vec_with_registry!(
                 "hashi_db_major_compaction_failures_total",
                 "Post-reconfig major compactions that failed, by keyspace",
@@ -1238,9 +1230,6 @@ impl Metrics {
         self.db_major_compaction_duration_seconds
             .with_label_values(labels)
             .observe(keyspace.elapsed.as_secs_f64());
-        self.db_keyspace_disk_bytes
-            .with_label_values(labels)
-            .set(keyspace.after.min(i64::MAX as u64) as i64);
         if keyspace.error.is_some() {
             self.db_major_compaction_failures_total
                 .with_label_values(labels)
