@@ -25,12 +25,12 @@ Canonical key layout:
 - `init/{session_id}/04-oa-activated.json`
 - `heartbeat/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{counter:020}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
-- `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
+- `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand32}.json`
 - `ceremony/{sharing_seq:020}-{session_id}.json`
 - `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session_id}.json`
 - `genesis/record.json`
 - `committee-update/{new_epoch:020}-{session_id}.json`
-- `committee-update/failure-{proposed_epoch:020}-{session_id}-{rand8}.json`
+- `committee-update/failure-{proposed_epoch:020}-{session_id}-{rand32}.json`
 
 Where:
 
@@ -40,7 +40,7 @@ Where:
 - `sharing_seq` (in `ceremony/`) is a zero-padded rotation counter — `setup_new_key` writes `0`; each `rotate_kp_set` appends `prev+1`.
 - `cert_seq` (in `kp-shares/`) is a zero-padded recipient-cert state counter within one `sharing_seq`. Setup/rotation write `0`; future individual KP cert rotations append higher values.
 - `new_epoch` / `proposed_epoch` (in `committee-update/`) are the zero-padded committee epoch numbers — `new_epoch` is the just-applied epoch for successes; `proposed_epoch` is the requested epoch for failures. Hashi reconfig is sparse, so neither is guaranteed to be `from_epoch + 1`.
-- `rand8` is a random 8-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
+- `rand32` is a random 32-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
 
 ## Stream semantics
 

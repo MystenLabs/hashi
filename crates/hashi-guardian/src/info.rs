@@ -14,6 +14,8 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
     info!("/get_guardian_info - Received request");
 
     let signing_pub_key = enclave.signing_pubkey();
+    // NOTE: If serving Guardian info becomes problematic due to attestation generation,
+    // consider adding a state-only RPC for callers that do not verify the attestation.
     let attestation = get_attestation(&signing_pub_key)?;
     Ok(GetGuardianInfoResponse::new(
         attestation,

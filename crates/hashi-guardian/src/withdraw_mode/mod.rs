@@ -7,7 +7,6 @@
 //! `committee_update`.
 
 pub mod committee_update;
-pub mod genesis;
 pub mod heartbeat;
 pub mod operator_activate;
 pub mod provisioner_init;

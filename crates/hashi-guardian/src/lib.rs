@@ -13,7 +13,12 @@ pub const LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE: Duration = Duration::from_mins(
 pub const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
 // An enclave that cannot write its next heartbeat must abort before another
-// session is allowed to treat it as quiet.
+// session is allowed to treat it as quiet. This fencing argument assumes the
+// old enclave either keeps executing until that abort or is permanently
+// terminated. Nitro Enclaves currently have no suspend/resume lifecycle (and
+// stopping the parent terminates its enclaves); a future platform that can
+// resume preserved enclave memory would need an explicit activation-generation
+// fence before serving withdrawals.
 const _: () = assert!(
     HEARTBEAT_INTERVAL.as_secs() + MAX_S3_WRITE_FAILURE_INTERVAL.as_secs()
         < OTHER_SESSION_QUIET_PERIOD.as_secs()

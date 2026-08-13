@@ -97,13 +97,7 @@ fn verify_signed_submissions(
             .verify_signature()
             .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
 
-        if submission.expected_session_id() != live_session_id {
-            return Err(GuardianError::InvalidInputs(format!(
-                "KP rotation submission expected guardian session {}, live session is {}",
-                submission.expected_session_id(),
-                live_session_id
-            )));
-        }
+        submission.validate_session(live_session_id)?;
         require_agreement(
             &mut agreed_pcr_allowlist,
             submission.pcr_allowlist(),

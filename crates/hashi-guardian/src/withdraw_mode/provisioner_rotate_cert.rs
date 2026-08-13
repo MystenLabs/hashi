@@ -17,6 +17,7 @@ use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::ProvisionerRotateCertResponse;
+use hashi_types::guardian::SessionBoundRequest;
 use tracing::info;
 
 pub async fn provisioner_rotate_cert(
@@ -25,21 +26,15 @@ pub async fn provisioner_rotate_cert(
 ) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
     info!("/provisioner_rotate_cert - Received request.");
 
+    enclave.require_fully_initialized()?;
+
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
     let request = signed_request
         .verify_into_data()
         .map_err(|error| Unauthenticated(error.to_string()))?;
 
-    enclave.require_fully_initialized()?;
-
     let live_session_id = enclave.s3_session_id();
-    if request.expected_session_id() != &live_session_id {
-        return Err(InvalidInputs(format!(
-            "provisioner_rotate_cert request expected guardian session {}, live session is {}",
-            request.expected_session_id(),
-            live_session_id
-        )));
-    }
+    request.validate_session(&live_session_id)?;
 
     let share_id = request.share_id();
     let target_fingerprint = request.target_kp_pgp_fingerprint().to_owned();
@@ -145,4 +140,40 @@ pub async fn provisioner_rotate_cert(
         cert_seq: next_cert_seq,
         encrypted_shares: changed_entry,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hashi_types::guardian::Ciphertext;
+    use hashi_types::guardian::GuardianEncryptedShare;
+    use hashi_types::guardian::GuardianError::LifecycleMismatch;
+    use hashi_types::pgp::test_utils::mock_pgp_cert;
+    use std::num::NonZeroU16;
+
+    #[tokio::test]
+    async fn rejects_wrong_lifecycle_before_verifying_signature() {
+        let enclave = Enclave::create_with_random_keys();
+        let signer_cert = mock_pgp_cert();
+        let request = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
+            "mock-session".into(),
+            0,
+            signer_cert.fingerprint().to_hex(),
+            mock_pgp_cert(),
+            GuardianEncryptedShare {
+                id: NonZeroU16::new(1).unwrap(),
+                ciphertext: Ciphertext {
+                    encapsulated_key: vec![],
+                    aes_ciphertext: vec![],
+                },
+            },
+        );
+        let signed_request = KpSigned::from_parts(request, signer_cert, "invalid signature".into());
+
+        let err = provisioner_rotate_cert(enclave, signed_request)
+            .await
+            .expect_err("wrong lifecycle should be rejected first");
+
+        assert!(matches!(err, LifecycleMismatch { .. }));
+    }
 }

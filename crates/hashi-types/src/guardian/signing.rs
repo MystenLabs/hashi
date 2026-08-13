@@ -19,6 +19,7 @@ use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
 use super::ProvisionerRotateKpSetRequest;
 use super::RotateKpSetResponse;
+use super::SessionBoundRequest;
 use super::SetupNewKeyResponse;
 use super::StandardWithdrawalResponse;
 use super::UnixMillis;
@@ -75,7 +76,7 @@ pub enum KpSigningIntentType {
 }
 
 /// KP-signed payloads and their intent-based domain separation.
-pub trait KpSigningIntent: Serialize {
+pub trait KpSigningIntent: Serialize + SessionBoundRequest {
     const INTENT: KpSigningIntentType;
 }
 

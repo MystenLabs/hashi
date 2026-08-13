@@ -5,7 +5,6 @@
 //! submissions and reconstructs the BTC key once threshold shares are present.
 //! Runs after the shared `crate::operator_init`.
 
-use crate::withdraw_mode::genesis::ensure_no_serving_committee;
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
@@ -78,6 +77,19 @@ impl PIInstall {
     }
 }
 
+/// Rejects genesis bootstrap after a serving committee has been persisted.
+async fn ensure_no_serving_committee(enclave: &Enclave) -> GuardianResult<()> {
+    let mut reader = enclave.new_guardian_reader()?;
+
+    if reader.read_latest_committee().await?.is_some() {
+        return Err(GuardianError::InvalidInputs(
+            "genesis bootstrap is rejected after a serving committee exists".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Receives the current KPs' signed share submissions in one batch. The relay
 /// may pre-verify them as a DoS guard, but the enclave authoritatively verifies
 /// each signature and session/config binding before decrypting and
@@ -147,13 +159,7 @@ fn verify_signed_submissions(
                 .verify_signature()
                 .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
 
-            if submission.expected_session_id() != live_session_id.as_str() {
-                return Err(GuardianError::InvalidInputs(format!(
-                    "PI submission expected guardian session {}, live session is {}",
-                    submission.expected_session_id(),
-                    live_session_id
-                )));
-            }
+            submission.validate_session(live_session_id)?;
             if submission.expected_config_hash() != live_config_hash {
                 return Err(GuardianError::InvalidInputs(format!(
                     "PI submission expected config hash {}, live config hash is {}",
