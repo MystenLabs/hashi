@@ -721,10 +721,10 @@ mod tests {
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
-        async fn rotate_kps(
+        async fn rotate_kp_set(
             &self,
-            _: Request<proto::RotateKpsRequest>,
-        ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
+            _: Request<proto::BatchProvisionerRotateKpSetRequest>,
+        ) -> Result<Response<proto::SignedRotateKpSetResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
     }

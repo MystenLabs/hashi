@@ -50,13 +50,8 @@ impl PIInstall {
             genesis_state_hash,
             &ceremony_state.encrypted_shares,
         )?;
-        let shares = decrypt_verify_shares(
-            &encrypted_shares,
-            enclave.encryption_secret_key(),
-            None,
-            instance.commitments(),
-            threshold,
-        )?;
+        let shares =
+            decrypt_verify_shares(&encrypted_shares, enclave.encryption_secret_key(), instance)?;
         info!("Verified {} shares (threshold {threshold}).", shares.len());
 
         info!("Threshold reached, combining shares.");
@@ -175,22 +170,8 @@ fn verify_signed_submissions(
             }
 
             let share_id = submission.encrypted_share().id;
-            let (assigned_share, _) = expected_kp_encrypted_shares
-                .find_by_fingerprint(&signer_fingerprint)
-                .ok_or_else(|| {
-                    GuardianError::InvalidInputs(format!(
-                        "PI submission signer {signer_fingerprint} is not in the current KP \
-                         encrypted-share roster"
-                    ))
-                })?;
-            if assigned_share.id != share_id {
-                return Err(GuardianError::InvalidInputs(format!(
-                    "PI submission signer {signer_fingerprint} is assigned to KP share id {}, \
-                     not submitted share id {}",
-                    assigned_share.id.get(),
-                    share_id.get()
-                )));
-            }
+            expected_kp_encrypted_shares
+                .validate_share_assignment(&signer_fingerprint, share_id)?;
 
             info!(
                 share_id = share_id.get(),
@@ -597,7 +578,7 @@ mod tests {
             .provision(BatchProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(message) if message.contains("assigned to KP")));
+        assert!(matches!(err, InvalidInputs(message) if message.contains("assigned share id")));
     }
 
     #[tokio::test]

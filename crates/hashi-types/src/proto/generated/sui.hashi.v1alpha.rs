@@ -2179,29 +2179,44 @@ pub struct SignedProvisionerRotateCertResponse {
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
-/// Assembled by the operator from the current KPs' encrypted old shares plus the
-/// shared rotation target. Each old share binds the same state digest as HPKE
-/// AAD, so the enclave only decrypts submissions that agree on the target.
-/// Asymmetry between old and new (n, t) is allowed.
+/// One current KP's signed authorization to rotate the KP set. The signature
+/// covers the PCR allowlist used to authenticate the existing state, this KP's
+/// encrypted old share, and the complete proposed new roster and parameters.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotateKpsRequest {
-    #[prost(message, repeated, tag = "1")]
-    pub encrypted_old_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
-    /// OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
-    #[prost(message, repeated, tag = "2")]
+pub struct SignedProvisionerRotateKpSetRequest {
+    #[prost(message, optional, tag = "1")]
+    pub encrypted_old_share: ::core::option::Option<GuardianEncryptedShare>,
+    /// The ceremony guardian session this KP verified before encrypting its share.
+    #[prost(string, tag = "2")]
+    pub expected_session_id: ::prost::alloc::string::String,
+    /// Builds allowed to authenticate the existing ceremony and KP-share state.
+    #[prost(message, optional, tag = "3")]
+    pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
+    /// OpenPGP cert sets for the proposed new KP set.
+    #[prost(message, repeated, tag = "4")]
     pub new_kp_pgp_cert_sets: ::prost::alloc::vec::Vec<KpPgpCertSet>,
-    #[prost(uint32, optional, tag = "3")]
+    #[prost(uint32, optional, tag = "5")]
     pub new_num_shares: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "4")]
+    #[prost(uint32, optional, tag = "6")]
     pub new_threshold: ::core::option::Option<u32>,
-    /// The current key's secret-sharing instance (old commitments + threshold) the
-    /// enclave verifies the submitted old shares against.
-    #[prost(message, optional, tag = "5")]
-    pub old_instance: ::core::option::Option<SecretSharingInstance>,
+    /// Armored authorizing current-KP cert and detached signature over the
+    /// intent-tagged ProvisionerRotateKpSetRequest payload.
+    #[prost(string, tag = "7")]
+    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub kp_signature: ::prost::alloc::string::String,
+}
+/// Collects threshold-many current-KP-authorized requests. Every submission must
+/// agree on the PCR allowlist and proposed new KP set. The enclave loads the
+/// authoritative old instance and encrypted-share roster from S3.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchProvisionerRotateKpSetRequest {
+    #[prost(message, repeated, tag = "1")]
+    pub submissions: ::prost::alloc::vec::Vec<SignedProvisionerRotateKpSetRequest>,
 }
 /// Unsigned response payload.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotateKpsResponseData {
+pub struct RotateKpSetResponseData {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
     #[prost(message, optional, tag = "2")]
@@ -2209,9 +2224,9 @@ pub struct RotateKpsResponseData {
 }
 /// Application-layer signed response.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SignedRotateKpsResponse {
+pub struct SignedRotateKpSetResponse {
     #[prost(message, optional, tag = "1")]
-    pub data: ::core::option::Option<RotateKpsResponseData>,
+    pub data: ::core::option::Option<RotateKpSetResponseData>,
     /// Milliseconds since Unix epoch.
     #[prost(uint64, optional, tag = "2")]
     pub timestamp_ms: ::core::option::Option<u64>,
@@ -2571,15 +2586,14 @@ pub mod guardian_service_client {
             self.inner.unary(req, path, codec).await
         }
         /// Ceremony mode only: rotate the KP set holding the existing BTC key. The
-        /// operator submits the current KPs' encrypted old shares in one request; once
-        /// threshold-many verify, the enclave reconstructs the BTC key, re-splits it
-        /// for the new KP set, writes the new share state (hashes) to ceremony/, and
-        /// returns the new encrypted shares.
-        pub async fn rotate_kps(
+        /// operator relays threshold-many current-KP-signed contributions; the enclave
+        /// verifies them, reconstructs the BTC key, re-splits it for the new KP set,
+        /// writes the new share state to ceremony/, and returns the encrypted shares.
+        pub async fn rotate_kp_set(
             &mut self,
-            request: impl tonic::IntoRequest<super::RotateKpsRequest>,
+            request: impl tonic::IntoRequest<super::BatchProvisionerRotateKpSetRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignedRotateKpsResponse>,
+            tonic::Response<super::SignedRotateKpSetResponse>,
             tonic::Status,
         > {
             self.inner
@@ -2592,12 +2606,12 @@ pub mod guardian_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.GuardianService/RotateKps",
+                "/sui.hashi.v1alpha.GuardianService/RotateKpSet",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "RotateKps"),
+                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "RotateKpSet"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -2840,15 +2854,14 @@ pub mod guardian_service_server {
             tonic::Status,
         >;
         /// Ceremony mode only: rotate the KP set holding the existing BTC key. The
-        /// operator submits the current KPs' encrypted old shares in one request; once
-        /// threshold-many verify, the enclave reconstructs the BTC key, re-splits it
-        /// for the new KP set, writes the new share state (hashes) to ceremony/, and
-        /// returns the new encrypted shares.
-        async fn rotate_kps(
+        /// operator relays threshold-many current-KP-signed contributions; the enclave
+        /// verifies them, reconstructs the BTC key, re-splits it for the new KP set,
+        /// writes the new share state to ceremony/, and returns the encrypted shares.
+        async fn rotate_kp_set(
             &self,
-            request: tonic::Request<super::RotateKpsRequest>,
+            request: tonic::Request<super::BatchProvisionerRotateKpSetRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignedRotateKpsResponse>,
+            tonic::Response<super::SignedRotateKpSetResponse>,
             tonic::Status,
         >;
         /// Operator initialization: provide stable config before provisioning.
@@ -3075,25 +3088,28 @@ pub mod guardian_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.GuardianService/RotateKps" => {
+                "/sui.hashi.v1alpha.GuardianService/RotateKpSet" => {
                     #[allow(non_camel_case_types)]
-                    struct RotateKpsSvc<T: GuardianService>(pub Arc<T>);
+                    struct RotateKpSetSvc<T: GuardianService>(pub Arc<T>);
                     impl<
                         T: GuardianService,
-                    > tonic::server::UnaryService<super::RotateKpsRequest>
-                    for RotateKpsSvc<T> {
-                        type Response = super::SignedRotateKpsResponse;
+                    > tonic::server::UnaryService<
+                        super::BatchProvisionerRotateKpSetRequest,
+                    > for RotateKpSetSvc<T> {
+                        type Response = super::SignedRotateKpSetResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::RotateKpsRequest>,
+                            request: tonic::Request<
+                                super::BatchProvisionerRotateKpSetRequest,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as GuardianService>::rotate_kps(&inner, request).await
+                                <T as GuardianService>::rotate_kp_set(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -3104,7 +3120,7 @@ pub mod guardian_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = RotateKpsSvc(inner);
+                        let method = RotateKpSetSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

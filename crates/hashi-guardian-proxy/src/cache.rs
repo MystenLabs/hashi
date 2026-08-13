@@ -397,11 +397,11 @@ where
         self.inner.update_committee_chain(request).await
     }
 
-    async fn rotate_kps(
+    async fn rotate_kp_set(
         &self,
-        request: Request<proto::RotateKpsRequest>,
-    ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
-        self.inner.rotate_kps(request).await
+        request: Request<proto::BatchProvisionerRotateKpSetRequest>,
+    ) -> Result<Response<proto::SignedRotateKpSetResponse>, Status> {
+        self.inner.rotate_kp_set(request).await
     }
 }
 
@@ -524,10 +524,10 @@ mod tests {
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
-        async fn rotate_kps(
+        async fn rotate_kp_set(
             &self,
-            _: Request<proto::RotateKpsRequest>,
-        ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
+            _: Request<proto::BatchProvisionerRotateKpSetRequest>,
+        ) -> Result<Response<proto::SignedRotateKpSetResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
     }

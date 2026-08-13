@@ -63,7 +63,6 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::borrow::Borrow;
-use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Deref;
 
@@ -296,24 +295,18 @@ pub struct SetupNewKeyResponse {
     pub btc_master_pubkey: BitcoinPubkey,
 }
 
-/// KP rotation endpoint. Request is assembled by the operator from the current KPs'
-/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
-/// rotation target `state`.
+/// A batch of current-KP-authorized requests to rotate the KP set.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RotateKpsRequest {
-    /// |n| encrypted shares, each bound to `state.digest()` as HPKE AAD.
-    encrypted_old_shares: Vec<GuardianEncryptedShare>,
-    /// Existing secret-sharing instance.
-    old_instance: SecretSharingInstance,
-    /// The shared rotation target state.
-    state: RotateKpsState,
+pub struct BatchProvisionerRotateKpSetRequest {
+    submissions: Vec<KpSigned<ProvisionerRotateKpSetRequest>>,
 }
 
-/// The shared rotation target all current KPs authorize. Each binds
-/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
-/// ones that agree on it. Old/new (`n`, `t`) may differ.
+/// One current KP's signed contribution toward rotating the KP set.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RotateKpsState {
+pub struct ProvisionerRotateKpSetRequest {
+    expected_session_id: SessionID,
+    pcr_allowlist: PcrAllowlist,
+    encrypted_old_share: GuardianEncryptedShare,
     /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
     /// `new_params.num_shares()`.
     new_kp_certs_roster: KpCertsRoster,
@@ -321,10 +314,10 @@ pub struct RotateKpsState {
     new_params: SecretSharingParams,
 }
 
-/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
-/// shares, returned by `rotate_kps`.
+/// `GuardianSignedResponse<RotateKpSetResponse>`. The new KP set's encrypted
+/// shares, returned by `rotate_kp_set`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RotateKpsResponse {
+pub struct RotateKpSetResponse {
     /// Encryptions to each new KP's cert. Each KP can have more than one cert.
     pub encrypted_shares: KPEncryptedSharesRoster,
     /// The new secret-sharing params and commitments.
@@ -696,8 +689,30 @@ impl ProvisionerInitRequest {
     }
 }
 
-impl RotateKpsState {
+impl BatchProvisionerRotateKpSetRequest {
+    pub fn new(submissions: Vec<KpSigned<ProvisionerRotateKpSetRequest>>) -> GuardianResult<Self> {
+        if submissions.is_empty() {
+            return Err(InvalidInputs(
+                "KP-set rotation requires at least one signed submission".into(),
+            ));
+        }
+        Ok(Self { submissions })
+    }
+
+    pub fn submissions(&self) -> &[KpSigned<ProvisionerRotateKpSetRequest>] {
+        &self.submissions
+    }
+
+    pub fn into_submissions(self) -> Vec<KpSigned<ProvisionerRotateKpSetRequest>> {
+        self.submissions
+    }
+}
+
+impl ProvisionerRotateKpSetRequest {
     pub fn new(
+        expected_session_id: SessionID,
+        pcr_allowlist: PcrAllowlist,
+        encrypted_old_share: GuardianEncryptedShare,
         new_kp_certs_roster: KpCertsRoster,
         new_num_shares: usize,
         new_threshold: usize,
@@ -711,9 +726,45 @@ impl RotateKpsState {
             )));
         }
         Ok(Self {
+            expected_session_id,
+            pcr_allowlist,
+            encrypted_old_share,
             new_kp_certs_roster,
             new_params,
         })
+    }
+
+    /// Build one current KP's rotation request. The KP signature directly binds
+    /// the proposed new roster and sharing parameters to its encrypted old share.
+    pub fn build_from_share<R: CryptoRng + RngCore>(
+        expected_session_id: SessionID,
+        pcr_allowlist: PcrAllowlist,
+        share: &Share,
+        enclave_pub_key: &EncPubKey,
+        new_kp_certs_roster: KpCertsRoster,
+        new_params: SecretSharingParams,
+        rng: &mut R,
+    ) -> GuardianResult<Self> {
+        Self::new(
+            expected_session_id,
+            pcr_allowlist,
+            encrypt_share(share, enclave_pub_key, None, rng),
+            new_kp_certs_roster,
+            new_params.num_shares(),
+            new_params.threshold(),
+        )
+    }
+
+    pub fn expected_session_id(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+
+    pub fn pcr_allowlist(&self) -> &PcrAllowlist {
+        &self.pcr_allowlist
+    }
+
+    pub fn encrypted_old_share(&self) -> &GuardianEncryptedShare {
+        &self.encrypted_old_share
     }
 
     pub fn new_kp_certs_roster(&self) -> &KpCertsRoster {
@@ -724,95 +775,22 @@ impl RotateKpsState {
         &self.new_params
     }
 
-    pub fn into_parts(self) -> (KpCertsRoster, SecretSharingParams) {
-        (self.new_kp_certs_roster, self.new_params)
-    }
-
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(self).expect("serialization should work");
-        Blake2b::<U32>::digest(bytes).into()
-    }
-}
-
-impl RotateKpsRequest {
-    /// Construct a rotation request after validating all visible old-share
-    /// cardinality and ID invariants. Ciphertexts and commitments are verified
-    /// after decryption inside the enclave.
-    pub fn new(
-        encrypted_old_shares: Vec<GuardianEncryptedShare>,
-        old_instance: SecretSharingInstance,
-        state: RotateKpsState,
-    ) -> GuardianResult<Self> {
-        let share_count = encrypted_old_shares.len();
-        let threshold = old_instance.threshold();
-        let num_shares = old_instance.num_shares();
-        if share_count < threshold {
-            return Err(InvalidInputs(format!(
-                "need at least {threshold} encrypted old shares, got {share_count}"
-            )));
-        }
-        if share_count > num_shares {
-            return Err(InvalidInputs(format!(
-                "at most {num_shares} encrypted old shares are allowed, got {share_count}"
-            )));
-        }
-
-        let mut seen_ids = BTreeSet::new();
-        for share in &encrypted_old_shares {
-            if usize::from(share.id.get()) > num_shares {
-                return Err(InvalidInputs(format!(
-                    "encrypted old share id {} exceeds old instance num_shares {num_shares}",
-                    share.id
-                )));
-            }
-            if !seen_ids.insert(share.id) {
-                return Err(InvalidInputs(format!(
-                    "duplicate encrypted old share id {}",
-                    share.id
-                )));
-            }
-        }
-
-        Ok(Self {
-            encrypted_old_shares,
-            old_instance,
-            state,
-        })
-    }
-
-    /// Encrypt one KP's `share` to `enclave_pub_key` with `state.digest()` bound
-    /// as HPKE AAD — tying the share to the specific rotation target that KP is
-    /// authorizing. Each current KP produces one of these; the operator bundles
-    /// them into a `RotateKpsRequest`.
-    pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
-        share: &Share,
-        enclave_pub_key: &EncPubKey,
-        state: &RotateKpsState,
-        rng: &mut R,
-    ) -> GuardianEncryptedShare {
-        encrypt_share(share, enclave_pub_key, Some(&state.digest()), rng)
-    }
-
-    pub fn encrypted_old_shares(&self) -> &[GuardianEncryptedShare] {
-        &self.encrypted_old_shares
-    }
-
-    pub fn old_instance(&self) -> &SecretSharingInstance {
-        &self.old_instance
-    }
-
-    pub fn state(&self) -> &RotateKpsState {
-        &self.state
-    }
-
     pub fn into_parts(
         self,
     ) -> (
-        Vec<GuardianEncryptedShare>,
-        SecretSharingInstance,
-        RotateKpsState,
+        SessionID,
+        PcrAllowlist,
+        GuardianEncryptedShare,
+        KpCertsRoster,
+        SecretSharingParams,
     ) {
-        (self.encrypted_old_shares, self.old_instance, self.state)
+        (
+            self.expected_session_id,
+            self.pcr_allowlist,
+            self.encrypted_old_share,
+            self.new_kp_certs_roster,
+            self.new_params,
+        )
     }
 }
 
@@ -1154,12 +1132,26 @@ mod tests {
     }
 
     #[test]
-    fn rotate_kps_state_new_rejects_wrong_cert_count() {
+    fn provisioner_rotate_kp_set_request_rejects_wrong_cert_count() {
         let mut cert_sets = test_utils::mock_kp_certs(5);
         cert_sets.pop();
         let certs_roster = KpCertsRoster::new(cert_sets).unwrap();
         assert!(matches!(
-            RotateKpsState::new(certs_roster, 5, 3).unwrap_err(),
+            ProvisionerRotateKpSetRequest::new(
+                "session".into(),
+                PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
+                GuardianEncryptedShare {
+                    id: ShareID::new(1).unwrap(),
+                    ciphertext: Ciphertext {
+                        encapsulated_key: vec![0],
+                        aes_ciphertext: vec![0],
+                    },
+                },
+                certs_roster,
+                5,
+                3,
+            )
+            .unwrap_err(),
             InvalidInputs(_)
         ));
     }
@@ -1251,12 +1243,36 @@ mod tests {
     }
 
     #[test]
-    fn rotate_kps_state_digest_commits_to_roster_order() {
+    fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
         let cert_sets = test_utils::mock_kp_certs(5);
         let reversed: Vec<KpCerts> = cert_sets.iter().rev().cloned().collect();
-        let a = RotateKpsState::new(KpCertsRoster::new(cert_sets).unwrap(), 5, 3).unwrap();
-        let b = RotateKpsState::new(KpCertsRoster::new(reversed).unwrap(), 5, 3).unwrap();
+        let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap();
+        let encrypted_old_share = GuardianEncryptedShare {
+            id: ShareID::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0],
+                aes_ciphertext: vec![0],
+            },
+        };
+        let a = ProvisionerRotateKpSetRequest::new(
+            "session".into(),
+            pcr_allowlist.clone(),
+            encrypted_old_share.clone(),
+            KpCertsRoster::new(cert_sets).unwrap(),
+            5,
+            3,
+        )
+        .unwrap();
+        let b = ProvisionerRotateKpSetRequest::new(
+            "session".into(),
+            pcr_allowlist,
+            encrypted_old_share,
+            KpCertsRoster::new(reversed).unwrap(),
+            5,
+            3,
+        )
+        .unwrap();
         assert_ne!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
-        assert_ne!(a.digest(), b.digest());
+        assert_ne!(KpSigned::signed_bytes(&a), KpSigned::signed_bytes(&b));
     }
 }

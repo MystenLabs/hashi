@@ -390,6 +390,28 @@ impl KPEncryptedSharesRoster {
         })
     }
 
+    /// Require `fingerprint` to be assigned to `submitted_share_id` in this
+    /// encrypted-share roster.
+    pub fn validate_share_assignment(
+        &self,
+        fingerprint: &str,
+        submitted_share_id: ShareID,
+    ) -> GuardianResult<()> {
+        let (assigned_share, _) = self.find_by_fingerprint(fingerprint).ok_or_else(|| {
+            InvalidInputs(format!(
+                "KP fingerprint {fingerprint} is not present in the encrypted-share roster"
+            ))
+        })?;
+        if assigned_share.id != submitted_share_id {
+            return Err(InvalidInputs(format!(
+                "KP fingerprint {fingerprint} is assigned share id {}, not submitted share id {}",
+                assigned_share.id.get(),
+                submitted_share_id.get()
+            )));
+        }
+        Ok(())
+    }
+
     /// Replace one certificate-specific ciphertext while preserving every
     /// other KP/share entry and revalidating global fingerprint uniqueness.
     pub fn replace_recipient(
@@ -760,32 +782,36 @@ pub fn decrypt_share(
     })
 }
 
-/// Decrypt each submission under optional `aad`, verify it against `commitments`,
-/// and reject duplicate share ids. Errors if fewer than `threshold` shares
-/// result — i.e. the set can't reconstruct the secret. Shared by
-/// `provisioner_init` (signature-bound, no AAD) and `rotate_kps` (state-bound
-/// AAD), which collect a batch of KP shares the same way.
+/// Decrypt each signed submission, verify it against the sharing instance, and
+/// reject duplicate share ids. The KP signature authenticates each ciphertext,
+/// so no additional HPKE AAD is needed.
 pub fn decrypt_verify_shares(
     encrypted: &[GuardianEncryptedShare],
     sk: &EncSecKey,
-    aad: Option<&[u8; 32]>,
-    commitments: &ShareCommitments,
-    threshold: usize,
+    instance: &SecretSharingInstance,
 ) -> GuardianResult<Vec<Share>> {
+    let share_count = encrypted.len();
+    let threshold = instance.threshold();
+    let num_shares = instance.num_shares();
+    if share_count < threshold {
+        return Err(InvalidInputs(format!(
+            "need at least {threshold} signed share submissions, got {share_count}"
+        )));
+    }
+    if share_count > num_shares {
+        return Err(InvalidInputs(format!(
+            "at most {num_shares} signed share submissions are allowed, got {share_count}"
+        )));
+    }
+
     let mut shares: Vec<Share> = Vec::with_capacity(encrypted.len());
     for enc in encrypted {
-        let share = decrypt_share(enc, sk, aad)?;
-        commitments.verify_share(&share)?;
+        let share = decrypt_share(enc, sk, None)?;
+        instance.commitments().verify_share(&share)?;
         if shares.iter().any(|s| s.id == share.id) {
             return Err(InvalidInputs("Duplicate share ID".into()));
         }
         shares.push(share);
-    }
-    if shares.len() < threshold {
-        return Err(InvalidInputs(format!(
-            "need at least {threshold} shares, got {}",
-            shares.len()
-        )));
     }
     Ok(shares)
 }

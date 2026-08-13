@@ -21,7 +21,7 @@ pub enum CeremonyLogMessage {
         /// monitors cross-check it against the on-chain `guardian_btc_public_key`.
         btc_master_pubkey: BitcoinPubkey,
     },
-    /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
+    /// Key rotation (`rotate_kp_set`) from `old_instance` to `new_instance`.
     Rotate {
         old_instance: SecretSharingInstance,
         new_instance: SecretSharingInstance,
