@@ -18,7 +18,7 @@
 //! 3. The authoritative `ceremony/` log is scraped for the secret-sharing
 //!    instance the new guardian was booted with; it must match.
 //! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
-//!    allowlist, and network; its `config_hash` is confirmed.
+//!    allowlist, S3 policy, and network; its `config_hash` is confirmed.
 //! 5. The optional genesis state hash is independently derived from S3 and
 //!    current on-chain state and confirmed against the enclave's pin.
 //! 6. This KP's PGP-encrypted share is read from the latest
@@ -286,12 +286,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     //    digest is the `config_hash` bound into the signed PI submission.
     info!(
         phase = "config hash",
-        "recomputing config_hash from limiter config + master G + PCR allowlist + network",
+        "recomputing config_hash from limiter config + master G + PCR allowlist + S3 policy + network",
     );
     let expected_config = InitConfig::new(
         cfg.limiter_config,
         master_g,
         allowlist.clone(),
+        guardian_s3.bucket_info.clone(),
+        guardian_s3.retention_environment,
         cfg.bitcoin_network,
     )?;
     let config_hash = expected_config.digest();

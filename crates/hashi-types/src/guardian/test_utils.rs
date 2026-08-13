@@ -236,17 +236,12 @@ impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
 
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
-        let s3_config = super::ResolvedS3Config {
-            access_key: "ak".into(),
-            secret_key: "sk".into(),
-            session_token: Some("token".into()),
-            bucket_info: super::S3BucketInfo {
-                bucket: "bucket".into(),
-                region: "us-east-1".into(),
-            },
-            retention_environment: super::S3RetentionEnvironment::Testnet,
-        };
-        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None), None)
+        let s3_config = ResolvedS3Config::mock_for_testing();
+        OperatorInitRequest::new_withdraw_mode(
+            s3_config.credentials,
+            InitConfig::mock_for_testing(None),
+            None,
+        )
     }
 }
 
@@ -362,6 +357,8 @@ impl InitConfig {
             limiter_config,
             hashi_btc_master_pubkey,
             mock_pcr_allowlist(),
+            S3BucketInfo::mock_for_testing(),
+            super::S3RetentionEnvironment::Testnet,
             network,
         )
         .expect("valid InitConfig")
@@ -385,6 +382,8 @@ impl InitConfig {
             },
             hashi_btc_master_pubkey,
             mock_pcr_allowlist(),
+            S3BucketInfo::mock_for_testing(),
+            super::S3RetentionEnvironment::Testnet,
             super::Network::Regtest,
         )
         .expect("valid InitConfig")
@@ -521,9 +520,11 @@ impl ResolvedS3Config {
     /// Convenience helper for tests.
     pub fn mock_for_testing() -> Self {
         Self {
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-            session_token: None,
+            credentials: super::S3Credentials {
+                access_key: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+                session_token: None,
+            },
             bucket_info: S3BucketInfo::mock_for_testing(),
             retention_environment: super::S3RetentionEnvironment::Testnet,
         }

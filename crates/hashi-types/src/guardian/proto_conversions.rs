@@ -193,8 +193,9 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
                 }))
             }
             pb::operator_init_request::Request::Withdraw(req) => {
-                let s3_config = super::ResolvedS3Config::try_from(
-                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
+                let s3_credentials = super::S3Credentials::try_from(
+                    req.s3_credentials
+                        .ok_or_else(|| missing("s3_credentials"))?,
                 )?;
                 let init_config =
                     InitConfig::try_from(req.init_config.ok_or_else(|| missing("init_config"))?)?;
@@ -209,7 +210,7 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
                     .transpose()?;
                 Ok(OperatorInitRequest::Withdraw(Box::new(
                     WithdrawOperatorInitRequest {
-                        s3_config,
+                        s3_credentials,
                         init_config,
                         genesis_state,
                     },
@@ -534,10 +535,19 @@ impl TryFrom<pb::InitConfig> for InitConfig {
 
         let network = pb_to_network(config_pb.network.ok_or_else(|| missing("network"))?)?;
 
+        let bucket_info = config_pb
+            .bucket_info
+            .ok_or_else(|| missing("bucket_info"))?
+            .try_into()?;
+        let retention_environment =
+            super::S3RetentionEnvironment::try_from(config_pb.retention_environment)?;
+
         InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
             pcr_allowlist,
+            bucket_info,
+            retention_environment,
             network,
         )
     }
@@ -706,13 +716,13 @@ pub fn operator_init_request_to_pb(
         }
         OperatorInitRequest::Withdraw(request) => {
             let WithdrawOperatorInitRequest {
-                s3_config,
+                s3_credentials,
                 init_config,
                 genesis_state,
             } = *request;
             pb::operator_init_request::Request::Withdraw(Box::new(
                 pb::WithdrawOperatorInitRequest {
-                    s3_config: Some(s3_config_to_pb(s3_config)),
+                    s3_credentials: Some(s3_credentials.into()),
                     init_config: Some(init_config_to_pb(init_config)?),
                     genesis_state: genesis_state.map(|state| pb::GenesisState {
                         committee: Some(move_committee_to_pb(&state.into_committee())),
@@ -789,13 +799,22 @@ impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotat
 
 // Throws an error if network is invalid.
 pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
-    let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) = s.into_parts();
+    let (
+        limiter_config,
+        hashi_btc_master_pubkey,
+        pcr_allowlist,
+        bucket_info,
+        retention_environment,
+        network,
+    ) = s.into_parts();
 
     Ok(pb::InitConfig {
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
         network: Some(network_to_pb(network)?),
+        bucket_info: Some(s3_bucket_info_to_pb(bucket_info)),
+        retention_environment: retention_environment.into(),
     })
 }
 
@@ -1199,9 +1218,11 @@ impl TryFrom<pb::S3Config> for super::ResolvedS3Config {
             super::S3RetentionEnvironment::try_from(cfg.retention_environment)?;
 
         Ok(Self {
-            access_key,
-            secret_key,
-            session_token: cfg.session_token,
+            credentials: super::S3Credentials {
+                access_key,
+                secret_key,
+                session_token: cfg.session_token,
+            },
             bucket_info: super::S3BucketInfo {
                 bucket: bucket_name,
                 region,
@@ -1211,13 +1232,39 @@ impl TryFrom<pb::S3Config> for super::ResolvedS3Config {
     }
 }
 
+impl TryFrom<pb::S3Credentials> for super::S3Credentials {
+    type Error = GuardianError;
+
+    fn try_from(credentials: pb::S3Credentials) -> Result<Self, Self::Error> {
+        Ok(Self {
+            access_key: credentials
+                .access_key
+                .ok_or_else(|| missing("access_key"))?,
+            secret_key: credentials
+                .secret_key
+                .ok_or_else(|| missing("secret_key"))?,
+            session_token: credentials.session_token,
+        })
+    }
+}
+
+impl From<super::S3Credentials> for pb::S3Credentials {
+    fn from(credentials: super::S3Credentials) -> Self {
+        Self {
+            access_key: Some(credentials.access_key),
+            secret_key: Some(credentials.secret_key),
+            session_token: credentials.session_token,
+        }
+    }
+}
+
 fn s3_config_to_pb(cfg: super::ResolvedS3Config) -> pb::S3Config {
     pb::S3Config {
-        access_key: Some(cfg.access_key),
-        secret_key: Some(cfg.secret_key),
+        access_key: Some(cfg.credentials.access_key),
+        secret_key: Some(cfg.credentials.secret_key),
         bucket_name: Some(cfg.bucket_info.bucket),
         region: Some(cfg.bucket_info.region),
-        session_token: cfg.session_token,
+        session_token: cfg.credentials.session_token,
         retention_environment: cfg.retention_environment.into(),
     }
 }
