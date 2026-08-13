@@ -255,6 +255,20 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         session_id = %session_id,
         "guardian info checks passed (bucket, limiter config, mpc_master_g, standby not activated)",
     );
+    info!(
+        phase = "heartbeat",
+        session_id = %session_id,
+        "checking that the pinned guardian session is live in S3",
+    );
+    reader
+        .ensure_session_live(&session_id)
+        .await
+        .with_context(|| format!("guardian session {session_id} is not live in S3"))?;
+    info!(
+        phase = "heartbeat",
+        session_id = %session_id,
+        "pinned guardian session is live in S3",
+    );
 
     // 3. Read the ceremony + KP share state and confirm the new guardian was
     //    booted with the same secret-sharing instance.
