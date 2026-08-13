@@ -8,21 +8,21 @@
 //! Both serialize a payload together with its signing intent so a signature for
 //! one payload type cannot be replayed as another.
 
-use super::CryptoVerificationError;
-use super::CryptoVerificationResult;
-use super::GuardianError::InternalError;
-use super::GuardianInfo;
-use super::GuardianResult;
-use super::LogEntry;
-use super::ProvisionerInitRequest;
-use super::ProvisionerRotateCertRequest;
-use super::ProvisionerRotateCertResponse;
-use super::ProvisionerRotateKpSetRequest;
-use super::RotateKpSetResponse;
-use super::SessionBoundRequest;
-use super::SetupNewKeyResponse;
-use super::StandardWithdrawalResponse;
-use super::UnixMillis;
+use crate::guardian::CryptoVerificationError;
+use crate::guardian::CryptoVerificationResult;
+use crate::guardian::GuardianError::InternalError;
+use crate::guardian::GuardianInfo;
+use crate::guardian::GuardianResult;
+use crate::guardian::LogEntry;
+use crate::guardian::ProvisionerInitRequest;
+use crate::guardian::ProvisionerRotateCertRequest;
+use crate::guardian::ProvisionerRotateCertResponse;
+use crate::guardian::ProvisionerRotateKpSetRequest;
+use crate::guardian::RotateKpSetResponse;
+use crate::guardian::SessionBoundRequest;
+use crate::guardian::SetupNewKeyResponse;
+use crate::guardian::StandardWithdrawalResponse;
+use crate::guardian::UnixMillis;
 use crate::pgp::Fingerprint;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::sign_detached_via_gpg;

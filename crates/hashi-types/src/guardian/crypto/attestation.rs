@@ -6,15 +6,15 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
-use super::CryptoVerificationError;
-use super::CryptoVerificationResult;
-use super::GuardianPubKey;
-use super::GuardianResult;
-use super::errors::GuardianError::BuildNotAllowlisted;
-use super::errors::GuardianError::BuildNotCurrent;
-use super::errors::GuardianError::InvalidInputs;
+use crate::guardian::CryptoVerificationError;
+use crate::guardian::CryptoVerificationResult;
+use crate::guardian::GuardianPubKey;
+use crate::guardian::GuardianResult;
+use crate::guardian::errors::GuardianError::BuildNotAllowlisted;
+use crate::guardian::errors::GuardianError::BuildNotCurrent;
+use crate::guardian::errors::GuardianError::InvalidInputs;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
-use super::time::now_timestamp_ms;
+use crate::guardian::time::now_timestamp_ms;
 
 /// Git commit revision reported by the enclave build.
 pub type GitRevision = String;
