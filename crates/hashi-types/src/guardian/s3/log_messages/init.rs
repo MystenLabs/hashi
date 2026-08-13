@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::ObjectKeyPattern;
-use super::super::S3_DIR_INIT;
+use super::super::log_layout::ObjectKeyPattern;
+use super::super::log_layout::S3_DIR_INIT;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
@@ -21,7 +21,7 @@ pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
     OIAttestationUnsigned {
         attestation: NitroAttestation,
-        #[serde(with = "crate::guardian::serde_utils::guardian_pubkey")]
+        #[serde(with = "crate::guardian::serde::guardian_pubkey")]
         signing_public_key: GuardianPubKey,
     },
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,

@@ -8,9 +8,9 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::now_unix_seconds;
 use crate::domain::utc_timestamp;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 
 const NUM_ITERATIONS_BEFORE_FAIL: u8 = 5;
 
@@ -86,7 +86,7 @@ impl BatchAuditor {
             utc_timestamp(start),
             utc_timestamp(end),
         );
-        let cur_time = now_unix_seconds();
+        let cur_time = now_timestamp_secs();
         anyhow::ensure!(
             end <= cur_time,
             "end is in the future: end={} > current_time={}",
@@ -156,7 +156,7 @@ impl BatchAuditor {
 
             if should_poll_guardian && !guardian_cursor_moved {
                 let ready_at = self.inner.get_guardian_next_partition_ready_at();
-                if now_unix_seconds() < ready_at {
+                if now_timestamp_secs() < ready_at {
                     anyhow::bail!(
                         "Guardian data is not finalized for the requested batch range:\n  \
                          guardian_complete_through={}\n  requested_end={}\n  \

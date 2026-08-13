@@ -2,29 +2,42 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod attestation;
+mod ceremony_state;
 pub mod crypto;
 pub mod errors;
 pub mod kp_certs_roster;
 pub mod lifecycle;
-pub mod log;
 pub mod proto_conversions;
-pub(crate) mod serde_utils;
+pub mod s3;
+pub(crate) mod serde;
+mod session;
 pub mod signing;
 pub mod test_utils;
-pub mod time_utils;
+pub mod time;
 
 pub mod limiter;
-pub mod s3_utils;
 
 pub use attestation::BuildPcrs;
 pub use attestation::GitRevision;
 pub use attestation::NitroAttestation;
 pub use attestation::PcrAllowlist;
+pub use ceremony_state::*;
 pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
-pub use log::*;
+pub use s3::DEVNET_S3_OBJECT_LOCK_POLICY;
+pub use s3::MAINNET_S3_OBJECT_LOCK_POLICY;
+pub use s3::ResolvedS3Config;
+pub use s3::S3BucketInfo;
+pub use s3::S3Credentials;
+pub use s3::S3ObjectLockPolicy;
+pub use s3::S3RetentionEnvironment;
+pub use s3::TESTNET_S3_OBJECT_LOCK_POLICY;
+pub use s3::UnresolvedS3Config;
+pub use s3::log;
+pub use s3::log::*;
+pub use session::*;
 pub use signing::GuardianResponse;
 pub use signing::GuardianSigned;
 pub use signing::GuardianSignedResponse;
@@ -33,10 +46,10 @@ pub use signing::GuardianSigningIntentType;
 pub use signing::KpSigned;
 pub use signing::KpSigningIntent;
 pub use signing::KpSigningIntentType;
-pub use time_utils::UnixMillis;
-pub use time_utils::now_timestamp_ms;
-pub use time_utils::now_timestamp_secs;
-pub use time_utils::unix_millis_to_seconds;
+pub use time::UnixMillis;
+pub use time::now_timestamp_ms;
+pub use time::now_timestamp_secs;
+pub use time::unix_millis_to_seconds;
 
 use self::errors::GuardianError::*;
 use crate::bitcoin::BitcoinPubkey;
@@ -48,6 +61,8 @@ pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::pgp::PgpPublicCert;
+use ::serde::Deserialize;
+use ::serde::Serialize;
 use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
@@ -60,11 +75,6 @@ pub use errors::*;
 pub use kp_certs_roster::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
-use serde::Deserialize;
-use serde::Serialize;
-use std::borrow::Borrow;
-use std::fmt;
-use std::ops::Deref;
 
 // ---------------------------------
 //    Common requests and responses
@@ -107,7 +117,7 @@ pub struct GuardianInfo {
     pub encryption_pubkey: EncPubKeyBytes,
     /// Digest of the operator-supplied `InitConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
-    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
+    #[serde(with = "crate::guardian::serde::option_hex_32")]
     pub config_hash: Option<[u8; 32]>,
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
@@ -124,7 +134,7 @@ pub struct GuardianInfo {
     pub current_committee_epoch: Option<u64>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
-    #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
+    #[serde(with = "crate::guardian::serde::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
     /// Digest of the optional genesis state pinned during operator init. KPs
     /// independently derive and bind it into their signed PI submissions.
@@ -132,7 +142,7 @@ pub struct GuardianInfo {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::guardian::serde_utils::option_hex_32"
+        with = "crate::guardian::serde::option_hex_32"
     )]
     pub genesis_state_hash: Option<[u8; 32]>,
 }
@@ -203,7 +213,7 @@ pub struct ProvisionerInitRequest {
     expected_session_id: SessionID,
     #[serde(with = "hex::serde")]
     expected_config_hash: [u8; 32],
-    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
+    #[serde(with = "crate::guardian::serde::option_hex_32")]
     expected_genesis_state_hash: Option<[u8; 32]>,
     encrypted_share: GuardianEncryptedShare,
 }
@@ -268,25 +278,6 @@ pub struct ProvisionerRotateCertRequest {
 pub struct ProvisionerRotateCertResponse {
     pub cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
-}
-
-/// A KP-signed request bound to one guardian session.
-pub trait SessionBoundRequest {
-    const REQUEST_CONTEXT: &'static str;
-
-    fn expected_session(&self) -> &SessionID;
-
-    fn validate_session(&self, live_session: &SessionID) -> GuardianResult<()> {
-        if self.expected_session() != live_session {
-            return Err(InvalidInputs(format!(
-                "{} expected guardian session {}, live session is {}",
-                Self::REQUEST_CONTEXT,
-                self.expected_session(),
-                live_session,
-            )));
-        }
-        Ok(())
-    }
 }
 
 // ---------------------------------------
@@ -357,118 +348,9 @@ pub struct RotateKpSetResponse {
 /// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = sui_sdk_types::Address;
 
-/// Guardian session identifier. Canonical IDs are short prefixes of the
-/// hex-encoded signing public key and tag per-session S3 objects.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct SessionID(String);
-
-impl SessionID {
-    /// Length of the signing-public-key prefix used for canonical session IDs.
-    pub const HEX_LEN: usize = 16;
-
-    pub fn from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> Self {
-        let mut session_id = ::hex::encode(signing_pub_key.as_bytes());
-        session_id.truncate(Self::HEX_LEN);
-        Self(session_id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for SessionID {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for SessionID {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl From<SessionID> for String {
-    fn from(value: SessionID) -> Self {
-        value.0
-    }
-}
-
-impl AsRef<str> for SessionID {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for SessionID {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Deref for SessionID {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for SessionID {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct S3BucketInfo {
-    pub bucket: String,
-    pub region: String,
-}
-
-/// S3 configuration as supplied by a config file, before AWS credentials have
-/// been resolved.
-#[derive(Clone, Debug, Deserialize)]
-pub struct UnresolvedS3Config {
-    #[serde(flatten)]
-    pub bucket_info: S3BucketInfo,
-    pub access_key: Option<String>,
-    pub secret_key: Option<String>,
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-/// Runtime S3 configuration with concrete credentials.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ResolvedS3Config {
-    pub credentials: S3Credentials,
-    pub bucket_info: S3BucketInfo,
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-/// Concrete credentials used to access the S3 policy authenticated through
-/// withdraw-mode `InitConfig`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct S3Credentials {
-    pub access_key: String,
-    pub secret_key: String,
-    pub session_token: Option<String>,
-}
-
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
-
-impl ResolvedS3Config {
-    pub fn bucket_name(&self) -> &str {
-        &self.bucket_info.bucket
-    }
-
-    pub fn region(&self) -> &str {
-        &self.bucket_info.region
-    }
-}
 
 impl OperatorInitRequest {
     pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
@@ -1167,23 +1049,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_bound_request_validates_live_session() {
-        let request = ProvisionerInitRequest::mock_for_testing();
-        request
-            .validate_session(&SessionID::from("mock-session"))
-            .unwrap();
-
-        let err = request
-            .validate_session(&SessionID::from("other-session"))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            InvalidInputs(message)
-                if message == "PI submission expected guardian session mock-session, live session is other-session"
-        ));
-    }
-
-    #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {
         let mut info = GuardianInfo::mock_for_testing();
         info.config_hash = Some([0xab; 32]);
@@ -1268,82 +1133,6 @@ mod tests {
         assert!(matches!(
             KpCertsRoster::new(cert_sets).unwrap_err(),
             InvalidInputs(_)
-        ));
-    }
-
-    #[test]
-    fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {
-        let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![
-                BuildPcrs::new("prev-1", vec![1]),
-                BuildPcrs::new("prev-2", vec![2]),
-            ],
-        )
-        .unwrap();
-
-        let current_build = allowlist.resolve("current").unwrap();
-        assert_eq!(current_build.pcr0(), &[0]);
-        let prev_build = allowlist.resolve("prev-1").unwrap();
-        assert_eq!(prev_build.pcr0(), &[1]);
-        let prev2_build = allowlist.resolve("prev-2").unwrap();
-        assert_eq!(prev2_build.pcr0(), &[2]);
-
-        assert!(matches!(
-            allowlist.resolve("missing").unwrap_err(),
-            BuildNotAllowlisted(message) if message.contains("build 'missing'")
-        ));
-    }
-
-    #[test]
-    fn pcr_allowlist_rejects_duplicate_build_revisions() {
-        let err = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![BuildPcrs::new("current", vec![1])],
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, InvalidInputs(msg) if msg.contains("duplicate PCR allowlist entry")));
-    }
-
-    #[test]
-    fn pcr_allowlist_deserializes_hex_wire_form() {
-        let allowlist: PcrAllowlist = serde_json::from_value(serde_json::json!({
-            "current_build": {
-                "git_revision": "current",
-                "pcr0": "0x00ff"
-            },
-            "prev_builds": [
-                {
-                    "git_revision": "prev",
-                    "pcr0": "01"
-                }
-            ]
-        }))
-        .unwrap();
-
-        let current_build = allowlist.resolve("current").unwrap();
-        assert_eq!(current_build.pcr0(), &[0x00, 0xff]);
-        let prev_build = allowlist.resolve("prev").unwrap();
-        assert_eq!(prev_build.pcr0(), &[0x01]);
-    }
-
-    #[test]
-    fn pcr_allowlist_requires_current_build() {
-        let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![BuildPcrs::new("prev", vec![1])],
-        )
-        .unwrap();
-
-        let current_build = allowlist.resolve("current").unwrap();
-        allowlist.require_current_build(current_build).unwrap();
-
-        let prev_build = allowlist.resolve("prev").unwrap();
-        assert!(matches!(
-            allowlist.require_current_build(prev_build).unwrap_err(),
-            BuildNotCurrent(message)
-                if message.contains("build 'prev'") && message.contains("build 'current'")
         ));
     }
 

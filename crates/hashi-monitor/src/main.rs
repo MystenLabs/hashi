@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::Subcommand;
-use hashi_monitor::domain::now_unix_seconds;
 use hashi_monitor::domain::parse_utc_timestamp;
+use hashi_types::guardian::time::now_timestamp_secs;
 
 #[derive(Debug, Parser)]
 #[command(name = "hashi-monitor")]
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Batch { config, start, end } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
-            let end = end.unwrap_or_else(now_unix_seconds);
+            let end = end.unwrap_or_else(now_timestamp_secs);
             let mut auditor = hashi_monitor::audit::BatchAuditor::new(&cfg, start, end).await?;
             auditor.run().await?;
         }

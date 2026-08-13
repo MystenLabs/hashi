@@ -6,7 +6,7 @@ use crate::domain::MonitorEventId;
 use crate::domain::MonitorEventType;
 use crate::domain::human_duration;
 use crate::domain::utc_timestamp;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

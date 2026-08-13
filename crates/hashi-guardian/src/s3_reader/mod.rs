@@ -9,7 +9,7 @@
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
-use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;

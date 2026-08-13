@@ -10,9 +10,9 @@ use crate::config::Config;
 use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
-use crate::domain::now_unix_seconds;
 use crate::domain::utc_timestamp;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
+use hashi_types::guardian::time::now_timestamp_secs;
 
 // TODO: Consider switching to a streaming API
 /// The frequency at which we poll sui, guardian and btc RPC
@@ -57,7 +57,7 @@ impl ContinuousAuditWindow {
 
 impl ContinuousAuditor {
     pub async fn new(cfg: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
-        let cur_time = now_unix_seconds();
+        let cur_time = now_timestamp_secs();
         anyhow::ensure!(
             start <= cur_time,
             "start is in the future: start={} > current_time={}",
@@ -82,7 +82,7 @@ impl ContinuousAuditor {
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
-        let up_to = now_unix_seconds();
+        let up_to = now_timestamp_secs();
         while let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui(up_to).await? {
             self.ingest_batch(events);
         }

@@ -27,7 +27,7 @@
 use super::GuardianReader;
 use super::VerifiedLogRecord;
 use crate::s3_client::GuardianS3Client;
-use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;

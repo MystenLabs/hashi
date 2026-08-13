@@ -44,7 +44,7 @@ pub use batch::BatchAuditor;
 use bitcoin::Txid;
 pub use continuous::ContinuousAuditor;
 use hashi_types::guardian::WithdrawalID;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
 use std::fmt;
 
 pub trait AuditWindow {

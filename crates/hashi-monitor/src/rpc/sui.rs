@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use futures::StreamExt;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::unix_millis_to_seconds;
 use hashi_types::move_types::HashiEvent;
 use hashi_types::move_types::PackageVersions;

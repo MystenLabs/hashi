@@ -1,14 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::ObjectKeyPattern;
+use super::super::log_layout::ObjectKeyPattern;
+use super::super::log_layout::S3HourScopedDirectory;
 use crate::committee::CommitteeSignature;
 use crate::guardian::LimiterState;
 use crate::guardian::StandardWithdrawalRequestWire;
 use crate::guardian::StandardWithdrawalResponse;
 use crate::guardian::UnixMillis;
 use crate::guardian::WithdrawalID;
-use crate::guardian::s3_utils::S3HourScopedDirectory;
 use crate::guardian::unix_millis_to_seconds;
 use bitcoin::Txid;
 use serde::Deserialize;
