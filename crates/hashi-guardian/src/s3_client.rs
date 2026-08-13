@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
 use std::time::SystemTime;
+use tokio::time::Instant;
 
 use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::primitives::ByteStream;
@@ -176,6 +177,19 @@ impl GuardianS3Client {
         self.write_at_key(&key, &log, object_lock_duration).await
     }
 
+    /// Attempt one immutable log write before an absolute fencing deadline.
+    pub(crate) async fn write_log_record_before(
+        &self,
+        log: LogRecord,
+        deadline: Instant,
+    ) -> GuardianResult<()> {
+        let key = log.object_key().to_string();
+        match tokio::time::timeout_at(deadline, self.write_log_record(log)).await {
+            Ok(result) => result,
+            Err(_) => panic!("S3 log {key} was not written before its fencing deadline"),
+        }
+    }
+
     /// Retry an immutable log write through the grace period, then abort.
     /// State-changing RPCs call this from their root-owned task.
     pub async fn write_log_record_or_abort(&self, log: LogRecord) -> GuardianResult<()> {
@@ -187,10 +201,33 @@ impl GuardianS3Client {
         .await
     }
 
+    /// Retry an immutable log write until an absolute heartbeat-fencing deadline.
+    pub(crate) async fn write_log_record_or_abort_before(
+        &self,
+        log: LogRecord,
+        deadline: Instant,
+    ) -> GuardianResult<()> {
+        self.write_log_record_or_abort_until(log, deadline, S3_WRITE_RETRY_INTERVAL)
+            .await
+    }
+
     async fn write_log_record_or_abort_inner(
         &self,
         log: LogRecord,
         max_failure_interval: Duration,
+        retry_interval: Duration,
+    ) -> GuardianResult<()> {
+        let deadline = Instant::now()
+            .checked_add(max_failure_interval)
+            .expect("S3 write deadline overflow");
+        self.write_log_record_or_abort_until(log, deadline, retry_interval)
+            .await
+    }
+
+    async fn write_log_record_or_abort_until(
+        &self,
+        log: LogRecord,
+        deadline: Instant,
         retry_interval: Duration,
     ) -> GuardianResult<()> {
         let object_lock_duration = self.object_lock_duration(&log);
@@ -207,12 +244,9 @@ impl GuardianS3Client {
             }
         };
 
-        match tokio::time::timeout(max_failure_interval, write_until_success).await {
+        match tokio::time::timeout_at(deadline, write_until_success).await {
             Ok(result) => result,
-            Err(_) => panic!(
-                "S3 log {} was not written within {:?}",
-                key, max_failure_interval
-            ),
+            Err(_) => panic!("S3 log {key} was not written before its deadline"),
         }
     }
 
@@ -918,7 +952,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "was not written within")]
+    #[should_panic(expected = "was not written before its deadline")]
     async fn test_log_writer_panics_after_failure_interval() {
         let put_fail = mock!(Client::put_object)
             .match_requests(|req| req.bucket() == Some("bucket"))

@@ -29,6 +29,8 @@ use std::time::Duration;
 use tokio::sync::OwnedMutexGuard;
 use tracing::info;
 
+use crate::log_writer::LogWriteCoordinator;
+use crate::log_writer::LogWriteKind;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_reader::GuardianReader;
 use hashi_types::committee::Committee as HashiCommittee;
@@ -44,6 +46,8 @@ pub struct Enclave {
     /// Serializes lifecycle and control-plane transitions so concurrent
     /// operations cannot race a check-then-set.
     control_lock: tokio::sync::Mutex<()>,
+    /// Serializes S3 log writes and fences them against heartbeat expiry.
+    log_write_coordinator: LogWriteCoordinator,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -322,6 +326,7 @@ impl Enclave {
             },
             temporary_init_state: RwLock::new(None),
             control_lock: tokio::sync::Mutex::new(()),
+            log_write_coordinator: LogWriteCoordinator::new(),
         }
     }
 
@@ -415,6 +420,9 @@ impl Enclave {
             });
         }
         self.assert_state_installed_for(next);
+        if next == WithdrawStage::OperatorInitialized.into() {
+            self.log_write_coordinator.arm_heartbeat_fencing();
+        }
         *lifecycle = next;
         Ok(())
     }
@@ -558,18 +566,35 @@ impl Enclave {
         SessionID::from_signing_pubkey(&self.signing_pubkey())
     }
 
-    async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
+    async fn write_log(&self, message: LogMessage, kind: LogWriteKind) -> GuardianResult<()> {
         let log = LogRecord::new(self.s3_session_id(), message, &self.config.signing_keys);
+        let logger = self.config.s3_logger()?;
 
-        self.config.s3_logger()?.write_log_record(log).await
+        self.log_write_coordinator
+            .write(kind, |fencing_deadline| async move {
+                match fencing_deadline {
+                    Some(deadline) => logger.write_log_record_before(log, deadline).await,
+                    None => logger.write_log_record(log).await,
+                }
+            })
+            .await
     }
 
-    async fn write_log_or_abort(&self, message: LogMessage) -> GuardianResult<()> {
+    async fn write_log_or_abort(
+        &self,
+        message: LogMessage,
+        kind: LogWriteKind,
+    ) -> GuardianResult<()> {
         let log = LogRecord::new(self.s3_session_id(), message, &self.config.signing_keys);
+        let logger = self.config.s3_logger()?;
 
-        self.config
-            .s3_logger()?
-            .write_log_record_or_abort(log)
+        self.log_write_coordinator
+            .write(kind, |fencing_deadline| async move {
+                match fencing_deadline {
+                    Some(deadline) => logger.write_log_record_or_abort_before(log, deadline).await,
+                    None => logger.write_log_record_or_abort(log).await,
+                }
+            })
             .await
     }
 
@@ -577,30 +602,35 @@ impl Enclave {
     /// S3 write/access issues. The incomplete enclave cannot serve and will restart,
     /// so S3 being ahead after a lost acknowledgement is acceptable.
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::Init(Box::new(msg))).await
+        self.write_log(LogMessage::Init(Box::new(msg)), LogWriteKind::Other)
+            .await
     }
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Withdrawal(Box::new(msg)))
+        self.write_log_or_abort(LogMessage::Withdrawal(Box::new(msg)), LogWriteKind::Other)
             .await
     }
 
     pub async fn log_committee_update(&self, msg: CommitteeUpdateLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::CommitteeUpdate(Box::new(msg)))
-            .await
+        self.write_log_or_abort(
+            LogMessage::CommitteeUpdate(Box::new(msg)),
+            LogWriteKind::Other,
+        )
+        .await
     }
 
     pub async fn log_genesis(&self, msg: GenesisLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Genesis(Box::new(msg)))
+        self.write_log_or_abort(LogMessage::Genesis(Box::new(msg)), LogWriteKind::Other)
             .await
     }
 
     pub async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Heartbeat(msg)).await
+        self.write_log_or_abort(LogMessage::Heartbeat(msg), LogWriteKind::Heartbeat)
+            .await
     }
 
     pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Ceremony(Box::new(state)))
+        self.write_log_or_abort(LogMessage::Ceremony(Box::new(state)), LogWriteKind::Other)
             .await
     }
 
@@ -613,9 +643,14 @@ impl Enclave {
         cert_seq: u64,
         encrypted_shares: KPEncryptedSharesRoster,
     ) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::KpShareState(Box::new(
-            KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
-        )))
+        self.write_log_or_abort(
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
+                sharing_seq,
+                cert_seq,
+                encrypted_shares,
+            ))),
+            LogWriteKind::Other,
+        )
         .await
     }
 
