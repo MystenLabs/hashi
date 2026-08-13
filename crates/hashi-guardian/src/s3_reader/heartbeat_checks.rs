@@ -23,6 +23,21 @@ use std::collections::BTreeMap;
 use tracing::info;
 
 impl GuardianReader {
+    /// Enforces that `live_session` has heartbeated recently.
+    pub async fn ensure_session_live(&mut self, live_session: &str) -> GuardianResult<()> {
+        let (summary, now) = self.read_recent_heartbeat_summary().await?;
+        let live_session_info = validate_session_live(&summary, now, live_session)?;
+
+        info!(
+            session_id = %live_session,
+            first_heartbeat = live_session_info.first_heartbeat,
+            last_heartbeat = live_session_info.last_heartbeat,
+            age_secs = now.saturating_sub(live_session_info.last_heartbeat),
+            "session heartbeat check passed"
+        );
+        Ok(())
+    }
+
     /// Enforces that `live_session` has heartbeated recently, while every other
     /// guardian session has been quiet long enough to no longer be considered
     /// active.
@@ -30,21 +45,16 @@ impl GuardianReader {
         &mut self,
         live_session: &str,
     ) -> GuardianResult<()> {
-        let recent_heartbeats = self.read_recent_heartbeat_logs().await?;
-        let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
-        let now = now_timestamp_secs();
+        let (summary, now) = self.read_recent_heartbeat_summary().await?;
 
-        validate_session_live_and_others_quiet(
+        let live_session_info = validate_session_live(&summary, now, live_session)?;
+        validate_other_sessions_quiet(
             &summary,
             now,
             live_session,
             OTHER_SESSION_QUIET_PERIOD.as_secs(),
         )?;
 
-        let live_session_info = summary
-            .iter()
-            .find(|s| s.session_id.as_str() == live_session)
-            .expect("validated live session must be present");
         info!(
             session_id = %live_session,
             first_heartbeat = live_session_info.first_heartbeat,
@@ -53,6 +63,14 @@ impl GuardianReader {
             "activation heartbeat check passed"
         );
         Ok(())
+    }
+
+    async fn read_recent_heartbeat_summary(
+        &mut self,
+    ) -> GuardianResult<(Vec<GuardianSessionInfo>, UnixSeconds)> {
+        let recent_heartbeats = self.read_recent_heartbeat_logs().await?;
+        let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
+        Ok((summary, now_timestamp_secs()))
     }
 
     async fn read_recent_heartbeat_logs(&mut self) -> GuardianResult<Vec<VerifiedLogRecord>> {
@@ -114,12 +132,34 @@ fn summarize_heartbeats_by_session(
         .collect())
 }
 
-fn validate_session_live_and_others_quiet(
+fn validate_other_sessions_quiet(
     summary: &[GuardianSessionInfo],
     now: UnixSeconds,
     live_session: &str,
     other_session_quiet_secs: UnixSeconds,
 ) -> GuardianResult<()> {
+    if let Some(most_recent_other_session) = summary
+        .iter()
+        .filter(|s| s.session_id.as_str() != live_session)
+        .max_by_key(|s| s.last_heartbeat)
+    {
+        let heartbeat_age_secs = now.saturating_sub(most_recent_other_session.last_heartbeat);
+        if heartbeat_age_secs < other_session_quiet_secs {
+            return Err(PriorSessionHeartbeatStillRecent {
+                session_id: most_recent_other_session.session_id.clone(),
+                heartbeat_age_secs,
+                required_quiet_secs: other_session_quiet_secs,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_session_live<'a>(
+    summary: &'a [GuardianSessionInfo],
+    now: UnixSeconds,
+    live_session: &str,
+) -> GuardianResult<&'a GuardianSessionInfo> {
     let live_session_info = summary
         .iter()
         .find(|s| s.session_id.as_str() == live_session)
@@ -136,22 +176,7 @@ fn validate_session_live_and_others_quiet(
             retry_after_secs: HEARTBEAT_INTERVAL.as_secs(),
         });
     }
-
-    if let Some(most_recent_other_session) = summary
-        .iter()
-        .filter(|s| s.session_id.as_str() != live_session)
-        .max_by_key(|s| s.last_heartbeat)
-    {
-        let heartbeat_age_secs = now.saturating_sub(most_recent_other_session.last_heartbeat);
-        if heartbeat_age_secs < other_session_quiet_secs {
-            return Err(PriorSessionHeartbeatStillRecent {
-                session_id: most_recent_other_session.session_id.clone(),
-                heartbeat_age_secs,
-                required_quiet_secs: other_session_quiet_secs,
-            });
-        }
-    }
-    Ok(())
+    Ok(live_session_info)
 }
 
 #[cfg(test)]
@@ -212,8 +237,10 @@ mod tests {
 
         assert_eq!(summary.len(), 2);
         assert_eq!(summary[0].session_id.as_str(), "a");
+        assert_eq!(summary[0].first_heartbeat, 10);
         assert_eq!(summary[0].last_heartbeat, 30);
         assert_eq!(summary[1].session_id.as_str(), "b");
+        assert_eq!(summary[1].first_heartbeat, 20);
         assert_eq!(summary[1].last_heartbeat, 20);
     }
 
@@ -225,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_session_live_and_others_quiet_accepts_live_session() {
+    fn validate_other_sessions_quiet_accepts_quiet_session() {
         let summary = vec![
             GuardianSessionInfo {
                 session_id: "live".into(),
@@ -239,12 +266,31 @@ mod tests {
             },
         ];
 
-        validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
-            .expect("live session is recent and other session is quiet");
+        validate_other_sessions_quiet(&summary, 1_000, "live", 600)
+            .expect("other session is quiet");
     }
 
     #[test]
-    fn validate_session_live_and_others_quiet_accepts_boundary_ages() {
+    fn validate_session_live_allows_another_live_session() {
+        let summary = vec![
+            GuardianSessionInfo {
+                session_id: "target".into(),
+                first_heartbeat: 990,
+                last_heartbeat: 990,
+            },
+            GuardianSessionInfo {
+                session_id: "active".into(),
+                first_heartbeat: 995,
+                last_heartbeat: 995,
+            },
+        ];
+
+        validate_session_live(&summary, 1_000, "target")
+            .expect("target session is live even while the active session also heartbeats");
+    }
+
+    #[test]
+    fn heartbeat_validators_accept_boundary_ages() {
         let summary = vec![
             GuardianSessionInfo {
                 session_id: "live".into(),
@@ -258,19 +304,21 @@ mod tests {
             },
         ];
 
-        validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
-            .expect("boundary ages satisfy the heartbeat requirements");
+        validate_session_live(&summary, 1_000, "live")
+            .expect("live session heartbeat is at the age boundary");
+        validate_other_sessions_quiet(&summary, 1_000, "live", 600)
+            .expect("other session heartbeat is at the quiet boundary");
     }
 
     #[test]
-    fn validate_session_live_and_others_quiet_fails_when_live_session_missing() {
+    fn validate_session_live_fails_when_session_missing() {
         let summary = vec![GuardianSessionInfo {
             session_id: "old".into(),
             first_heartbeat: 200,
             last_heartbeat: 200,
         }];
 
-        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
+        let err = validate_session_live(&summary, 1_000, "live")
             .expect_err("must require heartbeat for live session");
         assert_eq!(
             err,
@@ -283,14 +331,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_session_live_and_others_quiet_fails_when_live_session_stale() {
+    fn validate_session_live_fails_when_session_stale() {
         let summary = vec![GuardianSessionInfo {
             session_id: "live".into(),
             first_heartbeat: 800,
             last_heartbeat: 800,
         }];
 
-        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
+        let err = validate_session_live(&summary, 1_000, "live")
             .expect_err("must reject stale live session");
         assert_eq!(
             err,
@@ -303,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_session_live_and_others_quiet_reports_most_recent_other_heartbeat() {
+    fn validate_other_sessions_quiet_reports_most_recent_heartbeat() {
         let summary = vec![
             GuardianSessionInfo {
                 session_id: "live".into(),
@@ -322,7 +370,7 @@ mod tests {
             },
         ];
 
-        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 100)
+        let err = validate_other_sessions_quiet(&summary, 1_000, "live", 100)
             .expect_err("must reject a recent heartbeat from another session");
         assert_eq!(
             err,
