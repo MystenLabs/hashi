@@ -170,6 +170,8 @@ pub struct Metrics {
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
     pub mpc_end_reconfig_duration_seconds: HistogramVec,
+    db_major_compaction_duration_seconds: HistogramVec,
+    db_major_compaction_failures_total: IntCounterVec,
     pub mpc_prepare_signing_duration_seconds: HistogramVec,
     pub mpc_total_duration_seconds: HistogramVec,
     pub mpc_dealer_crypto_duration_seconds: HistogramVec,
@@ -929,6 +931,22 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            db_major_compaction_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_db_major_compaction_duration_seconds",
+                "Duration of a post-reconfig major compaction, by keyspace",
+                &["keyspace"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            db_major_compaction_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_db_major_compaction_failures_total",
+                "Post-reconfig major compactions that failed, by keyspace \
+                 (\"unlink\" is the final rotation that releases the disk)",
+                &["keyspace"],
+                registry,
+            )
+            .unwrap(),
             mpc_prepare_signing_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_prepare_signing_duration_seconds",
                 "Duration of prepare_signing",
@@ -1206,6 +1224,24 @@ impl Metrics {
         self.task_last_iteration_timestamp_seconds
             .with_label_values(&[task])
             .set(now);
+    }
+
+    pub fn record_major_compaction(&self, keyspace: &crate::db::CompactedKeyspace) {
+        let labels = &[keyspace.name];
+        self.db_major_compaction_duration_seconds
+            .with_label_values(labels)
+            .observe(keyspace.elapsed.as_secs_f64());
+        if keyspace.error.is_some() {
+            self.db_major_compaction_failures_total
+                .with_label_values(labels)
+                .inc();
+        }
+    }
+
+    pub fn record_major_compaction_unlink_failure(&self) {
+        self.db_major_compaction_failures_total
+            .with_label_values(&["unlink"])
+            .inc();
     }
 
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {

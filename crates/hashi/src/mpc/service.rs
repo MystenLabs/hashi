@@ -1347,7 +1347,6 @@ impl MpcService {
                  will retry at next trigger"
             );
         }
-        self.backup_handle.backup_after_epoch_change(target_epoch);
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         let pruning_references = {
             let state = self.inner.onchain_state().state();
@@ -1378,6 +1377,11 @@ impl MpcService {
         {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
+        self.run_major_compaction(target_epoch).await;
+        // Only after compaction: the backup takes a database-wide snapshot,
+        // and a snapshot taken before the prune pins every value the
+        // compaction would otherwise drop.
+        self.backup_handle.backup_after_epoch_change(target_epoch);
         if !self.reconfig_target_live(target_epoch) {
             info!(
                 "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
@@ -1410,6 +1414,50 @@ impl MpcService {
         }
         drop(_prepare_signing_timer);
         drop(_reconfig_timer);
+    }
+
+    /// Compact the database after an epoch change so the rows the prune just
+    /// tombstoned are actually unlinked.
+    ///
+    /// Awaited deliberately before `prepare_signing` refills the presig pool:
+    /// the keyspaces are at their emptiest right after the prune, so the merge
+    /// writes almost nothing.
+    async fn run_major_compaction(&self, epoch: u64) {
+        let db = self.inner.db.clone();
+        let started = std::time::Instant::now();
+        let compaction = match tokio::task::spawn_blocking(move || db.major_compact()).await {
+            Ok(compaction) => compaction,
+            Err(e) => {
+                error!("post-reconfig compaction for epoch {epoch} panicked: {e}");
+                return;
+            }
+        };
+        for keyspace in compaction.keyspaces {
+            self.inner.metrics.record_major_compaction(&keyspace);
+            match &keyspace.error {
+                Some(e) => error!("compacting {} failed: {e}", keyspace.name),
+                None => info!(
+                    "compacted {} in {:?}: {} -> {} live bytes",
+                    keyspace.name, keyspace.elapsed, keyspace.before, keyspace.after,
+                ),
+            }
+        }
+        // The unlink rotation is what actually releases the disk, so its
+        // failure fails the run even when every keyspace compacted cleanly.
+        match &compaction.unlink_error {
+            Some(e) => {
+                self.inner.metrics.record_major_compaction_unlink_failure();
+                error!(
+                    "post-reconfig compaction for epoch {epoch} failed after {:?}: \
+                     retired tables were not unlinked, the space is still held: {e}",
+                    started.elapsed()
+                );
+            }
+            None => info!(
+                "post-reconfig compaction for epoch {epoch} finished in {:?}",
+                started.elapsed()
+            ),
+        }
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {
