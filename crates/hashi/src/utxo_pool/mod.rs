@@ -214,15 +214,6 @@ pub struct UtxoCandidate {
     pub status: UtxoStatus,
 }
 
-impl UtxoCandidate {
-    pub(crate) fn is_individually_eligible(&self, params: &CoinSelectionParams) -> bool {
-        self.status.mempool_chain_depth() <= params.max_mempool_chain_depth
-            && self.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
-            && self.status.unconfirmed_ancestor_weight() + self.spend_path.input_weight()
-                < params.max_ancestor_package_weight
-    }
-}
-
 // ── Withdrawal Request ───────────────────────────────────────────────────────
 
 /// A withdrawal request candidate for inclusion in a Bitcoin transaction.
@@ -546,7 +537,9 @@ pub enum CoinSelectionError {
     #[error(
         "per-request deduction {fee_per_request} sat exceeds the configured cap \
          {max_fee_per_request} sat (total deduction {total_deduction} sat across \
-         {n_requests} requests)"
+         {n_requests} requests: transaction fee {transaction_fee} sat, CPFP deficit \
+         {cpfp_deficit} sat, dust padding {dust_padding} sat; {selected_inputs} inputs, \
+         {pending_inputs} pending, {unconfirmed_ancestors} unique unconfirmed ancestors)"
     )]
     FeeExceedsCap {
         /// `ceil(total_deduction / N)` — the equal share charged to each
@@ -559,21 +552,41 @@ pub enum CoinSelectionError {
         total_deduction: u64,
         /// Number of selected requests (N).
         n_requests: usize,
+        /// Fee required by the withdrawal transaction itself, excluding CPFP.
+        transaction_fee: u64,
+        /// Extra fee required to bring unconfirmed ancestors up to the target
+        /// package fee rate.
+        cpfp_deficit: u64,
+        /// Extra deduction required to avoid creating a dust change output.
+        dust_padding: u64,
+        /// Number of selected transaction inputs.
+        selected_inputs: usize,
+        /// Number of selected inputs created by pending transactions.
+        pending_inputs: usize,
+        /// Number of unique unconfirmed ancestor transactions.
+        unconfirmed_ancestors: usize,
     },
 
     /// The total available UTXO value is insufficient to cover the total
     /// requested withdrawal amounts. All fees come from request amounts, so
     /// inputs only need to cover `sum(request.amount)`; no extra for fees.
     #[error(
-        "insufficient funds: {available} sat available across confirmed and \
-         pending UTXOs, {required} sat required to cover selected withdrawal \
-         amounts"
+        "insufficient funds: selected {selected} sat from {selected_inputs}/{max_inputs} \
+         permitted inputs, {required} sat required; {available} sat available across all \
+         eligible confirmed and pending UTXOs"
     )]
     InsufficientFunds {
         /// Total satoshis available across confirmed and pending UTXOs.
         available: u64,
+        /// Total satoshis reachable using at most `max_inputs` UTXOs.
+        selected: u64,
         /// Sum of the selected withdrawal request amounts.
         required: u64,
+        /// Number of inputs selected before reaching the input limit or
+        /// exhausting the eligible pool.
+        selected_inputs: usize,
+        /// Maximum number of transaction inputs permitted for this attempt.
+        max_inputs: usize,
     },
 
     /// The transaction weight exceeds `params.max_tx_weight`. Step 1 takes
@@ -595,7 +608,9 @@ pub enum CoinSelectionError {
     /// rather than after, since Bitcoin would reject the broadcast.
     #[error(
         "transaction weight {weight:#} plus unconfirmed ancestor weight \
-         {ancestor_weight:#} exceeds the configured package maximum {max_weight:#}"
+         {ancestor_weight:#} exceeds the configured package maximum {max_weight:#} \
+         ({selected_inputs} inputs, {pending_inputs} pending, \
+         {unconfirmed_ancestors} unique unconfirmed ancestors)"
     )]
     ExceedsMaxAncestorPackageWeight {
         /// Weight of the candidate transaction itself.
@@ -604,6 +619,12 @@ pub enum CoinSelectionError {
         ancestor_weight: Weight,
         /// Configured maximum (`params.max_ancestor_package_weight`).
         max_weight: Weight,
+        /// Number of selected transaction inputs.
+        selected_inputs: usize,
+        /// Number of selected inputs created by pending transactions.
+        pending_inputs: usize,
+        /// Number of unique unconfirmed ancestor transactions.
+        unconfirmed_ancestors: usize,
     },
 
     /// A selected request's amount is smaller than the per-request fee share,
@@ -775,9 +796,18 @@ pub fn select_coins(
     // stay within Bitcoin's relay policy limits.
     let mut pool: Vec<&UtxoCandidate> = utxos
         .iter()
-        // Unspendable pending candidates are skipped rather than allowed to
-        // poison every largest-first retry.
-        .filter(|u| u.is_individually_eligible(params))
+        .filter(|u| {
+            u.status.mempool_chain_depth() <= params.max_mempool_chain_depth
+                // Also ensure that if this UTXO were to be selected, the resulting unconfirmed
+                // chain depth would be less than the max relay limit
+                && u.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
+                // Unspendable: its ancestors plus the input it would add
+                // already fill the package budget. Skipped rather than left
+                // to fail the selection, since largest-first would pick it
+                // on every retry and block withdrawals the others could fund.
+                && u.status.unconfirmed_ancestor_weight() + u.spend_path.input_weight()
+                    < params.max_ancestor_package_weight
+        })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
 
@@ -799,7 +829,10 @@ pub fn select_coins(
     if input_total < total_requested {
         return Err(CoinSelectionError::InsufficientFunds {
             available: pool.iter().map(|u| u.amount).sum(),
+            selected: input_total,
             required: total_requested,
+            selected_inputs: builder.inputs.len(),
+            max_inputs: params.max_inputs,
         });
     }
 
@@ -1045,17 +1078,23 @@ impl<'a> TransactionBuilder<'a> {
     /// Check that both the transaction weight and the unconfirmed
     /// ancestor package weight are within their configured maximums.
     fn check_weight(&self) -> Result<(), CoinSelectionError> {
-        if self.exceeds_max_weight() {
+        let weight = self.weight();
+        if weight > self.params.max_tx_weight {
             return Err(CoinSelectionError::ExceedsMaxWeight {
-                weight: self.weight(),
+                weight,
                 max_weight: self.params.max_tx_weight,
             });
         }
-        if self.exceeds_max_ancestor_package_weight() {
+        let ancestors = self.unconfirmed_ancestors();
+        let ancestor_weight = ancestors.iter().map(|ancestor| ancestor.tx_weight).sum();
+        if weight + ancestor_weight > self.params.max_ancestor_package_weight {
             return Err(CoinSelectionError::ExceedsMaxAncestorPackageWeight {
-                weight: self.weight(),
-                ancestor_weight: self.unconfirmed_ancestor_weight(),
+                weight,
+                ancestor_weight,
                 max_weight: self.params.max_ancestor_package_weight,
+                selected_inputs: self.inputs.len(),
+                pending_inputs: self.pending_input_count(),
+                unconfirmed_ancestors: ancestors.len(),
             });
         }
         Ok(())
@@ -1116,6 +1155,13 @@ impl<'a> TransactionBuilder<'a> {
         own_fee + self.cpfp_deficit()
     }
 
+    fn pending_input_count(&self) -> usize {
+        self.inputs
+            .iter()
+            .filter(|input| matches!(input.status, UtxoStatus::Pending { .. }))
+            .count()
+    }
+
     /// The sum of all withdrawal request amounts.
     fn total_requested(&self) -> u64 {
         self.outputs.iter().map(|o| o.request.amount).sum()
@@ -1146,7 +1192,10 @@ impl<'a> TransactionBuilder<'a> {
             return Ok(());
         }
 
-        let total_deduction = self.total_deduction();
+        let transaction_fee = fee_for_weight(self.fee_rate, self.weight());
+        let cpfp_deficit = self.cpfp_deficit();
+        let dust_padding = self.dust_padding();
+        let total_deduction = transaction_fee + cpfp_deficit + dust_padding;
         let deduction_per_request = total_deduction.div_ceil(n);
 
         if deduction_per_request > self.params.max_fee_per_request {
@@ -1155,6 +1204,12 @@ impl<'a> TransactionBuilder<'a> {
                 max_fee_per_request: self.params.max_fee_per_request,
                 total_deduction,
                 n_requests: n as usize,
+                transaction_fee,
+                cpfp_deficit,
+                dust_padding,
+                selected_inputs: self.inputs.len(),
+                pending_inputs: self.pending_input_count(),
+                unconfirmed_ancestors: self.unconfirmed_ancestors().len(),
             });
         }
 

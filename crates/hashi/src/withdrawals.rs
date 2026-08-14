@@ -1369,33 +1369,11 @@ impl Hashi {
             })
             .collect();
 
-        let (confirmed_count, confirmed_value, pending_count, pending_value) = candidates
-            .iter()
-            .fold((0usize, 0u64, 0usize, 0u64), |mut acc, candidate| {
-                match candidate.status {
-                    UtxoStatus::Confirmed => {
-                        acc.0 += 1;
-                        acc.1 = acc.1.saturating_add(candidate.amount);
-                    }
-                    UtxoStatus::Pending { .. } => {
-                        acc.2 += 1;
-                        acc.3 = acc.3.saturating_add(candidate.amount);
-                    }
-                }
-                acc
-            });
-
         let mut last_selection_error = None;
         let mut result = None;
         let mut attempt_error_counts = BTreeMap::<&'static str, usize>::new();
-        let mut first_attempt_error = None;
+        let mut representative_errors = BTreeMap::<&'static str, String>::new();
         let mut attempted_request_counts = 0usize;
-        let mut eligible_count = 0usize;
-        let mut eligible_value = 0u64;
-        let mut eligible_confirmed_count = 0usize;
-        let mut eligible_confirmed_value = 0u64;
-        let mut eligible_pending_count = 0usize;
-        let mut eligible_pending_value = 0u64;
         for request_count in (1..=configured_max_requests).rev() {
             let max_inputs = safe_withdrawal_flow_max_inputs(request_count, configured_max_inputs);
             if max_inputs == 0 {
@@ -1412,41 +1390,6 @@ impl Hashi {
                 ..CoinSelectionParams::new(change_address.clone())
             };
 
-            if attempted_request_counts == 0 {
-                for candidate in candidates
-                    .iter()
-                    .filter(|candidate| candidate.is_individually_eligible(&params))
-                {
-                    eligible_count += 1;
-                    eligible_value = eligible_value.saturating_add(candidate.amount);
-                    match candidate.status {
-                        UtxoStatus::Confirmed => {
-                            eligible_confirmed_count += 1;
-                            eligible_confirmed_value =
-                                eligible_confirmed_value.saturating_add(candidate.amount);
-                        }
-                        UtxoStatus::Pending { .. } => {
-                            eligible_pending_count += 1;
-                            eligible_pending_value =
-                                eligible_pending_value.saturating_add(candidate.amount);
-                        }
-                    }
-                }
-                tracing::debug!(
-                    confirmed_count,
-                    confirmed_value,
-                    pending_count,
-                    pending_value,
-                    eligible_count,
-                    eligible_value,
-                    eligible_confirmed_count,
-                    eligible_confirmed_value,
-                    eligible_pending_count,
-                    eligible_pending_value,
-                    fee_rate_sat_per_vb = fee_rate.to_sat_per_vb_floor(),
-                    "Prepared UTXO selection candidates",
-                );
-            }
             attempted_request_counts += 1;
 
             match utxo_pool::select_coins(&candidates, &mapped_requests, &params, fee_rate) {
@@ -1478,9 +1421,9 @@ impl Hashi {
                         error = %e,
                         "UTXO selection attempt failed",
                     );
-                    if first_attempt_error.is_none() {
-                        first_attempt_error = Some((request_count, max_inputs, e.to_string()));
-                    }
+                    representative_errors.entry(error_kind).or_insert_with(|| {
+                        format!("request_count={request_count}, max_inputs={max_inputs}, error={e}")
+                    });
                     last_selection_error = Some((request_count, max_inputs, e));
                 }
             }
@@ -1497,18 +1440,8 @@ impl Hashi {
                 configured_max_requests,
                 configured_max_inputs,
                 attempted_request_counts,
-                confirmed_count,
-                confirmed_value,
-                pending_count,
-                pending_value,
-                eligible_count,
-                eligible_value,
-                eligible_confirmed_count,
-                eligible_confirmed_value,
-                eligible_pending_count,
-                eligible_pending_value,
                 error_counts = ?attempt_error_counts,
-                first_error = ?first_attempt_error,
+                representative_errors = ?representative_errors,
                 last_error = ?last_error,
                 "No withdrawal request count passed UTXO selection",
             );
