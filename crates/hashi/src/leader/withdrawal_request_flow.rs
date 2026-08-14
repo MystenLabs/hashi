@@ -248,6 +248,7 @@ impl LeaderService {
             }
             Err(e) => {
                 let kind = e.kind();
+                warn!(error = %e, error_kind = ?kind, "Failed to build withdrawal commitment");
                 inner
                     .metrics
                     .leader_retries_total

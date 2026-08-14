@@ -214,6 +214,15 @@ pub struct UtxoCandidate {
     pub status: UtxoStatus,
 }
 
+impl UtxoCandidate {
+    pub(crate) fn is_individually_eligible(&self, params: &CoinSelectionParams) -> bool {
+        self.status.mempool_chain_depth() <= params.max_mempool_chain_depth
+            && self.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
+            && self.status.unconfirmed_ancestor_weight() + self.spend_path.input_weight()
+                < params.max_ancestor_package_weight
+    }
+}
+
 // ── Withdrawal Request ───────────────────────────────────────────────────────
 
 /// A withdrawal request candidate for inclusion in a Bitcoin transaction.
@@ -617,6 +626,20 @@ pub enum CoinSelectionError {
     },
 }
 
+impl CoinSelectionError {
+    pub(crate) const fn metric_label(&self) -> &'static str {
+        match self {
+            Self::EmptyPool => "empty_pool",
+            Self::NoRequests => "no_requests",
+            Self::FeeExceedsCap { .. } => "fee_exceeds_cap",
+            Self::InsufficientFunds { .. } => "insufficient_funds",
+            Self::ExceedsMaxWeight { .. } => "exceeds_max_weight",
+            Self::ExceedsMaxAncestorPackageWeight { .. } => "exceeds_max_ancestor_package_weight",
+            Self::RequestAmountTooSmall { .. } => "request_amount_too_small",
+        }
+    }
+}
+
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Output weight for a withdrawal request's recipient.
@@ -752,18 +775,9 @@ pub fn select_coins(
     // stay within Bitcoin's relay policy limits.
     let mut pool: Vec<&UtxoCandidate> = utxos
         .iter()
-        .filter(|u| {
-            u.status.mempool_chain_depth() <= params.max_mempool_chain_depth
-                // Also ensure that if this UTXO were to be selected, the resulting unconfirmed
-                // chain depth would be less than the max relay limit
-                && u.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
-                // Unspendable: its ancestors plus the input it would add
-                // already fill the package budget. Skipped rather than left
-                // to fail the selection, since largest-first would pick it
-                // on every retry and block withdrawals the others could fund.
-                && u.status.unconfirmed_ancestor_weight() + u.spend_path.input_weight()
-                    < params.max_ancestor_package_weight
-        })
+        // Unspendable pending candidates are skipped rather than allowed to
+        // poison every largest-first retry.
+        .filter(|u| u.is_individually_eligible(params))
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
 
