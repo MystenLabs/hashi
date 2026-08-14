@@ -333,6 +333,40 @@ entry fun archive_confirmed_withdrawals(hashi: &mut Hashi, withdrawal_ids: vecto
     });
 }
 
+/// Chunked archival for a withdrawal whose request count exceeds one Sui
+/// transaction's runtime-object budget: archive the listed requests only,
+/// leaving the txn in the hot bag for `finish_archive_withdrawal_txns`.
+/// Every listed request is cross-checked against the withdrawal id, so a
+/// caller can only archive requests the confirmation cert already covers.
+///
+/// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+/// no funds and must stay callable during an emergency pause.
+entry fun archive_withdrawal_requests(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    request_ids: vector<address>,
+) {
+    hashi.versioning().assert_version_enabled();
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .archive_withdrawal_requests(withdrawal_id, &request_ids);
+}
+
+/// Finish chunked archivals: move each listed txn to `confirmed_txns` once
+/// all of its requests are archived. Ids whose archival is incomplete (or
+/// already finished) are silently skipped, so batches survive races with
+/// in-flight chunk transactions.
+///
+/// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+/// no funds and must stay callable during an emergency pause.
+entry fun finish_archive_withdrawal_txns(hashi: &mut Hashi, withdrawal_ids: vector<address>) {
+    hashi.versioning().assert_version_enabled();
+    withdrawal_ids.do!(|withdrawal_id| {
+        hashi.bitcoin_mut().withdrawal_queue_mut().finish_archive_withdrawal_txn(withdrawal_id);
+    });
+}
+
 /// Reassign fresh presignatures to the still-unsigned inputs of a withdrawal
 /// whose signing batch is from a previous epoch. Only the pending tail is
 /// re-presigned; already-collected signatures are final and epoch-independent.

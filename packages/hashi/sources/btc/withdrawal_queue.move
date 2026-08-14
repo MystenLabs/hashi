@@ -633,17 +633,77 @@ public(package) fun archive_withdrawal_txn(
         assert!(txn.confirmed_timestamp_ms.is_some(), EWithdrawalNotConfirmed);
         txn.request_ids
     };
-    request_ids.do!(|id| {
-        if (self.requests.contains(id)) {
-            let mut request: WithdrawalRequest = self.requests.remove(id);
-            assert!(request.withdrawal_txn_id == option::some(withdrawal_id), ERequestTxnMismatch);
-            request.status = WithdrawalStatus::Confirmed;
-            self.processed.add(id, request);
-        } else {
-            let request: &mut WithdrawalRequest = self.processed.borrow_mut(id);
-            request.status = WithdrawalStatus::Confirmed;
-        }
+    request_ids.do!(|id| self.archive_request(withdrawal_id, id));
+    let txn: WithdrawalTransaction = self.withdrawal_txns.remove(withdrawal_id);
+    sui::event::emit(WithdrawalArchived {
+        withdrawal_txn_id: withdrawal_id,
+        request_ids,
     });
+    self.confirmed_txns.add(withdrawal_id, txn);
+}
+
+/// Archive one request of a confirmed withdrawal wherever it lives. The
+/// `withdrawal_txn_id` cross-check runs in BOTH branches: the chunked entry
+/// takes caller-supplied ids, and without the check in the fallback branch a
+/// caller could flip an unrelated archived request's status.
+fun archive_request(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
+    request_id: address,
+) {
+    if (self.requests.contains(request_id)) {
+        let mut request: WithdrawalRequest = self.requests.remove(request_id);
+        assert!(request.withdrawal_txn_id == option::some(withdrawal_id), ERequestTxnMismatch);
+        request.status = WithdrawalStatus::Confirmed;
+        self.processed.add(request_id, request);
+    } else {
+        let request: &mut WithdrawalRequest = self.processed.borrow_mut(request_id);
+        assert!(request.withdrawal_txn_id == option::some(withdrawal_id), ERequestTxnMismatch);
+        request.status = WithdrawalStatus::Confirmed;
+    }
+}
+
+/// Chunked archival: archive only the listed requests of a confirmed
+/// withdrawal, leaving the txn in the hot bag. Lets a txn whose request
+/// count exceeds one Sui transaction's runtime-object budget archive across
+/// several transactions; `finish_archive_withdrawal_txn` moves the txn once
+/// every request is archived. No-ops if the txn is already fully archived
+/// (re-run or raced GC); idempotent per request via the `processed` branch.
+public(package) fun archive_withdrawal_requests(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
+    request_ids: &vector<address>,
+) {
+    if (!self.withdrawal_txns.contains(withdrawal_id)) return;
+    {
+        let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+        assert!(txn.confirmed_timestamp_ms.is_some(), EWithdrawalNotConfirmed);
+    };
+    request_ids.do_ref!(|id| self.archive_request(withdrawal_id, *id));
+}
+
+/// Finish a chunked archival: move the txn to `confirmed_txns` once none of
+/// its requests remain in `requests`. Silently no-ops while any request is
+/// still unarchived (or if the txn is already archived), so batched GC calls
+/// survive races with in-flight chunk transactions; the caller re-arms and
+/// retries from mirror state. The completeness walk costs only a `contains`
+/// probe per request, so it stays cheap even at the largest batch sizes.
+public(package) fun finish_archive_withdrawal_txn(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
+) {
+    if (!self.withdrawal_txns.contains(withdrawal_id)) return;
+    let request_ids = {
+        let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+        assert!(txn.confirmed_timestamp_ms.is_some(), EWithdrawalNotConfirmed);
+        txn.request_ids
+    };
+    let mut i = 0;
+    let n = request_ids.length();
+    while (i < n) {
+        if (self.requests.contains(request_ids[i])) return;
+        i = i + 1;
+    };
     let txn: WithdrawalTransaction = self.withdrawal_txns.remove(withdrawal_id);
     sui::event::emit(WithdrawalArchived {
         withdrawal_txn_id: withdrawal_id,
