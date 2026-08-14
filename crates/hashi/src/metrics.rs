@@ -117,6 +117,8 @@ pub struct Metrics {
     pub never_retry_deposit_ids: IntGauge,
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
+    db_keyspace_disk_bytes: IntGaugeVec,
+    db_disk_bytes: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
     pub sui_balance: IntGaugeVec,
     pub sui_address_balance_sweeps_total: IntCounter,
@@ -730,6 +732,19 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            db_keyspace_disk_bytes: register_int_gauge_vec_with_registry!(
+                "hashi_db_keyspace_disk_bytes",
+                "bytes fjall accounts to each database keyspace",
+                &["keyspace"],
+                registry,
+            )
+            .unwrap(),
+            db_disk_bytes: register_int_gauge_with_registry!(
+                "hashi_db_disk_bytes",
+                "bytes fjall accounts to the whole database, journals included",
+                registry,
+            )
+            .unwrap(),
             sui_tx_submissions_total: register_int_counter_vec_with_registry!(
                 "hashi_sui_tx_submissions_total",
                 "Total Sui transaction submissions by operation and outcome",
@@ -1198,6 +1213,18 @@ impl Metrics {
         self.task_last_iteration_timestamp_seconds
             .with_label_values(&[task])
             .set(now);
+    }
+
+    pub fn update_db_disk_usage(&self, db: &crate::db::Database) {
+        for (keyspace, bytes) in db.keyspace_disk_space() {
+            self.db_keyspace_disk_bytes
+                .with_label_values(&[keyspace])
+                .set(bytes.min(i64::MAX as u64) as i64);
+        }
+        match db.total_disk_space() {
+            Ok(bytes) => self.db_disk_bytes.set(bytes.min(i64::MAX as u64) as i64),
+            Err(e) => tracing::debug!("failed to read database disk usage: {e}"),
+        }
     }
 
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
