@@ -1920,6 +1920,53 @@ fn test_infeasible_pending_candidate_is_skipped_not_fatal() {
     assert_conservation(&result);
 }
 
+/// Candidate eligibility must include the complete transaction, not only the
+/// candidate's input weight. This mirrors the package that blocked testnet.
+#[test]
+fn test_candidate_filter_includes_complete_transaction_weight() {
+    let stalled = pending_utxo_mixed(
+        1,
+        100_000_000,
+        &[
+            (0, 133_116, 10_000_000),
+            (0, 133_115, 10_000_000),
+            (0, 133_115, 10_000_000),
+        ],
+    );
+    let usable = confirmed_utxo(2, 5_000_000);
+    let requests = vec![make_request(1, 1_000_000, 0)];
+    let params = default_params();
+
+    let ancestor_weight = stalled.status.unconfirmed_ancestor_weight();
+    assert_eq!(ancestor_weight, Weight::from_wu(399_346));
+    assert!(
+        ancestor_weight + stalled.spend_path.input_weight() <= params.max_ancestor_package_weight,
+        "the old input-only eligibility check must admit this candidate"
+    );
+
+    let builder = TransactionBuilder {
+        fee_rate: default_fee_rate(),
+        params: &params,
+        inputs: Vec::new(),
+        outputs: vec![PendingOutput {
+            request: &requests[0],
+            net_amount: 0,
+        }],
+        raw_change: None,
+        final_change: None,
+    };
+    let candidate_weight = builder.weight_with_candidate(&stalled, 1_000_000);
+    assert_eq!(candidate_weight, Weight::from_wu(818));
+    assert!(ancestor_weight + candidate_weight > params.max_ancestor_package_weight);
+
+    let result = select_coins(&[stalled, usable], &requests, &params, default_fee_rate())
+        .expect("the confirmed UTXO should still fund the request");
+
+    assert_eq!(result.inputs.len(), 1);
+    assert_eq!(result.inputs[0].id, make_utxo_id(2));
+    assert_conservation(&result);
+}
+
 /// A shared parent must count once: one paying above target carries a
 /// surplus that, credited twice, cancels an underpayer's deficit.
 #[test]

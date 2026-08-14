@@ -786,6 +786,7 @@ pub fn select_coins(
             net_amount: 0,
         });
     }
+    let total_requested = builder.total_requested();
 
     // ── Step 2: Input selection (largest-first) ────────────────────────────
     //
@@ -801,17 +802,17 @@ pub fn select_coins(
                 // Also ensure that if this UTXO were to be selected, the resulting unconfirmed
                 // chain depth would be less than the max relay limit
                 && u.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
-                // Unspendable: its ancestors plus the input it would add
-                // already fill the package budget. Skipped rather than left
-                // to fail the selection, since largest-first would pick it
+                // Unspendable: its ancestors plus the lower-bound transaction
+                // weight containing this input exceed the package budget. Skipped rather
+                // than left to fail the selection, since largest-first would pick it
                 // on every retry and block withdrawals the others could fund.
-                && u.status.unconfirmed_ancestor_weight() + u.spend_path.input_weight()
-                    < params.max_ancestor_package_weight
+                && u.status.unconfirmed_ancestor_weight()
+                    + builder.weight_with_candidate(u, total_requested)
+                    <= params.max_ancestor_package_weight
         })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
 
-    let total_requested = builder.total_requested();
     let mut input_total = 0u64;
 
     for utxo in &pool {
@@ -969,6 +970,26 @@ impl<'a> TransactionBuilder<'a> {
     fn weight(&self) -> Weight {
         let input_count = self.inputs.len();
         let has_change = self.raw_change.is_none_or(|v| v > 0);
+        let input_weight = self
+            .inputs
+            .iter()
+            .map(|u| u.spend_path.input_weight())
+            .sum();
+
+        self.weight_for(input_count, input_weight, has_change)
+    }
+
+    /// Lower-bound transaction weight containing `candidate` and all selected outputs.
+    /// Includes change when the candidate alone overfunds the selected requests.
+    fn weight_with_candidate(&self, candidate: &UtxoCandidate, total_requested: u64) -> Weight {
+        self.weight_for(
+            1,
+            candidate.spend_path.input_weight(),
+            candidate.amount > total_requested,
+        )
+    }
+
+    fn weight_for(&self, input_count: usize, input_weight: Weight, has_change: bool) -> Weight {
         let output_count = self.outputs.len() + if has_change { 1 } else { 0 };
 
         // Non-witness fixed fields (scaled ×4):
@@ -980,13 +1001,6 @@ impl<'a> TransactionBuilder<'a> {
         let fixed = Weight::from_wu(32 + 2)
             + varint_weight(input_count as u64)
             + varint_weight(output_count as u64);
-
-        // Sum of all input weights (base + witness satisfaction).
-        let inputs: Weight = self
-            .inputs
-            .iter()
-            .map(|u| u.spend_path.input_weight())
-            .sum();
 
         // Sum of all withdrawal output weights.
         let outputs: Weight = self
@@ -1002,7 +1016,7 @@ impl<'a> TransactionBuilder<'a> {
             Weight::ZERO
         };
 
-        fixed + inputs + outputs + change
+        fixed + input_weight + outputs + change
     }
 
     /// The total value of all selected inputs.
