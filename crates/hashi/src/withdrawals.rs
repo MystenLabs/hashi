@@ -1371,6 +1371,9 @@ impl Hashi {
 
         let mut last_selection_error = None;
         let mut result = None;
+        let mut attempt_error_counts = BTreeMap::<&'static str, usize>::new();
+        let mut representative_errors = BTreeMap::<&'static str, String>::new();
+        let mut attempted_request_counts = 0usize;
         for request_count in (1..=configured_max_requests).rev() {
             let max_inputs = safe_withdrawal_flow_max_inputs(request_count, configured_max_inputs);
             if max_inputs == 0 {
@@ -1387,6 +1390,8 @@ impl Hashi {
                 ..CoinSelectionParams::new(change_address.clone())
             };
 
+            attempted_request_counts += 1;
+
             match utxo_pool::select_coins(&candidates, &mapped_requests, &params, fee_rate) {
                 Ok(selection) => {
                     if request_count < configured_max_requests {
@@ -1402,14 +1407,47 @@ impl Hashi {
                     result = Some(selection);
                     break;
                 }
-                Err(e) => last_selection_error = Some(e),
+                Err(e) => {
+                    let error_kind = e.metric_label();
+                    *attempt_error_counts.entry(error_kind).or_default() += 1;
+                    self.metrics
+                        .utxo_selection_attempt_failures_total
+                        .with_label_values(&[error_kind])
+                        .inc();
+                    tracing::debug!(
+                        request_count,
+                        max_inputs,
+                        error_kind,
+                        error = %e,
+                        "UTXO selection attempt failed",
+                    );
+                    representative_errors.entry(error_kind).or_insert_with(|| {
+                        format!("request_count={request_count}, max_inputs={max_inputs}, error={e}")
+                    });
+                    last_selection_error = Some((request_count, max_inputs, e));
+                }
             }
         }
 
         let result = result.ok_or_else(|| {
+            let last_error =
+                last_selection_error
+                    .as_ref()
+                    .map(|(request_count, max_inputs, error)| {
+                        (*request_count, *max_inputs, error.to_string())
+                    });
+            tracing::warn!(
+                configured_max_requests,
+                configured_max_inputs,
+                attempted_request_counts,
+                error_counts = ?attempt_error_counts,
+                representative_errors = ?representative_errors,
+                last_error = ?last_error,
+                "No withdrawal request count passed UTXO selection",
+            );
             WithdrawalCommitmentError::UtxoSelectionFailed(anyhow!(
                 last_selection_error
-                    .map(|e| e.to_string())
+                    .map(|(_, _, e)| e.to_string())
                     .unwrap_or_else(|| "no withdrawal request count fits Sui commit limits".into())
             ))
         })?;

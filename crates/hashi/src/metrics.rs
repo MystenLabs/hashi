@@ -125,6 +125,7 @@ pub struct Metrics {
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
+    pub utxo_selection_attempt_failures_total: IntCounterVec,
 
     /// Withdrawals skipped because their gross amount exceeds the
     /// guardian's `max_bucket_capacity`. The request stays approved
@@ -778,6 +779,13 @@ impl Metrics {
                 "hashi_leader_items_in_backoff",
                 "Number of requests currently in retry backoff by operation",
                 &["operation"],
+                registry,
+            )
+            .unwrap(),
+            utxo_selection_attempt_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_utxo_selection_attempt_failures_total",
+                "Failed UTXO selection attempts by concrete selector error kind",
+                &["error_kind"],
                 registry,
             )
             .unwrap(),
