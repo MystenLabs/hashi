@@ -1,7 +1,41 @@
 ---
 title: Service
-description: The Hashi node service that committee members run, the gRPC interface it exposes, and the on-Sui state it relies on.
-keywords: [ service, node, gRPC, TLS, stateless, Move package ]
+description: >-
+  The Hashi node service that committee members run, the gRPC interface it
+  exposes, and the on-Sui state it relies on.
+keywords:
+  - service
+  - node
+  - gRPC
+  - TLS
+  - stateless
+  - Move package
+goal:
+  description: >-
+    Reader understands the Hashi node service architecture — its stateless
+    design, gRPC interface, TLS security, and onchain state dependencies
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 100
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the Hashi node service?
+  - How does the Hashi service communicate?
+  - Is the Hashi service stateless?
+  - What onchain state does Hashi rely on?
+answer: >-
+  The Hashi node service is a stateless gRPC service secured by TLS with
+  self-signed certificates. Each committee member runs a Hashi node that
+  stores all critical state onchain in Sui's live object set, requiring no
+  knowledge of historical transactions or events for correct operation.
 ---
 
 Every committee member is responsible for running a Hashi node service. Each

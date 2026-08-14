@@ -1,7 +1,41 @@
 ---
 title: Configuration
-description: Onchain configuration parameters that control Hashi's deposit, withdrawal, fee, and operational behavior.
-keywords: [ configuration, governance, deposit minimum, withdrawal minimum, confirmation threshold, parameters ]
+description: >-
+  Onchain configuration parameters that control Hashi's deposit, withdrawal,
+  fee, and operational behavior.
+keywords:
+  - configuration
+  - governance
+  - deposit minimum
+  - withdrawal minimum
+  - confirmation threshold
+  - parameters
+goal:
+  description: >-
+    Reader understands the onchain configuration parameters that govern Hashi
+    protocol behavior and how they are updated through governance
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What are the Hashi configuration parameters?
+  - How do I update Hashi protocol configuration?
+  - What is the minimum deposit amount for Hashi?
+  - How does Hashi governance update configuration?
+answer: >-
+  Hashi maintains onchain configuration parameters in a Config object that
+  control deposit minimums, withdrawal minimums, confirmation thresholds, fee
+  estimation, and operational behavior. All parameters are updated through
+  UpdateConfig governance proposals requiring 2/3 of committee weight.
 ---
 
 Hashi maintains a set of onchain configuration parameters stored in the

@@ -1,7 +1,43 @@
 ---
 title: Withdraw
-description: How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
-keywords: [ withdraw, hBTC, BTC, signing, MPC, Bitcoin transaction, Schnorr ]
+description: >-
+  How Hashi turns hBTC on Sui back into native BTC through the request,
+  approve, build, sign, and broadcast phases.
+keywords:
+  - withdraw
+  - hBTC
+  - BTC
+  - signing
+  - MPC
+  - Bitcoin transaction
+  - Schnorr
+goal:
+  description: >-
+    Reader understands the five-phase withdrawal flow (request, approve, build
+    TX, sign, broadcast) and MPC signing process
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do Hashi withdrawals work?
+  - What are the phases of a Hashi withdrawal?
+  - How does Hashi sign Bitcoin withdrawal transactions?
+  - How does hBTC get converted back to BTC?
+answer: >-
+  A Hashi withdrawal converts hBTC on Sui back to native BTC through five
+  phases: request (user burns hBTC and specifies a Bitcoin address), approve
+  (committee validates the request), build TX (construct the Bitcoin
+  transaction), sign (MPC threshold Schnorr signing with Guardian co-sign),
+  and broadcast (publish to the Bitcoin network).
 ---
 
 A withdrawal allows a user to redeem their `hBTC` on Sui for native BTC,

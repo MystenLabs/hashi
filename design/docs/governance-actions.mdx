@@ -1,7 +1,41 @@
 ---
 title: Governance Actions
-description: Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, and update onchain configuration.
-keywords: [ governance, proposals, upgrade, configuration, package versions ]
+description: >-
+  Proposal types that the Hashi committee uses to upgrade packages, enable or
+  disable versions, and update onchain configuration.
+keywords:
+  - governance
+  - proposals
+  - upgrade
+  - configuration
+  - package versions
+goal:
+  description: >-
+    Reader understands the available governance proposal types and how the
+    committee votes to change protocol behavior
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 150
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What governance actions does Hashi support?
+  - How does the Hashi committee vote on proposals?
+  - How are Hashi packages upgraded?
+  - How does EmergencyPause work in Hashi?
+answer: >-
+  Hashi governance uses typed Proposal objects that committee members vote on
+  with their validator stake weight. Available actions include Upgrade
+  (package upgrades), EnableVersion/DisableVersion (version management),
+  UpdateConfig (parameter changes), and EmergencyPause (pause/unpause
+  deposits and withdrawals).
 ---
 
 Governance actions are each defined by a unique `Proposal<T>` type. Proposals

@@ -1,7 +1,41 @@
 ---
 title: Reconfiguration
-description: How the Hashi committee transfers MPC key shares between epochs through DKG or key rotation as Sui validators change.
-keywords: [ reconfiguration, epoch change, DKG, key rotation, MPC ]
+description: >-
+  How the Hashi committee transfers MPC key shares between epochs through DKG
+  or key rotation as Sui validators change.
+keywords:
+  - reconfiguration
+  - epoch change
+  - DKG
+  - key rotation
+  - MPC
+goal:
+  description: >-
+    Reader understands how Hashi reconfiguration works at epoch boundaries,
+    including the choice between DKG and key rotation
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Hashi reconfiguration work?
+  - What happens to Hashi MPC keys at epoch boundaries?
+  - When does Hashi use DKG versus key rotation?
+  - How are operations paused during Hashi reconfiguration?
+answer: >-
+  When a Sui epoch change occurs, the Hashi service pauses in-progress
+  operations and starts reconfiguration. The old committee transfers MPC key
+  shares to the new committee through either DKG (for initial key generation)
+  or key rotation (for redistributing existing shares). Operations resume
+  after the new committee completes reconfiguration.
 ---
 
 Reconfiguration is one of the most important parts of the Hashi protocol,

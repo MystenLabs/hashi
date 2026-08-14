@@ -1,8 +1,44 @@
 ---
 title: Bitcoin Address Scheme
-description: Hashi derives a unique Bitcoin Taproot deposit address for every Sui address using a 2-of-2 multisig between the MPC committee and the Guardian, plus a delayed MPC-only recovery path.
-keywords: [ address scheme, Taproot, P2TR, BIP-341, key derivation, deposit address, MPC ]
+description: >-
+  Hashi derives a unique Bitcoin Taproot deposit address for every Sui address
+  using a 2-of-2 multisig between the MPC committee and the Guardian, plus a
+  delayed MPC-only recovery path.
+keywords:
+  - address scheme
+  - Taproot
+  - P2TR
+  - BIP-341
+  - key derivation
+  - deposit address
+  - MPC
 sidebar_label: Address Scheme
+goal:
+  description: >-
+    Reader understands how Hashi derives unique Taproot deposit addresses per
+    Sui address and the 2-of-2 multisig plus recovery path design
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 200
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Hashi generate Bitcoin deposit addresses?
+  - What is the Hashi Taproot address scheme?
+  - How does the Hashi recovery path work?
+  - What is the 2-of-2 multisig in Hashi?
+answer: >-
+  Hashi derives a unique P2TR (Pay-to-Taproot) deposit address for every Sui
+  address using a Taproot tree with two leaves: a 2-of-2 multisig between the
+  MPC committee and the Guardian for normal spends, and a recovery script that
+  lets the MPC key alone spend after a 60-day BIP-68 relative timelock.
 ---
 
 Every Sui address has its own unique Hashi Bitcoin deposit address. This gives

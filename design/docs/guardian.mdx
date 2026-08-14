@@ -1,7 +1,40 @@
 ---
 title: Guardian
-description: The withdrawal Guardian is a second signatory on managed Bitcoin deposits, providing defense in depth against committee compromise.
-keywords: [ guardian, withdrawal, multisig, security ]
+description: >-
+  The withdrawal Guardian is a second signatory on managed Bitcoin deposits,
+  providing defense in depth against committee compromise.
+keywords:
+  - guardian
+  - withdrawal
+  - multisig
+  - security
+goal:
+  description: >-
+    Reader understands the Guardian's role as a second signatory, its four
+    operational flows, and how it provides defense in depth
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 400
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What is the Hashi Guardian?
+  - How does the Guardian protect Hashi deposits?
+  - What are the Guardian operational flows?
+  - How does Hashi use 2-of-2 multisig with the Guardian?
+answer: >-
+  The Hashi Guardian is a second signatory on all managed Bitcoin deposits,
+  enforcing a 2-of-2 multisig where both the MPC committee and the Guardian
+  must sign to spend funds. It operates through four flows: ceremony mode
+  (key generation), withdraw-mode provisioning, activation, and normal
+  operation (signing withdrawals and handling committee handoffs).
 ---
 
 To protect against vulnerabilities and against malicious past committees,
