@@ -356,15 +356,16 @@ impl CoinSelectionParams {
     pub const DEFAULT_MAX_INPUTS: usize = 400;
 
     /// Maximum number of withdrawal requests per batch, derived from the
-    /// Sui commit transaction's runtime-object budget: at 3 runtime objects
-    /// per request, `(922 budget - 12 fixed - 16 reserved funding inputs) /
-    /// 3 = 298`. The reserve keeps room for the largest-first funding
+    /// Sui commit transaction's runtime-object budget: at the v2 (in-place
+    /// commit) cost of 2 runtime objects per request, `(922 budget - 12
+    /// fixed - 16 reserved funding inputs) / 2 = 447`. The reserve keeps
+    /// room for the largest-first funding
     /// inputs when a batch is at this cap (a compile-time assertion in
     /// `withdrawals.rs` ties this value to those constants); the descending
     /// retry loop in `build_withdrawal_tx_commitment` shrinks the batch if
     /// even the reserve is not enough.
     ///
-    /// Bitcoin-side limits do not bind here: a 298-output batch with 16
+    /// Bitcoin-side limits do not bind here: a 447-output batch with 16
     /// taproot script-path inputs is ~58 kWU, well under the 400 kWU
     /// standardness cap, and leaves ample room under the 101 kvB mempool
     /// cluster budget for a direct child.
@@ -376,7 +377,13 @@ impl CoinSelectionParams {
     /// commit budget in `safe_withdrawal_flow_max_inputs` automatically
     /// squeezes the input side down toward the funding reserve (optimizing
     /// withdrawal throughput).
-    pub const MAX_WITHDRAWAL_REQUESTS: usize = 298;
+    /// The v2 (deferred-archival) cap: with commit writing request status in
+    /// place, each request costs 2 runtime objects instead of the 3 the
+    /// v1 bag move paid, and the archival GC chunks oversized txns, so the
+    /// commit budget alone binds. Chains still operating at package v1 are
+    /// capped at `LEGACY_MAX_WITHDRAWAL_REQUESTS` (298, in `withdrawals.rs`) via
+    /// `max_withdrawal_requests`.
+    pub const MAX_WITHDRAWAL_REQUESTS: usize = 447;
 
     /// Default minimum fee rate floor (3 sat/vB), deliberately above
     /// Bitcoin Core's 1 sat/vB relay minimum.

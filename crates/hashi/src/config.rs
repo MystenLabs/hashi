@@ -152,8 +152,10 @@ pub struct Config {
     /// transaction. The batch commits immediately once this many requests are
     /// ready, without waiting for `withdrawal_batching_delay_ms` to elapse.
     ///
-    /// Defaults to 298 (the algorithm's hard upper bound, set by the Sui
-    /// commit transaction's runtime-object budget). Note that large batches
+    /// Defaults to 447 (the algorithm's hard upper bound, set by the Sui
+    /// commit transaction's runtime-object budget under the deferred-archival
+    /// package; a chain still executing v1 bytecode is additionally capped
+    /// at 298 at batch-build time). Note that large batches
     /// automatically shrink the input side: coin selection reserves the
     /// commit object budget for requests first, so a full batch spends only
     /// a handful of funding inputs and performs no consolidation.
@@ -646,7 +648,10 @@ mod tests {
     #[test]
     fn test_withdrawal_max_batch_size_defaults_to_absolute_cap() {
         let config = Config::new_for_testing();
-        assert_eq!(config.withdrawal_max_batch_size(), 298);
+        // The config clamp is the v2 cap; the leader additionally applies
+        // the version-aware cap at batch-build time, so a v1-active chain
+        // still gets the legacy 298.
+        assert_eq!(config.withdrawal_max_batch_size(), 447);
     }
 
     #[test]
@@ -674,7 +679,7 @@ mod tests {
     fn test_withdrawal_max_batch_size_clamps_to_absolute_cap() {
         let mut config = Config::new_for_testing();
         config.withdrawal_max_batch_size = Some(1_000);
-        assert_eq!(config.withdrawal_max_batch_size(), 298);
+        assert_eq!(config.withdrawal_max_batch_size(), 447);
     }
 
     #[test]
