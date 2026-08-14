@@ -122,6 +122,15 @@ pub struct CompactedKeyspace {
     pub error: Option<fjall::Error>,
 }
 
+/// Outcome of a whole-database major compaction.
+pub struct MajorCompaction {
+    pub keyspaces: Vec<CompactedKeyspace>,
+    /// Error from the final rotation that unlinks the retired tables. When
+    /// set, the compacted bytes stay on disk until a later rotation, so the
+    /// run as a whole failed even if every keyspace compacted cleanly.
+    pub unlink_error: Option<fjall::Error>,
+}
+
 /// Keyspaces included in snapshot backups. Add new backup/restore keyspaces here.
 #[derive(Clone, Copy)]
 enum BackupKeyspace {
@@ -250,7 +259,7 @@ impl Database {
     ///
     /// Blocking and slow, and it locks out background compaction for each
     /// keyspace while it runs — call it from a blocking thread.
-    pub fn major_compact(&self) -> Vec<CompactedKeyspace> {
+    pub fn major_compact(&self) -> MajorCompaction {
         let compacted: Vec<_> = self
             .all_keyspaces()
             .into_iter()
@@ -281,14 +290,15 @@ impl Database {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if let Err(e) = self
+        let unlink_error = self
             .maintenance
             .insert(MAINTENANCE_COMPACTION_KEY, now.to_be_bytes())
             .and_then(|_| self.maintenance.rotate_memtable_and_wait().map(|_| ()))
-        {
-            tracing::warn!("unlinking compacted tables failed, retrying next epoch: {e}");
+            .err();
+        MajorCompaction {
+            keyspaces: compacted,
+            unlink_error,
         }
-        compacted
     }
 
     /// Store an encryption private key, keyed by its public key, plus the
@@ -1960,8 +1970,14 @@ pub(crate) mod tests {
             "pruning alone does not free the disk — this is the bug being fixed",
         );
 
-        let compacted = db.major_compact();
-        let nonce = compacted
+        let compaction = db.major_compact();
+        assert!(
+            compaction.unlink_error.is_none(),
+            "unlink rotation failed: {:?}",
+            compaction.unlink_error
+        );
+        let nonce = compaction
+            .keyspaces
             .iter()
             .find(|keyspace| keyspace.name == NONCE_MESSAGES_CF_NAME)
             .expect("nonce_messages must be compacted");

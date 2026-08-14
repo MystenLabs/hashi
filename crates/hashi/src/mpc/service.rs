@@ -1425,14 +1425,14 @@ impl MpcService {
     async fn run_major_compaction(&self, epoch: u64) {
         let db = self.inner.db.clone();
         let started = std::time::Instant::now();
-        let compacted = match tokio::task::spawn_blocking(move || db.major_compact()).await {
-            Ok(compacted) => compacted,
+        let compaction = match tokio::task::spawn_blocking(move || db.major_compact()).await {
+            Ok(compaction) => compaction,
             Err(e) => {
                 error!("post-reconfig compaction for epoch {epoch} panicked: {e}");
                 return;
             }
         };
-        for keyspace in compacted {
+        for keyspace in compaction.keyspaces {
             self.inner.metrics.record_major_compaction(&keyspace);
             match &keyspace.error {
                 Some(e) => error!("compacting {} failed: {e}", keyspace.name),
@@ -1442,10 +1442,22 @@ impl MpcService {
                 ),
             }
         }
-        info!(
-            "post-reconfig compaction for epoch {epoch} finished in {:?}",
-            started.elapsed()
-        );
+        // The unlink rotation is what actually releases the disk, so its
+        // failure fails the run even when every keyspace compacted cleanly.
+        match &compaction.unlink_error {
+            Some(e) => {
+                self.inner.metrics.record_major_compaction_unlink_failure();
+                error!(
+                    "post-reconfig compaction for epoch {epoch} failed after {:?}: \
+                     retired tables were not unlinked, the space is still held: {e}",
+                    started.elapsed()
+                );
+            }
+            None => info!(
+                "post-reconfig compaction for epoch {epoch} finished in {:?}",
+                started.elapsed()
+            ),
+        }
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {

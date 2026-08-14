@@ -941,7 +941,8 @@ impl Metrics {
             .unwrap(),
             db_major_compaction_failures_total: register_int_counter_vec_with_registry!(
                 "hashi_db_major_compaction_failures_total",
-                "Post-reconfig major compactions that failed, by keyspace",
+                "Post-reconfig major compactions that failed, by keyspace \
+                 (\"unlink\" is the final rotation that releases the disk)",
                 &["keyspace"],
                 registry,
             )
@@ -1235,6 +1236,12 @@ impl Metrics {
                 .with_label_values(labels)
                 .inc();
         }
+    }
+
+    pub fn record_major_compaction_unlink_failure(&self) {
+        self.db_major_compaction_failures_total
+            .with_label_values(&["unlink"])
+            .inc();
     }
 
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
