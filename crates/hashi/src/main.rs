@@ -26,7 +26,7 @@ enum Commands {
     /// Run the Hashi validator server
     Server {
         #[clap(long)]
-        config: Option<std::path::PathBuf>,
+        config: std::path::PathBuf,
     },
 
     /// Proposal management commands
@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+async fn run_server(config_path: std::path::PathBuf) -> anyhow::Result<()> {
     hashi_types::telemetry::TelemetryConfig::new()
         .with_file_line(true)
         .with_env()
@@ -175,14 +175,8 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
 
     tracing::info!("welcome to hashi");
 
-    let config = config_path
-        .as_deref()
-        .map(|path| {
-            Config::load(path)
-                .with_context(|| format!("failed to load config from {}", path.display()))
-        })
-        .transpose()?
-        .unwrap_or_default();
+    let config = Config::load(&config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
 
     let hashi_ids = config.hashi_ids();
     prometheus::default_registry()
@@ -217,7 +211,7 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
 
     let server_version = ServerVersion::new(env!("CARGO_BIN_NAME"), VERSION);
 
-    let hashi = Hashi::new(server_version, config_path, config)?;
+    let hashi = Hashi::new(server_version, Some(config_path), config)?;
     let hashi_service = hashi.start().await?;
     hashi_service.main().await?;
 

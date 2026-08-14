@@ -92,7 +92,7 @@ pub(crate) fn resolve_backup_recipient(
     node_config: &Config,
     backup_pgp_cert_override: Option<String>,
 ) -> Result<PgpPublicCert> {
-    backup_pgp_cert_override
+    Ok(backup_pgp_cert_override
         .map(|value| {
             let path = Path::new(&value);
             let cert = if path.is_file() {
@@ -104,12 +104,7 @@ pub(crate) fn resolve_backup_recipient(
             PgpPublicCert::new(cert)
         })
         .transpose()?
-        .or_else(|| node_config.backup_pgp_cert.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No OpenPGP backup certificate configured. Pass --backup-pgp-cert or set backup-pgp-cert in the node config."
-            )
-        })
+        .unwrap_or_else(|| node_config.backup_pgp_cert.clone()))
 }
 
 pub fn restore(
@@ -269,10 +264,8 @@ mod tests {
             // Create a node config file with a db path and initialise the database.
             // Drop the handle immediately so subsequent opens can acquire the lock.
             let node_config_path = src.path().join("config.toml");
-            let node_config = crate::config::Config {
-                db: Some(db_path.clone()),
-                ..Default::default()
-            };
+            let mut node_config = crate::config::Config::new_for_testing();
+            node_config.db = Some(db_path.clone());
             node_config.save(&node_config_path).unwrap();
             drop(crate::db::Database::open(&db_path).unwrap());
 
@@ -535,12 +528,10 @@ mod tests {
         fs::write(&op_key_path, b"operator-key-bytes").unwrap();
 
         let node_config_path = src.path().join("config.toml");
-        let node_config = crate::config::Config {
-            db: Some(db_path.clone()),
-            tls_private_key: Some(tls_key_path.to_string_lossy().into_owned()),
-            operator_private_key: Some(op_key_path.to_string_lossy().into_owned()),
-            ..Default::default()
-        };
+        let mut node_config = crate::config::Config::new_for_testing();
+        node_config.db = Some(db_path.clone());
+        node_config.tls_private_key = Some(tls_key_path.to_string_lossy().into_owned());
+        node_config.operator_private_key = Some(op_key_path.to_string_lossy().into_owned());
         node_config.save(&node_config_path).unwrap();
         drop(crate::db::Database::open(&db_path).unwrap());
 
@@ -661,7 +652,7 @@ mod tests {
         let (public_cert, _) = mock_pgp_keypair();
 
         let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
-        node_config.backup_pgp_cert = Some(PgpPublicCert::new(public_cert).unwrap());
+        node_config.backup_pgp_cert = PgpPublicCert::new(public_cert).unwrap();
         node_config.save(&fixture.node_config_path).unwrap();
 
         let dir = tempfile::Builder::new().tempdir().unwrap();

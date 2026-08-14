@@ -226,7 +226,7 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 | **Operator private key** | Ed25519 | Generate fresh | Signs the node's day-to-day Sui transactions (cert submission, governance, metadata). See [2.4](#24-operator-key-day-to-day-signing). |
 | **BLS12-381 key** | BLS12-381 | Auto-generated at startup | MPC protocol participation. Stored in local DB. |
 | **Encryption key** | ECIES | Auto-generated at startup | Encrypts MPC share exchange between validators. Stored in local DB. |
-| **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Strongly recommended. |
+| **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Required. |
 
 ### 2.2 TLS key (dedicated)
 
@@ -428,8 +428,8 @@ db = "/var/lib/hashi/db"
 
 # ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
 
-# Armored OpenPGP public certificate (file path or inline) for encrypted backups
-# backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+# Armored OpenPGP public certificate (file path or inline) for encrypted backups (required)
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 
 # Backup output directory (default: /tmp)
 # backup-dir = "/var/lib/hashi/backups"
@@ -695,7 +695,7 @@ If a command instead fails with `package_id is required. Set it via --package-id
 ### 6.2 Server
 
 ```bash
-hashi server [--config <path>]
+hashi server --config <path>
 ```
 
 Run the Hashi validator daemon. Uses the validator config.
@@ -794,7 +794,7 @@ Config values are type-prefixed: `u64:30000`, `bool:true`.
 Backups are **OpenPGP (Sequoia)**: encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar` (format auto-detected on restore).
 
 ```bash
-# Create a backup (cert taken from the node config's backup-pgp-cert, or override inline/by path)
+# Create a backup (uses the required configured cert unless overridden inline/by path)
 hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .]
 
 # Restore an encrypted .tar.asc — exactly one decryptor is required:
@@ -1037,7 +1037,7 @@ After execution, the previous committee resumes; the system can trigger a new re
 
 The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
-When `backup-pgp-cert` is configured, the node automatically writes an encrypted backup every epoch: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. The node writes backups to `backup-dir` (default `/tmp`, so set a persistent path). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. The node writes backups to `backup-dir` (default `/tmp`, so set a persistent path). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 
