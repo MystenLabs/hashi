@@ -69,39 +69,149 @@ pub struct Database {
     //
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
     // value: BCS-serialized batch_avss::Message
-    nonce_messages: Keyspace,
+    nonce_messages: EpochGenerations,
 
     // Column Family used to store per-round AVID receiver state for restart/resume.
     //
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
     // value: BCS-serialized AvidRoundState
-    avid_round_states: Keyspace,
+    avid_round_states: EpochGenerations,
 
     // Column Family used to store this node's own AVID dealer builder per batch.
     //
     // key: (big endian u64 epoch) + (big endian u32 batch_index)
     // value: BCS-serialized AvssMessageBuilder
-    avid_dealer_builders: Keyspace,
+    avid_dealer_builders: EpochGenerations,
 
     // Column Family used to store this node's held AVID vote and outbound echoes per round.
     //
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte dealer address)
     // value: BCS-serialized HeldAvidEchoes
-    avid_held_echoes: Keyspace,
+    avid_held_echoes: EpochGenerations,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
 const SIGNING_KEYS_CF_NAME: &str = "signing_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
-const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
-const AVID_ROUND_STATES_CF_NAME: &str = "avid_round_states";
-const AVID_DEALER_BUILDERS_CF_NAME: &str = "avid_dealer_builders";
-const AVID_HELD_ECHOES_CF_NAME: &str = "avid_held_echoes";
 const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
+// Generation names for the epoch-scoped keyspaces. Generation 0 keeps the
+// pre-split name, so rows written before the split are retired as usual.
+const NONCE_MESSAGES_CF_NAMES: [&str; 2] = ["nonce_messages", "nonce_messages_g1"];
+const AVID_ROUND_STATES_CF_NAMES: [&str; 2] = ["avid_round_states", "avid_round_states_g1"];
+const AVID_DEALER_BUILDERS_CF_NAMES: [&str; 2] =
+    ["avid_dealer_builders", "avid_dealer_builders_g1"];
+const AVID_HELD_ECHOES_CF_NAMES: [&str; 2] = ["avid_held_echoes", "avid_held_echoes_g1"];
+
 const RETENTION_EXTRA_EPOCHS: u64 = 7;
+
+/// Number of generations an [`EpochGenerations`] keyspace is split across.
+const GENERATIONS: usize = 2;
+
+/// A keyspace whose rows are scoped to a single MPC epoch, split into two
+/// generations selected by epoch parity so that retiring an epoch can drop a
+/// whole generation.
+///
+/// Deleting these rows one by one never frees the disk: a tombstone is a few
+/// dozen bytes against a value of hundreds of kilobytes, so leveled compaction
+/// gets nowhere near enough write pressure to rewrite the bottom level.
+struct EpochGenerations {
+    names: [&'static str; GENERATIONS],
+    generations: std::sync::RwLock<[Keyspace; GENERATIONS]>,
+}
+
+impl EpochGenerations {
+    fn open(db: &fjall::Database, names: [&'static str; GENERATIONS]) -> Result<Self> {
+        Ok(Self {
+            names,
+            generations: std::sync::RwLock::new([
+                db.keyspace(names[0], KeyspaceCreateOptions::default)?,
+                db.keyspace(names[1], KeyspaceCreateOptions::default)?,
+            ]),
+        })
+    }
+
+    fn index(epoch: u64) -> usize {
+        (epoch % 2) as usize
+    }
+
+    fn generation(&self, index: usize) -> Keyspace {
+        self.generations.read().unwrap()[index].clone()
+    }
+
+    /// The generation that owns `epoch`; every write for `epoch` lands here.
+    fn owner(&self, epoch: u64) -> Keyspace {
+        self.generation(Self::index(epoch))
+    }
+
+    /// The generation that cannot own `epoch`. Read as a fallback, so that rows
+    /// written before the split stay visible while their epoch is still live.
+    fn other(&self, epoch: u64) -> Keyspace {
+        self.generation(Self::index(epoch) ^ 1)
+    }
+
+    fn get(&self, epoch: u64, key: &[u8]) -> Result<Option<fjall::UserValue>> {
+        match self.owner(epoch).get(key)? {
+            Some(value) => Ok(Some(value)),
+            None => self.other(epoch).get(key),
+        }
+    }
+
+    fn insert(&self, epoch: u64, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        self.owner(epoch).insert(key, value)
+    }
+
+    /// Delete a key from both generations, so it stops resolving through the
+    /// fallback in [`Self::other`] too.
+    fn remove(&self, key: Vec<u8>) -> Result<()> {
+        for index in 0..GENERATIONS {
+            self.generation(index).remove(key.clone())?;
+        }
+        Ok(())
+    }
+
+    /// List `(Address, T)` pairs under `prefix`, which must begin with `epoch`.
+    /// The owning generation wins where a key is in both.
+    fn list_by_prefix<T: DeserializeOwned>(
+        &self,
+        epoch: u64,
+        prefix: &[u8],
+    ) -> Result<Vec<(Address, T)>> {
+        let mut rows: std::collections::BTreeMap<Address, T> =
+            list_messages_by_prefix(&self.other(epoch), prefix)?
+                .into_iter()
+                .collect();
+        rows.extend(list_messages_by_prefix(&self.owner(epoch), prefix)?);
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Discard the rows for epochs below `cutoff_epoch`, which must be the epoch
+    /// being installed.
+    ///
+    /// Dropping the generation that cannot own `cutoff_epoch` needs no check:
+    /// every writer stores under the node's own current MPC epoch, which
+    /// `handle_reconfig` sets to `cutoff_epoch` before any of this runs, so the
+    /// newest row that generation can hold is `cutoff_epoch - 1`. Older rows
+    /// sharing the live generation's parity go at the next epoch change, leaving
+    /// at most two epochs on disk.
+    ///
+    /// Deleted and recreated rather than cleared, because fjall only unlinks a
+    /// table once a compaction marks it deleted — clearing would orphan the
+    /// files until the next recovery.
+    fn retire_epochs_below(&self, db: &fjall::Database, cutoff_epoch: u64) -> Result<()> {
+        if cutoff_epoch == 0 {
+            return Ok(());
+        }
+        let index = Self::index(cutoff_epoch) ^ 1;
+        let mut generations = self.generations.write().unwrap();
+        db.delete_keyspace(generations[index].clone())?;
+        // Overwriting the last handle is what unlinks the directory.
+        generations[index] = db.keyspace(self.names[index], KeyspaceCreateOptions::default)?;
+        Ok(())
+    }
+}
 
 /// Keyspaces included in snapshot backups. Add new backup/restore keyspaces here.
 #[derive(Clone, Copy)]
@@ -163,13 +273,10 @@ impl Database {
             db.keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let rotation_messages =
             db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
-        let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
-        let avid_round_states =
-            db.keyspace(AVID_ROUND_STATES_CF_NAME, KeyspaceCreateOptions::default)?;
-        let avid_dealer_builders =
-            db.keyspace(AVID_DEALER_BUILDERS_CF_NAME, KeyspaceCreateOptions::default)?;
-        let avid_held_echoes =
-            db.keyspace(AVID_HELD_ECHOES_CF_NAME, KeyspaceCreateOptions::default)?;
+        let nonce_messages = EpochGenerations::open(&db, NONCE_MESSAGES_CF_NAMES)?;
+        let avid_round_states = EpochGenerations::open(&db, AVID_ROUND_STATES_CF_NAMES)?;
+        let avid_dealer_builders = EpochGenerations::open(&db, AVID_DEALER_BUILDERS_CF_NAMES)?;
+        let avid_held_echoes = EpochGenerations::open(&db, AVID_HELD_ECHOES_CF_NAMES)?;
         let encryption_epoch_index = db.keyspace(
             ENCRYPTION_EPOCH_INDEX_CF_NAME,
             KeyspaceCreateOptions::default,
@@ -382,7 +489,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(message).unwrap();
-        self.nonce_messages.insert(key, value)
+        self.nonce_messages.insert(epoch, key, value)
     }
 
     pub fn get_nonce_message(
@@ -397,7 +504,7 @@ impl Database {
             dealer.as_bytes(),
         ]
         .concat();
-        let bytes = match self.nonce_messages.get(key) {
+        let bytes = match self.nonce_messages.get(epoch, &key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e),
@@ -421,7 +528,7 @@ impl Database {
             batch_index.to_be_bytes().as_slice(),
         ]
         .concat();
-        list_messages_by_prefix(&self.nonce_messages, &prefix)
+        self.nonce_messages.list_by_prefix(epoch, &prefix)
     }
 
     pub fn delete_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<()> {
@@ -463,7 +570,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(state).unwrap();
-        self.avid_round_states.insert(key, value)
+        self.avid_round_states.insert(epoch, key, value)
     }
 
     pub fn get_avid_round_state(
@@ -478,7 +585,7 @@ impl Database {
             dealer.as_bytes(),
         ]
         .concat();
-        let bytes = match self.avid_round_states.get(key) {
+        let bytes = match self.avid_round_states.get(epoch, &key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e),
@@ -502,7 +609,7 @@ impl Database {
             batch_index.to_be_bytes().as_slice(),
         ]
         .concat();
-        list_messages_by_prefix(&self.avid_round_states, &prefix)
+        self.avid_round_states.list_by_prefix(epoch, &prefix)
     }
 
     pub fn store_avid_held_echoes(
@@ -519,7 +626,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(held).unwrap();
-        self.avid_held_echoes.insert(key, value)
+        self.avid_held_echoes.insert(epoch, key, value)
     }
 
     pub fn get_avid_held_echoes(
@@ -534,7 +641,7 @@ impl Database {
             dealer.as_bytes(),
         ]
         .concat();
-        let bytes = match self.avid_held_echoes.get(key) {
+        let bytes = match self.avid_held_echoes.get(epoch, &key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e),
@@ -560,7 +667,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(builder).unwrap();
-        self.avid_dealer_builders.insert(key, value)
+        self.avid_dealer_builders.insert(epoch, key, value)
     }
 
     pub fn get_avid_dealer_builder(
@@ -573,7 +680,7 @@ impl Database {
             batch_index.to_be_bytes().as_slice(),
         ]
         .concat();
-        let bytes = match self.avid_dealer_builders.get(key) {
+        let bytes = match self.avid_dealer_builders.get(epoch, &key) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => return Err(e),
@@ -619,10 +726,15 @@ impl Database {
             retention_cutoff,
             is_referenced_epoch,
         )?;
-        prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
-        prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
-        prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
-        prune_keyspace(&self.avid_held_echoes, cutoff_epoch)?;
+        // Retired a generation at a time so the space is actually freed.
+        self.nonce_messages
+            .retire_epochs_below(&self.db, cutoff_epoch)?;
+        self.avid_round_states
+            .retire_epochs_below(&self.db, cutoff_epoch)?;
+        self.avid_dealer_builders
+            .retire_epochs_below(&self.db, cutoff_epoch)?;
+        self.avid_held_echoes
+            .retire_epochs_below(&self.db, cutoff_epoch)?;
         Ok(())
     }
 }
@@ -696,23 +808,6 @@ fn list_messages_by_prefix<T: DeserializeOwned>(
         results.push((address, message));
     }
     Ok(results)
-}
-
-/// Delete entries from `keyspace` whose leading big-endian u64 epoch is `< cutoff_epoch`.
-fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
-    let keys_to_delete: Vec<_> = keyspace
-        .iter()
-        .filter_map(|guard| {
-            let key = guard.key().ok()?;
-            let epoch_bytes: [u8; 8] = key.as_ref().get(..8)?.try_into().ok()?;
-            let epoch = u64::from_be_bytes(epoch_bytes);
-            (epoch < cutoff_epoch).then(|| key.to_vec())
-        })
-        .collect();
-    for key in keys_to_delete {
-        keyspace.remove(key)?;
-    }
-    Ok(())
 }
 
 /// Delete entries from `keyspace` whose leading big-endian u64 epoch is
@@ -1609,30 +1704,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_delete_nonce_message() {
-        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path()).unwrap();
-
-        let dealer1 = Address::new([1u8; 32]);
-        let dealer2 = Address::new([2u8; 32]);
-        let message = create_test_nonce_message();
-
-        db.store_nonce_message(1, 0, &dealer1, &message).unwrap();
-        db.store_nonce_message(1, 0, &dealer2, &message).unwrap();
-        assert_eq!(db.list_nonce_messages(1, 0).unwrap().len(), 2);
-
-        // Delete one
-        db.delete_nonce_message(1, 0, &dealer1).unwrap();
-        let remaining = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].0, dealer2);
-
-        // Delete non-existent is a no-op
-        db.delete_nonce_message(1, 0, &dealer1).unwrap();
-        db.delete_nonce_message(1, 1, &dealer2).unwrap();
-    }
-
-    #[test]
     fn test_nonce_messages_overwrite() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
@@ -1728,10 +1799,14 @@ pub(crate) mod tests {
                 .unwrap();
             db.store_rotation_messages(epoch, &dealer, &rotation_msgs)
                 .unwrap();
-            db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
-                .unwrap();
-            db.store_avid_round_state(epoch, 0, &dealer, &avid_state)
-                .unwrap();
+            // These are only written for the node's own current epoch, so
+            // nothing above the cutoff exists at prune time.
+            if epoch <= cutoff {
+                db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
+                    .unwrap();
+                db.store_avid_round_state(epoch, 0, &dealer, &avid_state)
+                    .unwrap();
+            }
             db.store_encryption_key(epoch, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
                 .unwrap();
             db.store_signing_key(
@@ -1766,18 +1841,30 @@ pub(crate) mod tests {
                 "rotation messages at epoch {epoch} should be retained (>= cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
         }
-        for epoch in 1..cutoff {
+        // Only the opposite parity goes now; the rest share the live
+        // generation and go at the next epoch change.
+        for epoch in (1..cutoff).filter(|epoch| epoch % 2 != cutoff % 2) {
             assert!(
                 db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
-                "nonce message at epoch {epoch} should be pruned (flat cutoff)"
+                "nonce message at epoch {epoch} should be dropped with its generation"
             );
             assert!(
                 db.get_avid_round_state(epoch, 0, &dealer)
                     .unwrap()
                     .is_none(),
-                "avid round state at epoch {epoch} should be pruned (flat cutoff)"
+                "avid round state at epoch {epoch} should be dropped with its generation"
             );
         }
+        assert!(
+            db.get_nonce_message(cutoff, 0, &dealer).unwrap().is_some(),
+            "nonce message at the cutoff epoch is live and must survive"
+        );
+        assert!(
+            db.get_avid_round_state(cutoff, 0, &dealer)
+                .unwrap()
+                .is_some(),
+            "avid round state at the cutoff epoch is live and must survive"
+        );
         for epoch in 1..key_retain_floor {
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_none(),
@@ -1808,16 +1895,6 @@ pub(crate) mod tests {
                 "rotation messages at epoch {epoch} should be kept"
             );
             assert!(
-                db.get_nonce_message(epoch, 0, &dealer).unwrap().is_some(),
-                "nonce message at epoch {epoch} should be kept"
-            );
-            assert!(
-                db.get_avid_round_state(epoch, 0, &dealer)
-                    .unwrap()
-                    .is_some(),
-                "avid round state at epoch {epoch} should be kept"
-            );
-            assert!(
                 db.get_encryption_key(epoch).unwrap().is_some(),
                 "encryption key at epoch {epoch} should be kept"
             );
@@ -1826,6 +1903,198 @@ pub(crate) mod tests {
                 "signing key at epoch {epoch} should be kept"
             );
         }
+    }
+
+    /// The bug this split exists to fix: point-deleting the rows left the bytes
+    /// on disk.
+    #[test]
+    fn test_retiring_an_epoch_returns_the_bytes_to_the_filesystem() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let nonce_msg = create_test_nonce_message();
+        for batch_index in 0..256 {
+            for dealer in 0..16u8 {
+                db.store_nonce_message(1, batch_index, &Address::new([dealer; 32]), &nonce_msg)
+                    .unwrap();
+            }
+        }
+        for keyspace in db.nonce_messages.generations.read().unwrap().iter() {
+            keyspace.rotate_memtable_and_wait().unwrap();
+        }
+        // Measure the files, not fjall's accounting: unlinking is the property
+        // that matters, and dereferencing the tables is not enough.
+        let occupied = bytes_on_disk(&db.nonce_messages);
+        assert!(occupied > 0, "epoch 1 should be on disk before retirement");
+
+        // Installing epoch 2 retires epoch 1.
+        db.prune_messages_below(2, &PruningReferences::default())
+            .unwrap();
+
+        let remaining = wait_for_bytes_on_disk_below(&db.nonce_messages, occupied / 10);
+        assert!(
+            remaining < occupied / 10,
+            "retiring epoch 1 must give back its {occupied} bytes, not just tombstone \
+             the rows; {remaining} bytes are still on disk",
+        );
+        assert!(
+            db.get_nonce_message(1, 0, &Address::new([0u8; 32]))
+                .unwrap()
+                .is_none(),
+        );
+    }
+
+    /// Total size of the files backing both generations.
+    fn bytes_on_disk(generations: &super::EpochGenerations) -> u64 {
+        generations
+            .generations
+            .read()
+            .unwrap()
+            .iter()
+            .map(|keyspace| {
+                let Ok(entries) = std::fs::read_dir(keyspace.path().join("tables")) else {
+                    return 0;
+                };
+                entries
+                    .filter_map(|entry| entry.ok()?.metadata().ok())
+                    .map(|metadata| metadata.len())
+                    .sum::<u64>()
+            })
+            .sum()
+    }
+
+    /// A concurrent reader holding a handle defers the unlink, so allow for it.
+    fn wait_for_bytes_on_disk_below(generations: &super::EpochGenerations, target: u64) -> u64 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let bytes = bytes_on_disk(generations);
+            if bytes < target || std::time::Instant::now() >= deadline {
+                return bytes;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Retirement puts a brand new keyspace behind the same name.
+    #[test]
+    fn test_retired_generation_reopens() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let dealer = Address::new([1u8; 32]);
+        let message = create_test_nonce_message();
+        {
+            let db = Database::open(tmpdir.path()).unwrap();
+            db.store_nonce_message(1, 0, &dealer, &message).unwrap();
+            db.prune_messages_below(2, &PruningReferences::default())
+                .unwrap();
+            db.store_nonce_message(2, 0, &dealer, &message).unwrap();
+        }
+
+        let db = Database::open(tmpdir.path()).unwrap();
+        assert!(db.get_nonce_message(1, 0, &dealer).unwrap().is_none());
+        assert!(db.get_nonce_message(2, 0, &dealer).unwrap().is_some());
+
+        // And the fresh generation still retires normally afterwards.
+        db.prune_messages_below(3, &PruningReferences::default())
+            .unwrap();
+        assert!(db.get_nonce_message(2, 0, &dealer).unwrap().is_none());
+    }
+
+    /// Write a nonce message the way a binary that predates the generation split
+    /// would have: straight into the generation carrying the pre-split name.
+    fn store_pre_split_nonce_message(
+        db: &Database,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        message: &batch_avss::Message,
+    ) {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        db.nonce_messages.generations.read().unwrap()[0]
+            .insert(key, bcs::to_bytes(message).unwrap())
+            .unwrap();
+    }
+
+    /// Deleting a row has to beat the pre-split fallback, or the e2e recovery
+    /// tests would not lose the message they delete.
+    #[test]
+    fn test_delete_nonce_message_clears_both_generations() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let message = create_test_nonce_message();
+
+        // Epoch 3 is owned by generation 1, so dealer1's row lands in the
+        // generation that does not own it.
+        store_pre_split_nonce_message(&db, 3, 0, &dealer1, &message);
+        db.store_nonce_message(3, 0, &dealer2, &message).unwrap();
+        assert_eq!(db.list_nonce_messages(3, 0).unwrap().len(), 2);
+
+        db.delete_nonce_message(3, 0, &dealer1).unwrap();
+        let remaining = db.list_nonce_messages(3, 0).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, dealer2);
+
+        // Deleting what is not there is a no-op.
+        db.delete_nonce_message(3, 0, &dealer1).unwrap();
+        db.delete_nonce_message(3, 1, &dealer2).unwrap();
+    }
+
+    /// One epoch change only drops one parity; two must drop everything.
+    #[test]
+    fn test_two_epoch_changes_retire_every_earlier_epoch() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let nonce_msg = create_test_nonce_message();
+        for epoch in 1..=10 {
+            db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
+                .unwrap();
+        }
+
+        db.prune_messages_below(10, &PruningReferences::default())
+            .unwrap();
+        db.prune_messages_below(11, &PruningReferences::default())
+            .unwrap();
+
+        for epoch in 1..=10 {
+            assert!(
+                db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
+                "epoch {epoch} should be gone after two epoch changes"
+            );
+        }
+    }
+
+    /// Pre-split rows sit in the generation carrying the pre-split name, which
+    /// is not always the one that owns their epoch.
+    #[test]
+    fn test_rows_in_the_non_owning_generation_are_still_readable() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // Epoch 3 is owned by generation 1.
+        let dealer = Address::new([1u8; 32]);
+        store_pre_split_nonce_message(&db, 3, 0, &dealer, &create_test_nonce_message());
+
+        assert!(db.get_nonce_message(3, 0, &dealer).unwrap().is_some());
+        assert_eq!(db.list_nonce_messages(3, 0).unwrap().len(), 1);
+
+        // Retiring epoch 4 drops generation 1; epoch 3 survives in generation 0.
+        db.prune_messages_below(4, &PruningReferences::default())
+            .unwrap();
+        assert!(db.get_nonce_message(3, 0, &dealer).unwrap().is_some());
+
+        // Retiring epoch 5 drops generation 0, taking the stale rows with it.
+        db.prune_messages_below(5, &PruningReferences::default())
+            .unwrap();
+        assert!(db.get_nonce_message(3, 0, &dealer).unwrap().is_none());
     }
 
     #[test]
