@@ -9,6 +9,7 @@ use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
+use crate::sui_tx_executor::ArchiveVictim;
 use crate::sui_tx_executor::SuiTxExecutor;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -553,11 +554,12 @@ fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>)
 }
 
 /// Confirmed-but-unarchived withdrawal txns, oldest confirmation first so a
-/// capped backlog drains FIFO. Each victim carries its request count so the
-/// executor can pack GC transactions against the runtime-object budget.
+/// capped backlog drains FIFO. Each victim carries its request ids so the
+/// executor can pack GC transactions against the runtime-object budget and
+/// chunk oversized txns through the split archival entries.
 fn find_confirmed_withdrawals_pending_archive(
     withdrawal_txns: &[crate::onchain::types::WithdrawalTransaction],
-) -> Vec<(Address, usize)> {
+) -> Vec<ArchiveVictim> {
     let mut confirmed: Vec<_> = withdrawal_txns
         .iter()
         .filter(|txn| txn.is_confirmed())
@@ -566,7 +568,10 @@ fn find_confirmed_withdrawals_pending_archive(
     confirmed
         .into_iter()
         .take(MAX_WITHDRAWAL_ARCHIVES_PER_GC)
-        .map(|txn| (txn.id, txn.request_ids.len()))
+        .map(|txn| ArchiveVictim {
+            txn_id: txn.id,
+            request_ids: txn.request_ids.clone(),
+        })
         .collect()
 }
 

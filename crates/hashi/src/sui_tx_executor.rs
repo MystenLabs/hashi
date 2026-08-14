@@ -1856,57 +1856,106 @@ impl SuiTxExecutor {
             .ok_or_else(|| anyhow::anyhow!("active version {version} has no published package"))
     }
 
-    /// Submit `withdraw::archive_confirmed_withdrawals` for the given
-    /// confirmed txns, greedily packed so every transaction stays inside the
-    /// runtime-object budget (a whole txn's requests archive together, so
-    /// packing is by per-victim cost, not count). `victims` pairs each txn id
-    /// with its request count. Returns the max landed checkpoint.
+    /// Archive the given confirmed withdrawal txns, packed into a plan of
+    /// GC transactions that each stay inside the runtime-object budget.
+    /// Victims that fit a single transaction go through the atomic
+    /// `archive_confirmed_withdrawals` entry; oversized ones (request cost
+    /// beyond one transaction) archive through `archive_withdrawal_requests`
+    /// chunks followed by `finish_archive_withdrawal_txns`. Returns the max
+    /// landed checkpoint.
     ///
-    /// The entry only exists in the v2 package; the caller gates on the
+    /// The entries only exist in the v2 package; the caller gates on the
     /// active version, and the target resolves through it.
-    pub async fn execute_archive_confirmed_withdrawals(
+    pub(crate) async fn execute_archive_confirmed_withdrawals(
         &mut self,
-        victims: &[(Address, usize)],
+        victims: &[ArchiveVictim],
     ) -> anyhow::Result<u64> {
         let package_id = self.active_version_package()?;
         let mut max_checkpoint = 0;
-        for chunk in chunk_archive_victims(victims) {
+        for call in plan_archive_calls(victims) {
             let mut builder = TransactionBuilder::new();
             let hashi_arg = builder.object(
                 ObjectInput::new(self.hashi_ids.hashi_object_id)
                     .as_shared()
                     .with_mutable(true),
             );
-            let ids_arg = builder.pure(&chunk);
+            let (function, args) = match &call {
+                ArchiveCall::Atomic(txn_ids) => {
+                    let ids_arg = builder.pure(txn_ids);
+                    ("archive_confirmed_withdrawals", vec![hashi_arg, ids_arg])
+                }
+                ArchiveCall::Requests {
+                    txn_id,
+                    request_ids,
+                } => {
+                    let txn_arg = builder.pure(txn_id);
+                    let ids_arg = builder.pure(request_ids);
+                    (
+                        "archive_withdrawal_requests",
+                        vec![hashi_arg, txn_arg, ids_arg],
+                    )
+                }
+                ArchiveCall::Finish(txn_ids) => {
+                    let ids_arg = builder.pure(txn_ids);
+                    ("finish_archive_withdrawal_txns", vec![hashi_arg, ids_arg])
+                }
+            };
             builder.move_call(
                 Function::new(
                     package_id,
                     Identifier::from_static("withdraw"),
-                    Identifier::from_static("archive_confirmed_withdrawals"),
+                    Identifier::new(function)?,
                 ),
-                vec![hashi_arg, ids_arg],
+                args,
             );
 
             let response = self.execute(builder).await?;
             if !response.transaction().effects().status().success() {
                 anyhow::bail!(
-                    "archive_confirmed_withdrawals failed: {:?}",
+                    "{function} failed: {:?}",
                     response.transaction().effects().status()
                 );
             }
-            let checkpoint = response.transaction().checkpoint_opt().ok_or_else(|| {
-                anyhow::anyhow!("archive_confirmed_withdrawals response missing checkpoint")
-            })?;
+            let checkpoint = response
+                .transaction()
+                .checkpoint_opt()
+                .ok_or_else(|| anyhow::anyhow!("{function} response missing checkpoint"))?;
             max_checkpoint = max_checkpoint.max(checkpoint);
         }
         Ok(max_checkpoint)
     }
 }
 
-/// Greedy-pack archival victims into per-transaction chunks under the
-/// runtime-object budget. A single victim always fits alone (the
-/// `withdrawals.rs` compile-time assert guarantees a max-size txn does).
-fn chunk_archive_victims(victims: &[(Address, usize)]) -> Vec<Vec<Address>> {
+/// A confirmed withdrawal txn awaiting archival, with its request ids so the
+/// planner can price and, when oversized, chunk it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ArchiveVictim {
+    pub txn_id: Address,
+    pub request_ids: Vec<Address>,
+}
+
+/// One GC transaction of an archival plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArchiveCall {
+    /// Whole txns archived atomically, several per transaction.
+    Atomic(Vec<Address>),
+    /// One request chunk of an oversized txn.
+    Requests {
+        txn_id: Address,
+        request_ids: Vec<Address>,
+    },
+    /// Move fully-chunk-archived txns to the cold bag. Emitted after every
+    /// chunk of the txns it finishes, so in-order execution completes them.
+    Finish(Vec<Address>),
+}
+
+/// Pack archival victims into per-transaction calls under the runtime-object
+/// budget. Victims whose whole cost fits one transaction greedy-pack into
+/// atomic calls; oversized ones split into request chunks plus a batched
+/// finish (the `withdrawals.rs` compile-time asserts guarantee every chunk
+/// makes progress and a max-size finish walk fits one transaction).
+fn plan_archive_calls(victims: &[ArchiveVictim]) -> Vec<ArchiveCall> {
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST;
     use crate::withdrawals::WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS;
     use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET;
     use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST;
@@ -1914,63 +1963,139 @@ fn chunk_archive_victims(victims: &[(Address, usize)]) -> Vec<Vec<Address>> {
 
     let budget =
         WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET - WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS;
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    let mut used = 0usize;
-    for (id, request_count) in victims {
+    let requests_per_chunk = (budget - WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN)
+        / WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST;
+
+    let mut calls = Vec::new();
+    let mut atomic: Vec<Address> = Vec::new();
+    let mut atomic_used = 0usize;
+    let mut finish: Vec<Address> = Vec::new();
+    let mut finish_used = 0usize;
+    for victim in victims {
         let cost = WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
-            + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST * request_count;
-        if !current.is_empty() && used + cost > budget {
-            chunks.push(std::mem::take(&mut current));
-            used = 0;
+            + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST * victim.request_ids.len();
+        if cost <= budget {
+            if atomic_used + cost > budget {
+                calls.push(ArchiveCall::Atomic(std::mem::take(&mut atomic)));
+                atomic_used = 0;
+            }
+            atomic.push(victim.txn_id);
+            atomic_used += cost;
+        } else {
+            for chunk in victim.request_ids.chunks(requests_per_chunk) {
+                calls.push(ArchiveCall::Requests {
+                    txn_id: victim.txn_id,
+                    request_ids: chunk.to_vec(),
+                });
+            }
+            let finish_cost = WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
+                + WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST * victim.request_ids.len();
+            if finish_used + finish_cost > budget {
+                calls.push(ArchiveCall::Finish(std::mem::take(&mut finish)));
+                finish_used = 0;
+            }
+            finish.push(victim.txn_id);
+            finish_used += finish_cost;
         }
-        current.push(*id);
-        used += cost;
     }
-    if !current.is_empty() {
-        chunks.push(current);
+    if !atomic.is_empty() {
+        calls.push(ArchiveCall::Atomic(atomic));
     }
-    chunks
+    if !finish.is_empty() {
+        calls.push(ArchiveCall::Finish(finish));
+    }
+    calls
 }
 
 #[cfg(test)]
-mod archive_chunking_tests {
+mod archive_planning_tests {
     use super::*;
+    use crate::utxo_pool::CoinSelectionParams;
 
     fn addr(byte: u8) -> Address {
         Address::new([byte; 32])
     }
 
-    #[test]
-    fn empty_input_yields_no_chunks() {
-        assert!(chunk_archive_victims(&[]).is_empty());
+    fn victim(byte: u8, request_count: usize) -> ArchiveVictim {
+        // Planning depends only on counts; the ids themselves are opaque.
+        ArchiveVictim {
+            txn_id: addr(byte),
+            request_ids: (0..request_count).map(|i| addr(i as u8)).collect(),
+        }
     }
 
     #[test]
-    fn one_max_size_txn_fits_alone() {
-        use crate::utxo_pool::CoinSelectionParams;
-        let chunks =
-            chunk_archive_victims(&[(addr(1), CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)]);
-        assert_eq!(chunks, vec![vec![addr(1)]]);
+    fn empty_input_yields_no_calls() {
+        assert!(plan_archive_calls(&[]).is_empty());
     }
 
     #[test]
-    fn small_victims_pack_together() {
-        let victims: Vec<_> = (0..10u8).map(|i| (addr(i), 1usize)).collect();
-        let chunks = chunk_archive_victims(&victims);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), 10);
+    fn small_victims_pack_into_one_atomic_call() {
+        let victims: Vec<_> = (0..10u8).map(|i| victim(i, 1)).collect();
+        let calls = plan_archive_calls(&victims);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0], ArchiveCall::Atomic(ids) if ids.len() == 10));
     }
 
     #[test]
-    fn budget_boundary_splits() {
+    fn atomic_budget_boundary_splits() {
         // Each 100-request victim costs 3 + 300 = 303; the 910-object budget
-        // fits three (909) and the fourth spills into a second chunk.
-        let victims: Vec<_> = (0..4u8).map(|i| (addr(i), 100usize)).collect();
-        let chunks = chunk_archive_victims(&victims);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].len(), 3);
-        assert_eq!(chunks[1].len(), 1);
+        // fits three (909) and the fourth spills into a second call.
+        let victims: Vec<_> = (0..4u8).map(|i| victim(i, 100)).collect();
+        let calls = plan_archive_calls(&victims);
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(&calls[0], ArchiveCall::Atomic(ids) if ids.len() == 3));
+        assert!(matches!(&calls[1], ArchiveCall::Atomic(ids) if ids.len() == 1));
+    }
+
+    #[test]
+    fn max_size_txn_chunks_then_finishes() {
+        // A 447-request txn costs 3 + 1341, beyond one transaction: it must
+        // split into request chunks (302 per chunk at 3/request under the
+        // 910 budget) followed by one finish.
+        let victims = [victim(1, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)];
+        let calls = plan_archive_calls(&victims);
+        assert_eq!(calls.len(), 3);
+        let (mut chunked, mut finished) = (0usize, Vec::new());
+        for call in &calls {
+            match call {
+                ArchiveCall::Requests {
+                    txn_id,
+                    request_ids,
+                } => {
+                    assert_eq!(*txn_id, addr(1));
+                    chunked += request_ids.len();
+                }
+                ArchiveCall::Finish(ids) => finished = ids.clone(),
+                ArchiveCall::Atomic(_) => panic!("oversized victim must not go atomic"),
+            }
+        }
+        assert_eq!(chunked, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS);
+        assert_eq!(finished, vec![addr(1)]);
+        // The finish must come after every chunk of the txn it completes.
+        assert!(matches!(calls.last(), Some(ArchiveCall::Finish(_))));
+    }
+
+    #[test]
+    fn mixed_sizes_route_by_cost() {
+        let victims = [
+            victim(1, 5),
+            victim(2, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS),
+            victim(3, 5),
+        ];
+        let calls = plan_archive_calls(&victims);
+        let atomics: Vec<_> = calls
+            .iter()
+            .filter(|c| matches!(c, ArchiveCall::Atomic(_)))
+            .collect();
+        assert_eq!(atomics.len(), 1);
+        assert!(matches!(atomics[0], ArchiveCall::Atomic(ids) if ids.len() == 2));
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, ArchiveCall::Requests { .. }))
+        );
+        assert!(matches!(calls.last(), Some(ArchiveCall::Finish(ids)) if ids == &vec![addr(2)]));
     }
 }
 

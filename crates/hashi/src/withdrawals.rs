@@ -107,16 +107,43 @@ pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction)
 /// Target 922 to leave 7.8% headroom below the hard cap.
 const WITHDRAWAL_RUNTIME_OBJECT_BUDGET: usize = 922;
 
-/// Runtime-object cost model for `commit_withdrawal_tx`. Empirical
-/// measurements put commit transactions at roughly
-/// `3 * requests + 1 * selected_utxos + fixed_overhead` runtime objects:
-/// each request is removed from the `requests` ObjectBag and re-added to
-/// `processed` (the `Field` wrapper, the child request object, and the new
+/// Runtime-object cost model for the v2 (deferred-archival)
+/// `commit_withdrawal_tx`: each request is mutated in place in the
+/// `requests` ObjectBag (the `Field` wrapper plus the child request object,
+/// 2 per request — the v1 bag move paid a third for the new `processed`
 /// `Field`), and each input borrows and locks its `utxo_records` entry (one
-/// `Field` per input).
+/// `Field` per input). The v1 empirical baseline was `3 * requests +
+/// 1 * selected_utxos + fixed_overhead`; the 2/request coefficient follows
+/// from removing the `Field` creation and should be confirmed by sui-replay
+/// before the upgrade ships.
 const WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS: usize = 12;
-const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
+const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
+
+/// The pre-deferred-archival batch cap, still enforced while the chain
+/// operates at package v1: v1 bytecode's commit pays 3 runtime objects per
+/// request, and pre-v2 validators have this bound compiled in. See
+/// [`max_withdrawal_requests`].
+pub(crate) const LEGACY_MAX_WITHDRAWAL_REQUESTS: usize = 298;
+
+/// The package version at which the deferred-archival flow (in-place
+/// commit, chunked archival GC) is live; the canonical constant for both
+/// the archival GC gate and the batch-cap switch.
+pub(crate) const DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION: u64 = 2;
+
+/// The request cap for the active package version. The larger v2 cap is
+/// only safe once the chain executes v2 bytecode (in-place commit) AND the
+/// fleet runs binaries that accept it — the same rollout discipline the
+/// upgrade train already requires: binaries first, then the upgrade tx.
+/// Gating on the resolved active version makes the flip atomic with the
+/// upgrade checkpoint on every node.
+pub(crate) fn max_withdrawal_requests(active_package_version: Option<u64>) -> usize {
+    if active_package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+    } else {
+        LEGACY_MAX_WITHDRAWAL_REQUESTS
+    }
+}
 
 /// Funding-input reserve at the request-count cap. With largest-first
 /// selection a batch is normally funded by a handful of inputs; 16 leaves
@@ -152,8 +179,27 @@ const _: () = assert!(
 /// checked alongside it so a future change to either cost cannot silently
 /// regress the other.
 const WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS: usize = 43;
-const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
+/// v2 confirm defers every request-status write to the archival GC, so its
+/// object cost no longer scales with the request count.
+const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 0;
 const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
+
+/// v1 bytecode coefficients, still applied while the chain operates at
+/// package v1: commit moved each request between bags (3 objects) and
+/// confirm borrowed each request to set its status (2 objects).
+const LEGACY_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
+const LEGACY_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
+
+// Pin the legacy cap to the v1 commit derivation the same way the current
+// cap is pinned below: refuse to compile if either drifts from its model.
+const _: () = assert!(
+    LEGACY_MAX_WITHDRAWAL_REQUESTS
+        == (WITHDRAWAL_RUNTIME_OBJECT_BUDGET
+            - WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS
+            - WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS * WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT)
+            / LEGACY_COMMIT_RUNTIME_OBJECTS_PER_REQUEST,
+    "LEGACY_MAX_WITHDRAWAL_REQUESTS must equal the v1 commit object-budget derivation"
+);
 
 /// Runtime-object cost model for the deferred `archive_confirmed_withdrawals`
 /// GC (v2 package): ~3 objects per archived txn (hot-bag `Field` + child
@@ -167,15 +213,28 @@ pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN: usize = 3;
 pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET: usize = WITHDRAWAL_RUNTIME_OBJECT_BUDGET;
 
-// A whole txn's requests archive together (the entry has no partial-archival
-// mode), so the largest committable batch must fit one GC transaction.
+/// Cost of `finish_archive_withdrawal_txn`'s completeness walk: one
+/// `contains` probe per request, on top of the txn borrow.
+pub(crate) const WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST: usize = 1;
+
+// A txn whose requests exceed one GC transaction archives through the
+// chunked entries (`archive_withdrawal_requests` + finish); the packer only
+// needs each chunk to make progress and the finisher's probe walk to fit a
+// single transaction at the largest committable batch.
 const _: () = assert!(
     WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS
         + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
         + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST
+        <= WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET,
+    "an archival chunk must fit at least one request per GC transaction"
+);
+const _: () = assert!(
+    WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS
+        + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
+        + WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST
             * CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
         <= WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET,
-    "a max-size withdrawal txn must archive in a single GC transaction"
+    "a max-size txn's archival finish walk must fit a single GC transaction"
 );
 
 /// How many inputs fit in [`WITHDRAWAL_RUNTIME_OBJECT_BUDGET`] after the
@@ -193,19 +252,48 @@ fn runtime_object_input_budget(
     input_objects / objects_per_input
 }
 
-fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+/// Per-request commit cost for the version the chain executes: v1 bytecode
+/// moves each request between bags (3 objects), v2 mutates in place (2).
+fn commit_objects_per_request(active_package_version: Option<u64>) -> usize {
+    if active_package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
+        WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST
+    } else {
+        LEGACY_COMMIT_RUNTIME_OBJECTS_PER_REQUEST
+    }
+}
+
+/// Per-request confirm cost for the version the chain executes: v1 bytecode
+/// borrows every request to set its status (2 objects), v2 defers the
+/// status writes to the archival GC (0).
+fn confirm_objects_per_request(active_package_version: Option<u64>) -> usize {
+    if active_package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
+        WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST
+    } else {
+        LEGACY_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST
+    }
+}
+
+fn safe_withdrawal_commit_max_inputs(
+    request_count: usize,
+    configured_max_inputs: usize,
+    active_package_version: Option<u64>,
+) -> usize {
     configured_max_inputs.min(runtime_object_input_budget(
         WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS,
-        WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST,
+        commit_objects_per_request(active_package_version),
         WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT,
         request_count,
     ))
 }
 
-fn safe_withdrawal_confirm_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+fn safe_withdrawal_confirm_max_inputs(
+    request_count: usize,
+    configured_max_inputs: usize,
+    active_package_version: Option<u64>,
+) -> usize {
     configured_max_inputs.min(runtime_object_input_budget(
         WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS,
-        WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST,
+        confirm_objects_per_request(active_package_version),
         WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT,
         request_count,
     ))
@@ -213,8 +301,13 @@ fn safe_withdrawal_confirm_max_inputs(request_count: usize, configured_max_input
 
 /// The input cap for the whole withdrawal flow at a given request count:
 /// the configured cap, the per-request consolidation budget, and the
-/// runtime-object budgets of both the commit and confirm transactions.
-fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+/// runtime-object budgets of both the commit and confirm transactions —
+/// each priced for the bytecode the active package version executes.
+fn safe_withdrawal_flow_max_inputs(
+    request_count: usize,
+    configured_max_inputs: usize,
+    active_package_version: Option<u64>,
+) -> usize {
     let request_input_budget =
         request_count.saturating_mul(CoinSelectionParams::DEFAULT_INPUT_BUDGET);
     configured_max_inputs
@@ -222,10 +315,12 @@ fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: 
         .min(safe_withdrawal_commit_max_inputs(
             request_count,
             configured_max_inputs,
+            active_package_version,
         ))
         .min(safe_withdrawal_confirm_max_inputs(
             request_count,
             configured_max_inputs,
+            active_package_version,
         ))
 }
 
@@ -258,9 +353,13 @@ const _: () = assert!(
 /// Otherwise pool health is the scarce resource: cap the batch at
 /// [`CONSOLIDATION_MODE_MAX_REQUESTS`] so the full per-request
 /// consolidation budget stays available (consolidation mode).
-fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize) -> usize {
+fn withdrawal_batch_request_cap(
+    pending_requests: usize,
+    available_utxos: usize,
+    active_package_version: Option<u64>,
+) -> usize {
     if pending_requests > available_utxos {
-        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        max_withdrawal_requests(active_package_version)
     } else {
         CONSOLIDATION_MODE_MAX_REQUESTS
     }
@@ -299,15 +398,19 @@ fn validate_commitment_shape(
     request_count: usize,
     input_count: usize,
     outputs: &[OutputUtxo],
+    active_package_version: Option<u64>,
 ) -> anyhow::Result<()> {
+    let max_requests = max_withdrawal_requests(active_package_version);
     anyhow::ensure!(
-        request_count <= CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
-        "Commitment has {request_count} requests, exceeding the batch cap of {}",
-        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+        request_count <= max_requests,
+        "Commitment has {request_count} requests, exceeding the batch cap of {max_requests}",
     );
 
-    let max_inputs =
-        safe_withdrawal_flow_max_inputs(request_count, CoinSelectionParams::DEFAULT_MAX_INPUTS);
+    let max_inputs = safe_withdrawal_flow_max_inputs(
+        request_count,
+        CoinSelectionParams::DEFAULT_MAX_INPUTS,
+        active_package_version,
+    );
     anyhow::ensure!(
         input_count <= max_inputs,
         "Commitment has {input_count} inputs for {request_count} requests, \
@@ -472,6 +575,7 @@ impl Hashi {
             approval.request_ids.len(),
             approval.selected_utxos.len(),
             &approval.outputs,
+            self.onchain_state().active_package_version(),
         )?;
 
         // 1. Verify each request_id exists and is approved
@@ -1366,8 +1470,13 @@ impl Hashi {
 
         // Drain versus consolidate: size the batch cap by comparing the
         // queue depth to the available pool. `candidates` counts every
-        // unlocked UTXO — the same set coin selection draws from.
-        let batch_request_cap = withdrawal_batch_request_cap(requests.len(), candidates.len());
+        // unlocked UTXO — the same set coin selection draws from. The cap
+        // (and the input models below) follow the active package version,
+        // so the leader proposes only shapes the executing bytecode can
+        // afford and every validator generation will certify.
+        let active_package_version = self.onchain_state().active_package_version();
+        let batch_request_cap =
+            withdrawal_batch_request_cap(requests.len(), candidates.len(), active_package_version);
         let configured_max_requests = self
             .config
             .withdrawal_max_batch_size()
@@ -1398,7 +1507,11 @@ impl Hashi {
         let mut representative_errors = BTreeMap::<&'static str, String>::new();
         let mut attempted_request_counts = 0usize;
         for request_count in (1..=configured_max_requests).rev() {
-            let max_inputs = safe_withdrawal_flow_max_inputs(request_count, configured_max_inputs);
+            let max_inputs = safe_withdrawal_flow_max_inputs(
+                request_count,
+                configured_max_inputs,
+                active_package_version,
+            );
             if max_inputs == 0 {
                 continue;
             }
@@ -2218,18 +2331,32 @@ mod tests {
         }
     }
 
+    /// Active-version shorthand for the model tests: the deferred-archival
+    /// package and the legacy chain.
+    const V2: Option<u64> = Some(DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION);
+    const V1: Option<u64> = Some(1);
+
     #[test]
     fn batch_cap_drains_when_queue_outnumbers_pool() {
         assert_eq!(
-            withdrawal_batch_request_cap(5_000, 1_000),
+            withdrawal_batch_request_cap(5_000, 1_000, V2),
             CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        );
+        assert_eq!(
+            withdrawal_batch_request_cap(5_000, 1_000, V1),
+            LEGACY_MAX_WITHDRAWAL_REQUESTS
+        );
+        assert_eq!(
+            withdrawal_batch_request_cap(5_000, 1_000, None),
+            LEGACY_MAX_WITHDRAWAL_REQUESTS,
+            "an unresolved active version must fall back to the legacy cap",
         );
     }
 
     #[test]
     fn batch_cap_consolidates_when_pool_outnumbers_queue() {
         assert_eq!(
-            withdrawal_batch_request_cap(10, 1_000),
+            withdrawal_batch_request_cap(10, 1_000, V2),
             CONSOLIDATION_MODE_MAX_REQUESTS
         );
     }
@@ -2237,7 +2364,7 @@ mod tests {
     #[test]
     fn batch_cap_prefers_consolidation_at_parity() {
         assert_eq!(
-            withdrawal_batch_request_cap(500, 500),
+            withdrawal_batch_request_cap(500, 500, V2),
             CONSOLIDATION_MODE_MAX_REQUESTS
         );
     }
@@ -2343,21 +2470,34 @@ mod tests {
 
     #[test]
     fn withdrawal_flow_budget_at_absolute_cap() {
-        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 298);
+        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 447);
         assert_eq!(CoinSelectionParams::DEFAULT_MAX_INPUTS, 400);
+        // Both caps leave exactly the funding-input reserve under their own
+        // commit coefficients: 922 - 12 - 2*447 = 922 - 12 - 3*298 = 16.
         assert_eq!(
             safe_withdrawal_commit_max_inputs(
                 CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
+                V2,
             ),
             WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
-            "at the request cap, the commit object budget leaves exactly \
+            "at the v2 request cap, the commit object budget leaves exactly \
              the funding-input reserve",
+        );
+        assert_eq!(
+            safe_withdrawal_commit_max_inputs(
+                LEGACY_MAX_WITHDRAWAL_REQUESTS,
+                CoinSelectionParams::DEFAULT_MAX_INPUTS,
+                V1,
+            ),
+            WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
+            "at the legacy request cap under v1 coefficients, likewise",
         );
         assert_eq!(
             safe_withdrawal_flow_max_inputs(
                 CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
+                V2,
             ),
             WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
             "a full drain-mode batch spends the object budget on requests, \
@@ -2372,7 +2512,7 @@ mod tests {
     #[test]
     fn withdrawal_flow_budget_at_legacy_batch_size() {
         assert_eq!(
-            safe_withdrawal_flow_max_inputs(40, CoinSelectionParams::DEFAULT_MAX_INPUTS),
+            safe_withdrawal_flow_max_inputs(40, CoinSelectionParams::DEFAULT_MAX_INPUTS, V2),
             400,
             "40 requests × 10 inputs/request still fills the configured input cap",
         );
@@ -2381,7 +2521,7 @@ mod tests {
     #[test]
     fn withdrawal_flow_budget_scales_inputs_with_request_count() {
         assert_eq!(
-            safe_withdrawal_flow_max_inputs(10, CoinSelectionParams::DEFAULT_MAX_INPUTS),
+            safe_withdrawal_flow_max_inputs(10, CoinSelectionParams::DEFAULT_MAX_INPUTS, V2),
             10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
             "at low request counts, the per-request input budget is binding",
         );
@@ -2401,16 +2541,21 @@ mod tests {
     #[test]
     fn commitment_shape_accepts_production_envelopes() {
         // (requests, inputs): the consolidation-heavy legacy shape, the
-        // drain-mode shape at the request cap, and a minimal batch.
-        for (requests, inputs) in [(40, 400), (298, 16), (1, 10)] {
-            validate_commitment_shape(requests, inputs, &p2tr_outputs(requests + 1))
+        // drain-mode shapes at both request caps, and a minimal batch.
+        for (requests, inputs) in [(40, 400), (298, 16), (447, 16), (1, 10)] {
+            validate_commitment_shape(requests, inputs, &p2tr_outputs(requests + 1), V2)
                 .unwrap_or_else(|e| panic!("{requests} requests / {inputs} inputs rejected: {e}"));
         }
+        // A v1-active chain keeps the legacy envelope and refuses the larger one.
+        validate_commitment_shape(298, 16, &p2tr_outputs(299), V1)
+            .expect("legacy cap batch must validate on a v1-active chain");
+        let err = validate_commitment_shape(299, 16, &p2tr_outputs(300), V1).unwrap_err();
+        assert!(err.to_string().contains("exceeding the batch cap"), "{err}");
     }
 
     #[test]
     fn commitment_shape_rejects_request_count_above_cap() {
-        let err = validate_commitment_shape(299, 1, &p2tr_outputs(299)).unwrap_err();
+        let err = validate_commitment_shape(448, 1, &p2tr_outputs(448), V2).unwrap_err();
         assert!(err.to_string().contains("exceeding the batch cap"), "{err}");
     }
 
@@ -2418,9 +2563,9 @@ mod tests {
     fn commitment_shape_rejects_inputs_above_flow_cap() {
         // One over the per-request consolidation budget, the configured
         // input cap, and the commit object budget's funding reserve.
-        for (requests, inputs) in [(1, 11), (40, 401), (298, 17)] {
-            let err =
-                validate_commitment_shape(requests, inputs, &p2tr_outputs(requests)).unwrap_err();
+        for (requests, inputs) in [(1, 11), (40, 401), (447, 17)] {
+            let err = validate_commitment_shape(requests, inputs, &p2tr_outputs(requests), V2)
+                .unwrap_err();
             assert!(
                 err.to_string().contains("exceeding the flow cap"),
                 "{requests} requests / {inputs} inputs: {err}"
@@ -2433,22 +2578,28 @@ mod tests {
         // Request and input counts inside their caps, but enough change
         // outputs to push the transaction past the 400 kWU standardness
         // limit (~2,300 P2TR outputs).
-        let err = validate_commitment_shape(298, 16, &p2tr_outputs(3_000)).unwrap_err();
+        let err = validate_commitment_shape(447, 16, &p2tr_outputs(3_000), V2).unwrap_err();
         assert!(err.to_string().contains("standardness limit"), "{err}");
     }
 
     #[test]
     fn commitment_shape_accepts_change_outputs_at_cap() {
-        validate_commitment_shape(40, 400, &p2tr_outputs(40 + WITHDRAWAL_MAX_CHANGE_OUTPUTS))
-            .expect("a commitment at the change-output cap must validate");
+        validate_commitment_shape(
+            40,
+            400,
+            &p2tr_outputs(40 + WITHDRAWAL_MAX_CHANGE_OUTPUTS),
+            V2,
+        )
+        .expect("a commitment at the change-output cap must validate");
     }
 
     #[test]
     fn commitment_shape_rejects_change_outputs_above_cap() {
         let err = validate_commitment_shape(
-            298,
+            447,
             16,
-            &p2tr_outputs(298 + WITHDRAWAL_MAX_CHANGE_OUTPUTS + 1),
+            &p2tr_outputs(447 + WITHDRAWAL_MAX_CHANGE_OUTPUTS + 1),
+            V2,
         )
         .unwrap_err();
         assert!(err.to_string().contains("change outputs"), "{err}");
@@ -2476,16 +2627,22 @@ mod tests {
     /// safety net.
     #[test]
     fn withdrawal_confirm_budget_never_binds() {
-        for request_count in 1..=1000 {
-            let configured = CoinSelectionParams::DEFAULT_MAX_INPUTS;
-            let without_confirm = configured
-                .min(request_count * CoinSelectionParams::DEFAULT_INPUT_BUDGET)
-                .min(safe_withdrawal_commit_max_inputs(request_count, configured));
-            assert_eq!(
-                safe_withdrawal_flow_max_inputs(request_count, configured),
-                without_confirm,
-                "confirm budget unexpectedly binds at {request_count} requests",
-            );
+        for active in [V1, V2] {
+            for request_count in 1..=1000 {
+                let configured = CoinSelectionParams::DEFAULT_MAX_INPUTS;
+                let without_confirm = configured
+                    .min(request_count * CoinSelectionParams::DEFAULT_INPUT_BUDGET)
+                    .min(safe_withdrawal_commit_max_inputs(
+                        request_count,
+                        configured,
+                        active,
+                    ));
+                assert_eq!(
+                    safe_withdrawal_flow_max_inputs(request_count, configured, active),
+                    without_confirm,
+                    "confirm budget unexpectedly binds at {request_count} requests ({active:?})",
+                );
+            }
         }
     }
 
