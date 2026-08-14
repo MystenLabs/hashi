@@ -190,6 +190,14 @@ async fn health() -> impl axum::response::IntoResponse {
 }
 
 async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
+    // A poisoned database never persists again without a restart, so stop
+    // serving rather than look healthy. See `hashi_db_poisoned`.
+    if hashi.db.is_poisoned() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "database is poisoned and cannot persist writes — restart required",
+        );
+    }
     let onchain_state = hashi.onchain_state();
     // If the chain has moved past what this binary supports, report not-ready so
     // operators/orchestration surface it — the node has halted autonomous work

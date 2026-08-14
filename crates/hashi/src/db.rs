@@ -27,6 +27,12 @@ use crate::mpc::types::RotationMessages;
 
 pub struct Database {
     db: fjall::Database,
+
+    // Latched when fjall poisons the database on a failed write, `ENOSPC`
+    // above all. Nothing recovers in-process, so the node has to stop
+    // reporting ready rather than serve on while persisting nothing.
+    poisoned: std::sync::atomic::AtomicBool,
+
     // keyspaces
 
     // Column Family used to store encryption private keys, keyed by their own public key.
@@ -302,6 +308,7 @@ impl Database {
         reject_legacy_epoch_keyed_format(&signing_keys, SIGNING_KEYS_CF_NAME)?;
         Ok(Self {
             db,
+            poisoned: std::sync::atomic::AtomicBool::new(false),
             encryption_keys,
             signing_keys,
             encryption_epoch_index,
@@ -325,6 +332,22 @@ impl Database {
 
     pub(crate) fn snapshot(&self) -> fjall::Snapshot {
         self.db.snapshot()
+    }
+
+    /// Pass a write result through, latching if it says fjall is poisoned.
+    /// Reads never surface it: fjall only checks the flag when writing.
+    fn note_write<T>(&self, result: Result<T>) -> Result<T> {
+        if matches!(result, Err(fjall::Error::Poisoned)) {
+            self.poisoned
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// Whether fjall has poisoned this database. Never clears — only reopening
+    /// recovers, so the node has to be restarted.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Bytes fjall accounts to each keyspace, with the epoch-scoped ones summed
@@ -383,7 +406,7 @@ impl Database {
         let mut batch = self.db.batch();
         batch.insert(&self.encryption_keys, pubkey.clone(), value);
         batch.insert(&self.encryption_epoch_index, epoch_key, pubkey);
-        batch.commit()
+        self.note_write(batch.commit())
     }
 
     pub fn latest_encryption_key_epoch(&self) -> Result<Option<u64>> {
@@ -420,7 +443,7 @@ impl Database {
         let mut batch = self.db.batch();
         batch.insert(&self.signing_keys, pubkey.clone(), value);
         batch.insert(&self.signing_epoch_index, epoch_key, pubkey);
-        batch.commit()
+        self.note_write(batch.commit())
     }
 
     pub fn get_signing_key(&self, epoch: u64) -> Result<Option<Bls12381PrivateKey>> {
@@ -455,7 +478,7 @@ impl Database {
     ) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         let value = bcs::to_bytes(message).unwrap();
-        self.dealer_messages.insert(key, value)
+        self.note_write(self.dealer_messages.insert(key, value))
     }
 
     pub fn get_dealer_message(
@@ -493,7 +516,7 @@ impl Database {
     ) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         let value = bcs::to_bytes(messages).unwrap();
-        self.rotation_messages.insert(key, value)
+        self.note_write(self.rotation_messages.insert(key, value))
     }
 
     pub fn get_rotation_messages(
@@ -537,7 +560,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(message).unwrap();
-        self.nonce_messages.insert(epoch, key, value)
+        self.note_write(self.nonce_messages.insert(epoch, key, value))
     }
 
     pub fn get_nonce_message(
@@ -581,12 +604,12 @@ impl Database {
 
     pub fn delete_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
-        self.dealer_messages.remove(key)
+        self.note_write(self.dealer_messages.remove(key))
     }
 
     pub fn delete_rotation_messages(&self, epoch: u64, dealer: &Address) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
-        self.rotation_messages.remove(key)
+        self.note_write(self.rotation_messages.remove(key))
     }
 
     pub fn delete_nonce_message(
@@ -601,7 +624,7 @@ impl Database {
             dealer.as_bytes(),
         ]
         .concat();
-        self.nonce_messages.remove(key)
+        self.note_write(self.nonce_messages.remove(key))
     }
 
     pub fn store_avid_round_state(
@@ -618,7 +641,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(state).unwrap();
-        self.avid_round_states.insert(epoch, key, value)
+        self.note_write(self.avid_round_states.insert(epoch, key, value))
     }
 
     pub fn get_avid_round_state(
@@ -674,7 +697,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(held).unwrap();
-        self.avid_held_echoes.insert(epoch, key, value)
+        self.note_write(self.avid_held_echoes.insert(epoch, key, value))
     }
 
     pub fn get_avid_held_echoes(
@@ -715,7 +738,7 @@ impl Database {
         ]
         .concat();
         let value = bcs::to_bytes(builder).unwrap();
-        self.avid_dealer_builders.insert(epoch, key, value)
+        self.note_write(self.avid_dealer_builders.insert(epoch, key, value))
     }
 
     pub fn get_avid_dealer_builder(
@@ -748,6 +771,10 @@ impl Database {
         cutoff_epoch: u64,
         pruning_references: &PruningReferences,
     ) -> Result<()> {
+        self.note_write(self.prune(cutoff_epoch, pruning_references))
+    }
+
+    fn prune(&self, cutoff_epoch: u64, pruning_references: &PruningReferences) -> Result<()> {
         let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
         // A key is retained if and only if its public key is referenced by a live committee or pending registration,
         // or it was created within the retention buffer.
@@ -2021,6 +2048,28 @@ pub(crate) mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    fn test_poisoning_latches_and_nothing_else_does() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+        assert!(!db.is_poisoned());
+
+        db.store_nonce_message(1, 0, &Address::new([1u8; 32]), &create_test_nonce_message())
+            .unwrap();
+        assert!(!db.is_poisoned(), "a healthy write must not latch");
+
+        let other = fjall::Error::Io(std::io::Error::other("some other failure"));
+        assert!(db.note_write::<()>(Err(other)).is_err());
+        assert!(!db.is_poisoned(), "an unrelated error must not latch");
+
+        assert!(db.note_write::<()>(Err(fjall::Error::Poisoned)).is_err());
+        assert!(db.is_poisoned());
+
+        // Poisoning is permanent for the process; a later success cannot clear it.
+        assert!(db.note_write(Ok(())).is_ok());
+        assert!(db.is_poisoned());
     }
 
     /// The gauge has to name a keyspace an operator can act on, and has to fall

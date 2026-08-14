@@ -119,6 +119,7 @@ pub struct Metrics {
     pub presig_pool_remaining: IntGauge,
     db_keyspace_disk_bytes: IntGaugeVec,
     db_disk_bytes: IntGauge,
+    db_poisoned: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
     pub sui_balance: IntGaugeVec,
     pub sui_address_balance_sweeps_total: IntCounter,
@@ -745,6 +746,12 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            db_poisoned: register_int_gauge_with_registry!(
+                "hashi_db_poisoned",
+                "1 when fjall has poisoned the database and the node can no longer persist writes",
+                registry,
+            )
+            .unwrap(),
             sui_tx_submissions_total: register_int_counter_vec_with_registry!(
                 "hashi_sui_tx_submissions_total",
                 "Total Sui transaction submissions by operation and outcome",
@@ -1216,6 +1223,7 @@ impl Metrics {
     }
 
     pub fn update_db_disk_usage(&self, db: &crate::db::Database) {
+        self.db_poisoned.set(i64::from(db.is_poisoned()));
         for (keyspace, bytes) in db.keyspace_disk_space() {
             self.db_keyspace_disk_bytes
                 .with_label_values(&[keyspace])
