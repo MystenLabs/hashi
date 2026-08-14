@@ -88,6 +88,13 @@ pub struct Database {
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte dealer address)
     // value: BCS-serialized HeldAvidEchoes
     avid_held_echoes: Keyspace,
+
+    // Column Family holding the single marker row `major_compact` writes so the
+    // rotation that unlinks retired tables always has something to flush.
+    //
+    // key: `MAINTENANCE_COMPACTION_KEY`
+    // value: big endian u64 unix seconds of the last major compaction
+    maintenance: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
@@ -100,6 +107,9 @@ const AVID_DEALER_BUILDERS_CF_NAME: &str = "avid_dealer_builders";
 const AVID_HELD_ECHOES_CF_NAME: &str = "avid_held_echoes";
 const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
+const MAINTENANCE_CF_NAME: &str = "maintenance";
+
+const MAINTENANCE_COMPACTION_KEY: &[u8] = b"last_compaction";
 
 const RETENTION_EXTRA_EPOCHS: u64 = 7;
 
@@ -185,6 +195,7 @@ impl Database {
         )?;
         let signing_epoch_index =
             db.keyspace(SIGNING_EPOCH_INDEX_CF_NAME, KeyspaceCreateOptions::default)?;
+        let maintenance = db.keyspace(MAINTENANCE_CF_NAME, KeyspaceCreateOptions::default)?;
         reject_legacy_epoch_keyed_format(&encryption_keys, ENCRYPTION_KEYS_CF_NAME)?;
         reject_legacy_epoch_keyed_format(&signing_keys, SIGNING_KEYS_CF_NAME)?;
         Ok(Self {
@@ -199,6 +210,7 @@ impl Database {
             avid_round_states,
             avid_dealer_builders,
             avid_held_echoes,
+            maintenance,
         })
     }
 
@@ -215,7 +227,7 @@ impl Database {
     }
 
     /// Every keyspace, for whole-database maintenance. Add new keyspaces here.
-    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 10] {
+    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 11] {
         [
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
             (SIGNING_KEYS_CF_NAME, &self.signing_keys),
@@ -227,6 +239,7 @@ impl Database {
             (AVID_ROUND_STATES_CF_NAME, &self.avid_round_states),
             (AVID_DEALER_BUILDERS_CF_NAME, &self.avid_dealer_builders),
             (AVID_HELD_ECHOES_CF_NAME, &self.avid_held_echoes),
+            (MAINTENANCE_CF_NAME, &self.maintenance),
         ]
     }
 
@@ -236,22 +249,21 @@ impl Database {
     /// kilobytes, so leveled compaction never rewrites the bottom level.
     ///
     /// Blocking and slow, and it locks out background compaction for each
-    /// keyspace while it runs — keep it off the reconfig path.
+    /// keyspace while it runs — call it from a blocking thread.
     pub fn major_compact(&self) -> Vec<CompactedKeyspace> {
-        // Compaction merges tables, not memtables, so the prune's tombstones
-        // have to reach a table first or the values they shadow survive it.
-        for (name, keyspace) in self.all_keyspaces() {
-            if let Err(e) = keyspace.rotate_memtable_and_wait() {
-                tracing::warn!("flushing {name} before compaction failed: {e}");
-            }
-        }
         let compacted: Vec<_> = self
             .all_keyspaces()
             .into_iter()
             .map(|(name, keyspace)| {
                 let before = keyspace.disk_space();
                 let started = std::time::Instant::now();
-                let error = keyspace.major_compact().err();
+                // Compaction merges tables, not memtables, so the prune's
+                // tombstones have to reach a table first or the values they
+                // shadow survive the merge. A failed flush fails the keyspace.
+                let error = keyspace
+                    .rotate_memtable_and_wait()
+                    .and_then(|_| keyspace.major_compact())
+                    .err();
                 CompactedKeyspace {
                     name,
                     before,
@@ -261,14 +273,20 @@ impl Database {
                 }
             })
             .collect();
-        // A compaction retires the tables it merged away but does not unlink
-        // them; fjall only does that while rotating a memtable, and one
-        // rotation sweeps every keyspace. Rotating needs something to flush, so
-        // on an idle keyspace the files go back on the next write instead.
-        for (name, keyspace) in self.all_keyspaces() {
-            if let Err(e) = keyspace.rotate_memtable() {
-                tracing::warn!("rotating {name} after compaction failed: {e}");
-            }
+        // Compaction retires the tables it merged away, but only a memtable
+        // rotation unlinks them, and rotating an empty memtable is a no-op.
+        // Write a marker row so the rotation always has something to flush;
+        // one rotation sweeps every keyspace.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Err(e) = self
+            .maintenance
+            .insert(MAINTENANCE_COMPACTION_KEY, now.to_be_bytes())
+            .and_then(|_| self.maintenance.rotate_memtable_and_wait().map(|_| ()))
+        {
+            tracing::warn!("unlinking compacted tables failed, retrying next epoch: {e}");
         }
         compacted
     }
@@ -1957,11 +1975,6 @@ pub(crate) mod tests {
             "every row was pruned, so nothing should be live"
         );
 
-        // Unlinking lands on the next rotation with something to flush, which
-        // ordinary write traffic supplies.
-        db.store_nonce_message(2, 0, &Address::new([0u8; 32]), &nonce_msg)
-            .unwrap();
-        db.nonce_messages.rotate_memtable_and_wait().unwrap();
         assert!(
             bytes_on_disk(&db.nonce_messages) < occupied / 10,
             "compaction must give back the {occupied} bytes pruning tombstoned",

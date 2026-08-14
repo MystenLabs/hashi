@@ -106,7 +106,6 @@ pub struct MpcService {
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
-    compacting: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MpcService {
@@ -121,7 +120,6 @@ impl MpcService {
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
-            compacting: Arc::new(tokio::sync::Mutex::new(())),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -1349,7 +1347,6 @@ impl MpcService {
                  will retry at next trigger"
             );
         }
-        self.backup_handle.backup_after_epoch_change(target_epoch);
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         let pruning_references = {
             let state = self.inner.onchain_state().state();
@@ -1380,7 +1377,11 @@ impl MpcService {
         {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
-        self.spawn_major_compaction(target_epoch);
+        self.run_major_compaction(target_epoch).await;
+        // Only after compaction: the backup takes a database-wide snapshot,
+        // and a snapshot taken before the prune pins every value the
+        // compaction would otherwise drop.
+        self.backup_handle.backup_after_epoch_change(target_epoch);
         if !self.reconfig_target_live(target_epoch) {
             info!(
                 "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
@@ -1418,35 +1419,33 @@ impl MpcService {
     /// Compact the database after an epoch change so the rows the prune just
     /// tombstoned are actually unlinked.
     ///
-    /// Detached on a blocking thread, and deliberately before `prepare_signing`
-    /// refills the presig pool: the keyspaces are at their emptiest right after
-    /// the prune, so the merge writes almost nothing. A run still going means
-    /// the last one outlasted an epoch, so skip rather than pile on.
-    fn spawn_major_compaction(&self, epoch: u64) {
-        let Ok(guard) = self.compacting.clone().try_lock_owned() else {
-            warn!("skipping post-reconfig compaction at epoch {epoch}: previous run still going");
-            return;
-        };
+    /// Awaited deliberately before `prepare_signing` refills the presig pool:
+    /// the keyspaces are at their emptiest right after the prune, so the merge
+    /// writes almost nothing.
+    async fn run_major_compaction(&self, epoch: u64) {
         let db = self.inner.db.clone();
-        let metrics = self.inner.metrics.clone();
-        tokio::task::spawn_blocking(move || {
-            let _guard = guard;
-            let started = std::time::Instant::now();
-            for keyspace in db.major_compact() {
-                metrics.record_major_compaction(&keyspace);
-                match &keyspace.error {
-                    Some(e) => error!("compacting {} failed: {e}", keyspace.name),
-                    None => info!(
-                        "compacted {} in {:?}: {} -> {} live bytes",
-                        keyspace.name, keyspace.elapsed, keyspace.before, keyspace.after,
-                    ),
-                }
+        let started = std::time::Instant::now();
+        let compacted = match tokio::task::spawn_blocking(move || db.major_compact()).await {
+            Ok(compacted) => compacted,
+            Err(e) => {
+                error!("post-reconfig compaction for epoch {epoch} panicked: {e}");
+                return;
             }
-            info!(
-                "post-reconfig compaction for epoch {epoch} finished in {:?}",
-                started.elapsed()
-            );
-        });
+        };
+        for keyspace in compacted {
+            self.inner.metrics.record_major_compaction(&keyspace);
+            match &keyspace.error {
+                Some(e) => error!("compacting {} failed: {e}", keyspace.name),
+                None => info!(
+                    "compacted {} in {:?}: {} -> {} live bytes",
+                    keyspace.name, keyspace.elapsed, keyspace.before, keyspace.after,
+                ),
+            }
+        }
+        info!(
+            "post-reconfig compaction for epoch {epoch} finished in {:?}",
+            started.elapsed()
+        );
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {
