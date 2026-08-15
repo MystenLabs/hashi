@@ -14,6 +14,7 @@ use e2e_tests::TestNetworksBuilder;
 use e2e_tests::snapshot;
 use e2e_tests::test_helpers::BackgroundMiner;
 use e2e_tests::test_helpers::create_deposit_and_wait;
+use e2e_tests::test_helpers::extract_witness_program;
 use e2e_tests::test_helpers::get_hbtc_balance;
 use e2e_tests::test_helpers::init_test_logging;
 use e2e_tests::test_helpers::subscribe_withdrawal_confirmations;

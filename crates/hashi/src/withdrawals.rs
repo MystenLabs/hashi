@@ -1486,6 +1486,8 @@ impl Hashi {
             pending_requests = requests.len(),
             available_utxos = candidates.len(),
             batch_request_cap,
+            active_package_version,
+            configured_max_requests,
             "Sized the withdrawal batch cap from queue depth versus pool size",
         );
 
