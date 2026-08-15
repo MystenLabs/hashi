@@ -2238,6 +2238,12 @@ pub fn withdrawal_request_id_from_response(
 /// Build the PTB for cancelling a withdrawal. The refunded `Balance<BTC>` is
 /// sent to `sender`'s address balance, so `sender` must be the same address the
 /// transaction is finalized for.
+///
+/// `call_package` must be the active version's package id (or the original
+/// id while only v1 is live): v1 cancel bytecode gates on `processed`-bag
+/// membership, which misses requests the v2 in-place commit left in
+/// `requests` — cancelling one there would destroy a request a live
+/// withdrawal txn still references.
 pub fn build_cancel_withdrawal(
     hashi_ids: HashiIds,
     call_package: Address,

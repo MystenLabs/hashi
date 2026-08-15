@@ -200,12 +200,27 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
             "No sender available: pass --sender (the refund recipient) or configure a keypair",
         )?;
 
-    let builder = crate::sui_tx_executor::build_cancel_withdrawal(
+    // Resolve the active version's package so the cancel runs the bytecode
+    // generation whose committed-request gate matches the chain's state
+    // (v1's bag-membership gate misses v2 in-place-committed requests).
+    let call_package = crate::onchain::OnchainState::new_reader(
+        &config.sui_rpc_url,
         hashi_ids,
-        hashi_ids.package_id,
-        &req_addr,
-        sender,
-    );
+        None,
+        crate::onchain::ScrapeScope::GovernanceOnly,
+    )
+    .await
+    .ok()
+    .and_then(|state| {
+        let guard = state.state();
+        let version = guard
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()?;
+        guard.package_versions().get(version)
+    })
+    .unwrap_or(hashi_ids.package_id);
+    let builder =
+        crate::sui_tx_executor::build_cancel_withdrawal(hashi_ids, call_package, &req_addr, sender);
 
     match tx_opts.mode() {
         TxMode::SerializeUnsigned => print_info("Building unsigned withdrawal cancellation..."),
