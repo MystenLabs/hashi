@@ -933,7 +933,7 @@ impl Metrics {
             .unwrap(),
             db_major_compaction_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_db_major_compaction_duration_seconds",
-                "Duration of a post-reconfig major compaction, by keyspace",
+                "Duration of a major compaction, by keyspace",
                 &["keyspace"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
@@ -941,7 +941,7 @@ impl Metrics {
             .unwrap(),
             db_major_compaction_failures_total: register_int_counter_vec_with_registry!(
                 "hashi_db_major_compaction_failures_total",
-                "Post-reconfig major compactions that failed, by keyspace \
+                "Major compactions that failed, by keyspace \
                  (\"unlink\" is the final rotation that releases the disk)",
                 &["keyspace"],
                 registry,
