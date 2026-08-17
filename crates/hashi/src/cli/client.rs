@@ -104,6 +104,31 @@ pub struct HashiClient {
     executor: Option<SuiTxExecutor>,
 }
 
+/// Fetch a shared object's initial shared version from its owner field.
+///
+/// Needed to build fully-resolved shared inputs: pre-resolving a shared input's
+/// initial version + mutability keeps sui >= 1.76 fullnodes from having to
+/// inspect an upgrade-introduced module's signature at simulate time (that
+/// inspection fails with `INVALID_LINKAGE`).
+pub async fn fetch_initial_shared_version(
+    client: &mut sui_rpc::Client,
+    object_id: Address,
+) -> Result<u64> {
+    use sui_rpc::field::FieldMask;
+    use sui_rpc::field::FieldMaskUtil;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&object_id).with_read_mask(FieldMask::from_paths(["owner"])),
+        )
+        .await
+        .with_context(|| format!("fetching owner of shared object {object_id}"))?
+        .into_inner();
+    Ok(response.object().owner().version())
+}
+
 impl HashiClient {
     /// Client for governance and config commands. Skips the Bitcoin
     /// collections, which none of them read.
@@ -216,6 +241,15 @@ impl HashiClient {
             .state()
             .package_versions()
             .latest_version()
+    }
+
+    /// The latest published package id. Transactions whose type args may name an
+    /// upgrade-introduced type must be called through the latest package (v1-era
+    /// type args unify fine under a newer call, but not vice versa).
+    pub fn latest_package_id(&self) -> anyhow::Result<Address> {
+        self.onchain_state
+            .package_id()
+            .context("no package versions known on-chain")
     }
 
     /// Fetch current epoch from on-chain state

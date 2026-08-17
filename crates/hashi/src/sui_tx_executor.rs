@@ -1066,6 +1066,22 @@ impl SuiTxExecutor {
         Ok(request_ids)
     }
 
+    /// The package id whose code should execute for version-SEMANTIC calls
+    /// (committee formation, and anything else whose behavior differs across
+    /// package versions). Resolves the highest enabled on-chain version this
+    /// binary supports through the version framework; falls back to the
+    /// original package when no state is attached (CLI-built executors) or
+    /// nothing is resolved yet.
+    fn active_call_package_id(&self) -> Address {
+        self.onchain_state
+            .as_ref()
+            .and_then(|onchain_state| {
+                let version = onchain_state.active_package_version()?;
+                onchain_state.state().package_versions().get(version)
+            })
+            .unwrap_or(self.hashi_ids.package_id)
+    }
+
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_start_reconfig(&mut self) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
@@ -1079,9 +1095,13 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(false),
         );
+        // Committee formation runs inside start_reconfig, and its semantics
+        // are version-dependent (v2 skips governance-ignored members) — so
+        // this call must execute the ACTIVE version's code, not the original
+        // package's.
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                self.active_call_package_id(),
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("start_reconfig"),
             ),
