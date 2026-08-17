@@ -488,7 +488,7 @@ impl SuiTxExecutor {
         self
     }
 
-    fn call_package(&self) -> Address {
+    pub(crate) fn call_package(&self) -> Address {
         self.call_target().0
     }
 
@@ -1251,9 +1251,11 @@ impl SuiTxExecutor {
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<Option<u64>> {
         let sender = self.signer.verifying_key().derive_address();
+        let call_package = self.call_package();
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
+            call_package,
             config,
             operator_address,
             Some(sender),
@@ -1823,8 +1825,9 @@ impl SuiTxExecutor {
     }
 }
 
-// TODO: the free builders still call the original package id, so they run v1
-// bytecode after an upgrade. Take the call target as a parameter.
+// TODO: the remaining free builders and `cli/client.rs` still call the original
+// package id, so they run v1 bytecode after an upgrade. Take the call target as
+// a parameter, as `build_register_or_update_validator_tx` now does.
 
 /// Build the PTB for a single deposit request. Pure (no signer / no network),
 /// so it can be signed/executed by [`SuiTxExecutor::execute`] or serialized
@@ -2017,9 +2020,11 @@ pub fn build_cancel_withdrawal(
 ///
 /// When not registering, the sender is set to `sender` if provided (typically the operator
 /// address), otherwise falls back to `validator_address`.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_register_or_update_validator_tx(
     client: &mut Client,
     hashi_ids: &HashiIds,
+    call_package: Address,
     config: &Config,
     operator_address: Option<Address>,
     sender: Option<Address>,
@@ -2084,7 +2089,7 @@ pub async fn build_register_or_update_validator_tx(
         );
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                call_package,
                 Identifier::from_static("validator"),
                 Identifier::from_static("register"),
             ),
@@ -2113,7 +2118,7 @@ pub async fn build_register_or_update_validator_tx(
         let pop_signature_arg = builder.pure(&pop.signature().as_ref().to_vec());
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                call_package,
                 Identifier::from_static("validator"),
                 Identifier::from_static("update_next_epoch_public_key"),
             ),
@@ -2139,7 +2144,7 @@ pub async fn build_register_or_update_validator_tx(
             let encryption_key_arg = builder.pure(&new_bytes.as_slice().to_vec());
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("validator"),
                     Identifier::from_static("update_next_epoch_encryption_public_key"),
                 ),
@@ -2160,7 +2165,7 @@ pub async fn build_register_or_update_validator_tx(
         let endpoint_url_arg = builder.pure(&config_url.to_string());
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                call_package,
                 Identifier::from_static("validator"),
                 Identifier::from_static("update_endpoint_url"),
             ),
@@ -2189,7 +2194,7 @@ pub async fn build_register_or_update_validator_tx(
             let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("validator"),
                     Identifier::from_static("update_tls_public_key"),
                 ),
@@ -2213,7 +2218,7 @@ pub async fn build_register_or_update_validator_tx(
         let operator_arg = builder.pure(&operator);
         builder.move_call(
             Function::new(
-                hashi_ids.package_id,
+                call_package,
                 Identifier::from_static("validator"),
                 Identifier::from_static("update_operator_address"),
             ),

@@ -355,7 +355,7 @@ impl LeaderService {
 
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    executor.call_package(),
                     Identifier::from_static("proposal"),
                     Identifier::from_static("delete_expired"),
                 )
