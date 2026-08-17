@@ -140,6 +140,8 @@ impl MpcService {
             "MPC service starting: pending_epoch_change={pending:?}, \
              is_in_current_committee={is_in_committee}",
         );
+        self.run_major_compaction(self.inner.onchain_state().epoch())
+            .await;
         if let Some(epoch) = pending {
             info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;
@@ -1416,8 +1418,7 @@ impl MpcService {
         drop(_reconfig_timer);
     }
 
-    /// Compact the database after an epoch change so the rows the prune just
-    /// tombstoned are actually unlinked.
+    /// Compact the database so rows tombstoned by pruning are actually unlinked.
     ///
     /// Awaited deliberately before `prepare_signing` refills the presig pool:
     /// the keyspaces are at their emptiest right after the prune, so the merge
@@ -1428,7 +1429,7 @@ impl MpcService {
         let compaction = match tokio::task::spawn_blocking(move || db.major_compact()).await {
             Ok(compaction) => compaction,
             Err(e) => {
-                error!("post-reconfig compaction for epoch {epoch} panicked: {e}");
+                error!("major compaction for epoch {epoch} panicked: {e}");
                 return;
             }
         };
@@ -1448,13 +1449,13 @@ impl MpcService {
             Some(e) => {
                 self.inner.metrics.record_major_compaction_unlink_failure();
                 error!(
-                    "post-reconfig compaction for epoch {epoch} failed after {:?}: \
+                    "major compaction for epoch {epoch} failed after {:?}: \
                      retired tables were not unlinked, the space is still held: {e}",
                     started.elapsed()
                 );
             }
             None => info!(
-                "post-reconfig compaction for epoch {epoch} finished in {:?}",
+                "major compaction for epoch {epoch} finished in {:?}",
                 started.elapsed()
             ),
         }
