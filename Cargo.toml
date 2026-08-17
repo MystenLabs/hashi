@@ -87,9 +87,13 @@ aws-config = "1.1.7"
 aws-credential-types = "1"
 aws-sdk-s3 = "1.12.0"
 
-# fastcrypto — pinned to a `main` rev.
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "179ba6ca65f567efb297d0f8d449d78cdef6745c" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "179ba6ca65f567efb297d0f8d449d78cdef6745c" }
+# fastcrypto — the merged avss verify_message/create_complaint split
+# (MystenLabs/fastcrypto#1002) on top of 179ba6c, hashi main's pinned rev. This
+# commit is kept reachable by SHA via the merged PR. fastcrypto main has since
+# diverged with unrelated breaking changes, so moving off this rev needs a
+# coordinated fastcrypto bump for the whole workspace, not just this PR.
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d9ae33b1f5abfc2c09974c7682175f281f6f528f" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d9ae33b1f5abfc2c09974c7682175f281f6f528f" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
