@@ -6525,6 +6525,49 @@ impl RotationTestSetup {
 }
 
 #[test]
+fn test_send_messages_does_not_persist_a_batch_with_a_foreign_share_index() {
+    let rotation_setup = RotationTestSetup::new();
+
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer_with_memory_store(0);
+    let dealer_addr = rotation_setup.setup.address(0);
+
+    let (mut receiver_manager, receiver_dkg_output) =
+        rotation_setup.create_receiver_with_memory_store(1);
+    receiver_manager.previous_output = Some(receiver_dkg_output);
+
+    let attacker_addr = rotation_setup.setup.address(3);
+    assert_ne!(attacker_addr, dealer_addr);
+
+    let request = SendMessagesRequest {
+        messages: rotation_messages,
+    };
+    let err = match receiver_manager.handle_send_messages_request(attacker_addr, &request) {
+        Ok(_) => panic!("must reject a batch whose share indices belong to another dealer"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("does not belong to dealer"),
+        "sanity check only; this string predates the fix. got: {err}"
+    );
+
+    assert!(
+        !receiver_manager
+            .current_rotation_messages
+            .contains_key(&attacker_addr),
+        "a rejected batch must not remain in memory"
+    );
+    let epoch = receiver_manager.mpc_config.epoch;
+    assert!(
+        receiver_manager
+            .public_messages_store
+            .get_rotation_messages(epoch, &attacker_addr)
+            .unwrap()
+            .is_none(),
+        "a rejected batch must not be persisted"
+    );
+}
+
+#[test]
 fn test_try_sign_rotation_messages_all_or_nothing() {
     let rotation_setup = RotationTestSetup::new();
 
@@ -8438,10 +8481,17 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     );
 
     let outputs_before = receiver_manager.dealer_outputs.len();
+    let owned_share_indices = receiver_manager
+        .previous_share_ids_of(&rotation_dealer_addr)
+        .unwrap();
 
     // Call process_certified_rotation_message
     receiver_manager
-        .process_certified_rotation_message(&rotation_dealer_addr, &dealer_dkg_output)
+        .process_certified_rotation_message(
+            &rotation_dealer_addr,
+            &dealer_dkg_output,
+            &owned_share_indices,
+        )
         .unwrap();
 
     // Verify share 1: output unchanged (skipped because already had output)
