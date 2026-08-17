@@ -36,7 +36,13 @@ pub const PRESIG_REFILL_DIVISOR: usize = 2;
 /// Add the next version here in the same change that teaches this binary to
 /// run it (e.g. a package upgrade); never list a version whose semantics this
 /// build does not implement.
-pub const SUPPORTED_PACKAGE_VERSIONS: &[u64] = &[1];
+///
+/// Enabling v2 lets this binary drive the published v2 package: version-
+/// dependent calls (e.g. `start_reconfig`) execute the active version's code
+/// through `SuiTxExecutor::active_call_package_id` instead of the original
+/// publish id, and shared inputs are pre-resolved so upgrade-introduced
+/// modules never trip the fullnode's simulate-time linkage check.
+pub const SUPPORTED_PACKAGE_VERSIONS: &[u64] = &[1, 2];
 
 pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
