@@ -196,7 +196,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             encryption_key.clone(),
             Some(encryption_key),
             dummy_signing_key.clone(),
-            Box::new(store),
+            Arc::new(store),
             chain_id,
             None, // weight_divisor
             0,    // batch_size_per_weight (unused for reconstruction)

@@ -2514,7 +2514,7 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = std::sync::Arc::new(Database::open(tmpdir.path()).unwrap());
 
-        let mut store = EpochPublicMessagesStore::new(db.clone(), 87);
+        let store = EpochPublicMessagesStore::new(db.clone(), 87);
 
         let dealer = Address::new([1u8; 32]);
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();

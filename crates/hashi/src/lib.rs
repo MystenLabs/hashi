@@ -582,7 +582,7 @@ impl Hashi {
             validator_address,
             epoch,
         )?;
-        let store = Box::new(storage::EpochPublicMessagesStore::new(
+        let store = Arc::new(storage::EpochPublicMessagesStore::new(
             self.db.clone(),
             epoch,
         ));
