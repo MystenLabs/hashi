@@ -13463,7 +13463,7 @@ fn test_handle_send_rejects_vanilla_nonce_message_in_avid_epoch() {
 }
 
 #[test]
-fn test_serve_avid_nonce_retrieval() {
+fn test_avid_nonce_retrieval() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
@@ -16076,6 +16076,8 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
         _batch_index: u32,
         _dealer: &Address,
     ) -> anyhow::Result<Option<AvidRoundState>> {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
         Ok(None)
     }
 
@@ -16260,4 +16262,308 @@ fn retrieve_messages_store_read_does_not_hold_the_manager_lock() {
         response.unwrap().into_inner().messages,
         Some(hashi_types::proto::retrieve_messages_response::Messages::DkgMessage(_))
     ));
+}
+
+#[test]
+fn avid_retrieval_store_read_does_not_hold_the_manager_lock() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new_avid(4);
+    let dealer_message = setup
+        .create_manager(0)
+        .create_dealer_message(&mut rand::thread_rng());
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let manager = setup.create_manager_with_store(
+        0,
+        Arc::new(BlockingDealerMessageStore {
+            message: dealer_message,
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }),
+    );
+    let epoch = manager.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+        epoch: Some(epoch),
+        dealer: Some(setup.address(2).to_string()),
+        protocol_type: Some(hashi_types::proto::MpcProtocolType::NonceGeneration as i32),
+        batch_index: Some(0),
+    });
+    request.extensions_mut().insert(setup.address(1));
+
+    let handler = rt.spawn(async move {
+        use hashi_types::proto::mpc_service_server::MpcService;
+        service.retrieve_messages(request).await
+    });
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("handler never reached the AVID storage read");
+    let writable = mpc_lock.try_write().is_ok();
+
+    release_tx.send(()).unwrap();
+    let _ = rt.block_on(handler).unwrap();
+
+    assert!(
+        writable,
+        "manager write lock was held across the AVID storage read"
+    );
+}
+
+struct RacingAvidStore {
+    round_state: AvidRoundState,
+    held: HeldAvidEchoes,
+    published: std::sync::Mutex<bool>,
+    first_read: std::sync::Mutex<bool>,
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl RacingAvidStore {
+    fn pause_after_first_read(&self) {
+        let mut first = self.first_read.lock().unwrap();
+        if !*first {
+            return;
+        }
+        *first = false;
+        drop(first);
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+    }
+}
+
+impl PublicMessagesStore for RacingAvidStore {
+    fn store_dealer_message(
+        &self,
+        _epoch: u64,
+        _dealer: &Address,
+        _message: &avss::Message,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
+    fn get_dealer_message(
+        &self,
+        _epoch: u64,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<avss::Message>> {
+        unimplemented!()
+    }
+
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+        unimplemented!()
+    }
+
+    fn store_rotation_messages(
+        &self,
+        _epoch: u64,
+        _dealer: &Address,
+        _messages: &RotationMessages,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
+    fn get_rotation_messages(
+        &self,
+        _epoch: u64,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<RotationMessages>> {
+        unimplemented!()
+    }
+
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+        unimplemented!()
+    }
+
+    fn store_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _message: &batch_avss::Message,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        unimplemented!()
+    }
+
+    fn list_nonce_messages(
+        &self,
+        _batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+        unimplemented!()
+    }
+
+    fn store_avid_round_state(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
+    fn get_avid_round_state(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        let published = *self.published.lock().unwrap();
+        let answer = published.then(|| self.round_state.clone());
+        self.pause_after_first_read();
+        Ok(answer)
+    }
+
+    fn list_avid_round_states(
+        &self,
+        _batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+        unimplemented!()
+    }
+
+    fn store_avid_held_echoes(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        let published = *self.published.lock().unwrap();
+        let answer = published.then(|| self.held.clone());
+        self.pause_after_first_read();
+        Ok(answer)
+    }
+
+    fn store_avid_dealer_builder(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _builder: &batch_avss_avid::AvssMessageBuilder,
+    ) -> anyhow::Result<()> {
+        unimplemented!()
+    }
+
+    fn get_avid_dealer_builder(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+    ) -> anyhow::Result<Option<batch_avss_avid::AvssMessageBuilder>> {
+        unimplemented!()
+    }
+}
+
+#[test]
+fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let source = Arc::new(InMemoryPublicMessagesStore::new());
+    let mut voter = setup.create_manager_with_store(1, source.clone());
+    voter
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+    voter
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .unwrap();
+    let epoch = voter.mpc_config.epoch;
+    let round_state = source
+        .get_avid_round_state(epoch, batch_index, &fx.dealer_addr)
+        .unwrap()
+        .unwrap();
+    let held = source
+        .get_avid_held_echoes(epoch, batch_index, &fx.dealer_addr)
+        .unwrap()
+        .unwrap();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let store = Arc::new(RacingAvidStore {
+        round_state,
+        held,
+        published: std::sync::Mutex::new(false),
+        first_read: std::sync::Mutex::new(true),
+        entered: entered_tx,
+        release: std::sync::Mutex::new(release_rx),
+    });
+
+    let pending = AvidPending {
+        epoch,
+        batch_index,
+        dealer: fx.dealer_addr,
+        requester: setup.address(4),
+        common: Lookup::Pending,
+        held: Lookup::Pending,
+    };
+
+    let reader = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || finish_avid_retrieval(&*store, pending))
+    };
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("retrieval never reached a fallback store read");
+    *store.published.lock().unwrap() = true;
+    release_tx.send(()).unwrap();
+
+    let response = reader.join().unwrap().unwrap();
+    let Messages::AvidNonceRetrieval(bundle) = response.messages else {
+        panic!("expected an AVID retrieval bundle");
+    };
+    assert!(
+        bundle.avid_vote.is_none() || bundle.common.is_some(),
+        "served an AVID vote with no common message"
+    );
 }

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
+use crate::mpc::RetrieveOutcome;
+use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;
@@ -90,21 +92,26 @@ impl MpcService for HttpService {
                 }
                 mpc_error_to_status(e)
             };
-            let (in_memory, store) = {
+            let (outcome, store) = {
                 let mgr = mpc_manager.read().unwrap();
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
                     mgr.previous_epoch,
                     internal_request.epoch,
                 )?;
-                let in_memory = mgr
-                    .try_retrieve_in_memory(requester, &internal_request)
+                let outcome = mgr
+                    .begin_retrieve(requester, &internal_request)
                     .map_err(to_status)?;
-                (in_memory, std::sync::Arc::clone(&mgr.public_messages_store))
+                (outcome, std::sync::Arc::clone(&mgr.public_messages_store))
             };
-            let messages = match in_memory {
-                Some(messages) => messages,
-                None => retrieve_from_store(&*store, &internal_request).map_err(to_status)?,
+            let messages = match outcome {
+                RetrieveOutcome::Ready(messages) => messages,
+                RetrieveOutcome::NeedsStore => {
+                    retrieve_from_store(&*store, &internal_request).map_err(to_status)?
+                }
+                RetrieveOutcome::NeedsAvidStore(pending) => {
+                    finish_avid_retrieval(&*store, pending).map_err(to_status)?
+                }
             };
             Ok(RetrieveMessagesResponse::from(&messages))
         })
