@@ -47,21 +47,24 @@ impl MpcService for HttpService {
             .with_label_values(&[label])
             .start_timer();
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
-            mgr.handle_send_messages_request(sender, &internal_request)
-                .map_err(|e| {
-                    if matches!(&e, MpcError::NotReady(_)) {
-                        tracing::info!("send_messages from {sender:?}: {e}");
-                    } else {
-                        tracing::warn!("send_messages from {sender:?} failed: {e}");
-                    }
-                    mpc_error_to_status(e)
-                })
+            let signed = {
+                let mut mgr = mpc_manager.write().unwrap();
+                validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
+                mgr.handle_send_messages_request(sender, &internal_request)
+                    .map_err(|e| {
+                        if matches!(&e, MpcError::NotReady(_)) {
+                            tracing::info!("send_messages from {sender:?}: {e}");
+                        } else {
+                            tracing::warn!("send_messages from {sender:?} failed: {e}");
+                        }
+                        mpc_error_to_status(e)
+                    })?
+            };
+            Ok(SendMessagesResponse::from(&signed))
         })
         .await?;
         drop(_timer);
-        Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
+        Ok(tonic::Response::new(response))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -73,30 +76,32 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = {
-            let mpc_manager = self.mpc_manager()?;
-            let mgr = mpc_manager.read().unwrap();
-            validate_epoch_current_or_previous(
-                mgr.mpc_config.epoch,
-                mgr.previous_epoch,
-                internal_request.epoch,
-            )?;
-            mgr.handle_retrieve_messages_request(requester, &internal_request)
-                .map_err(|e| {
-                    match &e {
-                        MpcError::NotFound(_) => {
-                            tracing::debug!("retrieve_messages: {e}");
+        let mpc_manager = self.mpc_manager()?;
+        let response = spawn_blocking(move || -> Result<_, Status> {
+            let messages = {
+                let mgr = mpc_manager.read().unwrap();
+                validate_epoch_current_or_previous(
+                    mgr.mpc_config.epoch,
+                    mgr.previous_epoch,
+                    internal_request.epoch,
+                )?;
+                mgr.handle_retrieve_messages_request(requester, &internal_request)
+                    .map_err(|e| {
+                        match &e {
+                            MpcError::NotFound(_) => {
+                                tracing::debug!("retrieve_messages: {e}");
+                            }
+                            _ => {
+                                tracing::warn!("retrieve_messages failed: {e}");
+                            }
                         }
-                        _ => {
-                            tracing::warn!("retrieve_messages failed: {e}");
-                        }
-                    }
-                    mpc_error_to_status(e)
-                })?
-        };
-        Ok(tonic::Response::new(RetrieveMessagesResponse::from(
-            &response,
-        )))
+                        mpc_error_to_status(e)
+                    })?
+            };
+            Ok(RetrieveMessagesResponse::from(&messages))
+        })
+        .await?;
+        Ok(tonic::Response::new(response))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -110,20 +115,23 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch_current_or_previous(
-                mgr.mpc_config.epoch,
-                mgr.previous_epoch,
-                internal_request.epoch,
-            )?;
-            mgr.handle_complain_request(caller, &internal_request)
-                .map_err(|e| {
-                    tracing::warn!("complain failed: {e}");
-                    mpc_error_to_status(e)
-                })
+            let complaint = {
+                let mut mgr = mpc_manager.write().unwrap();
+                validate_epoch_current_or_previous(
+                    mgr.mpc_config.epoch,
+                    mgr.previous_epoch,
+                    internal_request.epoch,
+                )?;
+                mgr.handle_complain_request(caller, &internal_request)
+                    .map_err(|e| {
+                        tracing::warn!("complain failed: {e}");
+                        mpc_error_to_status(e)
+                    })?
+            };
+            Ok(ComplainResponse::from(&complaint))
         })
         .await?;
-        Ok(tonic::Response::new(ComplainResponse::from(&response)))
+        Ok(tonic::Response::new(response))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -135,18 +143,20 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::GetPublicMpcOutputRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let response = {
-            let mpc_manager = self.mpc_manager()?;
-            let mgr = mpc_manager.read().unwrap();
-            mgr.handle_get_public_mpc_output_request(&internal_request)
-                .map_err(|e| {
-                    tracing::warn!("get_public_mpc_output failed: {e}");
-                    mpc_error_to_status(e)
-                })?
-        };
-        Ok(tonic::Response::new(GetPublicMpcOutputResponse::from(
-            &response,
-        )))
+        let mpc_manager = self.mpc_manager()?;
+        let response = spawn_blocking(move || -> Result<_, Status> {
+            let output = {
+                let mgr = mpc_manager.read().unwrap();
+                mgr.handle_get_public_mpc_output_request(&internal_request)
+                    .map_err(|e| {
+                        tracing::warn!("get_public_mpc_output failed: {e}");
+                        mpc_error_to_status(e)
+                    })?
+            };
+            Ok(GetPublicMpcOutputResponse::from(&output))
+        })
+        .await?;
+        Ok(tonic::Response::new(response))
     }
 
     #[tracing::instrument(skip(self, request))]
