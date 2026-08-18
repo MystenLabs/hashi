@@ -482,22 +482,28 @@ impl MpcManager {
         result
     }
 
-    pub fn handle_retrieve_messages_request(
+    #[cfg(test)]
+    fn handle_retrieve_messages_request(
         &self,
         requester: Address,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
-        match self.try_retrieve_in_memory(requester, request)? {
-            Some(response) => Ok(response),
-            None => retrieve_from_store(&*self.public_messages_store, request),
+        match self.begin_retrieve(requester, request)? {
+            RetrieveOutcome::Ready(response) => Ok(response),
+            RetrieveOutcome::NeedsStore => {
+                retrieve_from_store(&*self.public_messages_store, request)
+            }
+            RetrieveOutcome::NeedsAvidStore(pending) => {
+                finish_avid_retrieval(&*self.public_messages_store, pending)
+            }
         }
     }
 
-    pub fn try_retrieve_in_memory(
+    pub(crate) fn begin_retrieve(
         &self,
         requester: Address,
         request: &RetrieveMessagesRequest,
-    ) -> MpcResult<Option<RetrieveMessagesResponse>> {
+    ) -> MpcResult<RetrieveOutcome> {
         if request.epoch == self.mpc_config.epoch
             && let Some(messages) = self.get_dealer_messages(
                 request.protocol_type,
@@ -505,73 +511,43 @@ impl MpcManager {
                 request.batch_index,
             )
         {
-            return Ok(Some(RetrieveMessagesResponse { messages }));
+            return Ok(RetrieveOutcome::Ready(RetrieveMessagesResponse {
+                messages,
+            }));
         }
         if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
             let batch_index = request.batch_index.ok_or_else(|| {
                 MpcError::NotFound("batch_index required for nonce gen retrieval".into())
             })?;
             if self.mpc_config.nonce_generation_protocol == NonceGenerationProtocol::Avid {
-                return self
-                    .serve_avid_nonce_retrieval(requester, batch_index, request)
-                    .map(Some);
+                if request.epoch != self.mpc_config.epoch {
+                    return Err(MpcError::NotFound(
+                        "AVID retrieval serves the current epoch only".into(),
+                    ));
+                }
+                let key = (batch_index, request.dealer);
+                let common = self
+                    .current_avid_round_state
+                    .get(&key)
+                    .map(|state| state.common.clone());
+                let held = self.avid_held_echoes.get(&key).cloned();
+                return Ok(RetrieveOutcome::NeedsAvidStore(AvidPending {
+                    epoch: self.mpc_config.epoch,
+                    batch_index,
+                    dealer: request.dealer,
+                    requester,
+                    common: match common {
+                        Some(common) => Lookup::Resolved(common),
+                        None => Lookup::Pending,
+                    },
+                    held: match held {
+                        Some(echoes) => Lookup::Resolved(echoes),
+                        None => Lookup::Pending,
+                    },
+                }));
             }
         }
-        Ok(None)
-    }
-
-    fn serve_avid_nonce_retrieval(
-        &self,
-        requester: Address,
-        batch_index: u32,
-        request: &RetrieveMessagesRequest,
-    ) -> MpcResult<RetrieveMessagesResponse> {
-        if request.epoch != self.mpc_config.epoch {
-            return Err(MpcError::NotFound(
-                "AVID retrieval serves the current epoch only".into(),
-            ));
-        }
-        let common = self
-            .get_avid_round_state(batch_index, &request.dealer)?
-            .map(|state| state.common);
-        let (avid_vote, echo) =
-            match &self.try_get_avid_held_echoes(batch_index, &request.dealer)? {
-                Some((vote, echoes)) => {
-                    let echo = echoes.iter().find_map(|(addr, msg)| {
-                        (*addr == requester).then(|| match msg {
-                            Messages::NonceGenerationAvid(AvidNonceMessage {
-                                kind: AvidNonceMessageKind::Echo { echo, .. },
-                                ..
-                            }) => echo.clone(),
-                            _ => unreachable!("held echoes are echo messages"),
-                        })
-                    });
-                    (Some(vote.clone()), echo)
-                }
-                None => (None, None),
-            };
-        if common.is_none() && avid_vote.is_none() && echo.is_none() {
-            return Err(MpcError::NotFound(format!(
-                "no AVID round state for dealer {:?}",
-                request.dealer
-            )));
-        }
-        tracing::info!(
-            "AVID echo pull served: requester {:?}, dealer {:?}, batch_index={batch_index}, \
-             common={}, vote={}, echo={}",
-            requester,
-            request.dealer,
-            common.is_some(),
-            avid_vote.is_some(),
-            echo.is_some()
-        );
-        Ok(RetrieveMessagesResponse {
-            messages: Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
-                common,
-                echo,
-                avid_vote,
-            }),
-        })
+        Ok(RetrieveOutcome::NeedsStore)
     }
 
     pub fn handle_complain_request(
@@ -6851,7 +6827,97 @@ fn consume_certified_nonce_outputs<T>(
     (pre_filter, dealers, outputs)
 }
 
-/// The part of a retrieval that only needs the store, so it runs without the manager lock.
+pub(crate) enum RetrieveOutcome {
+    Ready(RetrieveMessagesResponse),
+    NeedsStore,
+    NeedsAvidStore(AvidPending),
+}
+
+pub(crate) enum Lookup<T> {
+    Pending,
+    Resolved(T),
+}
+
+pub(crate) struct AvidPending {
+    epoch: u64,
+    batch_index: u32,
+    dealer: Address,
+    requester: Address,
+    common: Lookup<batch_avss_avid::AvssCommonMessage>,
+    held: Lookup<HeldAvidEchoes>,
+}
+
+pub(crate) fn finish_avid_retrieval(
+    store: &dyn PublicMessagesStore,
+    pending: AvidPending,
+) -> MpcResult<RetrieveMessagesResponse> {
+    let held = match pending.held {
+        Lookup::Resolved(resolved) => Some(resolved),
+        Lookup::Pending => store
+            .get_avid_held_echoes(pending.epoch, pending.batch_index, &pending.dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?,
+    };
+    let common = match pending.common {
+        Lookup::Resolved(resolved) => Some(resolved),
+        Lookup::Pending => store
+            .get_avid_round_state(pending.epoch, pending.batch_index, &pending.dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(|state| state.common),
+    };
+    build_avid_response(
+        pending.requester,
+        pending.dealer,
+        pending.batch_index,
+        common,
+        held,
+    )
+}
+
+fn build_avid_response(
+    requester: Address,
+    dealer: Address,
+    batch_index: u32,
+    common: Option<batch_avss_avid::AvssCommonMessage>,
+    held: Option<HeldAvidEchoes>,
+) -> MpcResult<RetrieveMessagesResponse> {
+    let (avid_vote, echo) = match &held {
+        Some((vote, echoes)) => {
+            let echo = echoes.iter().find_map(|(addr, msg)| {
+                (*addr == requester).then(|| match msg {
+                    Messages::NonceGenerationAvid(AvidNonceMessage {
+                        kind: AvidNonceMessageKind::Echo { echo, .. },
+                        ..
+                    }) => echo.clone(),
+                    _ => unreachable!("held echoes are echo messages"),
+                })
+            });
+            (Some(vote.clone()), echo)
+        }
+        None => (None, None),
+    };
+    if common.is_none() && avid_vote.is_none() && echo.is_none() {
+        return Err(MpcError::NotFound(format!(
+            "no AVID round state for dealer {dealer:?}"
+        )));
+    }
+    tracing::info!(
+        "AVID echo pull served: requester {:?}, dealer {:?}, batch_index={batch_index}, \
+         common={}, vote={}, echo={}",
+        requester,
+        dealer,
+        common.is_some(),
+        avid_vote.is_some(),
+        echo.is_some()
+    );
+    Ok(RetrieveMessagesResponse {
+        messages: Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
+            common,
+            echo,
+            avid_vote,
+        }),
+    })
+}
+
 pub(crate) fn retrieve_from_store(
     store: &dyn PublicMessagesStore,
     request: &RetrieveMessagesRequest,
