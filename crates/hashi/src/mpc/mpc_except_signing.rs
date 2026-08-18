@@ -487,6 +487,17 @@ impl MpcManager {
         requester: Address,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
+        match self.try_retrieve_in_memory(requester, request)? {
+            Some(response) => Ok(response),
+            None => retrieve_from_store(&*self.public_messages_store, request),
+        }
+    }
+
+    pub fn try_retrieve_in_memory(
+        &self,
+        requester: Address,
+        request: &RetrieveMessagesRequest,
+    ) -> MpcResult<Option<RetrieveMessagesResponse>> {
         if request.epoch == self.mpc_config.epoch
             && let Some(messages) = self.get_dealer_messages(
                 request.protocol_type,
@@ -494,40 +505,19 @@ impl MpcManager {
                 request.batch_index,
             )
         {
-            return Ok(RetrieveMessagesResponse { messages });
+            return Ok(Some(RetrieveMessagesResponse { messages }));
         }
-        let messages = match request.protocol_type {
-            ProtocolTypeIndicator::Dkg => self
-                .public_messages_store
-                .get_dealer_message(request.epoch, &request.dealer)
-                .map_err(|e| MpcError::StorageError(e.to_string()))?
-                .map(Messages::Dkg),
-            ProtocolTypeIndicator::KeyRotation => self
-                .public_messages_store
-                .get_rotation_messages(request.epoch, &request.dealer)
-                .map_err(|e| MpcError::StorageError(e.to_string()))?
-                .map(Messages::Rotation),
-            ProtocolTypeIndicator::NonceGeneration => {
-                let batch_index = request.batch_index.ok_or_else(|| {
-                    MpcError::NotFound("batch_index required for nonce gen retrieval".into())
-                })?;
-                if self.mpc_config.nonce_generation_protocol == NonceGenerationProtocol::Avid {
-                    return self.serve_avid_nonce_retrieval(requester, batch_index, request);
-                }
-                self.public_messages_store
-                    .get_nonce_message(request.epoch, batch_index, &request.dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))?
-                    .map(|msg| {
-                        Messages::NonceGeneration(NonceMessage {
-                            batch_index,
-                            message: msg,
-                        })
-                    })
+        if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
+            let batch_index = request.batch_index.ok_or_else(|| {
+                MpcError::NotFound("batch_index required for nonce gen retrieval".into())
+            })?;
+            if self.mpc_config.nonce_generation_protocol == NonceGenerationProtocol::Avid {
+                return self
+                    .serve_avid_nonce_retrieval(requester, batch_index, request)
+                    .map(Some);
             }
-        };
-        messages
-            .map(|m| RetrieveMessagesResponse { messages: m })
-            .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
+        }
+        Ok(None)
     }
 
     fn serve_avid_nonce_retrieval(
@@ -6859,6 +6849,40 @@ fn consume_certified_nonce_outputs<T>(
         }
     });
     (pre_filter, dealers, outputs)
+}
+
+/// The part of a retrieval that only needs the store, so it runs without the manager lock.
+pub(crate) fn retrieve_from_store(
+    store: &dyn PublicMessagesStore,
+    request: &RetrieveMessagesRequest,
+) -> MpcResult<RetrieveMessagesResponse> {
+    let messages = match request.protocol_type {
+        ProtocolTypeIndicator::Dkg => store
+            .get_dealer_message(request.epoch, &request.dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(Messages::Dkg),
+        ProtocolTypeIndicator::KeyRotation => store
+            .get_rotation_messages(request.epoch, &request.dealer)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+            .map(Messages::Rotation),
+        ProtocolTypeIndicator::NonceGeneration => {
+            let batch_index = request.batch_index.ok_or_else(|| {
+                MpcError::NotFound("batch_index required for nonce gen retrieval".into())
+            })?;
+            store
+                .get_nonce_message(request.epoch, batch_index, &request.dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .map(|msg| {
+                    Messages::NonceGeneration(NonceMessage {
+                        batch_index,
+                        message: msg,
+                    })
+                })
+        }
+    };
+    messages
+        .map(|m| RetrieveMessagesResponse { messages: m })
+        .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T

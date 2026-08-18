@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
+use crate::mpc::retrieve_from_store;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;
 use crate::mpc::types::MpcError;
@@ -78,25 +79,32 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let messages = {
+            let to_status = |e: MpcError| {
+                match &e {
+                    MpcError::NotFound(_) => {
+                        tracing::debug!("retrieve_messages: {e}");
+                    }
+                    _ => {
+                        tracing::warn!("retrieve_messages failed: {e}");
+                    }
+                }
+                mpc_error_to_status(e)
+            };
+            let (in_memory, store) = {
                 let mgr = mpc_manager.read().unwrap();
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
                     mgr.previous_epoch,
                     internal_request.epoch,
                 )?;
-                mgr.handle_retrieve_messages_request(requester, &internal_request)
-                    .map_err(|e| {
-                        match &e {
-                            MpcError::NotFound(_) => {
-                                tracing::debug!("retrieve_messages: {e}");
-                            }
-                            _ => {
-                                tracing::warn!("retrieve_messages failed: {e}");
-                            }
-                        }
-                        mpc_error_to_status(e)
-                    })?
+                let in_memory = mgr
+                    .try_retrieve_in_memory(requester, &internal_request)
+                    .map_err(to_status)?;
+                (in_memory, std::sync::Arc::clone(&mgr.public_messages_store))
+            };
+            let messages = match in_memory {
+                Some(messages) => messages,
+                None => retrieve_from_store(&*store, &internal_request).map_err(to_status)?,
             };
             Ok(RetrieveMessagesResponse::from(&messages))
         })
