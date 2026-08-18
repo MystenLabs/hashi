@@ -411,6 +411,7 @@ impl MpcManager {
                     .previous_output
                     .clone()
                     .ok_or_else(|| MpcError::NotReady("Rotation not started".into()))?;
+                self.reject_unowned_rotation_indices(sender, msgs)?;
                 self.cache_and_persist_rotation_messages(self.mpc_config.epoch, sender, msgs)?;
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)
             }
@@ -562,16 +563,11 @@ impl MpcManager {
                         reason: "Rotation complaint requires share_index".into(),
                     })?;
                 if request.epoch == self.mpc_config.epoch {
-                    let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
-                        MpcError::InvalidConfig("Key rotation requires previous committee".into())
-                    })?;
-                    let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
-                        MpcError::InvalidConfig("Key rotation requires previous nodes".into())
-                    })?;
-                    let owns = previous_committee
-                        .index_of(&request.dealer)
-                        .and_then(|party_id| previous_nodes.share_ids_of(party_id as PartyId).ok())
-                        .is_some_and(|indices| indices.contains(&share_index));
+                    let owns = match self.previous_share_ids_of(&request.dealer) {
+                        Ok(owned) => owned.contains(&share_index),
+                        Err(MpcError::InvalidMessage { .. }) => false,
+                        Err(e) => return Err(e),
+                    };
                     if !owns {
                         return Err(MpcError::InvalidMessage {
                             sender: caller,
@@ -1665,24 +1661,7 @@ impl MpcManager {
             }
             let dealer_share_indices = {
                 let mgr = mpc_manager.read().unwrap();
-                let previous_nodes = mgr.previous_nodes.as_ref().ok_or_else(|| {
-                    MpcError::InvalidConfig("Key rotation requires previous nodes".into())
-                })?;
-                let previous_committee = mgr.previous_committee.as_ref().ok_or_else(|| {
-                    MpcError::InvalidConfig("Key rotation requires previous committee".into())
-                })?;
-                let dealer_party_id = previous_committee.index_of(&dealer).ok_or_else(|| {
-                    MpcError::InvalidMessage {
-                        sender: dealer,
-                        reason: "Dealer not in previous committee".into(),
-                    }
-                })? as u16;
-                previous_nodes.share_ids_of(dealer_party_id).map_err(|_| {
-                    MpcError::InvalidMessage {
-                        sender: dealer,
-                        reason: "Dealer has no shares in previous committee".into(),
-                    }
-                })?
+                mgr.previous_share_ids_of(&dealer)?
             };
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
@@ -1741,7 +1720,7 @@ impl MpcManager {
                                 .complaints_to_process
                                 .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
                     }) {
-                        mgr.process_certified_rotation_message(&dealer, &previous)?;
+                        mgr.process_certified_rotation_message(&dealer, &previous, &share_indices)?;
                     }
                     Ok::<_, MpcError>(())
                 })
@@ -3927,6 +3906,7 @@ impl MpcManager {
         &mut self,
         dealer: &Address,
         previous_dkg_output: &MpcOutput,
+        dealer_previous_share_indices: &[ShareIndex],
     ) -> MpcResult<()> {
         let rotation_messages = self
             .current_rotation_messages
@@ -3934,7 +3914,12 @@ impl MpcManager {
             .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?
             .clone();
         let base_sid = self.current_session_id();
+        let mut unowned = Vec::new();
         for (share_index, message) in rotation_messages {
+            if !dealer_previous_share_indices.contains(&share_index) {
+                unowned.push(share_index);
+                continue;
+            }
             let output_key = DealerOutputsKey::Rotation(*dealer, share_index);
             let complaint_key = ComplaintsToProcessKey::Rotation(*dealer, share_index);
             if self.dealer_outputs.contains_key(&output_key)
@@ -3961,6 +3946,13 @@ impl MpcManager {
                 );
                 e
             })?;
+        }
+        if !unowned.is_empty() {
+            tracing::warn!(
+                "process_certified_rotation_message: dealer {dealer} claims {} share indices it \
+                 does not own; skipped {unowned:?}",
+                unowned.len(),
+            );
         }
         Ok(())
     }
@@ -4759,36 +4751,10 @@ impl MpcManager {
                 reason: "Rotation batch differs from the previously acked batch".into(),
             });
         }
-        let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
-            MpcError::InvalidConfig("Key rotation requires previous committee".into())
-        })?;
-        let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
-            MpcError::InvalidConfig("Key rotation requires previous nodes".into())
-        })?;
-        let dealer_party_id =
-            previous_committee
-                .index_of(&dealer)
-                .ok_or_else(|| MpcError::InvalidMessage {
-                    sender: dealer,
-                    reason: "Dealer not in previous committee".into(),
-                })? as u16;
-        let dealer_share_indices: HashSet<_> = previous_nodes
-            .share_ids_of(dealer_party_id)
-            .map_err(|_| MpcError::InvalidMessage {
-                sender: dealer,
-                reason: "Dealer has no shares in previous committee".into(),
-            })?
-            .into_iter()
-            .collect();
+        self.reject_unowned_rotation_indices(dealer, rotation_messages)?;
         let mut outputs = Vec::with_capacity(rotation_messages.len());
         let base_sid = self.current_session_id();
         for (&share_index, message) in rotation_messages {
-            if !dealer_share_indices.contains(&share_index) {
-                return Err(MpcError::InvalidMessage {
-                    sender: dealer,
-                    reason: format!("Share index {} does not belong to dealer", share_index),
-                });
-            }
             if self
                 .dealer_outputs
                 .contains_key(&DealerOutputsKey::Rotation(dealer, share_index))
@@ -6116,6 +6082,43 @@ impl MpcManager {
             }
         }
         Ok(owners)
+    }
+
+    fn reject_unowned_rotation_indices(
+        &self,
+        dealer: Address,
+        messages: &RotationMessages,
+    ) -> MpcResult<()> {
+        let owned: HashSet<_> = self.previous_share_ids_of(&dealer)?.into_iter().collect();
+        if let Some(foreign) = messages.keys().copied().find(|i| !owned.contains(i)) {
+            return Err(MpcError::InvalidMessage {
+                sender: dealer,
+                reason: format!("Share index {foreign} does not belong to dealer"),
+            });
+        }
+        Ok(())
+    }
+
+    fn previous_share_ids_of(&self, dealer: &Address) -> MpcResult<Vec<ShareIndex>> {
+        let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig("Key rotation requires previous committee".into())
+        })?;
+        let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig("Key rotation requires previous nodes".into())
+        })?;
+        let party_id =
+            previous_committee
+                .index_of(dealer)
+                .ok_or_else(|| MpcError::InvalidMessage {
+                    sender: *dealer,
+                    reason: "Dealer not in previous committee".into(),
+                })? as PartyId;
+        previous_nodes
+            .share_ids_of(party_id)
+            .map_err(|_| MpcError::InvalidMessage {
+                sender: *dealer,
+                reason: "Dealer has no shares in previous committee".into(),
+            })
     }
 
     fn accuser_party_id(&self, epoch: u64, caller: &Address) -> MpcResult<PartyId> {
