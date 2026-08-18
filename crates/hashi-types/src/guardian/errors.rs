@@ -3,7 +3,7 @@
 
 use super::SessionID;
 use super::lifecycle::EnclaveLifecycle;
-use super::time_utils::UnixSeconds;
+use super::time::UnixSeconds;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GuardianError {
@@ -34,7 +34,7 @@ pub enum GuardianError {
         expected: u64,
         actual: u64,
     },
-    /// The standby session has no heartbeat recent enough for activation.
+    /// The selected session has no heartbeat recent enough to be considered live.
     CurrentSessionHeartbeatNotLive {
         session_id: SessionID,
         /// `None` means no heartbeat was found in the recent scan.

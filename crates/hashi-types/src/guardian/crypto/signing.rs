@@ -8,19 +8,21 @@
 //! Both serialize a payload together with its signing intent so a signature for
 //! one payload type cannot be replayed as another.
 
-use super::CryptoVerificationError;
-use super::CryptoVerificationResult;
-use super::GuardianError::InternalError;
-use super::GuardianInfo;
-use super::GuardianResult;
-use super::LogEntry;
-use super::ProvisionerRotateCertRequest;
-use super::ProvisionerRotateCertResponse;
-use super::RotateKpsResponse;
-use super::SetupNewKeyResponse;
-use super::SingleProvisionerInitRequest;
-use super::StandardWithdrawalResponse;
-use super::UnixMillis;
+use crate::guardian::CryptoVerificationError;
+use crate::guardian::CryptoVerificationResult;
+use crate::guardian::GuardianError::InternalError;
+use crate::guardian::GuardianInfo;
+use crate::guardian::GuardianResult;
+use crate::guardian::LogEntry;
+use crate::guardian::ProvisionerInitRequest;
+use crate::guardian::ProvisionerRotateCertRequest;
+use crate::guardian::ProvisionerRotateCertResponse;
+use crate::guardian::ProvisionerRotateKpSetRequest;
+use crate::guardian::RotateKpSetResponse;
+use crate::guardian::SessionBoundRequest;
+use crate::guardian::SetupNewKeyResponse;
+use crate::guardian::StandardWithdrawalResponse;
+use crate::guardian::UnixMillis;
 use crate::pgp::Fingerprint;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::sign_detached_via_gpg;
@@ -45,8 +47,8 @@ pub enum GuardianSigningIntentType {
     StandardWithdrawalResponse = 2,
     /// Intent for GuardianInfo.
     GuardianInfo = 3,
-    /// Intent for RotateKpsResponse.
-    RotateKpsResponse = 4,
+    /// Intent for RotateKpSetResponse.
+    RotateKpSetResponse = 4,
     /// Intent for ProvisionerRotateCertResponse.
     ProvisionerRotateCertResponse = 5,
 }
@@ -65,14 +67,16 @@ pub trait GuardianSigningIntent: Serialize {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KpSigningIntentType {
-    /// Intent for SingleProvisionerInitRequest.
-    SingleProvisionerInitRequest = 0,
+    /// Intent for ProvisionerInitRequest.
+    ProvisionerInitRequest = 0,
     /// Intent for ProvisionerRotateCertRequest.
     ProvisionerRotateCertRequest = 1,
+    /// Intent for ProvisionerRotateKpSetRequest.
+    ProvisionerRotateKpSetRequest = 2,
 }
 
 /// KP-signed payloads and their intent-based domain separation.
-pub trait KpSigningIntent: Serialize {
+pub trait KpSigningIntent: Serialize + SessionBoundRequest {
     const INTENT: KpSigningIntentType;
 }
 
@@ -123,8 +127,8 @@ impl GuardianSigningIntent for GuardianResponse<GuardianInfo> {
     const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::GuardianInfo;
 }
 
-impl GuardianSigningIntent for GuardianResponse<RotateKpsResponse> {
-    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpsResponse;
+impl GuardianSigningIntent for GuardianResponse<RotateKpSetResponse> {
+    const INTENT: GuardianSigningIntentType = GuardianSigningIntentType::RotateKpSetResponse;
 }
 
 impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
@@ -132,12 +136,16 @@ impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
         GuardianSigningIntentType::ProvisionerRotateCertResponse;
 }
 
-impl KpSigningIntent for SingleProvisionerInitRequest {
-    const INTENT: KpSigningIntentType = KpSigningIntentType::SingleProvisionerInitRequest;
+impl KpSigningIntent for ProvisionerInitRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerInitRequest;
 }
 
 impl KpSigningIntent for ProvisionerRotateCertRequest {
     const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateCertRequest;
+}
+
+impl KpSigningIntent for ProvisionerRotateKpSetRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateKpSetRequest;
 }
 
 impl<T> GuardianResponse<T> {

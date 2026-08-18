@@ -1476,7 +1476,7 @@ pub mod guardian_relay_service_client {
         }
         pub async fn single_provisioner_init(
             &mut self,
-            request: impl tonic::IntoRequest<super::SignedSingleProvisionerInitRequest>,
+            request: impl tonic::IntoRequest<super::SignedProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SingleProvisionerInitResponse>,
             tonic::Status,
@@ -1553,7 +1553,7 @@ pub mod guardian_relay_service_server {
     pub trait GuardianRelayService: std::marker::Send + std::marker::Sync + 'static {
         async fn single_provisioner_init(
             &self,
-            request: tonic::Request<super::SignedSingleProvisionerInitRequest>,
+            request: tonic::Request<super::SignedProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SingleProvisionerInitResponse>,
             tonic::Status,
@@ -1662,9 +1662,8 @@ pub mod guardian_relay_service_server {
                     struct SingleProvisionerInitSvc<T: GuardianRelayService>(pub Arc<T>);
                     impl<
                         T: GuardianRelayService,
-                    > tonic::server::UnaryService<
-                        super::SignedSingleProvisionerInitRequest,
-                    > for SingleProvisionerInitSvc<T> {
+                    > tonic::server::UnaryService<super::SignedProvisionerInitRequest>
+                    for SingleProvisionerInitSvc<T> {
                         type Response = super::SingleProvisionerInitResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
@@ -1672,9 +1671,7 @@ pub mod guardian_relay_service_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<
-                                super::SignedSingleProvisionerInitRequest,
-                            >,
+                            request: tonic::Request<super::SignedProvisionerInitRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
@@ -1994,15 +1991,33 @@ pub struct SignedSetupNewKeyResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperatorInitRequest {
-    /// S3 connection and retention config.
+    #[prost(oneof = "operator_init_request::Request", tags = "1, 2")]
+    pub request: ::core::option::Option<operator_init_request::Request>,
+}
+/// Nested message and enum types in `OperatorInitRequest`.
+pub mod operator_init_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Request {
+        #[prost(message, tag = "1")]
+        Ceremony(super::CeremonyOperatorInitRequest),
+        #[prost(message, tag = "2")]
+        Withdraw(::prost::alloc::boxed::Box<super::WithdrawOperatorInitRequest>),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CeremonyOperatorInitRequest {
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-    /// exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
-    #[prost(message, optional, tag = "4")]
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WithdrawOperatorInitRequest {
+    #[prost(message, optional, tag = "1")]
+    pub s3_credentials: ::core::option::Option<S3Credentials>,
+    /// Stable configuration whose digest KPs bind into signed PI submissions.
+    #[prost(message, optional, tag = "2")]
     pub init_config: ::core::option::Option<InitConfig>,
     /// First-deploy state to be authorized by KPs during provisioner_init.
-    #[prost(message, optional, tag = "5")]
+    #[prost(message, optional, tag = "3")]
     pub genesis_state: ::core::option::Option<GenesisState>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2028,10 +2043,19 @@ pub struct S3Config {
     #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
     pub retention_environment: i32,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct S3Credentials {
+    #[prost(string, optional, tag = "1")]
+    pub access_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    pub secret_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub session_token: ::core::option::Option<::prost::alloc::string::String>,
+}
 /// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
 /// and buffer these submissions, but the enclave is the authoritative verifier.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SignedSingleProvisionerInitRequest {
+pub struct SignedProvisionerInitRequest {
     /// This KP's share, HPKE-encrypted to the enclave session key without config
     /// AAD. The signature below binds the share to the expected config instead.
     #[prost(message, optional, tag = "1")]
@@ -2043,7 +2067,7 @@ pub struct SignedSingleProvisionerInitRequest {
     #[prost(string, tag = "3")]
     pub signer_cert: ::prost::alloc::string::String,
     /// Detached armored OpenPGP signature over the intent-tagged
-    /// SingleProvisionerInitRequest payload.
+    /// ProvisionerInitRequest payload.
     #[prost(string, tag = "4")]
     pub kp_signature: ::prost::alloc::string::String,
     /// The operator-init config hash the KP independently recomputed and verified.
@@ -2057,9 +2081,9 @@ pub struct SignedSingleProvisionerInitRequest {
 /// collected enough. The enclave re-verifies every submission before using any
 /// share.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ProvisionerInitRequest {
+pub struct BatchProvisionerInitRequest {
     #[prost(message, repeated, tag = "1")]
-    pub submissions: ::prost::alloc::vec::Vec<SignedSingleProvisionerInitRequest>,
+    pub submissions: ::prost::alloc::vec::Vec<SignedProvisionerInitRequest>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorActivateRequest {
@@ -2097,6 +2121,12 @@ pub struct InitConfig {
     /// BTC network.
     #[prost(enumeration = "Network", optional, tag = "4")]
     pub network: ::core::option::Option<i32>,
+    /// S3 bucket and region used for Guardian state.
+    #[prost(message, optional, tag = "5")]
+    pub bucket_info: ::core::option::Option<S3BucketInfo>,
+    /// Hashi deployment class selecting the S3 object-lock policy.
+    #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
+    pub retention_environment: i32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {
@@ -2164,37 +2194,54 @@ pub struct SignedProvisionerRotateCertResponse {
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
-/// Assembled by the operator from the current KPs' encrypted old shares plus the
-/// shared rotation target. Each old share binds the same state digest as HPKE
-/// AAD, so the enclave only decrypts submissions that agree on the target.
-/// Asymmetry between old and new (n, t) is allowed.
+/// One current KP's signed authorization to rotate the KP set. The signature
+/// covers the PCR allowlist used to authenticate the existing state, this KP's
+/// encrypted old share, and the complete proposed new roster and parameters.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotateKpsRequest {
-    #[prost(message, repeated, tag = "1")]
-    pub encrypted_old_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
-    /// OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
-    #[prost(message, repeated, tag = "2")]
+pub struct SignedProvisionerRotateKpSetRequest {
+    #[prost(message, optional, tag = "1")]
+    pub encrypted_old_share: ::core::option::Option<GuardianEncryptedShare>,
+    /// The ceremony guardian session this KP verified before encrypting its share.
+    #[prost(string, tag = "2")]
+    pub expected_session_id: ::prost::alloc::string::String,
+    /// Builds allowed to authenticate the existing ceremony and KP-share state.
+    #[prost(message, optional, tag = "3")]
+    pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
+    /// OpenPGP cert sets for the proposed new KP set.
+    #[prost(message, repeated, tag = "4")]
     pub new_kp_pgp_cert_sets: ::prost::alloc::vec::Vec<KpPgpCertSet>,
-    #[prost(uint32, optional, tag = "3")]
+    #[prost(uint32, optional, tag = "5")]
     pub new_num_shares: ::core::option::Option<u32>,
-    #[prost(uint32, optional, tag = "4")]
+    #[prost(uint32, optional, tag = "6")]
     pub new_threshold: ::core::option::Option<u32>,
-    /// The current key's secret-sharing instance (old commitments + threshold) the
-    /// enclave verifies the submitted old shares against.
-    #[prost(message, optional, tag = "5")]
-    pub old_instance: ::core::option::Option<SecretSharingInstance>,
+    /// Armored authorizing current-KP cert and detached signature over the
+    /// intent-tagged ProvisionerRotateKpSetRequest payload.
+    #[prost(string, tag = "7")]
+    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub kp_signature: ::prost::alloc::string::String,
+}
+/// Collects threshold-many current-KP-authorized requests. Every submission must
+/// agree on the PCR allowlist and proposed new KP set. The enclave loads the
+/// authoritative old instance and encrypted-share roster from S3.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BatchProvisionerRotateKpSetRequest {
+    #[prost(message, repeated, tag = "1")]
+    pub submissions: ::prost::alloc::vec::Vec<SignedProvisionerRotateKpSetRequest>,
 }
 /// Unsigned response payload.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotateKpsResponseData {
+pub struct RotateKpSetResponseData {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
+    #[prost(message, optional, tag = "2")]
+    pub new_instance: ::core::option::Option<SecretSharingInstance>,
 }
 /// Application-layer signed response.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SignedRotateKpsResponse {
+pub struct SignedRotateKpSetResponse {
     #[prost(message, optional, tag = "1")]
-    pub data: ::core::option::Option<RotateKpsResponseData>,
+    pub data: ::core::option::Option<RotateKpSetResponseData>,
     /// Milliseconds since Unix epoch.
     #[prost(uint64, optional, tag = "2")]
     pub timestamp_ms: ::core::option::Option<u64>,
@@ -2554,15 +2601,14 @@ pub mod guardian_service_client {
             self.inner.unary(req, path, codec).await
         }
         /// Ceremony mode only: rotate the KP set holding the existing BTC key. The
-        /// operator submits the current KPs' encrypted old shares in one request; once
-        /// threshold-many verify, the enclave reconstructs the BTC key, re-splits it
-        /// for the new KP set, writes the new share state (hashes) to ceremony/, and
-        /// returns the new encrypted shares.
-        pub async fn rotate_kps(
+        /// operator relays threshold-many current-KP-signed contributions; the enclave
+        /// verifies them, reconstructs the BTC key, re-splits it for the new KP set,
+        /// writes the new share state to ceremony/, and returns the encrypted shares.
+        pub async fn rotate_kp_set(
             &mut self,
-            request: impl tonic::IntoRequest<super::RotateKpsRequest>,
+            request: impl tonic::IntoRequest<super::BatchProvisionerRotateKpSetRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignedRotateKpsResponse>,
+            tonic::Response<super::SignedRotateKpSetResponse>,
             tonic::Status,
         > {
             self.inner
@@ -2575,12 +2621,12 @@ pub mod guardian_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.GuardianService/RotateKps",
+                "/sui.hashi.v1alpha.GuardianService/RotateKpSet",
             );
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(
-                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "RotateKps"),
+                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "RotateKpSet"),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -2614,7 +2660,7 @@ pub mod guardian_service_client {
         /// Provisioner initialization: submit the current KPs' signed share contributions.
         pub async fn provisioner_init(
             &mut self,
-            request: impl tonic::IntoRequest<super::ProvisionerInitRequest>,
+            request: impl tonic::IntoRequest<super::BatchProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
             tonic::Status,
@@ -2823,15 +2869,14 @@ pub mod guardian_service_server {
             tonic::Status,
         >;
         /// Ceremony mode only: rotate the KP set holding the existing BTC key. The
-        /// operator submits the current KPs' encrypted old shares in one request; once
-        /// threshold-many verify, the enclave reconstructs the BTC key, re-splits it
-        /// for the new KP set, writes the new share state (hashes) to ceremony/, and
-        /// returns the new encrypted shares.
-        async fn rotate_kps(
+        /// operator relays threshold-many current-KP-signed contributions; the enclave
+        /// verifies them, reconstructs the BTC key, re-splits it for the new KP set,
+        /// writes the new share state to ceremony/, and returns the encrypted shares.
+        async fn rotate_kp_set(
             &self,
-            request: tonic::Request<super::RotateKpsRequest>,
+            request: tonic::Request<super::BatchProvisionerRotateKpSetRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignedRotateKpsResponse>,
+            tonic::Response<super::SignedRotateKpSetResponse>,
             tonic::Status,
         >;
         /// Operator initialization: provide stable config before provisioning.
@@ -2845,7 +2890,7 @@ pub mod guardian_service_server {
         /// Provisioner initialization: submit the current KPs' signed share contributions.
         async fn provisioner_init(
             &self,
-            request: tonic::Request<super::ProvisionerInitRequest>,
+            request: tonic::Request<super::BatchProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
             tonic::Status,
@@ -3058,25 +3103,28 @@ pub mod guardian_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.GuardianService/RotateKps" => {
+                "/sui.hashi.v1alpha.GuardianService/RotateKpSet" => {
                     #[allow(non_camel_case_types)]
-                    struct RotateKpsSvc<T: GuardianService>(pub Arc<T>);
+                    struct RotateKpSetSvc<T: GuardianService>(pub Arc<T>);
                     impl<
                         T: GuardianService,
-                    > tonic::server::UnaryService<super::RotateKpsRequest>
-                    for RotateKpsSvc<T> {
-                        type Response = super::SignedRotateKpsResponse;
+                    > tonic::server::UnaryService<
+                        super::BatchProvisionerRotateKpSetRequest,
+                    > for RotateKpSetSvc<T> {
+                        type Response = super::SignedRotateKpSetResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::RotateKpsRequest>,
+                            request: tonic::Request<
+                                super::BatchProvisionerRotateKpSetRequest,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as GuardianService>::rotate_kps(&inner, request).await
+                                <T as GuardianService>::rotate_kp_set(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -3087,7 +3135,7 @@ pub mod guardian_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = RotateKpsSvc(inner);
+                        let method = RotateKpSetSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -3153,7 +3201,7 @@ pub mod guardian_service_server {
                     struct ProvisionerInitSvc<T: GuardianService>(pub Arc<T>);
                     impl<
                         T: GuardianService,
-                    > tonic::server::UnaryService<super::ProvisionerInitRequest>
+                    > tonic::server::UnaryService<super::BatchProvisionerInitRequest>
                     for ProvisionerInitSvc<T> {
                         type Response = super::ProvisionerInitResponse;
                         type Future = BoxFuture<
@@ -3162,7 +3210,7 @@ pub mod guardian_service_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::ProvisionerInitRequest>,
+                            request: tonic::Request<super::BatchProvisionerInitRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {

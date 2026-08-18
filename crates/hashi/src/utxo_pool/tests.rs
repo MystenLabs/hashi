@@ -200,7 +200,8 @@ fn test_insufficient_funds() {
         result,
         Err(CoinSelectionError::InsufficientFunds {
             available: 50_000,
-            required: 100_000
+            required: 100_000,
+            ..
         })
     ));
 }
@@ -235,10 +236,24 @@ fn test_fee_exceeds_cap() {
         ..default_params()
     };
     let result = select_coins(&utxos, &requests, &params, default_fee_rate());
-    assert!(
-        matches!(result, Err(CoinSelectionError::FeeExceedsCap { .. })),
-        "expected FeeExceedsCap, got {result:?}",
-    );
+    let Err(CoinSelectionError::FeeExceedsCap {
+        transaction_fee,
+        cpfp_deficit,
+        dust_padding,
+        selected_inputs,
+        pending_inputs,
+        unconfirmed_ancestors,
+        ..
+    }) = result
+    else {
+        panic!("expected FeeExceedsCap, got {result:?}");
+    };
+    assert!(transaction_fee > 0);
+    assert_eq!(cpfp_deficit, 0);
+    assert_eq!(dust_padding, 0);
+    assert_eq!(selected_inputs, 1);
+    assert_eq!(pending_inputs, 0);
+    assert_eq!(unconfirmed_ancestors, 0);
 }
 
 // ── Happy path tests ──────────────────────────────────────────────────────
@@ -1069,7 +1084,8 @@ fn test_insufficient_funds_available_reflects_eligible_pool() {
         result,
         Err(CoinSelectionError::InsufficientFunds {
             available: 50_000,
-            required: 100_000
+            required: 100_000,
+            ..
         })
     ));
 }
@@ -1370,10 +1386,22 @@ fn test_cpfp_deficit_exhausts_fee_cap() {
     };
     let result = select_coins(&[heavy_low_fee], &requests, &params, default_fee_rate());
 
-    assert!(
-        matches!(result, Err(CoinSelectionError::FeeExceedsCap { .. })),
-        "expected FeeExceedsCap, got {result:?}"
-    );
+    let Err(CoinSelectionError::FeeExceedsCap {
+        transaction_fee,
+        cpfp_deficit,
+        selected_inputs,
+        pending_inputs,
+        unconfirmed_ancestors,
+        ..
+    }) = result
+    else {
+        panic!("expected FeeExceedsCap, got {result:?}");
+    };
+    assert!(transaction_fee > 0);
+    assert!(cpfp_deficit > 0);
+    assert_eq!(selected_inputs, 1);
+    assert_eq!(pending_inputs, 1);
+    assert_eq!(unconfirmed_ancestors, 1);
 }
 
 #[test]
@@ -1714,10 +1742,16 @@ fn test_max_inputs_prevents_covering_request_returns_insufficient_funds() {
     };
     let result = select_coins(&utxos, &requests, &params, default_fee_rate());
     // 2 inputs × 10k = 20k < 50k required.
-    assert!(
-        matches!(result, Err(CoinSelectionError::InsufficientFunds { .. })),
-        "expected InsufficientFunds when max_inputs blocks coverage, got {result:?}"
-    );
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::InsufficientFunds {
+            available: 100_000,
+            selected: 20_000,
+            required: 50_000,
+            selected_inputs: 2,
+            max_inputs: 2,
+        })
+    ));
 }
 
 // ── Consolidation undo path tests ─────────────────────────────────────────
@@ -1840,13 +1874,18 @@ fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
     let err = select_coins(&[a, b], &requests, &default_params(), default_fee_rate())
         .expect_err("selection must refuse an oversized ancestor package");
 
-    assert!(
-        matches!(
-            err,
-            CoinSelectionError::ExceedsMaxAncestorPackageWeight { .. }
-        ),
-        "expected ExceedsMaxAncestorPackageWeight, got {err:?}"
-    );
+    let CoinSelectionError::ExceedsMaxAncestorPackageWeight {
+        selected_inputs,
+        pending_inputs,
+        unconfirmed_ancestors,
+        ..
+    } = err
+    else {
+        panic!("expected ExceedsMaxAncestorPackageWeight, got {err:?}");
+    };
+    assert_eq!(selected_inputs, 2);
+    assert_eq!(pending_inputs, 2);
+    assert_eq!(unconfirmed_ancestors, 2);
 }
 
 /// Selection is largest-first, so an unspendable pending UTXO would be
@@ -1878,6 +1917,53 @@ fn test_infeasible_pending_candidate_is_skipped_not_fatal() {
         make_utxo_id(2),
         "the stalled candidate must not be selected"
     );
+    assert_conservation(&result);
+}
+
+/// Candidate eligibility must include the complete transaction, not only the
+/// candidate's input weight. This mirrors the package that blocked testnet.
+#[test]
+fn test_candidate_filter_includes_complete_transaction_weight() {
+    let stalled = pending_utxo_mixed(
+        1,
+        100_000_000,
+        &[
+            (0, 133_116, 10_000_000),
+            (0, 133_115, 10_000_000),
+            (0, 133_115, 10_000_000),
+        ],
+    );
+    let usable = confirmed_utxo(2, 5_000_000);
+    let requests = vec![make_request(1, 1_000_000, 0)];
+    let params = default_params();
+
+    let ancestor_weight = stalled.status.unconfirmed_ancestor_weight();
+    assert_eq!(ancestor_weight, Weight::from_wu(399_346));
+    assert!(
+        ancestor_weight + stalled.spend_path.input_weight() <= params.max_ancestor_package_weight,
+        "the old input-only eligibility check must admit this candidate"
+    );
+
+    let builder = TransactionBuilder {
+        fee_rate: default_fee_rate(),
+        params: &params,
+        inputs: Vec::new(),
+        outputs: vec![PendingOutput {
+            request: &requests[0],
+            net_amount: 0,
+        }],
+        raw_change: None,
+        final_change: None,
+    };
+    let candidate_weight = builder.weight_with_candidate(&stalled, 1_000_000);
+    assert_eq!(candidate_weight, Weight::from_wu(818));
+    assert!(ancestor_weight + candidate_weight > params.max_ancestor_package_weight);
+
+    let result = select_coins(&[stalled, usable], &requests, &params, default_fee_rate())
+        .expect("the confirmed UTXO should still fund the request");
+
+    assert_eq!(result.inputs.len(), 1);
+    assert_eq!(result.inputs[0].id, make_utxo_id(2));
     assert_conservation(&result);
 }
 

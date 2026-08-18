@@ -245,6 +245,8 @@ pub enum ProtocolType {
 }
 
 impl SessionId {
+    // TODO: `new` accepts any protocol but only DKG and rotation reach it; nonce generation
+    // uses `nonce_dealer_session_id`.
     pub fn new(chain_id: &str, epoch: u64, protocol_identifer: &ProtocolType) -> Self {
         let oracle = RandomOracle::new(DOMAIN_HASHI);
         SessionId(oracle.evaluate(&(chain_id, epoch, protocol_identifer)))
@@ -436,6 +438,9 @@ pub enum ProtocolComplaint {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
     pub epoch: u64,
+    // TODO: Redundant since the request already pins the protocol.
+    // Removing it from the proto is a separate staged rollout since the field is required today
+    // and this RPC has no version negotiation.
     pub protocol_type: ProtocolTypeIndicator,
     pub dealer: Address,
     pub batch_index: Option<u32>,        // Only for nonce generation
@@ -883,7 +888,7 @@ impl RotationComplainContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DealerOutputsKey {
     Dkg(Address),
-    Rotation(ShareIndex),
+    Rotation(Address, ShareIndex),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

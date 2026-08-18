@@ -22,6 +22,8 @@ use crate::withdraw_mode::provisioner_init as provisioner_init_domain;
 use crate::withdraw_mode::provisioner_rotate_cert as provisioner_rotate_cert_domain;
 use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
+use hashi_types::guardian::BatchProvisionerInitRequest;
+use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -29,11 +31,9 @@ use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::ProvisionerRotateCertResponse;
-use hashi_types::guardian::RotateKpsRequest;
-use hashi_types::guardian::RotateKpsResponse;
+use hashi_types::guardian::RotateKpSetResponse;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::StandardWithdrawalRequest;
@@ -49,12 +49,12 @@ pub async fn setup_new_key(
         .await
 }
 
-pub async fn rotate_kps(
+pub async fn rotate_kp_set(
     enclave: Arc<Enclave>,
-    request: RotateKpsRequest,
-) -> GuardianResult<GuardianSignedResponse<RotateKpsResponse>> {
+    request: BatchProvisionerRotateKpSetRequest,
+) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     enclave
-        .spawn_control_task(request, rotate::rotate_kps)
+        .spawn_control_task(request, rotate::rotate_kp_set)
         .await
 }
 
@@ -69,7 +69,7 @@ pub async fn operator_init(
 
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
-    request: ProvisionerInitRequest,
+    request: BatchProvisionerInitRequest,
 ) -> GuardianResult<()> {
     enclave
         .spawn_control_task(request, provisioner_init_domain::provisioner_init)

@@ -673,13 +673,23 @@ impl Enclave {
     /// Construct a verified reader with the enclave's fixed S3 client and PCR
     /// allowlist. Each operation gets a fresh, operation-scoped session cache.
     pub fn new_guardian_reader(&self) -> GuardianResult<GuardianReader> {
-        let s3 = self.config.s3_logger()?.clone();
         let pcr_allowlist = self
             .config
             .pcr_allowlist
             .get()
             .cloned()
             .ok_or_else(|| InvalidInputs("PCR allowlist is uninitialized".into()))?;
+        self.new_guardian_reader_with_allowlist(pcr_allowlist)
+    }
+
+    /// Construct a verified reader with an operation-authorized PCR allowlist.
+    /// Ceremony rotation uses the allowlist agreed in the current KPs' signed
+    /// requests because ceremony-mode operator init installs only S3 config.
+    pub(crate) fn new_guardian_reader_with_allowlist(
+        &self,
+        pcr_allowlist: PcrAllowlist,
+    ) -> GuardianResult<GuardianReader> {
+        let s3 = self.config.s3_logger()?.clone();
         Ok(GuardianReader::from_s3_client(s3, pcr_allowlist))
     }
 

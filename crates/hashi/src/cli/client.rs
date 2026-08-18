@@ -104,6 +104,31 @@ pub struct HashiClient {
     executor: Option<SuiTxExecutor>,
 }
 
+/// Fetch a shared object's initial shared version from its owner field.
+///
+/// Needed to build fully-resolved shared inputs: pre-resolving a shared input's
+/// initial version + mutability keeps sui >= 1.76 fullnodes from having to
+/// inspect an upgrade-introduced module's signature at simulate time (that
+/// inspection fails with `INVALID_LINKAGE`).
+pub async fn fetch_initial_shared_version(
+    client: &mut sui_rpc::Client,
+    object_id: Address,
+) -> Result<u64> {
+    use sui_rpc::field::FieldMask;
+    use sui_rpc::field::FieldMaskUtil;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&object_id).with_read_mask(FieldMask::from_paths(["owner"])),
+        )
+        .await
+        .with_context(|| format!("fetching owner of shared object {object_id}"))?
+        .into_inner();
+    Ok(response.object().owner().version())
+}
+
 impl HashiClient {
     /// Client for governance and config commands. Skips the Bitcoin
     /// collections, which none of them read.
@@ -216,6 +241,15 @@ impl HashiClient {
             .state()
             .package_versions()
             .latest_version()
+    }
+
+    /// The latest published package id. Transactions whose type args may name an
+    /// upgrade-introduced type must be called through the latest package (v1-era
+    /// type args unify fine under a newer call, but not vice versa).
+    pub fn latest_package_id(&self) -> anyhow::Result<Address> {
+        self.onchain_state
+            .package_id()
+            .context("no package versions known on-chain")
     }
 
     /// Fetch current epoch from on-chain state
@@ -591,8 +625,12 @@ pub fn build_create_proposal_transaction(
             value,
             metadata,
         } => {
-            let entries_arg =
-                build_config_entries(&mut builder, hashi_ids.package_id, &[(key, value)]);
+            let entries_arg = build_config_entries(
+                &mut builder,
+                hashi_ids.package_id,
+                call_package,
+                &[(key, value)],
+            );
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
@@ -628,7 +666,8 @@ pub fn build_create_proposal_transaction(
             .into_iter()
             .filter_map(|(k, v)| v.map(|v| (k.to_string(), ConfigValue::U64(v))))
             .collect();
-            let entries_arg = build_config_entries(&mut builder, hashi_ids.package_id, &entries);
+            let entries_arg =
+                build_config_entries(&mut builder, hashi_ids.package_id, call_package, &entries);
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
@@ -744,7 +783,7 @@ pub fn build_create_proposal_transaction(
 /// Returns the `Argument` holding the constructed `Value`.
 fn build_config_value(
     builder: &mut TransactionBuilder,
-    package_id: Address,
+    call_package: Address,
     value: &hashi_types::move_types::ConfigValue,
 ) -> sui_transaction_builder::Argument {
     use hashi_types::move_types::ConfigValue;
@@ -762,7 +801,7 @@ fn build_config_value(
 
     builder.move_call(
         Function::new(
-            package_id,
+            call_package,
             Identifier::from_static("config_value"),
             Identifier::new(func_name).unwrap(),
         ),
@@ -772,7 +811,8 @@ fn build_config_value(
 
 fn build_config_entries(
     builder: &mut TransactionBuilder,
-    package_id: Address,
+    type_package: Address,
+    call_package: Address,
     entries: &[(String, ConfigValue)],
 ) -> sui_transaction_builder::Argument {
     let sui_framework = Address::from_static("0x2");
@@ -784,7 +824,7 @@ fn build_config_entries(
         vec![],
     )));
     let value_type = TypeTag::Struct(Box::new(StructTag::new(
-        package_id,
+        type_package,
         Identifier::from_static("config_value"),
         Identifier::from_static("Value"),
         vec![],
@@ -800,7 +840,7 @@ fn build_config_entries(
     );
     for (key, value) in entries {
         let key_arg = builder.pure(key);
-        let value_arg = build_config_value(builder, package_id, value);
+        let value_arg = build_config_value(builder, call_package, value);
         builder.move_call(
             Function::new(
                 sui_framework,

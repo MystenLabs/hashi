@@ -403,13 +403,11 @@ async fn cmd_start(
         write_validator_cli_config(data_dir, &state, i, &keypair_path)?;
         if manual {
             let cfg = node.config();
-            let server = hashi::config::Config {
-                validator_address: cfg.validator_address,
-                operator_private_key: cfg.operator_private_key.clone(),
-                sui_rpc: Some(state.sui_rpc_url.clone()),
-                hashi_ids: Some(ids),
-                ..Default::default()
-            };
+            let mut server = hashi::config::Config::new_for_testing();
+            server.validator_address = cfg.validator_address;
+            server.operator_private_key = cfg.operator_private_key.clone();
+            server.sui_rpc = Some(state.sui_rpc_url.clone());
+            server.hashi_ids = Some(ids);
             server
                 .save(&validators_dir.join(format!("validator_{i}.toml")))
                 .context("Failed to write validator server config")?;

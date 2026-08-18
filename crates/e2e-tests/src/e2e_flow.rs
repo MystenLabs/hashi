@@ -693,10 +693,13 @@ mod tests {
                 .unwrap()
                 .mpc_config
                 .nonce_accumulation_window_ms;
-            assert_eq!(
-                window_ms,
-                hashi_types::move_types::DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS,
-                "the accumulation window must be open for this test to mean anything"
+            assert!(
+                window_ms > 0,
+                "the accumulation window must be open for this test to mean anything. \
+                 Asserting a specific value here would be vacuous: the override this \
+                 harness applies is the compiled-in default, so an equality check passes \
+                 whether or not governance ever set it. Governance tuning of this key is \
+                 not covered by any test — see the update_config insert gap."
             );
             assert!(
                 !hashi

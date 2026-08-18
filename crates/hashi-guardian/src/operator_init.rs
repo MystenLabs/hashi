@@ -62,10 +62,7 @@ impl OIWithdrawModeInstall {
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let ceremony_state = reader
-            .read_latest_ceremony_state()
-            .await?
-            .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
+        let ceremony_state = reader.read_latest_ceremony_state().await?;
 
         Ok(Self::from_parts(config, ceremony_state, genesis_state))
     }
@@ -74,8 +71,10 @@ impl OIWithdrawModeInstall {
     /// `operator_init` invariant): every set runs once on a fresh enclave.
     pub fn install_into(self, enclave: &Enclave) {
         let config_hash = self.init_config.digest();
-        let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
-            self.init_config.into_parts();
+        let limiter_config = *self.init_config.limiter_config();
+        let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
+        let pcr_allowlist = self.init_config.pcr_allowlist().clone();
+        let network = self.init_config.network();
 
         info!(
             "Setting secret-sharing instance: n={}, t={}, {} commitments.",
@@ -112,8 +111,9 @@ impl OIWithdrawModeInstall {
     }
 }
 
-/// Receives S3 API keys and — for a withdraw-mode enclave — the stable `InitConfig`;
-/// installs arming state and fixes the `config_hash`. A ceremony enclave carries only S3.
+/// Receives S3 API keys and mode-specific configuration. A ceremony enclave
+/// carries only S3; a withdraw enclave installs the stable `InitConfig`, arming
+/// state, and fixed `config_hash`.
 ///
 /// Invariant: operator_init never returns an `Err` from a partially-initialized
 /// enclave. Every fallible step (request validation, S3 connectivity, S3 reads)
@@ -139,16 +139,37 @@ pub async fn operator_init(
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
 
-    // A withdraw-mode enclave must carry the config and a ceremony enclave must not.
-    request.validate(enclave.mode())?;
-
-    let (s3_config, init_config, genesis_state) = request.into_parts();
+    let (s3_config, withdraw_inputs) = match (enclave.mode(), request) {
+        (
+            EnclaveMode::Ceremony,
+            OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }),
+        ) => (s3_config, None),
+        (EnclaveMode::Withdraw, OperatorInitRequest::Withdraw(request)) => {
+            let WithdrawOperatorInitRequest {
+                s3_credentials,
+                init_config,
+                genesis_state,
+            } = *request;
+            let s3_config = init_config.resolved_s3_config(s3_credentials);
+            (s3_config, Some((init_config, genesis_state)))
+        }
+        (EnclaveMode::Ceremony, OperatorInitRequest::Withdraw(_)) => {
+            return Err(InvalidInputs(
+                "ceremony-mode guardian received a withdraw operator-init request".into(),
+            ));
+        }
+        (EnclaveMode::Withdraw, OperatorInitRequest::Ceremony(_)) => {
+            return Err(InvalidInputs(
+                "withdraw-mode guardian received a ceremony operator-init request".into(),
+            ));
+        }
+    };
     let logger = GuardianS3Client::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
-    let withdraw_mode = match init_config {
-        Some(config) => {
+    let withdraw_mode = match withdraw_inputs {
+        Some((config, genesis_state)) => {
             Some(OIWithdrawModeInstall::from_config(&logger, config, genesis_state).await?)
         }
         None => None,
@@ -200,7 +221,8 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     // TODO(testnet-wipe): Replace the full GuardianInfo snapshot with a
     // purpose-built OI payload containing only the data readers and KPs need;
     // the evolving status response should not define the durable log schema.
-    // Include the retention environment in that payload for audit provenance.
+    // Record bucket identity and retention environment together as the
+    // immutable S3 policy.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await

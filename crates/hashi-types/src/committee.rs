@@ -298,6 +298,8 @@ impl Committee {
 
     /// Verify the aggregate signature only — no minimum signer weight, so a
     /// single-member "certificate" passes. Pair with a weight gate.
+    // TODO: Make this harder to misuse by taking the `Nodes` and returning the achieved
+    // weight, so a caller cannot forget the gate.
     pub fn verify_signature_any_weight<T: IntentMessage>(
         &self,
         signed_message: &SignedMessage<T>,

@@ -63,6 +63,7 @@ fn main() {
         .build_client(true)
         .build_server(true)
         .bytes(".")
+        .boxed(".sui.hashi.v1alpha.OperatorInitRequest.request.withdraw")
         .extern_path(".google.rpc", "::sui_rpc::proto::google::rpc")
         .extern_path(".sui.rpc", "::sui_rpc::proto::sui::rpc")
         .out_dir(&out_dir)

@@ -59,14 +59,15 @@ entry fun destroy_all_certs(
     protocol_type: ProtocolType,
 ) {
     hashi.versioning().assert_version_enabled();
+    let is_nonce_generation = protocol_type.is_nonce_generation();
     let key = hashi::tob::tob_key(epoch, batch_index, protocol_type);
     let current_epoch = hashi.committee_set().epoch();
-    if (hashi.cert_bucket_is_bare(key)) {
-        let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);
-        hashi::tob::destroy_all(epoch_certs, current_epoch);
-    } else {
+    if (is_nonce_generation) {
         let epoch_certs: hashi::tob::StampedEpochCertsV1 = hashi.tob_mut().remove(key);
         hashi::tob::destroy_all_stamped(epoch_certs, current_epoch);
+    } else {
+        let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);
+        hashi::tob::destroy_all(epoch_certs, current_epoch);
     };
 }
 

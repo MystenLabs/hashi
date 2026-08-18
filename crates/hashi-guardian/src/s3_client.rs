@@ -10,6 +10,7 @@ use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::S3BucketInfo;
+use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::S3ObjectLockPolicy;
 use hashi_types::guardian::UnresolvedS3Config;
 use std::collections::BTreeSet;
@@ -23,7 +24,7 @@ use aws_sdk_s3::primitives::DateTime;
 use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
-use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
@@ -77,13 +78,12 @@ pub async fn resolve_s3_config(config: &UnresolvedS3Config) -> anyhow::Result<Re
     };
 
     Ok(ResolvedS3Config {
-        access_key,
-        secret_key,
-        session_token,
-        bucket_info: S3BucketInfo {
-            bucket: config.bucket.clone(),
-            region: config.region.clone(),
+        credentials: S3Credentials {
+            access_key,
+            secret_key,
+            session_token,
         },
+        bucket_info: config.bucket_info.clone(),
         retention_environment: config.retention_environment,
     })
 }
@@ -109,10 +109,10 @@ impl GuardianS3Client {
         info!("   Region: {}", config.region());
 
         let mut creds = CredentialsBuilder::default()
-            .access_key_id(config.access_key.clone())
-            .secret_access_key(config.secret_key.clone())
+            .access_key_id(config.credentials.access_key.clone())
+            .secret_access_key(config.credentials.secret_key.clone())
             .provider_name("hashi-guardian");
-        creds.set_session_token(config.session_token.clone());
+        creds.set_session_token(config.credentials.session_token.clone());
         let creds = creds.build();
 
         let retry_config = RetryConfig::standard().with_max_attempts(MAX_RETRY_ATTEMPTS); // default is 3
@@ -750,9 +750,11 @@ mod tests {
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = ResolvedS3Config {
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-            session_token: None,
+            credentials: S3Credentials {
+                access_key: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+                session_token: None,
+            },
             bucket_info: S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),

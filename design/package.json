@@ -15,7 +15,11 @@
     "fetch-sdk-readme": "node scripts/fetch-sdk-readme.js",
     "prebuild": "node scripts/fetch-sdk-readme.js && node scripts/generate-import-context.js",
     "prestart": "node scripts/fetch-sdk-readme.js && node scripts/generate-import-context.js",
-    "postbuild": "node scripts/copy-markdown-files.js && node scripts/generate-llmstxt.js"
+    "postbuild": "node scripts/copy-markdown-files.js && node scripts/generate-llmstxt.js",
+    "docs:audit": "node scripts/audit-docs.mjs",
+    "docs:audit:summary": "node scripts/audit-docs.mjs --summary",
+    "docs:audit:failures": "node scripts/audit-docs.mjs --only-failures --summary",
+    "docs:validate-frontmatter": "node scripts/validate-frontmatter.mjs --summary"
   },
   "dependencies": {
     "@docusaurus/core": "3.9.2",
@@ -40,6 +44,9 @@
     "tailwindcss": "^3.4.14",
     "turndown": "^7.2.0",
     "unist-util-visit": "^5.0.0"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1"
   },
   "browserslist": {
     "production": [

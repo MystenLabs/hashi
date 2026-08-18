@@ -1,18 +1,50 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Guardian S3 Object Lock retention policies.
-
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
-
-use super::LogType;
 
 const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const THIRTY_DAYS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const NINETY_DAYS: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const TEN_YEARS: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct S3BucketInfo {
+    pub bucket: String,
+    pub region: String,
+}
+
+/// S3 configuration as supplied by a config file, before AWS credentials have
+/// been resolved.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UnresolvedS3Config {
+    #[serde(flatten)]
+    pub bucket_info: S3BucketInfo,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub retention_environment: S3RetentionEnvironment,
+}
+
+/// Runtime S3 configuration with concrete credentials.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ResolvedS3Config {
+    pub credentials: S3Credentials,
+    pub bucket_info: S3BucketInfo,
+    pub retention_environment: S3RetentionEnvironment,
+}
+
+/// Concrete credentials used to access the S3 policy authenticated through
+/// withdraw-mode `InitConfig`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct S3Credentials {
+    pub access_key: String,
+    pub secret_key: String,
+    pub session_token: Option<String>,
+}
+
+// Guardian S3 Object Lock retention configuration.
 
 /// Object-lock retention policy for Guardian S3 logs.
 ///
@@ -30,8 +62,6 @@ pub struct S3ObjectLockPolicy {
     pub short_lived: Duration,
 }
 
-// TODO: Retire this enum once the repository has a canonical
-// Hashi network enum from which the retention policy can be derived.
 /// Hashi deployment class used to select an S3 object-lock policy.
 ///
 /// This is intentionally independent of `bitcoin::Network`: a Hashi
@@ -71,15 +101,14 @@ impl S3ObjectLockPolicy {
             S3RetentionEnvironment::Testnet => TESTNET_S3_OBJECT_LOCK_POLICY,
         }
     }
+}
 
-    pub(super) const fn duration_for(self, log_type: LogType) -> Duration {
-        match log_type {
-            LogType::Heartbeat | LogType::KpShareState => self.short_lived,
-            LogType::Init
-            | LogType::Withdrawal
-            | LogType::Ceremony
-            | LogType::CommitteeUpdate
-            | LogType::Genesis => self.long_lived,
-        }
+impl ResolvedS3Config {
+    pub fn bucket_name(&self) -> &str {
+        &self.bucket_info.bucket
+    }
+
+    pub fn region(&self) -> &str {
+        &self.bucket_info.region
     }
 }

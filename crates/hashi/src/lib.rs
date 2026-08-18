@@ -373,19 +373,11 @@ impl Hashi {
             );
             return Ok(None);
         };
-        let Some(recipient) = self.config.backup_pgp_cert.as_ref() else {
-            tracing::warn!(
-                epoch,
-                "Skipping automatic backup: backup_pgp_cert is not configured"
-            );
-            return Ok(None);
-        };
-
         let output_path = crate::backup::save(
             config_path,
             &self.config,
             self.db.as_ref(),
-            recipient,
+            &self.config.backup_pgp_cert,
             self.config.backup_dir(),
         )?;
         tracing::info!(
@@ -1393,7 +1385,7 @@ mod test {
         let error = Hashi::new(
             ServerVersion::new("unknown", "unknown"),
             None,
-            Config::default(),
+            Config::new_for_testing(),
         )
         .err()
         .unwrap();
@@ -1402,7 +1394,7 @@ mod test {
         let error = Hashi::new_with_registry(
             ServerVersion::new("unknown", "unknown"),
             None,
-            Config::default(),
+            Config::new_for_testing(),
             &prometheus::Registry::new(),
         )
         .err()
@@ -1459,12 +1451,10 @@ mod test {
         let backup_dir = tmpdir.path().join("backups");
         let config_path = tmpdir.path().join("config.toml");
 
-        let config = Config {
-            db: Some(db_path),
-            backup_pgp_cert: Some(mock_pgp_cert()),
-            backup_dir: Some(backup_dir.clone()),
-            ..Default::default()
-        };
+        let mut config = Config::new_for_testing();
+        config.db = Some(db_path);
+        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_dir = Some(backup_dir.clone());
         config.save(&config_path).unwrap();
 
         let server_version = ServerVersion::new("unknown", "unknown");

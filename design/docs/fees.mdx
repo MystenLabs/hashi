@@ -1,7 +1,43 @@
 ---
 title: Fees
-description: How Hashi charges miner fees on withdrawals, enforces fee bounds, and handles stuck transactions.
-keywords: [ fees, miner fee, withdrawal fee, fee estimation, RBF, CPFP, dust threshold ]
+description: >-
+  How Hashi charges miner fees on withdrawals, enforces fee bounds, and handles
+  stuck transactions.
+keywords:
+  - fees
+  - miner fee
+  - withdrawal fee
+  - fee estimation
+  - RBF
+  - CPFP
+  - dust threshold
+goal:
+  description: >-
+    Reader understands Hashi's fee model — free deposits, miner-fee-based
+    withdrawals, fee estimation, and stuck transaction handling
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 300
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - What fees does Hashi charge?
+  - How are withdrawal fees calculated in Hashi?
+  - Are Hashi deposits free?
+  - How does Hashi handle stuck Bitcoin transactions?
+answer: >-
+  Hashi deposits are free (subject to a configurable minimum). Withdrawals
+  charge only the Bitcoin miner fee required for onchain confirmation, which
+  is deducted from the withdrawal output amount. The fee depends on the
+  current network fee rate and transaction weight, with RBF and CPFP
+  mechanisms for handling stuck transactions.
 ---
 
 Hashi charges two kinds of fees: a flat **deposit fee** paid in `SUI`, and

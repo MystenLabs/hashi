@@ -347,7 +347,7 @@ pub enum BackupCommands {
         /// Path to the validator node config file
         node_config_path: std::path::PathBuf,
 
-        /// Armored OpenPGP certificate, or path to one, used to encrypt the backup
+        /// Override the configured OpenPGP certificate with armored text or a file path
         #[clap(long)]
         backup_pgp_cert: Option<String>,
 

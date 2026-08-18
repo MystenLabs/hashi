@@ -1,7 +1,42 @@
 ---
 title: User Flows
-description: End-to-end deposit and withdrawal flows for users moving BTC between Bitcoin and Sui through Hashi.
-keywords: [ user flow, deposit, withdraw, BTC, hBTC, Sui ]
+description: >-
+  End-to-end deposit and withdrawal flows for users moving BTC between Bitcoin
+  and Sui through Hashi.
+keywords:
+  - user flow
+  - deposit
+  - withdraw
+  - BTC
+  - hBTC
+  - Sui
+goal:
+  description: >-
+    Reader understands the end-to-end deposit and withdrawal user experience
+    for moving BTC between Bitcoin and Sui
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 200
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How do I deposit BTC into Hashi?
+  - How do I withdraw BTC from Hashi?
+  - What is the user experience for Hashi deposits?
+  - Is there a HASHI token?
+answer: >-
+  Hashi has two main user flows: deposits (send BTC to an MPC-controlled
+  Taproot address to receive hBTC on Sui) and withdrawals (burn hBTC to
+  receive native BTC at a specified Bitcoin address). There is no HASHI
+  governance or utility token — the committee governs by voting with
+  validator stake weight.
 ---
 
 There are two main user flows for interacting with `hashi`: deposits and

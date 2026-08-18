@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::BatchProvisionerInitRequest;
+use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
 use super::GetGuardianInfoResponse;
@@ -25,8 +27,9 @@ use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
+use super::ProvisionerRotateKpSetRequest;
 use super::ResolvedS3Config;
-use super::RotateKpsResponse;
+use super::RotateKpSetResponse;
 use super::S3BucketInfo;
 use super::SecretSharingInstance;
 use super::SessionID;
@@ -34,7 +37,6 @@ use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
 use super::ShareCommitments;
-use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawStage;
@@ -190,19 +192,20 @@ impl GuardianSignedResponse<SetupNewKeyResponse> {
     }
 }
 
-impl RotateKpsResponse {
+impl RotateKpSetResponse {
     pub fn mock_for_testing() -> Self {
         Self {
             encrypted_shares: dummy_encrypted_shares(),
+            new_instance: dummy_secret_sharing_instance(),
         }
     }
 }
 
-impl GuardianSignedResponse<RotateKpsResponse> {
+impl GuardianSignedResponse<RotateKpSetResponse> {
     pub fn mock_for_testing() -> Self {
         let signing_kp = SigningKey::from([1u8; 32]);
         GuardianSigned::sign(
-            GuardianResponse::new(RotateKpsResponse::mock_for_testing(), 0),
+            GuardianResponse::new(RotateKpSetResponse::mock_for_testing(), 0),
             &signing_kp,
         )
     }
@@ -233,21 +236,16 @@ impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
 
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
-        let s3_config = super::ResolvedS3Config {
-            access_key: "ak".into(),
-            secret_key: "sk".into(),
-            session_token: Some("token".into()),
-            bucket_info: super::S3BucketInfo {
-                bucket: "bucket".into(),
-                region: "us-east-1".into(),
-            },
-            retention_environment: super::S3RetentionEnvironment::Testnet,
-        };
-        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None), None)
+        let s3_config = ResolvedS3Config::mock_for_testing();
+        OperatorInitRequest::new_withdraw_mode(
+            s3_config.credentials,
+            InitConfig::mock_for_testing(None),
+            None,
+        )
     }
 }
 
-impl SingleProvisionerInitRequest {
+impl ProvisionerInitRequest {
     pub fn mock_for_testing() -> Self {
         let encrypted_share = GuardianEncryptedShare {
             id: NonZeroU16::new(1).unwrap(),
@@ -260,15 +258,47 @@ impl SingleProvisionerInitRequest {
     }
 }
 
-impl ProvisionerInitRequest {
+impl BatchProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
         let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
-        ProvisionerInitRequest(vec![KpSigned::from_parts(
-            SingleProvisionerInitRequest::mock_for_testing(),
+        BatchProvisionerInitRequest(vec![KpSigned::from_parts(
+            ProvisionerInitRequest::mock_for_testing(),
             crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
             "mock-signature".into(),
         )])
+    }
+}
+
+impl BatchProvisionerRotateKpSetRequest {
+    // NOTE: Incorrect encryption and signature are used. This is only for wire round trips.
+    pub fn mock_for_testing() -> Self {
+        let encrypted_old_share = GuardianEncryptedShare {
+            id: NonZeroU16::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0u8; 32],
+                aes_ciphertext: vec![0u8; 32],
+            },
+        };
+        let request = ProvisionerRotateKpSetRequest::new(
+            "mock-session".into(),
+            mock_pcr_allowlist(),
+            encrypted_old_share,
+            mock_kp_certs_roster(TEST_N),
+            TEST_N,
+            TEST_T,
+        )
+        .unwrap();
+        let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        Self::new(vec![
+            KpSigned::from_parts(
+                request,
+                crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+                "mock-signature".into(),
+            );
+            TEST_T
+        ])
+        .unwrap()
     }
 }
 
@@ -327,6 +357,8 @@ impl InitConfig {
             limiter_config,
             hashi_btc_master_pubkey,
             mock_pcr_allowlist(),
+            S3BucketInfo::mock_for_testing(),
+            super::S3RetentionEnvironment::Testnet,
             network,
         )
         .expect("valid InitConfig")
@@ -350,6 +382,8 @@ impl InitConfig {
             },
             hashi_btc_master_pubkey,
             mock_pcr_allowlist(),
+            S3BucketInfo::mock_for_testing(),
+            super::S3RetentionEnvironment::Testnet,
             super::Network::Regtest,
         )
         .expect("valid InitConfig")
@@ -486,9 +520,11 @@ impl ResolvedS3Config {
     /// Convenience helper for tests.
     pub fn mock_for_testing() -> Self {
         Self {
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-            session_token: None,
+            credentials: super::S3Credentials {
+                access_key: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+                session_token: None,
+            },
             bucket_info: S3BucketInfo::mock_for_testing(),
             retention_environment: super::S3RetentionEnvironment::Testnet,
         }

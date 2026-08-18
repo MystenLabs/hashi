@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bitcoin::BlockHash;
 use bitcoin::Txid;
-use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time::UnixSeconds;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::debug;
@@ -456,9 +456,12 @@ mod tests {
             ])
             .expect("valid next event delays"),
             clock_skew: 10,
+            withdrawal_predecessor_lookback: 60 * 60,
             guardian_s3: UnresolvedS3Config {
-                bucket: "bucket".to_string(),
-                region: "us-east-1".to_string(),
+                bucket_info: hashi_types::guardian::S3BucketInfo {
+                    bucket: "bucket".to_string(),
+                    region: "us-east-1".to_string(),
+                },
                 access_key: Some("access-key".to_string()),
                 secret_key: Some("secret-key".to_string()),
                 retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,

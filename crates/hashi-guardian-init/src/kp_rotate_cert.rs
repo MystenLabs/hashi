@@ -130,10 +130,7 @@ pub async fn run(
     let guardian_pub_key = EncPubKey::from_bytes(&endpoint_verified.info.encryption_pubkey)
         .map_err(anyhow::Error::msg)?;
 
-    let state = reader
-        .read_latest_ceremony_state()
-        .await?
-        .context("no ceremony log found in S3; key setup has not run")?;
+    let state = reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         &state.btc_master_pubkey == endpoint_btc_pubkey,

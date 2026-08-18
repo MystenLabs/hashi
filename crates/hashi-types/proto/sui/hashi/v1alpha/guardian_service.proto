@@ -13,17 +13,16 @@ service GuardianService {
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
 
   // Ceremony mode only: rotate the KP set holding the existing BTC key. The
-  // operator submits the current KPs' encrypted old shares in one request; once
-  // threshold-many verify, the enclave reconstructs the BTC key, re-splits it
-  // for the new KP set, writes the new share state (hashes) to ceremony/, and
-  // returns the new encrypted shares.
-  rpc RotateKps(RotateKpsRequest) returns (SignedRotateKpsResponse);
+  // operator relays threshold-many current-KP-signed contributions; the enclave
+  // verifies them, reconstructs the BTC key, re-splits it for the new KP set,
+  // writes the new share state to ceremony/, and returns the encrypted shares.
+  rpc RotateKpSet(BatchProvisionerRotateKpSetRequest) returns (SignedRotateKpSetResponse);
 
   // Operator initialization: provide stable config before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
 
   // Provisioner initialization: submit the current KPs' signed share contributions.
-  rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
+  rpc ProvisionerInit(BatchProvisionerInitRequest) returns (ProvisionerInitResponse);
 
   // KP-facing: replace one OpenPGP cert wrapping an already-committed share.
   rpc ProvisionerRotateCert(SignedProvisionerRotateCertRequest) returns (SignedProvisionerRotateCertResponse);
@@ -222,15 +221,24 @@ message SignedSetupNewKeyResponse {
 // =======================
 
 message OperatorInitRequest {
-  // S3 connection and retention config.
-  S3Config s3_config = 1;
+  oneof request {
+    CeremonyOperatorInitRequest ceremony = 1;
+    WithdrawOperatorInitRequest withdraw = 2;
+  }
+}
 
-  // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-  // exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
-  InitConfig init_config = 4;
+message CeremonyOperatorInitRequest {
+  S3Config s3_config = 1;
+}
+
+message WithdrawOperatorInitRequest {
+  S3Credentials s3_credentials = 1;
+
+  // Stable configuration whose digest KPs bind into signed PI submissions.
+  InitConfig init_config = 2;
 
   // First-deploy state to be authorized by KPs during provisioner_init.
-  GenesisState genesis_state = 5;
+  GenesisState genesis_state = 3;
 }
 
 message OperatorInitResponse {}
@@ -256,6 +264,12 @@ message S3Config {
   S3RetentionEnvironment retention_environment = 6;
 }
 
+message S3Credentials {
+  optional string access_key = 1;
+  optional string secret_key = 2;
+  optional string session_token = 3;
+}
+
 enum Network {
   MAINNET = 0;
   TESTNET = 1;
@@ -269,7 +283,7 @@ enum Network {
 
 // One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
 // and buffer these submissions, but the enclave is the authoritative verifier.
-message SignedSingleProvisionerInitRequest {
+message SignedProvisionerInitRequest {
   // This KP's share, HPKE-encrypted to the enclave session key without config
   // AAD. The signature below binds the share to the expected config instead.
   GuardianEncryptedShare encrypted_share = 1;
@@ -281,7 +295,7 @@ message SignedSingleProvisionerInitRequest {
   string signer_cert = 3;
 
   // Detached armored OpenPGP signature over the intent-tagged
-  // SingleProvisionerInitRequest payload.
+  // ProvisionerInitRequest payload.
   string kp_signature = 4;
 
   // The operator-init config hash the KP independently recomputed and verified.
@@ -294,8 +308,8 @@ message SignedSingleProvisionerInitRequest {
 // Assembled from the current KPs' signed submissions by the relay once it has
 // collected enough. The enclave re-verifies every submission before using any
 // share.
-message ProvisionerInitRequest {
-  repeated SignedSingleProvisionerInitRequest submissions = 1;
+message BatchProvisionerInitRequest {
+  repeated SignedProvisionerInitRequest submissions = 1;
 }
 
 message OperatorActivateRequest {
@@ -327,6 +341,12 @@ message InitConfig {
 
   // BTC network.
   optional Network network = 4;
+
+  // S3 bucket and region used for Guardian state.
+  S3BucketInfo bucket_info = 5;
+
+  // Hashi deployment class selecting the S3 object-lock policy.
+  S3RetentionEnvironment retention_environment = 6;
 }
 
 message LimiterState {
@@ -395,35 +415,48 @@ message SignedProvisionerRotateCertResponse {
 }
 
 // ==========================
-//        RotateKps
+//        RotateKpSet
 // ==========================
 
-// Assembled by the operator from the current KPs' encrypted old shares plus the
-// shared rotation target. Each old share binds the same state digest as HPKE
-// AAD, so the enclave only decrypts submissions that agree on the target.
-// Asymmetry between old and new (n, t) is allowed.
-message RotateKpsRequest {
-  repeated GuardianEncryptedShare encrypted_old_shares = 1;
+// One current KP's signed authorization to rotate the KP set. The signature
+// covers the PCR allowlist used to authenticate the existing state, this KP's
+// encrypted old share, and the complete proposed new roster and parameters.
+message SignedProvisionerRotateKpSetRequest {
+  GuardianEncryptedShare encrypted_old_share = 1;
 
-  // OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
-  repeated KpPgpCertSet new_kp_pgp_cert_sets = 2;
+  // The ceremony guardian session this KP verified before encrypting its share.
+  string expected_session_id = 2;
 
-  optional uint32 new_num_shares = 3;
-  optional uint32 new_threshold = 4;
+  // Builds allowed to authenticate the existing ceremony and KP-share state.
+  PcrAllowlist pcr_allowlist = 3;
 
-  // The current key's secret-sharing instance (old commitments + threshold) the
-  // enclave verifies the submitted old shares against.
-  SecretSharingInstance old_instance = 5;
+  // OpenPGP cert sets for the proposed new KP set.
+  repeated KpPgpCertSet new_kp_pgp_cert_sets = 4;
+  optional uint32 new_num_shares = 5;
+  optional uint32 new_threshold = 6;
+
+  // Armored authorizing current-KP cert and detached signature over the
+  // intent-tagged ProvisionerRotateKpSetRequest payload.
+  string signer_cert = 7;
+  string kp_signature = 8;
+}
+
+// Collects threshold-many current-KP-authorized requests. Every submission must
+// agree on the PCR allowlist and proposed new KP set. The enclave loads the
+// authoritative old instance and encrypted-share roster from S3.
+message BatchProvisionerRotateKpSetRequest {
+  repeated SignedProvisionerRotateKpSetRequest submissions = 1;
 }
 
 // Unsigned response payload.
-message RotateKpsResponseData {
+message RotateKpSetResponseData {
   repeated SingleKPEncryptedShares encrypted_shares = 1;
+  SecretSharingInstance new_instance = 2;
 }
 
 // Application-layer signed response.
-message SignedRotateKpsResponse {
-  RotateKpsResponseData data = 1;
+message SignedRotateKpSetResponse {
+  RotateKpSetResponseData data = 1;
 
   // Milliseconds since Unix epoch.
   optional uint64 timestamp_ms = 2;

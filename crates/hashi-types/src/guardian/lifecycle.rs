@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
-/// `setup_new_key`/`rotate_kps`; a `Withdraw` enclave runs `provisioner_init` +
+/// `setup_new_key`/`rotate_kp_set`; a `Withdraw` enclave runs `provisioner_init` +
 /// `standard_withdrawal`. `operator_init` and `get_guardian_info` are enabled
 /// in both modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

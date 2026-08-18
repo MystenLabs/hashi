@@ -12,15 +12,22 @@ use serde::Deserialize;
 
 use crate::domain::WithdrawalEventType;
 
-/// Configuration for the cursorless batch auditor.
+/// Configuration shared by the batch and continuous monitor modes.
+///
+/// All duration values are expressed in seconds.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     /// Maximum allowed delay between consecutive events.
     pub next_event_delays: NextEventDelays,
 
-    /// E_{i+1} is allowed to occur up to clock_skew seconds before E_i (default: 300s).
+    /// E_{i+1} is allowed to occur up to `clock_skew` before E_i (default: 300s).
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
+
+    /// How far before the guardian audit start to search Sui for withdrawal
+    /// predecessor events (default: 1 hour).
+    #[serde(default = "default_withdrawal_predecessor_lookback")]
+    pub withdrawal_predecessor_lookback: u64,
 
     pub guardian_s3: UnresolvedS3Config,
     #[serde(flatten)]
@@ -29,7 +36,7 @@ pub struct Config {
     pub btc: BtcConfig,
 }
 
-/// The maximum allowed delay between an event and it's successor in seconds.
+/// The maximum allowed delay between an event and its successor.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "Vec<(WithdrawalEventType, u64)>")]
 pub struct NextEventDelays(Vec<(WithdrawalEventType, u64)>);
@@ -73,6 +80,10 @@ impl BtcConfig {
 
 fn default_clock_skew() -> u64 {
     300
+}
+
+fn default_withdrawal_predecessor_lookback() -> u64 {
+    60 * 60
 }
 
 impl NextEventDelays {

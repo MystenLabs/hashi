@@ -1,42 +1,44 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod attestation;
+mod ceremony_state;
 pub mod crypto;
 pub mod errors;
-pub mod kp_certs_roster;
 pub mod lifecycle;
-pub mod log;
 pub mod proto_conversions;
-pub(crate) mod serde_utils;
-pub mod signing;
+pub mod s3;
+pub(crate) mod serde;
+mod session;
 pub mod test_utils;
-pub mod time_utils;
+pub mod time;
 
 pub mod limiter;
-pub mod s3_utils;
 
-pub use attestation::BuildPcrs;
-pub use attestation::GitRevision;
-pub use attestation::NitroAttestation;
-pub use attestation::PcrAllowlist;
+pub use ceremony_state::*;
+pub use crypto::attestation;
+pub use crypto::encryption as kp_certs_roster;
+pub use crypto::signing;
+pub use crypto::*;
 pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
-pub use log::*;
-pub use signing::GuardianResponse;
-pub use signing::GuardianSigned;
-pub use signing::GuardianSignedResponse;
-pub use signing::GuardianSigningIntent;
-pub use signing::GuardianSigningIntentType;
-pub use signing::KpSigned;
-pub use signing::KpSigningIntent;
-pub use signing::KpSigningIntentType;
-pub use time_utils::UnixMillis;
-pub use time_utils::now_timestamp_ms;
-pub use time_utils::now_timestamp_secs;
-pub use time_utils::unix_millis_to_seconds;
+pub use s3::DEVNET_S3_OBJECT_LOCK_POLICY;
+pub use s3::MAINNET_S3_OBJECT_LOCK_POLICY;
+pub use s3::ResolvedS3Config;
+pub use s3::S3BucketInfo;
+pub use s3::S3Credentials;
+pub use s3::S3ObjectLockPolicy;
+pub use s3::S3RetentionEnvironment;
+pub use s3::TESTNET_S3_OBJECT_LOCK_POLICY;
+pub use s3::UnresolvedS3Config;
+pub use s3::log;
+pub use s3::log::*;
+pub use session::*;
+pub use time::UnixMillis;
+pub use time::now_timestamp_ms;
+pub use time::now_timestamp_secs;
+pub use time::unix_millis_to_seconds;
 
 use self::errors::GuardianError::*;
 use crate::bitcoin::BitcoinPubkey;
@@ -48,36 +50,28 @@ pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::pgp::PgpPublicCert;
+use ::serde::Deserialize;
+use ::serde::Serialize;
 use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
 use blake2::digest::consts::U32;
-pub use crypto::*;
 pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
-pub use kp_certs_roster::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
-use serde::Deserialize;
-use serde::Serialize;
-use std::borrow::Borrow;
-use std::fmt;
-use std::ops::Deref;
 
 // ---------------------------------
 //    Common requests and responses
 // ---------------------------------
 
-/// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
-/// `s3_config`; a withdraw-mode enclave additionally carries the stable
-/// `InitConfig` whose digest KPs authenticate during provisioner init.
+/// Mode-specific operator bootstrap accepted by the shared `OperatorInit` RPC.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OperatorInitRequest {
-    s3_config: ResolvedS3Config,
-    init_config: Option<InitConfig>,
-    genesis_state: Option<GenesisState>,
+pub enum OperatorInitRequest {
+    Ceremony(CeremonyOperatorInitRequest),
+    Withdraw(Box<WithdrawOperatorInitRequest>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -110,7 +104,7 @@ pub struct GuardianInfo {
     pub encryption_pubkey: EncPubKeyBytes,
     /// Digest of the operator-supplied `InitConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
-    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
+    #[serde(with = "crate::guardian::serde::option_hex_32")]
     pub config_hash: Option<[u8; 32]>,
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
@@ -127,7 +121,7 @@ pub struct GuardianInfo {
     pub current_committee_epoch: Option<u64>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
-    #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
+    #[serde(with = "crate::guardian::serde::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
     /// Digest of the optional genesis state pinned during operator init. KPs
     /// independently derive and bind it into their signed PI submissions.
@@ -135,7 +129,7 @@ pub struct GuardianInfo {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "crate::guardian::serde_utils::option_hex_32"
+        with = "crate::guardian::serde::option_hex_32"
     )]
     pub genesis_state_hash: Option<[u8; 32]>,
 }
@@ -143,6 +137,15 @@ pub struct GuardianInfo {
 // ---------------------------------------
 //    Withdraw mode requests and responses
 // ---------------------------------------
+
+/// Withdraw-mode bootstrap carrying the stable configuration KPs authenticate
+/// during provisioner initialization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithdrawOperatorInitRequest {
+    pub s3_credentials: S3Credentials,
+    pub init_config: InitConfig,
+    pub genesis_state: Option<GenesisState>,
+}
 
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
@@ -155,6 +158,10 @@ pub struct InitConfig {
     hashi_btc_master_pubkey: HashiMasterG,
     /// Guardian build PCR pins used to verify attested guardian sessions.
     pcr_allowlist: PcrAllowlist,
+    /// S3 bucket and region used for Guardian state.
+    bucket_info: S3BucketInfo,
+    /// Hashi deployment class selecting the S3 object-lock policy.
+    retention_environment: S3RetentionEnvironment,
     /// BTC network.
     network: Network,
 }
@@ -184,16 +191,16 @@ pub struct ActivationState {
 /// collected enough. The enclave verifies every KP signature, session pin, and
 /// config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitRequest(pub Vec<KpSigned<SingleProvisionerInitRequest>>);
+pub struct BatchProvisionerInitRequest(pub Vec<KpSigned<ProvisionerInitRequest>>);
 
 /// Relay-facing request carrying one KP's signed contribution toward
 /// `ProvisionerInit` for a specific guardian session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SingleProvisionerInitRequest {
+pub struct ProvisionerInitRequest {
     expected_session_id: SessionID,
     #[serde(with = "hex::serde")]
     expected_config_hash: [u8; 32],
-    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
+    #[serde(with = "crate::guardian::serde::option_hex_32")]
     expected_genesis_state_hash: Option<[u8; 32]>,
     encrypted_share: GuardianEncryptedShare,
 }
@@ -240,58 +247,9 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
 }
 
-// ---------------------------------------
-//    Ceremony mode requests and responses
-// ---------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SetupNewKeyRequest {
-    key_provisioner_certs_roster: KpCertsRoster,
-    params: SecretSharingParams,
-}
-
-/// `GuardianSignedResponse<SetupNewKeyResponse>`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct SetupNewKeyResponse {
-    pub encrypted_shares: KPEncryptedSharesRoster,
-    pub secret_sharing_instance: SecretSharingInstance,
-    /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
-    /// as `guardian_btc_public_key` before the guardian is provisioned.
-    pub btc_master_pubkey: BitcoinPubkey,
-}
-
-/// Ceremony-mode rotation request, assembled by the operator from the current KPs'
-/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
-/// rotation target `state`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RotateKpsRequest {
-    encrypted_old_shares: Vec<GuardianEncryptedShare>,
-    old_instance: SecretSharingInstance,
-    state: RotateKpsState,
-}
-
-/// The shared rotation target all current KPs authorize. Each binds
-/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
-/// ones that agree on it. Old/new (`n`, `t`) may differ.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RotateKpsState {
-    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
-    /// `new_params.num_shares()`.
-    new_kp_certs_roster: KpCertsRoster,
-    new_params: SecretSharingParams,
-}
-
-/// `GuardianSignedResponse<RotateKpsResponse>`. The new KP set's encrypted
-/// shares, returned by `rotate_kps`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct RotateKpsResponse {
-    pub encrypted_shares: KPEncryptedSharesRoster,
-}
-
-/// `KpSigned<ProvisionerRotateCertRequest>`. Replaces one certificate in a KP
-/// roster entry without changing the BTC key, sharing instance,
-/// commitments, share ids, or threshold. The signing certificate may be the
-/// target or another certificate assigned to the same KP/share entry.
+/// `KpSigned<ProvisionerRotateCertRequest>`.
+/// Replaces one certificate in a KP roster entry. Request must be signed
+/// with a certificate assigned to the same KP (including the to-be-deleted one).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProvisionerRotateCertRequest {
     expected_session_id: SessionID,
@@ -309,6 +267,66 @@ pub struct ProvisionerRotateCertResponse {
     pub encrypted_shares: KPEncryptedShares,
 }
 
+// ---------------------------------------
+//    Ceremony mode requests and responses
+// ---------------------------------------
+
+/// Ceremony-mode bootstrap carrying the S3 configuration used for ceremony logs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CeremonyOperatorInitRequest {
+    pub s3_config: ResolvedS3Config,
+}
+
+/// TODO: Replace the operator-authored setup request with a batch of new-KP-signed
+/// approvals binding the session, roster, sharing params, and S3 policy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetupNewKeyRequest {
+    /// The KP certs. Each KP can have more than one cert.
+    key_provisioner_certs_roster: KpCertsRoster,
+    /// The secret-sharing params (n, t).
+    params: SecretSharingParams,
+}
+
+/// `GuardianSignedResponse<SetupNewKeyResponse>`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SetupNewKeyResponse {
+    /// Encryptions to each KP's cert. Each KP can have more than one cert.
+    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// Params + share commitments.
+    pub secret_sharing_instance: SecretSharingInstance,
+    /// The Guardian BTC pubkey.
+    pub btc_master_pubkey: BitcoinPubkey,
+}
+
+/// A batch of current-KP-authorized requests to rotate the KP set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BatchProvisionerRotateKpSetRequest {
+    submissions: Vec<KpSigned<ProvisionerRotateKpSetRequest>>,
+}
+
+/// One current KP's signed contribution toward rotating the KP set.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProvisionerRotateKpSetRequest {
+    expected_session_id: SessionID,
+    pcr_allowlist: PcrAllowlist,
+    encrypted_old_share: GuardianEncryptedShare,
+    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// `new_params.num_shares()`.
+    new_kp_certs_roster: KpCertsRoster,
+    /// The new secret-sharing params (n, t).
+    new_params: SecretSharingParams,
+}
+
+/// `GuardianSignedResponse<RotateKpSetResponse>`. The new KP set's encrypted
+/// shares, returned by `rotate_kp_set`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RotateKpSetResponse {
+    /// Encryptions to each new KP's cert. Each KP can have more than one cert.
+    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// The new secret-sharing params and commitments.
+    pub new_instance: SecretSharingInstance,
+}
+
 // ---------------------------------
 //      Helper types & structs
 // ---------------------------------
@@ -317,110 +335,25 @@ pub struct ProvisionerRotateCertResponse {
 /// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = sui_sdk_types::Address;
 
-/// Guardian session identifier. Canonical IDs are short prefixes of the
-/// hex-encoded signing public key and tag per-session S3 objects.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct SessionID(String);
-
-impl SessionID {
-    /// Length of the signing-public-key prefix used for canonical session IDs.
-    pub const HEX_LEN: usize = 16;
-
-    pub fn from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> Self {
-        let mut session_id = ::hex::encode(signing_pub_key.as_bytes());
-        session_id.truncate(Self::HEX_LEN);
-        Self(session_id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for SessionID {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for SessionID {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl From<SessionID> for String {
-    fn from(value: SessionID) -> Self {
-        value.0
-    }
-}
-
-impl AsRef<str> for SessionID {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for SessionID {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Deref for SessionID {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for SessionID {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// S3 configuration as supplied by a config file, before AWS credentials have
-/// been resolved.
-#[derive(Clone, Debug, Deserialize)]
-pub struct UnresolvedS3Config {
-    pub bucket: String,
-    pub region: String,
-    pub access_key: Option<String>,
-    pub secret_key: Option<String>,
-    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-/// Runtime S3 configuration with concrete credentials.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ResolvedS3Config {
-    pub access_key: String,
-    pub secret_key: String,
-    pub session_token: Option<String>,
-    pub bucket_info: S3BucketInfo,
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct S3BucketInfo {
-    pub bucket: String,
-    pub region: String,
-}
-
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
 
-impl ResolvedS3Config {
-    pub fn bucket_name(&self) -> &str {
-        &self.bucket_info.bucket
+impl OperatorInitRequest {
+    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
+        Self::Ceremony(CeremonyOperatorInitRequest { s3_config })
     }
 
-    pub fn region(&self) -> &str {
-        &self.bucket_info.region
+    pub fn new_withdraw_mode(
+        s3_credentials: S3Credentials,
+        init_config: InitConfig,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
+        Self::Withdraw(Box::new(WithdrawOperatorInitRequest {
+            s3_credentials,
+            init_config,
+            genesis_state,
+        }))
     }
 }
 
@@ -458,60 +391,6 @@ impl SetupNewKeyRequest {
 
     pub fn threshold(&self) -> usize {
         self.params.threshold()
-    }
-}
-
-impl OperatorInitRequest {
-    /// Build a ceremony-mode request (S3 only).
-    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
-        Self {
-            s3_config,
-            init_config: None,
-            genesis_state: None,
-        }
-    }
-
-    /// Build a withdraw-mode request carrying the stable operator config.
-    pub fn new_withdraw_mode(
-        s3_config: ResolvedS3Config,
-        init_config: InitConfig,
-        genesis_state: Option<GenesisState>,
-    ) -> Self {
-        Self {
-            s3_config,
-            init_config: Some(init_config),
-            genesis_state,
-        }
-    }
-
-    pub fn s3_config(&self) -> &ResolvedS3Config {
-        &self.s3_config
-    }
-
-    pub fn init_config(&self) -> Option<&InitConfig> {
-        self.init_config.as_ref()
-    }
-
-    /// `init_config` must be present iff the enclave runs in withdraw mode;
-    /// optional genesis state is withdraw-only.
-    pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
-        match (
-            mode,
-            self.init_config.is_some(),
-            self.genesis_state.is_some(),
-        ) {
-            (EnclaveMode::Withdraw, false, _) => Err(InvalidInputs(
-                "withdraw-mode operator_init requires an InitConfig".into(),
-            )),
-            (EnclaveMode::Ceremony, true, _) | (EnclaveMode::Ceremony, false, true) => Err(
-                InvalidInputs("ceremony-mode operator_init must carry only S3 config".into()),
-            ),
-            _ => Ok(()),
-        }
-    }
-
-    pub fn into_parts(self) -> (ResolvedS3Config, Option<InitConfig>, Option<GenesisState>) {
-        (self.s3_config, self.init_config, self.genesis_state)
     }
 }
 
@@ -600,21 +479,36 @@ impl InitConfig {
         limiter_config: LimiterConfig,
         hashi_btc_master_pubkey: HashiMasterG,
         pcr_allowlist: PcrAllowlist,
+        bucket_info: S3BucketInfo,
+        retention_environment: S3RetentionEnvironment,
         network: Network,
     ) -> GuardianResult<Self> {
         Ok(Self {
             limiter_config,
             hashi_btc_master_pubkey,
             pcr_allowlist,
+            bucket_info,
+            retention_environment,
             network,
         })
     }
 
-    pub fn into_parts(self) -> (LimiterConfig, HashiMasterG, PcrAllowlist, Network) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        LimiterConfig,
+        HashiMasterG,
+        PcrAllowlist,
+        S3BucketInfo,
+        S3RetentionEnvironment,
+        Network,
+    ) {
         (
             self.limiter_config,
             self.hashi_btc_master_pubkey,
             self.pcr_allowlist,
+            self.bucket_info,
+            self.retention_environment,
             self.network,
         )
     }
@@ -631,6 +525,14 @@ impl InitConfig {
         &self.pcr_allowlist
     }
 
+    pub fn resolved_s3_config(&self, credentials: S3Credentials) -> ResolvedS3Config {
+        ResolvedS3Config {
+            credentials,
+            bucket_info: self.bucket_info.clone(),
+            retention_environment: self.retention_environment,
+        }
+    }
+
     pub fn network(&self) -> Network {
         self.network
     }
@@ -643,7 +545,7 @@ impl InitConfig {
     }
 }
 
-impl SingleProvisionerInitRequest {
+impl ProvisionerInitRequest {
     /// Build one KP's PI contribution, encrypting `share` to the enclave's
     /// session key. Agreement on the stable config is authenticated by the KP
     /// signature over this request, not by HPKE AAD.
@@ -710,8 +612,38 @@ impl SingleProvisionerInitRequest {
     }
 }
 
-impl RotateKpsState {
+impl SessionBoundRequest for ProvisionerInitRequest {
+    const REQUEST_CONTEXT: &'static str = "PI submission";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+}
+
+impl BatchProvisionerRotateKpSetRequest {
+    pub fn new(submissions: Vec<KpSigned<ProvisionerRotateKpSetRequest>>) -> GuardianResult<Self> {
+        if submissions.is_empty() {
+            return Err(InvalidInputs(
+                "KP-set rotation requires at least one signed submission".into(),
+            ));
+        }
+        Ok(Self { submissions })
+    }
+
+    pub fn submissions(&self) -> &[KpSigned<ProvisionerRotateKpSetRequest>] {
+        &self.submissions
+    }
+
+    pub fn into_submissions(self) -> Vec<KpSigned<ProvisionerRotateKpSetRequest>> {
+        self.submissions
+    }
+}
+
+impl ProvisionerRotateKpSetRequest {
     pub fn new(
+        expected_session_id: SessionID,
+        pcr_allowlist: PcrAllowlist,
+        encrypted_old_share: GuardianEncryptedShare,
         new_kp_certs_roster: KpCertsRoster,
         new_num_shares: usize,
         new_threshold: usize,
@@ -725,9 +657,45 @@ impl RotateKpsState {
             )));
         }
         Ok(Self {
+            expected_session_id,
+            pcr_allowlist,
+            encrypted_old_share,
             new_kp_certs_roster,
             new_params,
         })
+    }
+
+    /// Build one current KP's rotation request. The KP signature directly binds
+    /// the proposed new roster and sharing parameters to its encrypted old share.
+    pub fn build_from_share<R: CryptoRng + RngCore>(
+        expected_session_id: SessionID,
+        pcr_allowlist: PcrAllowlist,
+        share: &Share,
+        enclave_pub_key: &EncPubKey,
+        new_kp_certs_roster: KpCertsRoster,
+        new_params: SecretSharingParams,
+        rng: &mut R,
+    ) -> GuardianResult<Self> {
+        Self::new(
+            expected_session_id,
+            pcr_allowlist,
+            encrypt_share(share, enclave_pub_key, None, rng),
+            new_kp_certs_roster,
+            new_params.num_shares(),
+            new_params.threshold(),
+        )
+    }
+
+    pub fn expected_session_id(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+
+    pub fn pcr_allowlist(&self) -> &PcrAllowlist {
+        &self.pcr_allowlist
+    }
+
+    pub fn encrypted_old_share(&self) -> &GuardianEncryptedShare {
+        &self.encrypted_old_share
     }
 
     pub fn new_kp_certs_roster(&self) -> &KpCertsRoster {
@@ -738,62 +706,30 @@ impl RotateKpsState {
         &self.new_params
     }
 
-    pub fn into_parts(self) -> (KpCertsRoster, SecretSharingParams) {
-        (self.new_kp_certs_roster, self.new_params)
-    }
-
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(self).expect("serialization should work");
-        Blake2b::<U32>::digest(bytes).into()
-    }
-}
-
-impl RotateKpsRequest {
-    pub fn new(
-        encrypted_old_shares: Vec<GuardianEncryptedShare>,
-        old_instance: SecretSharingInstance,
-        state: RotateKpsState,
-    ) -> Self {
-        Self {
-            encrypted_old_shares,
-            old_instance,
-            state,
-        }
-    }
-
-    /// Encrypt one KP's `share` to `enclave_pub_key` with `state.digest()` bound
-    /// as HPKE AAD — tying the share to the specific rotation target that KP is
-    /// authorizing. Each current KP produces one of these; the operator bundles
-    /// them into a `RotateKpsRequest`.
-    pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
-        share: &Share,
-        enclave_pub_key: &EncPubKey,
-        state: &RotateKpsState,
-        rng: &mut R,
-    ) -> GuardianEncryptedShare {
-        encrypt_share(share, enclave_pub_key, Some(&state.digest()), rng)
-    }
-
-    pub fn encrypted_old_shares(&self) -> &[GuardianEncryptedShare] {
-        &self.encrypted_old_shares
-    }
-
-    pub fn old_instance(&self) -> &SecretSharingInstance {
-        &self.old_instance
-    }
-
-    pub fn state(&self) -> &RotateKpsState {
-        &self.state
-    }
-
     pub fn into_parts(
         self,
     ) -> (
-        Vec<GuardianEncryptedShare>,
-        SecretSharingInstance,
-        RotateKpsState,
+        SessionID,
+        PcrAllowlist,
+        GuardianEncryptedShare,
+        KpCertsRoster,
+        SecretSharingParams,
     ) {
-        (self.encrypted_old_shares, self.old_instance, self.state)
+        (
+            self.expected_session_id,
+            self.pcr_allowlist,
+            self.encrypted_old_share,
+            self.new_kp_certs_roster,
+            self.new_params,
+        )
+    }
+}
+
+impl SessionBoundRequest for ProvisionerRotateKpSetRequest {
+    const REQUEST_CONTEXT: &'static str = "KP rotation submission";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
     }
 }
 
@@ -877,6 +813,14 @@ impl ProvisionerRotateCertRequest {
             self.new_kp_pgp_cert,
             self.encrypted_share,
         )
+    }
+}
+
+impl SessionBoundRequest for ProvisionerRotateCertRequest {
+    const REQUEST_CONTEXT: &'static str = "provisioner_rotate_cert request";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
     }
 }
 
@@ -991,6 +935,8 @@ struct InitConfigRepr {
     pub limiter_config: LimiterConfig,
     pub hashi_btc_master_pubkey: HashiMasterG,
     pub pcr_allowlist: PcrAllowlist,
+    pub bucket_info: S3BucketInfo,
+    pub retention_environment: S3RetentionEnvironment,
     pub network: String,
 }
 
@@ -1053,12 +999,20 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
 
 impl From<&InitConfig> for InitConfigRepr {
     fn from(config: &InitConfig) -> Self {
-        let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
-            config.clone().into_parts();
+        let (
+            limiter_config,
+            hashi_btc_master_pubkey,
+            pcr_allowlist,
+            bucket_info,
+            retention_environment,
+            network,
+        ) = config.clone().into_parts();
         Self {
             limiter_config,
             hashi_btc_master_pubkey,
             pcr_allowlist,
+            bucket_info,
+            retention_environment,
             network: network.to_string(),
         }
     }
@@ -1135,12 +1089,26 @@ mod tests {
     }
 
     #[test]
-    fn rotate_kps_state_new_rejects_wrong_cert_count() {
+    fn provisioner_rotate_kp_set_request_rejects_wrong_cert_count() {
         let mut cert_sets = test_utils::mock_kp_certs(5);
         cert_sets.pop();
         let certs_roster = KpCertsRoster::new(cert_sets).unwrap();
         assert!(matches!(
-            RotateKpsState::new(certs_roster, 5, 3).unwrap_err(),
+            ProvisionerRotateKpSetRequest::new(
+                "session".into(),
+                PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
+                GuardianEncryptedShare {
+                    id: ShareID::new(1).unwrap(),
+                    ciphertext: Ciphertext {
+                        encapsulated_key: vec![0],
+                        aes_ciphertext: vec![0],
+                    },
+                },
+                certs_roster,
+                5,
+                3,
+            )
+            .unwrap_err(),
             InvalidInputs(_)
         ));
     }
@@ -1156,88 +1124,36 @@ mod tests {
     }
 
     #[test]
-    fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {
-        let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![
-                BuildPcrs::new("prev-1", vec![1]),
-                BuildPcrs::new("prev-2", vec![2]),
-            ],
-        )
-        .unwrap();
-
-        let current_build = allowlist.resolve("current").unwrap();
-        assert_eq!(current_build.pcr0(), &[0]);
-        let prev_build = allowlist.resolve("prev-1").unwrap();
-        assert_eq!(prev_build.pcr0(), &[1]);
-        let prev2_build = allowlist.resolve("prev-2").unwrap();
-        assert_eq!(prev2_build.pcr0(), &[2]);
-
-        assert!(matches!(
-            allowlist.resolve("missing").unwrap_err(),
-            BuildNotAllowlisted(message) if message.contains("build 'missing'")
-        ));
-    }
-
-    #[test]
-    fn pcr_allowlist_rejects_duplicate_build_revisions() {
-        let err = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![BuildPcrs::new("current", vec![1])],
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, InvalidInputs(msg) if msg.contains("duplicate PCR allowlist entry")));
-    }
-
-    #[test]
-    fn pcr_allowlist_deserializes_hex_wire_form() {
-        let allowlist: PcrAllowlist = serde_json::from_value(serde_json::json!({
-            "current_build": {
-                "git_revision": "current",
-                "pcr0": "0x00ff"
-            },
-            "prev_builds": [
-                {
-                    "git_revision": "prev",
-                    "pcr0": "01"
-                }
-            ]
-        }))
-        .unwrap();
-
-        let current_build = allowlist.resolve("current").unwrap();
-        assert_eq!(current_build.pcr0(), &[0x00, 0xff]);
-        let prev_build = allowlist.resolve("prev").unwrap();
-        assert_eq!(prev_build.pcr0(), &[0x01]);
-    }
-
-    #[test]
-    fn pcr_allowlist_requires_current_build() {
-        let allowlist = PcrAllowlist::new(
-            BuildPcrs::new("current", vec![0]),
-            vec![BuildPcrs::new("prev", vec![1])],
-        )
-        .unwrap();
-
-        let current_build = allowlist.resolve("current").unwrap();
-        allowlist.require_current_build(current_build).unwrap();
-
-        let prev_build = allowlist.resolve("prev").unwrap();
-        assert!(matches!(
-            allowlist.require_current_build(prev_build).unwrap_err(),
-            BuildNotCurrent(message)
-                if message.contains("build 'prev'") && message.contains("build 'current'")
-        ));
-    }
-
-    #[test]
-    fn rotate_kps_state_digest_commits_to_roster_order() {
+    fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
         let cert_sets = test_utils::mock_kp_certs(5);
         let reversed: Vec<KpCerts> = cert_sets.iter().rev().cloned().collect();
-        let a = RotateKpsState::new(KpCertsRoster::new(cert_sets).unwrap(), 5, 3).unwrap();
-        let b = RotateKpsState::new(KpCertsRoster::new(reversed).unwrap(), 5, 3).unwrap();
+        let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap();
+        let encrypted_old_share = GuardianEncryptedShare {
+            id: ShareID::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0],
+                aes_ciphertext: vec![0],
+            },
+        };
+        let a = ProvisionerRotateKpSetRequest::new(
+            "session".into(),
+            pcr_allowlist.clone(),
+            encrypted_old_share.clone(),
+            KpCertsRoster::new(cert_sets).unwrap(),
+            5,
+            3,
+        )
+        .unwrap();
+        let b = ProvisionerRotateKpSetRequest::new(
+            "session".into(),
+            pcr_allowlist,
+            encrypted_old_share,
+            KpCertsRoster::new(reversed).unwrap(),
+            5,
+            3,
+        )
+        .unwrap();
         assert_ne!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
-        assert_ne!(a.digest(), b.digest());
+        assert_ne!(KpSigned::signed_bytes(&a), KpSigned::signed_bytes(&b));
     }
 }

@@ -100,6 +100,15 @@ pub struct Metrics {
     /// 1 when this binary supports no live on-chain package version (chain
     /// ahead of the binary); autonomous mutations are halted. 0 otherwise.
     package_version_unsupported: IntGauge,
+    /// Highest version in `SUPPORTED_PACKAGE_VERSIONS` — constant per build.
+    /// `package_version_active` reads the same for old and new binaries until
+    /// the chain upgrades, so only this gauge can count how much of the fleet
+    /// already runs a build that implements the next version.
+    package_version_supported_max: IntGauge,
+    /// Unix seconds of each long-running task loop's last iteration. A stale
+    /// entry means that task is wedged or dead inside a process whose other
+    /// metrics still look alive.
+    task_last_iteration_timestamp_seconds: IntGaugeVec,
 
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
@@ -116,6 +125,7 @@ pub struct Metrics {
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
+    pub utxo_selection_attempt_failures_total: IntCounterVec,
 
     /// Withdrawals skipped because their gross amount exceeds the
     /// guardian's `max_bucket_capacity`. The request stays approved
@@ -177,6 +187,8 @@ pub struct Metrics {
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
     pub mpc_end_reconfig_duration_seconds: HistogramVec,
+    db_major_compaction_duration_seconds: HistogramVec,
+    db_major_compaction_failures_total: IntCounterVec,
     pub mpc_prepare_signing_duration_seconds: HistogramVec,
     pub mpc_total_duration_seconds: HistogramVec,
     pub mpc_dealer_crypto_duration_seconds: HistogramVec,
@@ -685,6 +697,19 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            package_version_supported_max: register_int_gauge_with_registry!(
+                "hashi_package_version_supported_max",
+                "highest package version this build implements (fleet rollout census)",
+                registry,
+            )
+            .unwrap(),
+            task_last_iteration_timestamp_seconds: register_int_gauge_vec_with_registry!(
+                "hashi_task_last_iteration_timestamp_seconds",
+                "unix seconds of each task loop's last iteration; stale = task wedged",
+                &["task"],
+                registry,
+            )
+            .unwrap(),
             deposits_confirmed_total: register_int_counter_with_registry!(
                 "hashi_deposits_confirmed_total",
                 "Total number of deposits successfully confirmed on Sui",
@@ -777,6 +802,13 @@ impl Metrics {
                 "hashi_leader_items_in_backoff",
                 "Number of requests currently in retry backoff by operation",
                 &["operation"],
+                registry,
+            )
+            .unwrap(),
+            utxo_selection_attempt_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_utxo_selection_attempt_failures_total",
+                "Failed UTXO selection attempts by concrete selector error kind",
+                &["error_kind"],
                 registry,
             )
             .unwrap(),
@@ -1006,6 +1038,22 @@ impl Metrics {
                 "Duration of submit_end_reconfig",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            db_major_compaction_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_db_major_compaction_duration_seconds",
+                "Duration of a major compaction, by keyspace",
+                &["keyspace"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            db_major_compaction_failures_total: register_int_counter_vec_with_registry!(
+                "hashi_db_major_compaction_failures_total",
+                "Major compactions that failed, by keyspace \
+                 (\"unlink\" is the final rotation that releases the disk)",
+                &["keyspace"],
                 registry,
             )
             .unwrap(),
@@ -1275,6 +1323,37 @@ impl Metrics {
             .inc_by(coin_objects as u64);
     }
 
+    /// Record a liveness heartbeat for a long-running task loop. Alert on
+    /// `time() - hashi_task_last_iteration_timestamp_seconds` staleness to
+    /// catch a single wedged task inside an otherwise-healthy process.
+    pub fn task_heartbeat(&self, task: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.task_last_iteration_timestamp_seconds
+            .with_label_values(&[task])
+            .set(now);
+    }
+
+    pub fn record_major_compaction(&self, keyspace: &crate::db::CompactedKeyspace) {
+        let labels = &[keyspace.name];
+        self.db_major_compaction_duration_seconds
+            .with_label_values(labels)
+            .observe(keyspace.elapsed.as_secs_f64());
+        if keyspace.error.is_some() {
+            self.db_major_compaction_failures_total
+                .with_label_values(labels)
+                .inc();
+        }
+    }
+
+    pub fn record_major_compaction_unlink_failure(&self) {
+        self.db_major_compaction_failures_total
+            .with_label_values(&["unlink"])
+            .inc();
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -1451,6 +1530,13 @@ impl Metrics {
             .set(support.active_version().map(|v| v as i64).unwrap_or(0));
         self.package_version_unsupported
             .set(i64::from(support.must_halt()));
+        self.package_version_supported_max.set(
+            crate::constants::SUPPORTED_PACKAGE_VERSIONS
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0) as i64,
+        );
     }
 }
 

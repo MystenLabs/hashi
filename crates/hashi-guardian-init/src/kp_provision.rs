@@ -18,7 +18,7 @@
 //! 3. The authoritative `ceremony/` log is scraped for the secret-sharing
 //!    instance the new guardian was booted with; it must match.
 //! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
-//!    allowlist, and network; its `config_hash` is confirmed.
+//!    allowlist, S3 policy, and network; its `config_hash` is confirmed.
 //! 5. The optional genesis state hash is independently derived from S3 and
 //!    current on-chain state and confirmed against the enclave's pin.
 //! 6. This KP's PGP-encrypted share is read from the latest
@@ -45,7 +45,7 @@ use hashi_types::guardian::GenesisState;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
-use hashi_types::guardian::SingleProvisionerInitRequest;
+use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::pgp::PgpPublicCert;
@@ -255,6 +255,20 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         session_id = %session_id,
         "guardian info checks passed (bucket, limiter config, mpc_master_g, standby not activated)",
     );
+    info!(
+        phase = "heartbeat",
+        session_id = %session_id,
+        "checking that the pinned guardian session is live in S3",
+    );
+    reader
+        .ensure_session_live(&session_id)
+        .await
+        .with_context(|| format!("guardian session {session_id} is not live in S3"))?;
+    info!(
+        phase = "heartbeat",
+        session_id = %session_id,
+        "pinned guardian session is live in S3",
+    );
 
     // 3. Read the ceremony + KP share state and confirm the new guardian was
     //    booted with the same secret-sharing instance.
@@ -262,10 +276,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let state = reader
-        .read_latest_ceremony_state()
-        .await?
-        .context("no ceremony log found in S3; key setup has not run")?;
+    let state = reader.read_latest_ceremony_state().await?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
@@ -289,12 +300,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     //    digest is the `config_hash` bound into the signed PI submission.
     info!(
         phase = "config hash",
-        "recomputing config_hash from limiter config + master G + PCR allowlist + network",
+        "recomputing config_hash from limiter config + master G + PCR allowlist + S3 policy + network",
     );
     let expected_config = InitConfig::new(
         cfg.limiter_config,
         master_g,
         allowlist.clone(),
+        guardian_s3.bucket_info.clone(),
+        guardian_s3.retention_environment,
         cfg.bitcoin_network,
     )?;
     let config_hash = expected_config.digest();
@@ -389,7 +402,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(enclave_enc_pubkey_bytes).map_err(anyhow::Error::msg)?;
-    let request = SingleProvisionerInitRequest::build_from_share(
+    let request = ProvisionerInitRequest::build_from_share(
         session_id.clone(),
         config_hash,
         expected_genesis_state_hash,
@@ -400,7 +413,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(
         phase = "share build",
         share_id = request.encrypted_share().id.get(),
-        "built SingleProvisionerInitRequest ready for signing",
+        "built ProvisionerInitRequest ready for signing",
     );
 
     // 8. Submit. The relay collects T-of-N shares before forwarding them to the
@@ -453,7 +466,7 @@ async fn verified_endpoint_guardian_info(
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_guardian_info: GuardianInfo,
-    request: SingleProvisionerInitRequest,
+    request: ProvisionerInitRequest,
     signer_cert: &PgpPublicCert,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
@@ -505,7 +518,7 @@ async fn submit_provisioner_init_to_relay(
         .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
     let resp = relay_client
-        .single_provisioner_init(pb::SignedSingleProvisionerInitRequest::from(signed_request))
+        .single_provisioner_init(pb::SignedProvisionerInitRequest::from(signed_request))
         .await
         .with_context(|| "SingleProvisionerInit RPC failed")?
         .into_inner();

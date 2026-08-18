@@ -1,8 +1,40 @@
 ---
 title: Rate Limiting Withdrawals
-description: Hashi enforces a token-bucket rate limit on withdrawal outflows through the Guardian to protect against vulnerabilities.
-keywords: [ rate limit, token bucket, withdrawal, guardian ]
+description: >-
+  Hashi enforces a token-bucket rate limit on withdrawal outflows through the
+  Guardian to protect against vulnerabilities.
+keywords:
+  - rate limit
+  - token bucket
+  - withdrawal
+  - guardian
 sidebar_label: Limiter
+goal:
+  description: >-
+    Reader understands how the token-bucket rate limiter protects against
+    excessive outflows and how withdrawals are queued
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 150
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - How does Hashi rate limit withdrawals?
+  - What is the token-bucket rate limiter in Hashi?
+  - Can users cancel a queued Hashi withdrawal?
+answer: >-
+  Hashi enforces a configurable token-bucket rate limit on withdrawal outflows
+  through the Guardian. Capacity is replenished continuously over a fixed
+  duration. When a withdrawal would exceed the limit, Hashi waits for
+  sufficient capacity before processing it. Users can cancel pending
+  withdrawal requests at any time before processing begins.
 ---
 
 To protect against vulnerabilities or other exceptional scenarios, Hashi

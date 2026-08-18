@@ -117,6 +117,7 @@ async fn clock_watcher(sui_rpc_url: String, state: OnchainState, metrics: Option
             });
 
             if let Some(metrics) = &metrics {
+                metrics.task_heartbeat("state_watcher");
                 metrics.update_onchain_state(&state);
             }
         }

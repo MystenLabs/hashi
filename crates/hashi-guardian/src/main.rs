@@ -16,7 +16,7 @@ use tonic_health::server::health_reporter;
 use tracing::info;
 
 /// Enclave initialization.
-/// `setup_new_key` and `rotate_kps` are gated to CEREMONY_MODE=true;
+/// `setup_new_key` and `rotate_kp_set` are gated to CEREMONY_MODE=true;
 /// `provisioner_init` and `standard_withdrawal` are gated to CEREMONY_MODE=false.
 /// Everything else (operator_init, get_guardian_info, …) is available in
 /// both modes. See the per-route gates in `rpc.rs`.

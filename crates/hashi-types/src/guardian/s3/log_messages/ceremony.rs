@@ -1,8 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::ObjectKeyPattern;
-use super::super::S3_DIR_CEREMONY;
+use super::super::log_layout::ObjectKeyPattern;
+use super::super::log_layout::S3_DIR_CEREMONY;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::SecretSharingInstance;
 use serde::Deserialize;
@@ -21,7 +21,7 @@ pub enum CeremonyLogMessage {
         /// monitors cross-check it against the on-chain `guardian_btc_public_key`.
         btc_master_pubkey: BitcoinPubkey,
     },
-    /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
+    /// Key rotation (`rotate_kp_set`) from `old_instance` to `new_instance`.
     Rotate {
         old_instance: SecretSharingInstance,
         new_instance: SecretSharingInstance,

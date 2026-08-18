@@ -5,7 +5,10 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::BatchProvisionerInitRequest;
+use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
+use super::CeremonyOperatorInitRequest;
 use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
@@ -40,9 +43,8 @@ use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
-use super::RotateKpsRequest;
-use super::RotateKpsResponse;
-use super::RotateKpsState;
+use super::ProvisionerRotateKpSetRequest;
+use super::RotateKpSetResponse;
 use super::SecretSharingInstance;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
@@ -50,10 +52,10 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::ShareID;
 use super::SignedStandardWithdrawalRequestWire;
-use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawOperatorInitRequest;
 use super::WithdrawStage;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
@@ -181,30 +183,39 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
-        let s3_config =
-            super::ResolvedS3Config::try_from(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
-        let genesis_state = req
-            .genesis_state
-            .map(|state| {
-                let committee = state.committee.ok_or_else(|| missing("committee"))?;
-                Ok(GenesisState::from_move_committee(
-                    crate::move_types::Committee::try_from(committee)?,
-                ))
-            })
-            .transpose()?;
-        // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony.
-        match req.init_config.map(InitConfig::try_from).transpose()? {
-            Some(init_config) => Ok(OperatorInitRequest::new_withdraw_mode(
-                s3_config,
-                init_config,
-                genesis_state,
-            )),
-            None if genesis_state.is_none() => {
-                Ok(OperatorInitRequest::new_ceremony_mode(s3_config))
+        match req.request.ok_or_else(|| missing("request"))? {
+            pb::operator_init_request::Request::Ceremony(req) => {
+                let s3_config = super::ResolvedS3Config::try_from(
+                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
+                )?;
+                Ok(OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
+                    s3_config,
+                }))
             }
-            None => Err(InvalidInputs(
-                "genesis_state requires a withdraw-mode InitConfig".into(),
-            )),
+            pb::operator_init_request::Request::Withdraw(req) => {
+                let s3_credentials = super::S3Credentials::try_from(
+                    req.s3_credentials
+                        .ok_or_else(|| missing("s3_credentials"))?,
+                )?;
+                let init_config =
+                    InitConfig::try_from(req.init_config.ok_or_else(|| missing("init_config"))?)?;
+                let genesis_state = req
+                    .genesis_state
+                    .map(|state| {
+                        let committee = state.committee.ok_or_else(|| missing("committee"))?;
+                        Ok(GenesisState::from_move_committee(
+                            crate::move_types::Committee::try_from(committee)?,
+                        ))
+                    })
+                    .transpose()?;
+                Ok(OperatorInitRequest::Withdraw(Box::new(
+                    WithdrawOperatorInitRequest {
+                        s3_credentials,
+                        init_config,
+                        genesis_state,
+                    },
+                )))
+            }
         }
     }
 }
@@ -249,24 +260,24 @@ pub fn secret_sharing_instance_to_pb(
     }
 }
 
-impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
+impl TryFrom<pb::BatchProvisionerInitRequest> for BatchProvisionerInitRequest {
     type Error = GuardianError;
 
-    fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::BatchProvisionerInitRequest) -> Result<Self, Self::Error> {
         let submissions = req
             .submissions
             .into_iter()
-            .map(KpSigned::<SingleProvisionerInitRequest>::try_from)
+            .map(KpSigned::<ProvisionerInitRequest>::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest(submissions))
+        Ok(BatchProvisionerInitRequest(submissions))
     }
 }
 
-impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisionerInitRequest> {
+impl TryFrom<pb::SignedProvisionerInitRequest> for KpSigned<ProvisionerInitRequest> {
     type Error = GuardianError;
 
-    fn try_from(req: pb::SignedSingleProvisionerInitRequest) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::SignedProvisionerInitRequest) -> Result<Self, Self::Error> {
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
@@ -295,7 +306,7 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         )?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
-        let request = SingleProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::new(
             req.expected_session_id.into(),
             expected_config_hash,
             expected_genesis_state_hash,
@@ -345,48 +356,67 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
     }
 }
 
-impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
+impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRotateKpSetRequest> {
     type Error = GuardianError;
 
-    fn try_from(req: pb::RotateKpsRequest) -> Result<Self, Self::Error> {
-        let encrypted_old_shares = req
-            .encrypted_old_shares
-            .into_iter()
-            .map(GuardianEncryptedShare::try_from)
-            .collect::<GuardianResult<Vec<_>>>()?;
-
+    fn try_from(req: pb::SignedProvisionerRotateKpSetRequest) -> Result<Self, Self::Error> {
+        if req.expected_session_id.is_empty() {
+            return Err(missing("expected_session_id"));
+        }
+        if req.signer_cert.is_empty() {
+            return Err(missing("signer_cert"));
+        }
+        if req.kp_signature.is_empty() {
+            return Err(missing("kp_signature"));
+        }
+        let encrypted_old_share = GuardianEncryptedShare::try_from(
+            req.encrypted_old_share
+                .ok_or_else(|| missing("encrypted_old_share"))?,
+        )?;
+        let pcr_allowlist =
+            PcrAllowlist::try_from(req.pcr_allowlist.ok_or_else(|| missing("pcr_allowlist"))?)?;
         let new_num_shares = req
             .new_num_shares
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
-
-        let new_kp_pgp_cert_sets = req
-            .new_kp_pgp_cert_sets
-            .into_iter()
-            .map(KpCerts::try_from)
-            .collect::<GuardianResult<Vec<_>>>()?;
-        let state = RotateKpsState::new(
-            KpCertsRoster::new(new_kp_pgp_cert_sets)?,
+        let new_kp_certs_roster = KpCertsRoster::new(
+            req.new_kp_pgp_cert_sets
+                .into_iter()
+                .map(KpCerts::try_from)
+                .collect::<GuardianResult<Vec<_>>>()?,
+        )?;
+        let signer_cert =
+            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
+        let request = ProvisionerRotateKpSetRequest::new(
+            req.expected_session_id.into(),
+            pcr_allowlist,
+            encrypted_old_share,
+            new_kp_certs_roster,
             new_num_shares,
             new_threshold,
         )?;
-
-        let old_instance = SecretSharingInstance::try_from(
-            req.old_instance.ok_or_else(|| missing("old_instance"))?,
-        )?;
-
-        Ok(RotateKpsRequest::new(
-            encrypted_old_shares,
-            old_instance,
-            state,
-        ))
+        Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
     }
 }
 
-impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSignedResponse<RotateKpsResponse> {
+impl TryFrom<pb::BatchProvisionerRotateKpSetRequest> for BatchProvisionerRotateKpSetRequest {
     type Error = GuardianError;
 
-    fn try_from(resp: pb::SignedRotateKpsResponse) -> Result<Self, Self::Error> {
+    fn try_from(req: pb::BatchProvisionerRotateKpSetRequest) -> Result<Self, Self::Error> {
+        let submissions = req
+            .submissions
+            .into_iter()
+            .map(KpSigned::<ProvisionerRotateKpSetRequest>::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
+
+        BatchProvisionerRotateKpSetRequest::new(submissions)
+    }
+}
+
+impl TryFrom<pb::SignedRotateKpSetResponse> for GuardianSignedResponse<RotateKpSetResponse> {
+    type Error = GuardianError;
+
+    fn try_from(resp: pb::SignedRotateKpSetResponse) -> Result<Self, Self::Error> {
         let signature_bytes = resp.signature.ok_or_else(|| missing("signature"))?;
         let signature = GuardianSignature::try_from(signature_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
@@ -398,11 +428,20 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSignedResponse<RotateKpsRe
             .map(KPEncryptedShares::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
+        let new_instance = SecretSharingInstance::try_from(
+            data.new_instance.ok_or_else(|| missing("new_instance"))?,
+        )?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned::from_parts(
-            GuardianResponse::new(RotateKpsResponse { encrypted_shares }, timestamp_ms),
+            GuardianResponse::new(
+                RotateKpSetResponse {
+                    encrypted_shares,
+                    new_instance,
+                },
+                timestamp_ms,
+            ),
             signature,
         ))
     }
@@ -496,10 +535,19 @@ impl TryFrom<pb::InitConfig> for InitConfig {
 
         let network = pb_to_network(config_pb.network.ok_or_else(|| missing("network"))?)?;
 
+        let bucket_info = config_pb
+            .bucket_info
+            .ok_or_else(|| missing("bucket_info"))?
+            .try_into()?;
+        let retention_environment =
+            super::S3RetentionEnvironment::try_from(config_pb.retention_environment)?;
+
         InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
             pcr_allowlist,
+            bucket_info,
+            retention_environment,
             network,
         )
     }
@@ -608,20 +656,23 @@ pub fn setup_new_key_response_signed_to_pb(
     }
 }
 
-pub fn rotate_kps_response_signed_to_pb(
-    s: GuardianSignedResponse<RotateKpsResponse>,
-) -> pb::SignedRotateKpsResponse {
+pub fn rotate_kp_set_response_signed_to_pb(
+    s: GuardianSignedResponse<RotateKpSetResponse>,
+) -> pb::SignedRotateKpSetResponse {
     let (data, signature) = s.into_parts();
+    let RotateKpSetResponse {
+        encrypted_shares,
+        new_instance,
+    } = data.response;
 
-    pb::SignedRotateKpsResponse {
-        data: Some(pb::RotateKpsResponseData {
-            encrypted_shares: data
-                .response
-                .encrypted_shares
+    pb::SignedRotateKpSetResponse {
+        data: Some(pb::RotateKpSetResponseData {
+            encrypted_shares: encrypted_shares
                 .into_vec()
                 .into_iter()
                 .map(kp_encrypted_shares_to_pb)
                 .collect(),
+            new_instance: Some(secret_sharing_instance_to_pb(&new_instance)),
         }),
         timestamp_ms: Some(data.timestamp_ms),
         signature: Some(signature.to_bytes().to_vec().into()),
@@ -657,13 +708,31 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, init_config, genesis_state) = r.into_parts();
+    let request = match r {
+        OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }) => {
+            pb::operator_init_request::Request::Ceremony(pb::CeremonyOperatorInitRequest {
+                s3_config: Some(s3_config_to_pb(s3_config)),
+            })
+        }
+        OperatorInitRequest::Withdraw(request) => {
+            let WithdrawOperatorInitRequest {
+                s3_credentials,
+                init_config,
+                genesis_state,
+            } = *request;
+            pb::operator_init_request::Request::Withdraw(Box::new(
+                pb::WithdrawOperatorInitRequest {
+                    s3_credentials: Some(s3_credentials.into()),
+                    init_config: Some(init_config_to_pb(init_config)?),
+                    genesis_state: genesis_state.map(|state| pb::GenesisState {
+                        committee: Some(move_committee_to_pb(&state.into_committee())),
+                    }),
+                },
+            ))
+        }
+    };
     Ok(pb::OperatorInitRequest {
-        s3_config: Some(s3_config_to_pb(s3_config)),
-        init_config: init_config.map(init_config_to_pb).transpose()?,
-        genesis_state: genesis_state.map(|state| pb::GenesisState {
-            committee: Some(move_committee_to_pb(&state.into_committee())),
-        }),
+        request: Some(request),
     })
 }
 
@@ -673,20 +742,20 @@ pub fn operator_activate_request_to_pb(r: OperatorActivateRequest) -> pb::Operat
     }
 }
 
-pub fn provisioner_init_request_to_pb(
-    r: ProvisionerInitRequest,
-) -> GuardianResult<pb::ProvisionerInitRequest> {
-    Ok(pb::ProvisionerInitRequest {
+pub fn batch_provisioner_init_request_to_pb(
+    r: BatchProvisionerInitRequest,
+) -> GuardianResult<pb::BatchProvisionerInitRequest> {
+    Ok(pb::BatchProvisionerInitRequest {
         submissions: r
             .0
             .into_iter()
-            .map(pb::SignedSingleProvisionerInitRequest::from)
+            .map(pb::SignedProvisionerInitRequest::from)
             .collect(),
     })
 }
 
-impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisionerInitRequest {
-    fn from(r: KpSigned<SingleProvisionerInitRequest>) -> Self {
+impl From<KpSigned<ProvisionerInitRequest>> for pb::SignedProvisionerInitRequest {
+    fn from(r: KpSigned<ProvisionerInitRequest>) -> Self {
         let (request, signer_cert, signature) = r.into_parts();
         let (
             expected_session_id,
@@ -730,13 +799,22 @@ impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotat
 
 // Throws an error if network is invalid.
 pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
-    let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) = s.into_parts();
+    let (
+        limiter_config,
+        hashi_btc_master_pubkey,
+        pcr_allowlist,
+        bucket_info,
+        retention_environment,
+        network,
+    ) = s.into_parts();
 
     Ok(pb::InitConfig {
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
         network: Some(network_to_pb(network)?),
+        bucket_info: Some(s3_bucket_info_to_pb(bucket_info)),
+        retention_environment: retention_environment.into(),
     })
 }
 
@@ -756,22 +834,42 @@ fn pcr_allowlist_to_pb(allowlist: PcrAllowlist) -> pb::PcrAllowlist {
     }
 }
 
-pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
-    let (encrypted_old_shares, old_instance, state) = r.into_parts();
-    let (new_kp_certs_roster, new_params) = state.into_parts();
-    pb::RotateKpsRequest {
-        encrypted_old_shares: encrypted_old_shares
+pub fn batch_provisioner_rotate_kp_set_request_to_pb(
+    r: BatchProvisionerRotateKpSetRequest,
+) -> pb::BatchProvisionerRotateKpSetRequest {
+    pb::BatchProvisionerRotateKpSetRequest {
+        submissions: r
+            .into_submissions()
             .into_iter()
-            .map(guardian_encrypted_share_to_pb)
+            .map(pb::SignedProvisionerRotateKpSetRequest::from)
             .collect(),
-        new_kp_pgp_cert_sets: new_kp_certs_roster
-            .into_vec()
-            .into_iter()
-            .map(kp_cert_set_to_pb)
-            .collect(),
-        new_num_shares: Some(new_params.num_shares() as u32),
-        new_threshold: Some(new_params.threshold() as u32),
-        old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
+    }
+}
+
+impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRotateKpSetRequest {
+    fn from(r: KpSigned<ProvisionerRotateKpSetRequest>) -> Self {
+        let (request, signer_cert, signature) = r.into_parts();
+        let (
+            expected_session_id,
+            pcr_allowlist,
+            encrypted_old_share,
+            new_kp_certs_roster,
+            new_params,
+        ) = request.into_parts();
+        Self {
+            encrypted_old_share: Some(guardian_encrypted_share_to_pb(encrypted_old_share)),
+            expected_session_id: expected_session_id.into(),
+            pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
+            new_kp_pgp_cert_sets: new_kp_certs_roster
+                .into_vec()
+                .into_iter()
+                .map(kp_cert_set_to_pb)
+                .collect(),
+            new_num_shares: Some(new_params.num_shares() as u32),
+            new_threshold: Some(new_params.threshold() as u32),
+            signer_cert: signer_cert.armored().to_string(),
+            kp_signature: signature,
+        }
     }
 }
 
@@ -1120,9 +1218,11 @@ impl TryFrom<pb::S3Config> for super::ResolvedS3Config {
             super::S3RetentionEnvironment::try_from(cfg.retention_environment)?;
 
         Ok(Self {
-            access_key,
-            secret_key,
-            session_token: cfg.session_token,
+            credentials: super::S3Credentials {
+                access_key,
+                secret_key,
+                session_token: cfg.session_token,
+            },
             bucket_info: super::S3BucketInfo {
                 bucket: bucket_name,
                 region,
@@ -1132,13 +1232,39 @@ impl TryFrom<pb::S3Config> for super::ResolvedS3Config {
     }
 }
 
+impl TryFrom<pb::S3Credentials> for super::S3Credentials {
+    type Error = GuardianError;
+
+    fn try_from(credentials: pb::S3Credentials) -> Result<Self, Self::Error> {
+        Ok(Self {
+            access_key: credentials
+                .access_key
+                .ok_or_else(|| missing("access_key"))?,
+            secret_key: credentials
+                .secret_key
+                .ok_or_else(|| missing("secret_key"))?,
+            session_token: credentials.session_token,
+        })
+    }
+}
+
+impl From<super::S3Credentials> for pb::S3Credentials {
+    fn from(credentials: super::S3Credentials) -> Self {
+        Self {
+            access_key: Some(credentials.access_key),
+            secret_key: Some(credentials.secret_key),
+            session_token: credentials.session_token,
+        }
+    }
+}
+
 fn s3_config_to_pb(cfg: super::ResolvedS3Config) -> pb::S3Config {
     pb::S3Config {
-        access_key: Some(cfg.access_key),
-        secret_key: Some(cfg.secret_key),
+        access_key: Some(cfg.credentials.access_key),
+        secret_key: Some(cfg.credentials.secret_key),
         bucket_name: Some(cfg.bucket_info.bucket),
         region: Some(cfg.bucket_info.region),
-        session_token: cfg.session_token,
+        session_token: cfg.credentials.session_token,
         retention_environment: cfg.retention_environment.into(),
     }
 }
@@ -1671,10 +1797,10 @@ mod tests {
     }
 
     #[test]
-    fn signed_rotate_kps_response_round_trip() {
-        let resp = GuardianSignedResponse::<RotateKpsResponse>::mock_for_testing();
-        let pb = rotate_kps_response_signed_to_pb(resp.clone());
-        let back = GuardianSignedResponse::<RotateKpsResponse>::try_from(pb).unwrap();
+    fn signed_rotate_kp_set_response_round_trip() {
+        let resp = GuardianSignedResponse::<RotateKpSetResponse>::mock_for_testing();
+        let pb = rotate_kp_set_response_signed_to_pb(resp.clone());
+        let back = GuardianSignedResponse::<RotateKpSetResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
     }
 
@@ -1689,32 +1815,46 @@ mod tests {
 
     #[test]
     fn operator_init_request_round_trip() {
-        let req = OperatorInitRequest::mock_for_testing();
-        let pb = operator_init_request_to_pb(req.clone()).unwrap();
-        let back = OperatorInitRequest::try_from(pb).unwrap();
+        let requests = [
+            OperatorInitRequest::mock_for_testing(),
+            OperatorInitRequest::new_ceremony_mode(
+                super::super::ResolvedS3Config::mock_for_testing(),
+            ),
+        ];
+        for request in requests {
+            let pb = operator_init_request_to_pb(request.clone()).unwrap();
+            let round_trip = OperatorInitRequest::try_from(pb).unwrap();
+            assert_eq!(request, round_trip);
+        }
+    }
+
+    #[test]
+    fn batch_provisioner_init_request_round_trip() {
+        let req = BatchProvisionerInitRequest::mock_for_testing();
+        let pb = batch_provisioner_init_request_to_pb(req.clone()).unwrap();
+        let back = BatchProvisionerInitRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
     }
 
     #[test]
-    fn provisioner_init_request_round_trip() {
-        let req = ProvisionerInitRequest::mock_for_testing();
-        let pb = provisioner_init_request_to_pb(req.clone()).unwrap();
-        let back = ProvisionerInitRequest::try_from(pb).unwrap();
+    fn batch_provisioner_rotate_kp_set_request_round_trip() {
+        let req = BatchProvisionerRotateKpSetRequest::mock_for_testing();
+        let pb = batch_provisioner_rotate_kp_set_request_to_pb(req.clone());
+        let back = BatchProvisionerRotateKpSetRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
     }
 
     #[test]
-    fn signed_single_provisioner_init_request_round_trip_and_verifies() {
+    fn signed_provisioner_init_request_round_trip_and_verifies() {
         use crate::pgp::test_utils::mock_pgp_keypair;
         use crate::pgp::test_utils::sign_detached_in_process;
 
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let (_, _, _, encrypted_share) =
-            SingleProvisionerInitRequest::mock_for_testing().into_parts();
+        let (_, _, _, encrypted_share) = ProvisionerInitRequest::mock_for_testing().into_parts();
         let expected_config_hash = [9u8; 32];
         let expected_genesis_state_hash = Some([10u8; 32]);
-        let request = SingleProvisionerInitRequest::new(
+        let request = ProvisionerInitRequest::new(
             "session-a".into(),
             expected_config_hash,
             expected_genesis_state_hash,
@@ -1724,8 +1864,8 @@ mod tests {
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
         let signed = KpSigned::from_parts(request, cert.clone(), signature);
 
-        let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
-        let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
+        let pb = pb::SignedProvisionerInitRequest::from(signed);
+        let back = KpSigned::<ProvisionerInitRequest>::try_from(pb.clone()).unwrap();
         let data = back.verify_signature().unwrap();
         assert_eq!(data.expected_session_id(), "session-a");
         assert_eq!(data.expected_config_hash(), &expected_config_hash);
@@ -1738,7 +1878,7 @@ mod tests {
 
         let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
-        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify_signature().is_err(),
             "signature must bind the expected guardian session"
@@ -1746,10 +1886,82 @@ mod tests {
 
         let mut tampered = pb;
         tampered.expected_config_hash = Some(vec![8u8; 32].into());
-        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify_signature().is_err(),
             "signature must bind the expected operator-init config hash"
+        );
+    }
+
+    #[test]
+    fn signed_provisioner_rotate_kp_set_request_round_trip_and_verifies() {
+        use crate::pgp::test_utils::mock_pgp_keypair;
+        use crate::pgp::test_utils::sign_detached_in_process;
+
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![9]), []).unwrap();
+        let new_kp_certs_roster = super::super::test_utils::mock_kp_certs_roster(5);
+        let encrypted_old_share = GuardianEncryptedShare {
+            id: ShareID::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0; 32],
+                aes_ciphertext: vec![1; 32],
+            },
+        };
+        let request = ProvisionerRotateKpSetRequest::new(
+            "session-a".into(),
+            pcr_allowlist.clone(),
+            encrypted_old_share.clone(),
+            new_kp_certs_roster.clone(),
+            5,
+            3,
+        )
+        .unwrap();
+        let signature =
+            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
+        let signed = KpSigned::from_parts(request, cert.clone(), signature);
+
+        let pb = pb::SignedProvisionerRotateKpSetRequest::from(signed);
+        let back = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(pb.clone()).unwrap();
+        let data = back.verify_signature().unwrap();
+        assert_eq!(data.expected_session_id().to_string(), "session-a");
+        assert_eq!(data.pcr_allowlist(), &pcr_allowlist);
+        assert_eq!(data.encrypted_old_share(), &encrypted_old_share);
+        assert_eq!(data.new_kp_certs_roster(), &new_kp_certs_roster);
+        assert_eq!(data.new_params().num_shares(), 5);
+        assert_eq!(data.new_params().threshold(), 3);
+        assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
+
+        let mut tampered = pb.clone();
+        tampered.expected_session_id = "other-session".to_string();
+        let tampered = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(tampered).unwrap();
+        assert!(
+            tampered.verify_signature().is_err(),
+            "signature must bind the expected ceremony session"
+        );
+
+        let mut tampered = pb.clone();
+        tampered
+            .pcr_allowlist
+            .as_mut()
+            .unwrap()
+            .current_build
+            .as_mut()
+            .unwrap()
+            .pcr0 = Some(vec![8].into());
+        let tampered = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(tampered).unwrap();
+        assert!(
+            tampered.verify_signature().is_err(),
+            "signature must bind the PCR allowlist"
+        );
+
+        let mut tampered = pb;
+        tampered.new_threshold = Some(2);
+        let tampered = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(tampered).unwrap();
+        assert!(
+            tampered.verify_signature().is_err(),
+            "signature must bind the proposed new sharing parameters"
         );
     }
 

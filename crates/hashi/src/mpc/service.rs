@@ -66,6 +66,13 @@ const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
 const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
+const NONCE_CLOCK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const _: () = assert!(
+    NONCE_CLOCK_READ_TIMEOUT.as_millis() < NONCE_WINDOW_WAIT_SLACK.as_millis(),
+    "the clock read runs inside the window wait, whose deadline is at least \
+     NONCE_WINDOW_WAIT_SLACK, so a read bound at or above it never fires from the loop and \
+     mpc_nonce_read_side_clock_errors_total goes unreachable there",
+);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_WAIT_TOTAL_BUDGET: Duration = Duration::from_secs(600);
@@ -149,6 +156,8 @@ impl MpcService {
             "MPC service starting: pending_epoch_change={pending:?}, \
              is_in_current_committee={is_in_committee}",
         );
+        self.run_major_compaction(self.inner.onchain_state().epoch())
+            .await;
         if let Some(epoch) = pending {
             info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;
@@ -178,6 +187,17 @@ impl MpcService {
         let mut reconcile_tick = tokio::time::interval(RECONCILE_TICK);
         reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            self.inner.metrics.task_heartbeat("mpc_service");
+            // Re-sample the presig pool every iteration (at least each
+            // RECONCILE_TICK): the signing-time update in
+            // `forward_signing_results` alone leaves the gauge frozen — at 0
+            // after a restart — whenever no withdrawals are flowing.
+            if let Some(manager) = self.inner.current_signing_manager() {
+                self.inner
+                    .metrics
+                    .presig_pool_remaining
+                    .set(manager.presignatures_remaining() as i64);
+            }
             // Check for pending reconfig before blocking on `recv()`.
             if let Some(epoch) = self.get_pending_epoch_change() {
                 self.handle_reconfig(epoch).await;
@@ -620,7 +640,8 @@ impl MpcService {
                 NonceGenerationProtocol::Vanilla => None,
             }
         };
-        let mut party_channel = PrefetchedTobChannel::new(canonical.into_inner());
+        let mut party_channel = PrefetchedTobChannel::new(canonical.into_inner())
+            .with_supersede_check(onchain_state_for_certs.clone(), epoch);
         let nonce_result = MpcManager::run_nonce_party_phase(
             &mpc_manager,
             batch_index,
@@ -1216,6 +1237,7 @@ impl MpcService {
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
         let mut adjudicated = HashMap::new();
+        let mut pending_fetch = None;
         loop {
             let (onchain_epoch, pending) = {
                 let state = onchain_state.state();
@@ -1233,14 +1255,33 @@ impl MpcService {
                      (onchain epoch {onchain_epoch}, pending epoch change {pending:?})"
                 );
             }
-            let fetched = tokio::time::timeout(
-                crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
-                onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
-            )
-            .await;
+            let fetched = {
+                let (fetch, started, stall_reported) = pending_fetch.get_or_insert_with(|| {
+                    (
+                        Box::pin(
+                            onchain_state
+                                .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
+                        ),
+                        tokio::time::Instant::now(),
+                        false,
+                    )
+                });
+                let bound = if *stall_reported {
+                    wait_deadline
+                } else {
+                    (*started + crate::communication::sui_tob::FETCH_STALL_TIMEOUT)
+                        .min(wait_deadline)
+                };
+                match tokio::time::timeout_at(bound, fetch).await {
+                    Ok(res) => Ok(res),
+                    Err(_) => {
+                        *stall_reported = true;
+                        Err(tokio::time::Instant::now() >= wait_deadline)
+                    }
+                }
+            };
             let certs = match fetched {
-                Err(_) => {
-                    let expired = tokio::time::Instant::now() >= wait_deadline;
+                Err(expired) => {
                     metrics
                         .mpc_tob_fetch_stalls_total
                         .with_label_values(&[
@@ -1256,7 +1297,11 @@ impl MpcService {
                         "nonce cert fetch for epoch {epoch} batch {batch_index} stalled \
                          >{:?}; {}",
                         crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
-                        if expired { "giving up" } else { "retrying" },
+                        if expired {
+                            "giving up"
+                        } else {
+                            "still waiting"
+                        },
                     );
                     if expired {
                         anyhow::bail!(
@@ -1266,8 +1311,12 @@ impl MpcService {
                     }
                     continue;
                 }
-                Ok(Ok(certs)) => certs.unwrap_or_default(),
+                Ok(Ok(certs)) => {
+                    pending_fetch = None;
+                    certs.unwrap_or_default()
+                }
                 Ok(Err(e)) if crate::onchain::is_inconsistent_listing(&e) => {
+                    pending_fetch = None;
                     if tokio::time::Instant::now() >= wait_deadline {
                         return Err(e);
                     }
@@ -1311,14 +1360,13 @@ impl MpcService {
             }
             let read_side_past_cutoff = |cutoff_ms: u64| async move {
                 let read = tokio::time::timeout(
-                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
+                    NONCE_CLOCK_READ_TIMEOUT,
                     onchain_state.read_side_checkpoint_timestamp_ms(),
                 )
                 .await;
                 match read.unwrap_or_else(|_| {
                     Err(anyhow::anyhow!(
-                        "read-side clock read stalled >{:?}",
-                        crate::communication::sui_tob::FETCH_STALL_TIMEOUT
+                        "read-side clock read stalled >{NONCE_CLOCK_READ_TIMEOUT:?}"
                     ))
                 }) {
                     Ok(ts) => ts > cutoff_ms,
@@ -1452,7 +1500,8 @@ impl MpcService {
                     let mgr = mpc_manager.read().unwrap();
                     mgr.nonce_collection_cutoff_ms(&certs)
                 };
-                let mut prefetched = PrefetchedTobChannel::new(avid_certs);
+                let mut prefetched = PrefetchedTobChannel::new(avid_certs)
+                    .with_supersede_check(onchain_state.clone(), epoch);
                 let outcome = MpcManager::run_nonce_party_phase(
                     mpc_manager,
                     batch_index,
@@ -1679,7 +1728,6 @@ impl MpcService {
                  will retry at next trigger"
             );
         }
-        self.backup_handle.backup_after_epoch_change(target_epoch);
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         let pruning_references = {
             let state = self.inner.onchain_state().state();
@@ -1710,6 +1758,11 @@ impl MpcService {
         {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
+        self.run_major_compaction(target_epoch).await;
+        // Only after compaction: the backup takes a database-wide snapshot,
+        // and a snapshot taken before the prune pins every value the
+        // compaction would otherwise drop.
+        self.backup_handle.backup_after_epoch_change(target_epoch);
         if !self.reconfig_target_live(target_epoch) {
             info!(
                 "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
@@ -1742,6 +1795,49 @@ impl MpcService {
         }
         drop(_prepare_signing_timer);
         drop(_reconfig_timer);
+    }
+
+    /// Compact the database so rows tombstoned by pruning are actually unlinked.
+    ///
+    /// Awaited deliberately before `prepare_signing` refills the presig pool:
+    /// the keyspaces are at their emptiest right after the prune, so the merge
+    /// writes almost nothing.
+    async fn run_major_compaction(&self, epoch: u64) {
+        let db = self.inner.db.clone();
+        let started = std::time::Instant::now();
+        let compaction = match tokio::task::spawn_blocking(move || db.major_compact()).await {
+            Ok(compaction) => compaction,
+            Err(e) => {
+                error!("major compaction for epoch {epoch} panicked: {e}");
+                return;
+            }
+        };
+        for keyspace in compaction.keyspaces {
+            self.inner.metrics.record_major_compaction(&keyspace);
+            match &keyspace.error {
+                Some(e) => error!("compacting {} failed: {e}", keyspace.name),
+                None => info!(
+                    "compacted {} in {:?}: {} -> {} live bytes",
+                    keyspace.name, keyspace.elapsed, keyspace.before, keyspace.after,
+                ),
+            }
+        }
+        // The unlink rotation is what actually releases the disk, so its
+        // failure fails the run even when every keyspace compacted cleanly.
+        match &compaction.unlink_error {
+            Some(e) => {
+                self.inner.metrics.record_major_compaction_unlink_failure();
+                error!(
+                    "major compaction for epoch {epoch} failed after {:?}: \
+                     retired tables were not unlinked, the space is still held: {e}",
+                    started.elapsed()
+                );
+            }
+            None => info!(
+                "major compaction for epoch {epoch} finished in {:?}",
+                started.elapsed()
+            ),
+        }
     }
 
     fn setup_initial_dkg(&self, target_epoch: u64) -> anyhow::Result<()> {

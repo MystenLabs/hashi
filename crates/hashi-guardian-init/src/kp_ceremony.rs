@@ -97,8 +97,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     );
     let state = reader
         .read_latest_ceremony_state_from_current_build()
-        .await?
-        .context("no ceremony logs found in guardian S3 bucket")?;
+        .await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "ceremony scrape",

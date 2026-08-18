@@ -6,22 +6,22 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
-use super::CryptoVerificationError;
-use super::CryptoVerificationResult;
-use super::GuardianPubKey;
-use super::GuardianResult;
-use super::errors::GuardianError::BuildNotAllowlisted;
-use super::errors::GuardianError::BuildNotCurrent;
-use super::errors::GuardianError::InvalidInputs;
+use crate::guardian::CryptoVerificationError;
+use crate::guardian::CryptoVerificationResult;
+use crate::guardian::GuardianPubKey;
+use crate::guardian::GuardianResult;
+use crate::guardian::errors::GuardianError::BuildNotAllowlisted;
+use crate::guardian::errors::GuardianError::BuildNotCurrent;
+use crate::guardian::errors::GuardianError::InvalidInputs;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
-use super::time_utils::now_timestamp_ms;
+use crate::guardian::time::now_timestamp_ms;
 
 /// Git commit revision reported by the enclave build.
 pub type GitRevision = String;
 
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NitroAttestation(#[serde(with = "crate::guardian::serde_utils::base64_bytes")] Vec<u8>);
+pub struct NitroAttestation(#[serde(with = "crate::guardian::serde::base64_bytes")] Vec<u8>);
 
 impl NitroAttestation {
     pub fn new(bytes: Vec<u8>) -> Self {
@@ -271,5 +271,86 @@ impl<'de> Deserialize<'de> for PcrAllowlist {
 
         let wire = PcrAllowlistWire::deserialize(deserializer)?;
         PcrAllowlist::new(wire.current_build, wire.prev_builds).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {
+        let allowlist = PcrAllowlist::new(
+            BuildPcrs::new("current", vec![0]),
+            vec![
+                BuildPcrs::new("prev-1", vec![1]),
+                BuildPcrs::new("prev-2", vec![2]),
+            ],
+        )
+        .unwrap();
+
+        let current_build = allowlist.resolve("current").unwrap();
+        assert_eq!(current_build.pcr0(), &[0]);
+        let prev_build = allowlist.resolve("prev-1").unwrap();
+        assert_eq!(prev_build.pcr0(), &[1]);
+        let prev2_build = allowlist.resolve("prev-2").unwrap();
+        assert_eq!(prev2_build.pcr0(), &[2]);
+
+        assert!(matches!(
+            allowlist.resolve("missing").unwrap_err(),
+            BuildNotAllowlisted(message) if message.contains("build 'missing'")
+        ));
+    }
+
+    #[test]
+    fn pcr_allowlist_rejects_duplicate_build_revisions() {
+        let err = PcrAllowlist::new(
+            BuildPcrs::new("current", vec![0]),
+            vec![BuildPcrs::new("current", vec![1])],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, InvalidInputs(msg) if msg.contains("duplicate PCR allowlist entry")));
+    }
+
+    #[test]
+    fn pcr_allowlist_deserializes_hex_wire_form() {
+        let allowlist: PcrAllowlist = serde_json::from_value(serde_json::json!({
+            "current_build": {
+                "git_revision": "current",
+                "pcr0": "0x00ff"
+            },
+            "prev_builds": [
+                {
+                    "git_revision": "prev",
+                    "pcr0": "01"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let current_build = allowlist.resolve("current").unwrap();
+        assert_eq!(current_build.pcr0(), &[0x00, 0xff]);
+        let prev_build = allowlist.resolve("prev").unwrap();
+        assert_eq!(prev_build.pcr0(), &[0x01]);
+    }
+
+    #[test]
+    fn pcr_allowlist_requires_current_build() {
+        let allowlist = PcrAllowlist::new(
+            BuildPcrs::new("current", vec![0]),
+            vec![BuildPcrs::new("prev", vec![1])],
+        )
+        .unwrap();
+
+        let current_build = allowlist.resolve("current").unwrap();
+        allowlist.require_current_build(current_build).unwrap();
+
+        let prev_build = allowlist.resolve("prev").unwrap();
+        assert!(matches!(
+            allowlist.require_current_build(prev_build).unwrap_err(),
+            BuildNotCurrent(message)
+                if message.contains("build 'prev'") && message.contains("build 'current'")
+        ));
     }
 }

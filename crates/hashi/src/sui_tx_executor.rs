@@ -488,10 +488,6 @@ impl SuiTxExecutor {
         self
     }
 
-    pub(crate) fn call_package(&self) -> Address {
-        self.call_target().0
-    }
-
     fn call_target(&self) -> (Address, Option<u64>) {
         match self
             .onchain_state
@@ -592,7 +588,7 @@ impl SuiTxExecutor {
         signed_message: SignedMessage<DepositConfirmationMessage>,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -657,7 +653,7 @@ impl SuiTxExecutor {
 
         builder.move_call(
             Function::new(
-                self.call_package(),
+                self.active_call_package_id(),
                 Identifier::from_static("deposit"),
                 Identifier::from_static("confirm_deposit"),
             ),
@@ -689,7 +685,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<()> {
         // Build a PTB that calls delete_expired_deposit for each expired request
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -748,7 +744,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<Address> {
         let builder = build_create_deposit_request(
             self.hashi_ids,
-            self.call_package(),
+            self.active_call_package_id(),
             txid,
             vout,
             amount_sats,
@@ -789,7 +785,7 @@ impl SuiTxExecutor {
         anyhow::ensure!(!utxos.is_empty(), "No UTXOs to deposit");
 
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -890,7 +886,7 @@ impl SuiTxExecutor {
         anyhow::ensure!(!deposits.is_empty(), "No deposits to create");
 
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -984,7 +980,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<Address> {
         let builder = build_create_withdrawal_request(
             self.hashi_ids,
-            self.call_package(),
+            self.active_call_package_id(),
             withdrawal_amount_sats,
             destination_bytes,
         );
@@ -1021,7 +1017,7 @@ impl SuiTxExecutor {
         let total_sats = total_sats as u64;
 
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1100,6 +1096,10 @@ impl SuiTxExecutor {
         Ok(request_ids)
     }
 
+    pub(crate) fn active_call_package_id(&self) -> Address {
+        self.call_target().0
+    }
+
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_start_reconfig(&mut self) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
@@ -1115,7 +1115,7 @@ impl SuiTxExecutor {
         );
         builder.move_call(
             Function::new(
-                self.call_package(),
+                self.active_call_package_id(),
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("start_reconfig"),
             ),
@@ -1138,7 +1138,7 @@ impl SuiTxExecutor {
         mpc_cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
                 .as_shared()
@@ -1172,7 +1172,7 @@ impl SuiTxExecutor {
         committee_handoff_cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
                 .as_shared()
@@ -1223,7 +1223,7 @@ impl SuiTxExecutor {
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         builder.move_call(
             Function::new(
-                self.call_package(),
+                self.active_call_package_id(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
@@ -1258,7 +1258,7 @@ impl SuiTxExecutor {
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<Option<u64>> {
         let sender = self.signer.verifying_key().derive_address();
-        let call_package = self.call_package();
+        let call_package = self.active_call_package_id();
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
@@ -1390,7 +1390,7 @@ impl SuiTxExecutor {
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1443,7 +1443,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1565,7 +1565,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1623,7 +1623,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1687,7 +1687,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<()> {
         let builder = build_cancel_withdrawal(
             self.hashi_ids,
-            self.call_package(),
+            self.active_call_package_id(),
             withdrawal_id,
             self.sender(),
         );
@@ -1721,7 +1721,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1780,7 +1780,7 @@ impl SuiTxExecutor {
         let mut max_checkpoint = 0;
         for chunk in utxo_ids.chunks(MAX_PER_TX) {
             let mut builder = TransactionBuilder::new();
-            let package_id = self.call_package();
+            let package_id = self.active_call_package_id();
             let hashi_arg = builder.object(
                 ObjectInput::new(self.hashi_ids.hashi_object_id)
                     .as_shared()
@@ -1837,9 +1837,9 @@ impl SuiTxExecutor {
     }
 }
 
-// TODO: the remaining free builders and `cli/client.rs` still call the original
-// package id, so they run v1 bytecode after an upgrade. Take the call target as
-// a parameter, as `build_register_or_update_validator_tx` now does.
+// TODO: the builders below take the call target, but `cli/commands/{deposit,
+// withdraw}.rs` still pass the original package id, so those commands abort once
+// v1 is disabled. They need an `OnchainState` to resolve one.
 
 /// Build the PTB for a single deposit request. Pure (no signer / no network),
 /// so it can be signed/executed by [`SuiTxExecutor::execute`] or serialized

@@ -233,11 +233,21 @@ async fn fetch_certificates_if_present(
 pub struct PrefetchedTobChannel {
     certs: Vec<(Address, CertificateV1)>,
     next: usize,
+    supersede: Option<(OnchainState, u64)>,
 }
 
 impl PrefetchedTobChannel {
     pub fn new(certs: Vec<(Address, CertificateV1)>) -> Self {
-        Self { certs, next: 0 }
+        Self {
+            certs,
+            next: 0,
+            supersede: None,
+        }
+    }
+
+    pub fn with_supersede_check(mut self, onchain_state: OnchainState, epoch: u64) -> Self {
+        self.supersede = Some((onchain_state, epoch));
+        self
     }
 }
 
@@ -250,6 +260,24 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        if let Some((onchain_state, epoch)) = &self.supersede {
+            let (onchain_epoch, pending) = {
+                let state = onchain_state.state();
+                let committees = &state.hashi().committees;
+                (committees.epoch(), committees.pending_epoch_change())
+            };
+            if tob_wait_superseded(
+                ProtocolType::NonceGeneration,
+                *epoch,
+                onchain_epoch,
+                pending,
+            ) {
+                return Err(ChannelError::Other(format!(
+                    "nonce cert replay for epoch {epoch} superseded (onchain epoch \
+                     {onchain_epoch}, pending epoch change {pending:?})"
+                )));
+            }
+        }
         let (_, cert) = self.certs.get(self.next).ok_or(ChannelError::Exhausted)?;
         self.next += 1;
         Ok(cert.clone())
