@@ -64,6 +64,10 @@ public(package) fun disable_version(self: &mut Versioning, version: u64) {
     self.enabled_versions.remove(&version);
 }
 
+public(package) fun is_version_enabled(self: &Versioning, version: u64): bool {
+    self.enabled_versions.contains(&version)
+}
+
 public(package) fun enable_version(self: &mut Versioning, version: u64) {
     self.enabled_versions.insert(version);
 }

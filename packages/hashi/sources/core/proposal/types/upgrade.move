@@ -72,6 +72,7 @@ public fun finalize_upgrade(hashi: &mut Hashi, receipt: UpgradeReceipt) {
     hashi.versioning().assert_version_enabled();
     let upgrade_package = receipt.package();
     hashi.versioning_mut().commit_upgrade(receipt);
+    hashi::mpc_config::seed_absent_defaults(hashi.config_mut());
     let version = hashi.versioning().upgrade_cap().version();
     sui::event::emit(PackageUpgraded { package: upgrade_package, version });
 }

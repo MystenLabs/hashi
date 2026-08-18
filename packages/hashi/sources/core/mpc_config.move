@@ -83,6 +83,28 @@ public(package) fun nonce_accumulation_window_ms(config: &Config): u64 {
         .destroy_or!(DEFAULT_NONCE_ACCUMULATION_WINDOW_MS)
 }
 
+public(package) fun seed_absent_defaults(config: &mut Config) {
+    seed_if_absent(config, KEY_THRESHOLD_IN_BASIS_POINTS, DEFAULT_THRESHOLD_IN_BASIS_POINTS);
+    seed_if_absent(
+        config,
+        KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA,
+    );
+    seed_if_absent(config, KEY_MAX_FAULTY_IN_BASIS_POINTS, DEFAULT_MAX_FAULTY_IN_BASIS_POINTS);
+    seed_if_absent(config, KEY_NONCE_GENERATION_PROTOCOL, VANILLA_NONCE_GENERATION_PROTOCOL);
+    seed_if_absent(
+        config,
+        KEY_NONCE_ACCUMULATION_WINDOW_MS,
+        DEFAULT_NONCE_ACCUMULATION_WINDOW_MS,
+    );
+}
+
+fun seed_if_absent(config: &mut Config, key: vector<u8>, default: u64) {
+    if (!config.contains(key)) {
+        config.upsert(key, config_value::new_u64(default));
+    };
+}
+
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(
         KEY_THRESHOLD_IN_BASIS_POINTS,

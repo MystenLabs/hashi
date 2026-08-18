@@ -59,15 +59,14 @@ entry fun destroy_all_certs(
     protocol_type: ProtocolType,
 ) {
     hashi.versioning().assert_version_enabled();
-    let is_nonce_generation = protocol_type.is_nonce_generation();
     let key = hashi::tob::tob_key(epoch, batch_index, protocol_type);
     let current_epoch = hashi.committee_set().epoch();
-    if (is_nonce_generation) {
-        let epoch_certs: hashi::tob::StampedEpochCertsV1 = hashi.tob_mut().remove(key);
-        hashi::tob::destroy_all_stamped(epoch_certs, current_epoch);
-    } else {
+    if (hashi.cert_bucket_is_bare(key)) {
         let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);
         hashi::tob::destroy_all(epoch_certs, current_epoch);
+    } else {
+        let epoch_certs: hashi::tob::StampedEpochCertsV1 = hashi.tob_mut().remove(key);
+        hashi::tob::destroy_all_stamped(epoch_certs, current_epoch);
     };
 }
 
@@ -98,15 +97,20 @@ fun submit_stamped_cert_internal(
     ctx: &mut TxContext,
 ) {
     assert_can_submit(hashi, epoch, dealer, ctx);
-    let epoch_certs = hashi.epoch_certs_stamped(key, ctx);
-    hashi::tob::submit_stamped_cert_with_signature(
-        epoch_certs,
-        epoch,
-        dealer,
-        messages_hash,
-        cert,
-        clock.timestamp_ms(),
-    );
+    if (hashi.nonce_write_stays_bare(key)) {
+        let epoch_certs = hashi.epoch_certs(key, ctx);
+        hashi::tob::submit_cert_with_signature(epoch_certs, epoch, dealer, messages_hash, cert);
+    } else {
+        let epoch_certs = hashi.epoch_certs_stamped(key, ctx);
+        hashi::tob::submit_stamped_cert_with_signature(
+            epoch_certs,
+            epoch,
+            dealer,
+            messages_hash,
+            cert,
+            clock.timestamp_ms(),
+        );
+    };
 }
 
 fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContext) {

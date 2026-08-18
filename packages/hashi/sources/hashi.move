@@ -36,6 +36,8 @@ const EWrongUpgradeCap: vector<u8> = b"Upgrade cap does not belong to this packa
 
 // ~~~~~~~ Structs ~~~~~~~
 
+const BARE_CERT_PACKAGE_VERSION: u64 = 1;
+
 public struct Hashi has key {
     id: UID,
     committee_set: CommitteeSet,
@@ -221,6 +223,18 @@ public(package) fun epoch_certs(
         self.tob.add(key, hashi::tob::create(epoch, key.protocol_type(), ctx));
     };
     self.tob.borrow_mut(key)
+}
+
+public(package) fun cert_bucket_is_bare(self: &Hashi, key: hashi::tob::TobKey): bool {
+    self.tob.contains_with_type<hashi::tob::TobKey, hashi::tob::EpochCertsV1>(key)
+}
+
+public(package) fun nonce_write_stays_bare(self: &Hashi, key: hashi::tob::TobKey): bool {
+    if (self.tob.contains(key)) {
+        self.cert_bucket_is_bare(key)
+    } else {
+        self.versioning.is_version_enabled(BARE_CERT_PACKAGE_VERSION)
+    }
 }
 
 public(package) fun epoch_certs_stamped(

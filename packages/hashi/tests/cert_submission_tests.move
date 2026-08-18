@@ -114,3 +114,52 @@ fun test_destroy_all_stamped_before_two_epochs_aborts() {
     let bucket = hashi::tob::create_stamped(0, hashi::tob::protocol_type_nonce_generation(), ctx);
     hashi::tob::destroy_all_stamped(bucket, 1);
 }
+
+#[test]
+fun test_nonce_cert_follows_a_bare_bucket_after_v1_is_disabled() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let epoch = ctx.epoch();
+    let mut clock = sui::clock::create_for_testing(ctx);
+    clock.set_for_testing(123);
+
+    hashi.versioning_mut().enable_version(1);
+    hashi::cert_submission::submit_nonce_cert(
+        &mut hashi,
+        epoch,
+        0,
+        VOTER1,
+        vector[1u8, 2, 3],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        ctx,
+    );
+
+    let nonce_key = hashi::tob::tob_key(
+        epoch,
+        option::some(0),
+        hashi::tob::protocol_type_nonce_generation(),
+    );
+    assert!(hashi.cert_bucket_is_bare(nonce_key));
+    assert!(hashi.epoch_certs_ref(nonce_key).num_certs() == 1);
+
+    hashi.versioning_mut().disable_version(1);
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    hashi::cert_submission::submit_nonce_cert(
+        &mut hashi,
+        epoch,
+        0,
+        VOTER2,
+        vector[4u8, 5, 6],
+        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        &clock,
+        ctx2,
+    );
+
+    assert!(hashi.cert_bucket_is_bare(nonce_key));
+    assert!(hashi.epoch_certs_ref(nonce_key).num_certs() == 2);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
