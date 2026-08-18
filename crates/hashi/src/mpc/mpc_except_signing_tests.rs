@@ -16192,3 +16192,72 @@ fn retrieve_messages_does_not_starve_the_runtime() {
         Some(hashi_types::proto::retrieve_messages_response::Messages::DkgMessage(_))
     ));
 }
+
+#[test]
+fn retrieve_messages_store_read_does_not_hold_the_manager_lock() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let dealer_message = setup
+        .create_manager(0)
+        .create_dealer_message(&mut rand::thread_rng());
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let manager = setup.create_manager_with_store(
+        0,
+        Arc::new(BlockingDealerMessageStore {
+            message: dealer_message,
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }),
+    );
+    let epoch = manager.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let mpc_lock = hashi.mpc_manager().unwrap();
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+        epoch: Some(epoch),
+        dealer: Some(setup.address(2).to_string()),
+        protocol_type: Some(hashi_types::proto::MpcProtocolType::Dkg as i32),
+        batch_index: None,
+    });
+    request.extensions_mut().insert(setup.address(1));
+
+    let handler = rt.spawn(async move {
+        use hashi_types::proto::mpc_service_server::MpcService;
+        service.retrieve_messages(request).await
+    });
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("handler never reached the storage read");
+    let writable = mpc_lock.try_write().is_ok();
+
+    release_tx.send(()).unwrap();
+    let response = rt.block_on(handler).unwrap();
+
+    assert!(
+        writable,
+        "manager write lock was held across the storage read"
+    );
+    assert!(matches!(
+        response.unwrap().into_inner().messages,
+        Some(hashi_types::proto::retrieve_messages_response::Messages::DkgMessage(_))
+    ));
+}
