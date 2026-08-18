@@ -169,7 +169,7 @@ pub struct MpcManager {
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
-    pub public_messages_store: Box<dyn PublicMessagesStore>,
+    pub public_messages_store: Arc<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_nonce_outputs: BTreeMap<(u32, Address), batch_avss::ReceiverOutput>,
@@ -200,7 +200,7 @@ impl MpcManager {
         encryption_key: PrivateKey<EncryptionGroupElement>,
         previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
         signing_key: Bls12381PrivateKey,
-        public_message_store: Box<dyn PublicMessagesStore>,
+        public_message_store: Arc<dyn PublicMessagesStore>,
         chain_id: &str,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,

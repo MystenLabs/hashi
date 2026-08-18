@@ -263,14 +263,14 @@ impl TestSetup {
     fn create_manager(&self, validator_index: usize) -> MpcManager {
         self.create_manager_with_store(
             validator_index,
-            Box::new(InMemoryPublicMessagesStore::new()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
         )
     }
 
     fn create_manager_with_store(
         &self,
         validator_index: usize,
-        store: Box<dyn PublicMessagesStore>,
+        store: Arc<dyn PublicMessagesStore>,
     ) -> MpcManager {
         let address = Address::new([validator_index as u8; 32]);
         MpcManager::new(
@@ -1017,7 +1017,7 @@ fn test_mpc_manager_new_from_committee_set() {
         encryption_key,
         None,
         signing_key,
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1081,7 +1081,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         encryption_keys[0].clone(),
         None,
         signing_keys[0].clone(),
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1113,7 +1113,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         wrong_encryption_key,
         None,
         setup.signing_keys[0].clone(),
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1200,7 +1200,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1286,7 +1286,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1391,7 +1391,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
         signing_keys[0].clone(),
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -1453,12 +1453,12 @@ fn test_mpc_manager_new_party_id_follows_canonical_order() {
 }
 
 struct InMemoryPublicMessagesStore {
-    stored: HashMap<Address, avss::Message>,
-    rotation_stored: HashMap<Address, RotationMessages>,
-    nonce_stored: HashMap<(u32, Address), batch_avss::Message>,
-    avid_round_stored: HashMap<(u32, Address), AvidRoundState>,
-    avid_held_echoes_stored: HashMap<(u32, Address), HeldAvidEchoes>,
-    avid_dealer_builder_stored: HashMap<u32, batch_avss_avid::AvssMessageBuilder>,
+    stored: std::sync::Mutex<HashMap<Address, avss::Message>>,
+    rotation_stored: std::sync::Mutex<HashMap<Address, RotationMessages>>,
+    nonce_stored: std::sync::Mutex<HashMap<(u32, Address), batch_avss::Message>>,
+    avid_round_stored: std::sync::Mutex<HashMap<(u32, Address), AvidRoundState>>,
+    avid_held_echoes_stored: std::sync::Mutex<HashMap<(u32, Address), HeldAvidEchoes>>,
+    avid_dealer_builder_stored: std::sync::Mutex<HashMap<u32, batch_avss_avid::AvssMessageBuilder>>,
     fail_nonce_reads: bool,
     fail_avid_round_state_reads: bool,
     fail_avid_held_echoes_reads: bool,
@@ -1467,12 +1467,12 @@ struct InMemoryPublicMessagesStore {
 impl InMemoryPublicMessagesStore {
     fn new() -> Self {
         Self {
-            stored: HashMap::new(),
-            rotation_stored: HashMap::new(),
-            nonce_stored: HashMap::new(),
-            avid_round_stored: HashMap::new(),
-            avid_held_echoes_stored: HashMap::new(),
-            avid_dealer_builder_stored: HashMap::new(),
+            stored: std::sync::Mutex::new(HashMap::new()),
+            rotation_stored: std::sync::Mutex::new(HashMap::new()),
+            nonce_stored: std::sync::Mutex::new(HashMap::new()),
+            avid_round_stored: std::sync::Mutex::new(HashMap::new()),
+            avid_held_echoes_stored: std::sync::Mutex::new(HashMap::new()),
+            avid_dealer_builder_stored: std::sync::Mutex::new(HashMap::new()),
             fail_nonce_reads: false,
             fail_avid_round_state_reads: false,
             fail_avid_held_echoes_reads: false,
@@ -1482,12 +1482,12 @@ impl InMemoryPublicMessagesStore {
 
 impl PublicMessagesStore for InMemoryPublicMessagesStore {
     fn store_dealer_message(
-        &mut self,
+        &self,
         _epoch: u64,
         dealer: &Address,
         message: &avss::Message,
     ) -> anyhow::Result<()> {
-        self.stored.insert(*dealer, message.clone());
+        self.stored.lock().unwrap().insert(*dealer, message.clone());
         Ok(())
     }
 
@@ -1496,24 +1496,29 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         _epoch: u64,
         dealer: &Address,
     ) -> anyhow::Result<Option<avss::Message>> {
-        Ok(self.stored.get(dealer).cloned())
+        Ok(self.stored.lock().unwrap().get(dealer).cloned())
     }
 
     fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         Ok(self
             .stored
+            .lock()
+            .unwrap()
             .iter()
             .map(|(k, v)| (*k, Messages::Dkg(v.clone())))
             .collect())
     }
 
     fn store_rotation_messages(
-        &mut self,
+        &self,
         _epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
     ) -> anyhow::Result<()> {
-        self.rotation_stored.insert(*dealer, messages.clone());
+        self.rotation_stored
+            .lock()
+            .unwrap()
+            .insert(*dealer, messages.clone());
         Ok(())
     }
 
@@ -1522,25 +1527,29 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         _epoch: u64,
         dealer: &Address,
     ) -> anyhow::Result<Option<RotationMessages>> {
-        Ok(self.rotation_stored.get(dealer).cloned())
+        Ok(self.rotation_stored.lock().unwrap().get(dealer).cloned())
     }
 
     fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         Ok(self
             .rotation_stored
+            .lock()
+            .unwrap()
             .iter()
             .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
             .collect())
     }
 
     fn store_nonce_message(
-        &mut self,
+        &self,
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
         message: &batch_avss::Message,
     ) -> anyhow::Result<()> {
         self.nonce_stored
+            .lock()
+            .unwrap()
             .insert((batch_index, *dealer), message.clone());
         Ok(())
     }
@@ -1554,7 +1563,12 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         if self.fail_nonce_reads {
             return Err(anyhow::anyhow!("nonce read failure"));
         }
-        Ok(self.nonce_stored.get(&(batch_index, *dealer)).cloned())
+        Ok(self
+            .nonce_stored
+            .lock()
+            .unwrap()
+            .get(&(batch_index, *dealer))
+            .cloned())
     }
 
     fn list_nonce_messages(
@@ -1563,6 +1577,8 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
     ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
         Ok(self
             .nonce_stored
+            .lock()
+            .unwrap()
             .iter()
             .filter(|((bi, _), _)| *bi == batch_index)
             .map(|((_, addr), msg)| (*addr, msg.clone()))
@@ -1570,13 +1586,15 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
     }
 
     fn store_avid_round_state(
-        &mut self,
+        &self,
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
         state: &AvidRoundState,
     ) -> anyhow::Result<()> {
         self.avid_round_stored
+            .lock()
+            .unwrap()
             .insert((batch_index, *dealer), state.clone());
         Ok(())
     }
@@ -1590,7 +1608,12 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         if self.fail_avid_round_state_reads {
             return Err(anyhow::anyhow!("avid round state read failure"));
         }
-        Ok(self.avid_round_stored.get(&(batch_index, *dealer)).cloned())
+        Ok(self
+            .avid_round_stored
+            .lock()
+            .unwrap()
+            .get(&(batch_index, *dealer))
+            .cloned())
     }
 
     fn list_avid_round_states(
@@ -1599,6 +1622,8 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
     ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
         Ok(self
             .avid_round_stored
+            .lock()
+            .unwrap()
             .iter()
             .filter(|((bi, _), _)| *bi == batch_index)
             .map(|((_, addr), state)| (*addr, state.clone()))
@@ -1606,13 +1631,15 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
     }
 
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
         held: &HeldAvidEchoes,
     ) -> anyhow::Result<()> {
         self.avid_held_echoes_stored
+            .lock()
+            .unwrap()
             .insert((batch_index, *dealer), held.clone());
         Ok(())
     }
@@ -1628,17 +1655,21 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         }
         Ok(self
             .avid_held_echoes_stored
+            .lock()
+            .unwrap()
             .get(&(batch_index, *dealer))
             .cloned())
     }
 
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         _epoch: u64,
         batch_index: u32,
         builder: &batch_avss_avid::AvssMessageBuilder,
     ) -> anyhow::Result<()> {
         self.avid_dealer_builder_stored
+            .lock()
+            .unwrap()
             .insert(batch_index, builder.clone());
         Ok(())
     }
@@ -1648,7 +1679,12 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         _epoch: u64,
         batch_index: u32,
     ) -> anyhow::Result<Option<batch_avss_avid::AvssMessageBuilder>> {
-        Ok(self.avid_dealer_builder_stored.get(&batch_index).cloned())
+        Ok(self
+            .avid_dealer_builder_stored
+            .lock()
+            .unwrap()
+            .get(&batch_index)
+            .cloned())
     }
 }
 
@@ -1656,7 +1692,7 @@ struct FailingPublicMessagesStore;
 
 impl PublicMessagesStore for FailingPublicMessagesStore {
     fn store_dealer_message(
-        &mut self,
+        &self,
         _epoch: u64,
         _dealer: &Address,
         _message: &avss::Message,
@@ -1677,7 +1713,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
     }
 
     fn store_rotation_messages(
-        &mut self,
+        &self,
         _epoch: u64,
         _dealer: &Address,
         _messages: &RotationMessages,
@@ -1698,7 +1734,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
     }
 
     fn store_nonce_message(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -1724,7 +1760,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
     }
 
     fn store_avid_round_state(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -1750,7 +1786,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
     }
 
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -1769,7 +1805,7 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
     }
 
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _builder: &batch_avss_avid::AvssMessageBuilder,
@@ -1800,7 +1836,7 @@ fn test_dealer_receiver_flow() {
 
     // Create receiver (party 1) with custom storage
     let storage = InMemoryPublicMessagesStore::new();
-    let mut receiver_manager = setup.create_manager_with_store(1, Box::new(storage));
+    let mut receiver_manager = setup.create_manager_with_store(1, Arc::new(storage));
 
     // Receiver processes the dealer's message
     let signature =
@@ -1847,7 +1883,7 @@ fn test_receive_dealer_message_storage_failure() {
 
     // Create receiver with failing storage
     let mut receiver_manager =
-        setup.create_manager_with_store(1, Box::new(FailingPublicMessagesStore));
+        setup.create_manager_with_store(1, Arc::new(FailingPublicMessagesStore));
 
     // Receiver processes the dealer's message - should fail due to storage error
     let result = receive_dealer_messages(&mut receiver_manager, &messages, dealer_address);
@@ -3747,8 +3783,7 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
     let setup = TestSetup::new(5);
 
     let dealer_address = setup.address(0);
-    let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let manager = setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
 
     // Store message in DB only (not in dkg_messages in-memory map).
     let dealer_message = manager.create_dealer_message(&mut rng);
@@ -3784,7 +3819,7 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
     let rotation_setup = RotationTestSetup::new();
 
     let dealer_address = rotation_setup.setup.address(0);
-    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let (manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
 
     // Create rotation messages and store in DB only.
     let rotation_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
@@ -3906,7 +3941,7 @@ fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_curr
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+        setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
 
     let dealer_address = setup.address(0);
     let prev_epoch = manager.mpc_config.epoch - 1;
@@ -3953,7 +3988,7 @@ fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_cu
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+        setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
 
     let dealer_address = setup.address(0);
     let prev_epoch = manager.mpc_config.epoch - 1;
@@ -4005,8 +4040,7 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let dealer_address = setup.address(0);
-    let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let manager = setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
 
     // Store a nonce message in the DB store (but not in-memory map).
     let nonce_msg = create_nonce_dealer_message(&setup, 0, 0, &mut rng);
@@ -4057,7 +4091,7 @@ fn test_process_certified_nonce_message_db_fallback() {
     // Receiver has the message in DB but NOT in the in-memory cache —
     // simulates post-prune state.
     let mut receiver =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+        setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
     receiver
         .public_messages_store
         .store_nonce_message(
@@ -4092,7 +4126,7 @@ fn test_prepare_dealer_flow_survives_restart() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+        setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
 
     // First call: generates and persists.
     let flow1 = manager.prepare_dkg_dealer_flow(&mut rng).unwrap();
@@ -4176,7 +4210,7 @@ fn test_prepare_nonce_dealer_flow_survives_restart() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+        setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
     let batch_index = 0u32;
 
     let flow1 = manager
@@ -4207,7 +4241,7 @@ fn test_prepare_nonce_dealer_flow_survives_restart() {
 fn test_prepare_dealer_flow_propagates_db_read_error() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
-    let mut manager = setup.create_manager_with_store(0, Box::new(FailingPublicMessagesStore));
+    let mut manager = setup.create_manager_with_store(0, Arc::new(FailingPublicMessagesStore));
     // Cache is empty (fresh manager) → falls through to DB read → error.
     let err = manager.prepare_dkg_dealer_flow(&mut rng).err();
     assert!(
@@ -5437,7 +5471,7 @@ async fn test_nonce_ingest_fails_closed_when_the_store_read_fails() {
     let setup = TestSetup::new(5);
     let mut store = InMemoryPublicMessagesStore::new();
     store.fail_nonce_reads = true;
-    let mut manager = setup.create_manager_with_store(0, Box::new(store));
+    let mut manager = setup.create_manager_with_store(0, Arc::new(store));
     let dealer = setup.address(1);
     let batch_index = 3u32;
     let nonce = create_nonce_dealer_message(&setup, 1, batch_index, &mut rng);
@@ -5464,7 +5498,7 @@ async fn test_nonce_ingest_fails_closed_when_the_store_read_fails() {
 async fn test_nonce_equivocation_is_rejected_for_a_pruned_batch() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
-    let manager = setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let manager = setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
     let dealer = setup.address(1);
     let batch_index = 0u32;
     let epoch = manager.mpc_config.epoch;
@@ -5512,7 +5546,7 @@ async fn test_nonce_equivocation_is_rejected_after_a_restart() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
-        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+        setup.create_manager_with_store(0, Arc::new(InMemoryPublicMessagesStore::new()));
     let dealer = setup.address(1);
     // Non-zero so a hardcoded-batch regression cannot pass.
     let batch_index = 4u32;
@@ -5833,35 +5867,35 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
 
 /// A store that tracks calls to store_dealer_message.
 struct TrackingPublicMessagesStore {
-    stored: HashMap<Address, avss::Message>,
-    rotation_stored: HashMap<Address, RotationMessages>,
+    stored: std::sync::Mutex<HashMap<Address, avss::Message>>,
+    rotation_stored: std::sync::Mutex<HashMap<Address, RotationMessages>>,
     store_count: Arc<AtomicUsize>,
 }
 
 impl TrackingPublicMessagesStore {
     fn new(store_count: Arc<AtomicUsize>) -> Self {
         Self {
-            stored: HashMap::new(),
-            rotation_stored: HashMap::new(),
+            stored: std::sync::Mutex::new(HashMap::new()),
+            rotation_stored: std::sync::Mutex::new(HashMap::new()),
             store_count,
         }
     }
 
     /// Pre-populate without incrementing counter (simulates data from before restart)
-    fn pre_populate(&mut self, dealer: Address, message: avss::Message) {
-        self.stored.insert(dealer, message);
+    fn pre_populate(&self, dealer: Address, message: avss::Message) {
+        self.stored.lock().unwrap().insert(dealer, message);
     }
 }
 
 impl PublicMessagesStore for TrackingPublicMessagesStore {
     fn store_dealer_message(
-        &mut self,
+        &self,
         _epoch: u64,
         dealer: &Address,
         message: &avss::Message,
     ) -> anyhow::Result<()> {
         self.store_count.fetch_add(1, Ordering::SeqCst);
-        self.stored.insert(*dealer, message.clone());
+        self.stored.lock().unwrap().insert(*dealer, message.clone());
         Ok(())
     }
 
@@ -5870,24 +5904,29 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         _epoch: u64,
         dealer: &Address,
     ) -> anyhow::Result<Option<avss::Message>> {
-        Ok(self.stored.get(dealer).cloned())
+        Ok(self.stored.lock().unwrap().get(dealer).cloned())
     }
 
     fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         Ok(self
             .stored
+            .lock()
+            .unwrap()
             .iter()
             .map(|(k, v)| (*k, Messages::Dkg(v.clone())))
             .collect())
     }
 
     fn store_rotation_messages(
-        &mut self,
+        &self,
         _epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
     ) -> anyhow::Result<()> {
-        self.rotation_stored.insert(*dealer, messages.clone());
+        self.rotation_stored
+            .lock()
+            .unwrap()
+            .insert(*dealer, messages.clone());
         Ok(())
     }
 
@@ -5896,19 +5935,21 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         _epoch: u64,
         dealer: &Address,
     ) -> anyhow::Result<Option<RotationMessages>> {
-        Ok(self.rotation_stored.get(dealer).cloned())
+        Ok(self.rotation_stored.lock().unwrap().get(dealer).cloned())
     }
 
     fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         Ok(self
             .rotation_stored
+            .lock()
+            .unwrap()
             .iter()
             .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
             .collect())
     }
 
     fn store_nonce_message(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -5934,7 +5975,7 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
     }
 
     fn store_avid_round_state(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -5960,7 +6001,7 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
     }
 
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -5979,7 +6020,7 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
     }
 
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _builder: &batch_avss_avid::AvssMessageBuilder,
@@ -6069,11 +6110,11 @@ async fn test_restart_dealer_reuses_stored_message() {
 
     // Create tracking store with pre-populated message (simulating persistence)
     let store_count = Arc::new(AtomicUsize::new(0));
-    let mut store = TrackingPublicMessagesStore::new(store_count.clone());
+    let store = TrackingPublicMessagesStore::new(store_count.clone());
     store.pre_populate(dealer_address, original_message);
 
     // Simulate restart: create manager for same party with stored message
-    let restarted_manager = setup.create_manager_with_store(0, Box::new(store));
+    let restarted_manager = setup.create_manager_with_store(0, Arc::new(store));
 
     // Verify message was loaded (storage returns raw message, loaded as Messages::Dkg)
     assert_eq!(restarted_manager.address, dealer_address);
@@ -6152,13 +6193,13 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
 
     // Create tracking store with pre-populated messages (simulating restart)
     let store_count = Arc::new(AtomicUsize::new(0));
-    let mut store = TrackingPublicMessagesStore::new(store_count.clone());
+    let store = TrackingPublicMessagesStore::new(store_count.clone());
     store.pre_populate(dealer1_addr, msg1.clone());
     store.pre_populate(dealer2_addr, msg2.clone());
 
     // Create party (validator 3) with pre-stored messages
     let party_addr = setup.address(3);
-    let party_manager = setup.create_manager_with_store(3, Box::new(store));
+    let party_manager = setup.create_manager_with_store(3, Arc::new(store));
 
     // Verify messages were loaded on construction
     assert!(
@@ -6421,7 +6462,7 @@ impl RotationTestSetup {
     fn create_receiver_with_memory_store(&self, receiver_index: usize) -> (MpcManager, MpcOutput) {
         let mut receiver_manager = self.setup.create_manager_with_store(
             receiver_index,
-            Box::new(InMemoryPublicMessagesStore::new()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
         );
 
         // Process all dealer messages
@@ -6491,7 +6532,7 @@ impl RotationTestSetup {
         let mut rng = rand::thread_rng();
         let mut dealer_manager = self
             .setup
-            .create_manager_with_store(dealer_index, Box::new(InMemoryPublicMessagesStore::new()));
+            .create_manager_with_store(dealer_index, Arc::new(InMemoryPublicMessagesStore::new()));
 
         // Process all dealer messages
         for (i, message) in self.dealer_messages.iter().enumerate() {
@@ -7635,7 +7676,7 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_encryption_key,
         None,
         new_member_signing_key,
-        Box::new(InMemoryPublicMessagesStore::new()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7711,7 +7752,7 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     // previous_committee to epoch 99. Since signers() checks epoch, we
     // override previous_committee to match the cert epoch so retrieval works.
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
-    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_epoch = epoch;
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -7767,7 +7808,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
     let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
-    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_epoch = epoch;
 
     let diverged_dealer = rotation_setup
@@ -7921,7 +7962,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     // Create test manager (validator 2) with EMPTY store.
     let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
     let test_addr = rotation_setup.setup.address(2);
-    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
@@ -8030,7 +8071,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
 
     let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
     let test_addr = rotation_setup.setup.address(2);
-    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
@@ -8152,7 +8193,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
 
     let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
     let test_addr = rotation_setup.setup.address(2);
-    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
@@ -8271,7 +8312,7 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
 
     let (mut test_manager, test_dkg_output) = rotation_setup.create_receiver_with_memory_store(2);
     let test_addr = rotation_setup.setup.address(2);
-    test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
+    test_manager.public_messages_store = Arc::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
@@ -9107,7 +9148,7 @@ impl SharedMemoryStore {
 
 impl PublicMessagesStore for SharedMemoryStore {
     fn store_dealer_message(
-        &mut self,
+        &self,
         _epoch: u64,
         dealer: &Address,
         message: &avss::Message,
@@ -9131,7 +9172,7 @@ impl PublicMessagesStore for SharedMemoryStore {
     }
 
     fn store_rotation_messages(
-        &mut self,
+        &self,
         _epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
@@ -9158,7 +9199,7 @@ impl PublicMessagesStore for SharedMemoryStore {
     }
 
     fn store_nonce_message(
-        &mut self,
+        &self,
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -9190,7 +9231,7 @@ impl PublicMessagesStore for SharedMemoryStore {
     }
 
     fn store_avid_round_state(
-        &mut self,
+        &self,
         _epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -9225,7 +9266,7 @@ impl PublicMessagesStore for SharedMemoryStore {
     }
 
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -9250,7 +9291,7 @@ impl PublicMessagesStore for SharedMemoryStore {
     }
 
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         builder: &batch_avss_avid::AvssMessageBuilder,
@@ -9287,7 +9328,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
     let original_messages = {
         let mut dealer_manager = rotation_setup
             .setup
-            .create_manager_with_store(dealer_index, Box::new(shared_store.clone()));
+            .create_manager_with_store(dealer_index, Arc::new(shared_store.clone()));
 
         // Process DKG messages to complete initial DKG
         for (i, message) in rotation_setup.dealer_messages.iter().enumerate() {
@@ -9324,7 +9365,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
     // Phase 2: Create new manager with same store, verify messages are loaded
     let mut new_dealer_manager = rotation_setup
         .setup
-        .create_manager_with_store(dealer_index, Box::new(shared_store.clone()));
+        .create_manager_with_store(dealer_index, Arc::new(shared_store.clone()));
 
     // Process DKG messages again (needed for DKG output)
     for (i, message) in rotation_setup.dealer_messages.iter().enumerate() {
@@ -9450,7 +9491,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
     // Phase 3: Create party manager with pre-populated store (simulating restart)
     let mut party_manager = rotation_setup
         .setup
-        .create_manager_with_store(party_index, Box::new(shared_store.clone()));
+        .create_manager_with_store(party_index, Arc::new(shared_store.clone()));
     // No `switch_to_rotation`: this manager runs DKG below, which derives
     // against the Dkg base. Verified — switching here fails the test.
     rotation_setup.install_previous_committee(&mut party_manager);
@@ -9628,7 +9669,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     );
 
     // Create an InMemoryPublicMessagesStore with the DKG messages from the original DKG.
-    let mut store = InMemoryPublicMessagesStore::new();
+    let store = InMemoryPublicMessagesStore::new();
     for (i, &dealer_idx) in rotation_setup.dealer_indices.iter().enumerate() {
         let dealer_addr = rotation_setup.setup.address(dealer_idx);
         let msg = match &rotation_setup.dealer_messages[i] {
@@ -9647,7 +9688,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
-        Box::new(store),
+        Arc::new(store),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -9808,7 +9849,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         .set_committees(committees);
 
     // Create InMemoryPublicMessagesStore with all 4 dealer messages.
-    let mut store = InMemoryPublicMessagesStore::new();
+    let store = InMemoryPublicMessagesStore::new();
     for (i, msg) in dealer_messages.iter().enumerate() {
         let dealer_addr = setup.address(dealer_indices[i]);
         let Messages::Dkg(inner) = msg else {
@@ -9826,7 +9867,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         setup.encryption_keys[target_index].clone(),
         Some(setup.encryption_keys[target_index].clone()),
         setup.signing_keys[target_index].clone(),
-        Box::new(store),
+        Arc::new(store),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -9940,7 +9981,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         .set_committees(committees);
 
     let build_store = || {
-        let mut s = InMemoryPublicMessagesStore::new();
+        let s = InMemoryPublicMessagesStore::new();
         for (i, msg) in dealer_messages.iter().enumerate() {
             let dealer_addr = setup.address(dealer_indices[i]);
             let Messages::Dkg(inner) = msg else {
@@ -9961,7 +10002,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         prev_key.clone(),
         Some(prev_key.clone()),
         setup.signing_keys[target_index].clone(),
-        Box::new(build_store()),
+        Arc::new(build_store()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -9989,7 +10030,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         prev_key,
         None,
         setup.signing_keys[target_index].clone(),
-        Box::new(build_store()),
+        Arc::new(build_store()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10075,7 +10116,7 @@ fn test_recover_current_dkg() {
     committee_set.set_epoch(epoch).set_committees(committees);
 
     let build_store = |src_for: &dyn Fn(usize) -> usize| {
-        let mut s = InMemoryPublicMessagesStore::new();
+        let s = InMemoryPublicMessagesStore::new();
         for i in 0..dealer_messages.len() {
             let dealer_addr = setup.address(dealer_indices[i]);
             let Messages::Dkg(inner) = &dealer_messages[src_for(i)] else {
@@ -10085,7 +10126,7 @@ fn test_recover_current_dkg() {
         }
         s
     };
-    let make_manager = |store: Box<dyn PublicMessagesStore>| {
+    let make_manager = |store: Arc<dyn PublicMessagesStore>| {
         MpcManager::new(
             setup.address(target_index),
             &committee_set,
@@ -10107,7 +10148,7 @@ fn test_recover_current_dkg() {
     let onchain_key = bcs::to_bytes(&expected_public_key).unwrap();
     let req = GetPublicMpcOutputRequest { epoch };
 
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&identity)))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&identity)))));
     let MpcOutputRecoveryOutcome::Recovered(output) =
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key)
     else {
@@ -10125,7 +10166,7 @@ fn test_recover_current_dkg() {
     // vk mismatch (reconstruction disagrees with on-chain) → Suspicious; never committed.
     let mut wrong_key = onchain_key.clone();
     wrong_key[0] ^= 0xff;
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&identity)))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&identity)))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &wrong_key),
         MpcOutputRecoveryOutcome::Suspicious(_)
@@ -10139,7 +10180,7 @@ fn test_recover_current_dkg() {
     );
 
     let swap0 = |i: usize| if i == 0 { 1 } else { i };
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&swap0)))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&swap0)))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
         MpcOutputRecoveryOutcome::NotApplicable
@@ -10166,7 +10207,7 @@ fn test_recover_current_dkg() {
     }
 
     // Missing local messages → NotApplicable (fall through to live).
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(
         InMemoryPublicMessagesStore::new(),
     ))));
     assert!(matches!(
@@ -10175,7 +10216,7 @@ fn test_recover_current_dkg() {
     ));
 
     // No authenticated on-chain key yet → NotApplicable.
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&identity)))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store(&identity)))));
     assert!(matches!(
         MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &[]),
         MpcOutputRecoveryOutcome::NotApplicable
@@ -10248,7 +10289,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
     committees.insert(epoch, target_committee);
     committee_set.set_epoch(epoch).set_committees(committees);
 
-    let mut store = InMemoryPublicMessagesStore::new();
+    let store = InMemoryPublicMessagesStore::new();
     for (i, msg) in dealer_messages.iter().enumerate() {
         let Messages::Dkg(inner) = msg else {
             unreachable!()
@@ -10266,7 +10307,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         setup.encryption_keys[target_index].clone(),
         None,
         setup.signing_keys[target_index].clone(),
-        Box::new(store),
+        Arc::new(store),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10360,7 +10401,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             None,
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
-            Box::new(InMemoryPublicMessagesStore::new()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10393,7 +10434,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             None,
             rotation_setup.setup.signing_keys[other_idx].clone(),
-            Box::new(InMemoryPublicMessagesStore::new()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10486,7 +10527,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let shifted_addr = rotation_setup.setup.address(shifted_member_index);
 
     // Create an InMemoryPublicMessagesStore with the rotation messages
-    let mut store = InMemoryPublicMessagesStore::new();
+    let store = InMemoryPublicMessagesStore::new();
     for (dealer_addr, messages) in &rotation_messages_by_dealer {
         let rotation_msgs = match messages {
             Messages::Rotation(m) => m,
@@ -10506,7 +10547,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
-        Box::new(store),
+        Arc::new(store),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10592,7 +10633,7 @@ fn test_recover_current_rotation() {
             rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             rotation_setup.setup.signing_keys[idx].clone(),
-            Box::new(InMemoryPublicMessagesStore::new()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10641,7 +10682,7 @@ fn test_recover_current_rotation() {
     // previous_output); the InMemory store keys by dealer, with separate maps per type.
     let receiver_index = 3usize;
     let build_store = || {
-        let mut store = InMemoryPublicMessagesStore::new();
+        let store = InMemoryPublicMessagesStore::new();
         for (dealer_addr, msgs) in &rotation_messages_by_dealer {
             store
                 .store_rotation_messages(rotation_epoch, dealer_addr, msgs)
@@ -10660,7 +10701,7 @@ fn test_recover_current_rotation() {
         }
         store
     };
-    let make_manager = |store: Box<dyn PublicMessagesStore>| {
+    let make_manager = |store: Arc<dyn PublicMessagesStore>| {
         MpcManager::new(
             rotation_setup.setup.address(receiver_index),
             &committee_set,
@@ -10687,7 +10728,7 @@ fn test_recover_current_rotation() {
 
     // Recovered: both outputs reconstructed (key preserved across the rotation) and
     // committed — current_output for the rotation epoch, previous_output for epoch N-1.
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store()))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store()))));
     let MpcOutputRecoveryOutcome::Recovered(output) =
         MpcManager::reconstruct_current_rotation_output(
             &mgr,
@@ -10720,7 +10761,7 @@ fn test_recover_current_rotation() {
     // Wrong on-chain key → Suspicious; neither output committed.
     let mut wrong_key = onchain_key.clone();
     wrong_key[0] ^= 0xff;
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store()))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store()))));
     assert!(matches!(
         MpcManager::reconstruct_current_rotation_output(
             &mgr,
@@ -10739,7 +10780,7 @@ fn test_recover_current_rotation() {
     );
 
     // No authenticated on-chain key yet → NotApplicable.
-    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store()))));
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store()))));
     assert!(matches!(
         MpcManager::reconstruct_current_rotation_output(
             &mgr,
@@ -10790,7 +10831,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             rotation_setup.setup.signing_keys[idx].clone(),
-            Box::new(InMemoryPublicMessagesStore::new()),
+            Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -10858,7 +10899,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
     .unwrap();
 
     // Receiver (member 3) at epoch 101 with the certified-but-cheating rotation messages.
-    let mut store = InMemoryPublicMessagesStore::new();
+    let store = InMemoryPublicMessagesStore::new();
     store
         .store_rotation_messages(rotation_epoch, &dealer_addr, &cheating_map)
         .unwrap();
@@ -10870,7 +10911,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         rotation_setup.setup.encryption_keys[receiver_index].clone(),
         Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
         rotation_setup.setup.signing_keys[receiver_index].clone(),
-        Box::new(store),
+        Arc::new(store),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -12941,7 +12982,7 @@ fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
     let store = SharedMemoryStore::new();
-    let mut confirmer = setup.create_manager_with_store(1, Box::new(store.clone()));
+    let mut confirmer = setup.create_manager_with_store(1, Arc::new(store.clone()));
     confirmer
         .handle_send_messages_request(
             fx.dealer_addr,
@@ -12950,7 +12991,7 @@ fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
             },
         )
         .unwrap();
-    let mut restarted = setup.create_manager_with_store(1, Box::new(store.clone()));
+    let mut restarted = setup.create_manager_with_store(1, Arc::new(store.clone()));
     assert!(restarted.dealer_avid_nonce_outputs.is_empty());
 
     restarted
@@ -13083,7 +13124,7 @@ fn test_avid_optimistic_ingest_fails_closed_when_the_store_read_fails() {
 
     let mut store = InMemoryPublicMessagesStore::new();
     store.fail_avid_round_state_reads = true;
-    let mut receiver = setup.create_manager_with_store(receiver_idx, Box::new(store));
+    let mut receiver = setup.create_manager_with_store(receiver_idx, Arc::new(store));
 
     let err = receiver
         .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: deal })
@@ -13110,7 +13151,7 @@ fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
 
     let mut store = InMemoryPublicMessagesStore::new();
     store.fail_avid_held_echoes_reads = true;
-    let mut receiver = setup.create_manager_with_store(1, Box::new(store));
+    let mut receiver = setup.create_manager_with_store(1, Arc::new(store));
     receiver
         .handle_send_messages_request(
             fx.dealer_addr,
@@ -13326,7 +13367,7 @@ fn test_prepare_avid_nonce_dealer_flow_reloads_builder() {
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let store = SharedMemoryStore::new();
-    let mut dealer1 = setup.create_manager_with_store(0, Box::new(store.clone()));
+    let mut dealer1 = setup.create_manager_with_store(0, Arc::new(store.clone()));
     let flow1 = dealer1
         .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
         .unwrap();
@@ -13343,7 +13384,7 @@ fn test_prepare_avid_nonce_dealer_flow_reloads_builder() {
         .unwrap();
 
     drop(dealer1);
-    let mut dealer2 = setup.create_manager_with_store(0, Box::new(store.clone()));
+    let mut dealer2 = setup.create_manager_with_store(0, Arc::new(store.clone()));
     let flow2 = dealer2
         .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
         .unwrap();
@@ -13626,7 +13667,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
         .collect();
     managers.insert(
         setup.address(1),
-        setup.create_manager_with_store(1, Box::new(store.clone())),
+        setup.create_manager_with_store(1, Arc::new(store.clone())),
     );
     let (sigs, confirm_target) =
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
@@ -13646,7 +13687,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let second_full_cert = make_full_cert(&second_target, second_sigs);
 
     managers.remove(&setup.address(1));
-    let restarted = setup.create_manager_with_store(1, Box::new(store.clone()));
+    let restarted = setup.create_manager_with_store(1, Arc::new(store.clone()));
     assert!(restarted.dealer_avid_nonce_outputs.is_empty());
 
     let party = Arc::new(RwLock::new(restarted));
@@ -14235,7 +14276,7 @@ fn test_avid_voter_state_survives_restart() {
         .unwrap();
 
     let voter_store = SharedMemoryStore::new();
-    let mut voter = setup.create_manager_with_store(1, Box::new(voter_store.clone()));
+    let mut voter = setup.create_manager_with_store(1, Arc::new(voter_store.clone()));
     let mut others: HashMap<usize, MpcManager> = [2, 3, 4]
         .into_iter()
         .zip([2, 3, 4].map(|i| setup.create_manager(i)))
@@ -14325,7 +14366,7 @@ fn test_avid_voter_state_survives_restart() {
     .into_verified()
     .unwrap();
 
-    let mut restarted = setup.create_manager_with_store(1, Box::new(voter_store.clone()));
+    let mut restarted = setup.create_manager_with_store(1, Arc::new(voter_store.clone()));
     assert!(restarted.avid_held_echoes.is_empty());
 
     assert_eq!(
@@ -14739,7 +14780,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     let mut managers: Vec<_> = (0..num_validators)
         .map(|i| {
             if i == 0 {
-                setup.create_manager_with_store(i, Box::new(InMemoryPublicMessagesStore::new()))
+                setup.create_manager_with_store(i, Arc::new(InMemoryPublicMessagesStore::new()))
             } else {
                 setup.create_manager(i)
             }
@@ -14940,7 +14981,7 @@ async fn test_recover_nonce_shares_via_complaint_db_fallback() {
     let test_party_idx = 0;
     // Use a real in-memory store so DB fallback has something to fall back to.
     let mut test_manager = setup
-        .create_manager_with_store(test_party_idx, Box::new(InMemoryPublicMessagesStore::new()));
+        .create_manager_with_store(test_party_idx, Arc::new(InMemoryPublicMessagesStore::new()));
     let test_addr = setup.address(test_party_idx);
 
     let dealer_idx = 1;
@@ -15968,7 +16009,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
     }
 
     fn store_dealer_message(
-        &mut self,
+        &self,
         _epoch: u64,
         _dealer: &Address,
         _message: &avss::Message,
@@ -15977,7 +16018,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
     }
 
     fn store_rotation_messages(
-        &mut self,
+        &self,
         _epoch: u64,
         _dealer: &Address,
         _messages: &RotationMessages,
@@ -15994,7 +16035,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
     }
 
     fn store_nonce_message(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -16020,7 +16061,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
     }
 
     fn store_avid_round_state(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -16046,7 +16087,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
     }
 
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _dealer: &Address,
@@ -16065,7 +16106,7 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
     }
 
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         _epoch: u64,
         _batch_index: u32,
         _builder: &batch_avss_avid::AvssMessageBuilder,
@@ -16099,7 +16140,7 @@ fn retrieve_messages_does_not_starve_the_runtime() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let manager = setup.create_manager_with_store(
         0,
-        Box::new(BlockingDealerMessageStore {
+        Arc::new(BlockingDealerMessageStore {
             message: dealer_message,
             entered: entered_tx,
             release: std::sync::Mutex::new(release_rx),

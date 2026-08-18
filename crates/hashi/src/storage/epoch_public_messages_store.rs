@@ -28,7 +28,7 @@ impl EpochPublicMessagesStore {
 
 impl PublicMessagesStore for EpochPublicMessagesStore {
     fn store_dealer_message(
-        &mut self,
+        &self,
         epoch: u64,
         dealer: &Address,
         message: &avss::Message,
@@ -60,7 +60,7 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
     }
 
     fn store_rotation_messages(
-        &mut self,
+        &self,
         epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
@@ -92,7 +92,7 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
     }
 
     fn store_nonce_message(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -124,7 +124,7 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
     }
 
     fn store_avid_round_state(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -156,7 +156,7 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
     }
 
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -179,7 +179,7 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
     }
 
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         builder: &batch_avss_avid::AvssMessageBuilder,

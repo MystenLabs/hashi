@@ -16,7 +16,7 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's DKG message at the given epoch.
     /// If a message already exists for this dealer, it will be overwritten.
     fn store_dealer_message(
-        &mut self,
+        &self,
         epoch: u64,
         dealer: &Address,
         message: &avss::Message,
@@ -32,7 +32,7 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's rotation messages at the given epoch.
     /// If messages already exist for this dealer, they will be overwritten.
     fn store_rotation_messages(
-        &mut self,
+        &self,
         epoch: u64,
         dealer: &Address,
         messages: &RotationMessages,
@@ -52,7 +52,7 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's nonce message at the given epoch.
     /// If a message already exists for this dealer and batch, it will be overwritten.
     fn store_nonce_message(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -75,7 +75,7 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's AVID round state at the given epoch and batch.
     /// If state already exists for this dealer and batch, it will be overwritten.
     fn store_avid_round_state(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -97,7 +97,7 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Store this node's held AVID vote and echoes for the given epoch, batch, and dealer,
     /// overwriting any existing entry.
     fn store_avid_held_echoes(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         dealer: &Address,
@@ -115,7 +115,7 @@ pub trait PublicMessagesStore: Send + Sync {
     /// Store this node's own AVID dealer builder for the given epoch and batch, overwriting any
     /// existing one.
     fn store_avid_dealer_builder(
-        &mut self,
+        &self,
         epoch: u64,
         batch_index: u32,
         builder: &batch_avss_avid::AvssMessageBuilder,
