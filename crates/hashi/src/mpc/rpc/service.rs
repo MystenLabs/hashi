@@ -5,6 +5,7 @@ use crate::grpc::HttpService;
 use crate::mpc::MpcManager;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
+use crate::mpc::mpc_except_signing::time_async;
 use crate::mpc::retrieve_from_store;
 use crate::mpc::spawn_blocking;
 use crate::mpc::types;
@@ -45,12 +46,9 @@ impl MpcService for HttpService {
             | types::Messages::AvidNonceRetrieval(_) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
         };
         let mpc_manager = self.mpc_manager()?;
-        let _timer = self
-            .metrics()
-            .mpc_rpc_handler_process_duration_seconds
-            .with_label_values(&[label])
-            .start_timer();
-        let response =
+        let response = time_async(
+            &self.metrics().mpc_rpc_handler_process_duration_seconds,
+            label,
             MpcManager::with_manager_blocking_mut(&mpc_manager, move |mgr| -> Result<_, Status> {
                 validate_epoch(mgr.mpc_config.epoch, external_request.epoch)?;
                 mgr.handle_send_messages_request(sender, &internal_request)
@@ -62,9 +60,9 @@ impl MpcService for HttpService {
                         }
                         mpc_error_to_status(e)
                     })
-            })
-            .await?;
-        drop(_timer);
+            }),
+        )
+        .await?;
         Ok(tonic::Response::new(SendMessagesResponse::from(&response)))
     }
 
