@@ -96,6 +96,7 @@ async fn request(
 
         let builder = crate::sui_tx_executor::build_create_withdrawal_request(
             hashi_ids,
+            hashi_ids.package_id,
             amount,
             destination_bytes,
         );
@@ -198,7 +199,12 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
             "No sender available: pass --sender (the refund recipient) or configure a keypair",
         )?;
 
-    let builder = crate::sui_tx_executor::build_cancel_withdrawal(hashi_ids, &req_addr, sender);
+    let builder = crate::sui_tx_executor::build_cancel_withdrawal(
+        hashi_ids,
+        hashi_ids.package_id,
+        &req_addr,
+        sender,
+    );
 
     match tx_opts.mode() {
         TxMode::SerializeUnsigned => print_info("Building unsigned withdrawal cancellation..."),

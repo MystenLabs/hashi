@@ -664,6 +664,28 @@ mod tests {
         .await?;
         rotate_into_avid(&mut networks).await?;
         {
+            let hashi_ids = networks.hashi_network.ids();
+            let stamped_package = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state()
+                .active_package()
+                .expect("an active package after upgrade")
+                .0;
+            let mut executors: Vec<hashi::sui_tx_executor::SuiTxExecutor> = networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .map(|node| {
+                    hashi::sui_tx_executor::SuiTxExecutor::from_config(
+                        &node.hashi().config,
+                        node.hashi().onchain_state(),
+                    )
+                })
+                .collect::<Result<_>>()?;
+            crate::upgrade_flow::disable_version(&mut executors, hashi_ids, 1, stamped_package)
+                .await?;
+        }
+        {
             let hashi = networks.hashi_network.nodes()[0].hashi();
             let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
             let window_ms = mpc_manager
@@ -677,12 +699,18 @@ mod tests {
                 "the accumulation window must be open for this test to mean anything"
             );
             assert!(
-                hashi.onchain_state().active_package().is_some_and(
-                    |(_, v)| v >= hashi::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION
-                ),
-                "certs carry timestamp 0 below the stamped version, which collapses the window \
-                 to the floor-only rule — this test would then pass while exercising the legacy \
-                 path it exists to distinguish from"
+                !hashi
+                    .onchain_state()
+                    .state()
+                    .hashi()
+                    .config
+                    .enabled_versions
+                    .contains(&1),
+                "while the bare-only version is enabled every nonce bucket is created bare and \
+                 certs carry timestamp 0, which collapses the window to the floor-only rule — \
+                 this test would then pass while exercising the legacy path it exists to \
+                 distinguish from. The active package version does not establish this: the \
+                 layout is decided by whether the bare-only version is still enabled"
             );
         }
         let deposit_amount_sats = 100_000u64;

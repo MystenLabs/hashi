@@ -190,6 +190,7 @@ async fn request(
 
     let builder = crate::sui_tx_executor::build_create_deposit_request(
         hashi_ids,
+        hashi_ids.package_id,
         txid_address,
         vout,
         amount,

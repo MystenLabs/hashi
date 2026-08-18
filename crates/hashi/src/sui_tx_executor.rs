@@ -746,8 +746,14 @@ impl SuiTxExecutor {
         amount_sats: u64,
         derivation_path: Option<Address>,
     ) -> anyhow::Result<Address> {
-        let builder =
-            build_create_deposit_request(self.hashi_ids, txid, vout, amount_sats, derivation_path);
+        let builder = build_create_deposit_request(
+            self.hashi_ids,
+            self.call_package(),
+            txid,
+            vout,
+            amount_sats,
+            derivation_path,
+        );
 
         let response = self.execute(builder).await?;
 
@@ -978,6 +984,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<Address> {
         let builder = build_create_withdrawal_request(
             self.hashi_ids,
+            self.call_package(),
             withdrawal_amount_sats,
             destination_bytes,
         );
@@ -1678,7 +1685,12 @@ impl SuiTxExecutor {
         &mut self,
         withdrawal_id: &Address,
     ) -> anyhow::Result<()> {
-        let builder = build_cancel_withdrawal(self.hashi_ids, withdrawal_id, self.sender());
+        let builder = build_cancel_withdrawal(
+            self.hashi_ids,
+            self.call_package(),
+            withdrawal_id,
+            self.sender(),
+        );
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
@@ -1834,6 +1846,7 @@ impl SuiTxExecutor {
 /// unsigned via [`finalize`].
 pub fn build_create_deposit_request(
     hashi_ids: HashiIds,
+    call_package: Address,
     txid: Address,
     vout: u32,
     amount_sats: u64,
@@ -1860,7 +1873,7 @@ pub fn build_create_deposit_request(
     // utxo::utxo_id(txid, vout)
     let utxo_id_arg = builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package,
             Identifier::from_static("utxo"),
             Identifier::from_static("utxo_id"),
         ),
@@ -1870,7 +1883,7 @@ pub fn build_create_deposit_request(
     // utxo::utxo(utxo_id, amount, derivation_path)
     let utxo_arg = builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package,
             Identifier::from_static("utxo"),
             Identifier::from_static("utxo"),
         ),
@@ -1880,7 +1893,7 @@ pub fn build_create_deposit_request(
     // deposit::deposit(hashi, utxo, clock)
     builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package,
             Identifier::from_static("deposit"),
             Identifier::from_static("deposit"),
         ),
@@ -1907,6 +1920,7 @@ pub fn deposit_request_id_from_response(
 /// transaction sender via a balance intent, resolved at build time.
 pub fn build_create_withdrawal_request(
     hashi_ids: HashiIds,
+    call_package: Address,
     withdrawal_amount_sats: u64,
     destination_bytes: Vec<u8>,
 ) -> TransactionBuilder {
@@ -1936,7 +1950,7 @@ pub fn build_create_withdrawal_request(
     // withdraw::request_withdrawal(hashi, clock, btc, bitcoin_address)
     builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package,
             Identifier::from_static("withdraw"),
             Identifier::from_static("request_withdrawal"),
         ),
@@ -1964,6 +1978,7 @@ pub fn withdrawal_request_id_from_response(
 /// transaction is finalized for.
 pub fn build_cancel_withdrawal(
     hashi_ids: HashiIds,
+    call_package: Address,
     withdrawal_id: &Address,
     sender: Address,
 ) -> TransactionBuilder {
@@ -1983,7 +1998,7 @@ pub fn build_cancel_withdrawal(
 
     let refunded_balance = builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package,
             Identifier::from_static("withdraw"),
             Identifier::from_static("cancel_withdrawal"),
         ),
