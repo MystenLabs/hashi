@@ -124,6 +124,8 @@ pub struct ExternalGuardian {
     pub btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
 }
 
+const KEYS_NEWER_THAN_V1_SNAPSHOT: &[&str] = &["mpc_nonce_accumulation_window_ms"];
+
 pub struct TestNetworksBuilder {
     sui_builder: SuiNetworkBuilder,
     hashi_builder: HashiNetworkBuilder,
@@ -150,14 +152,16 @@ pub struct TestNetworksBuilder {
 
 impl TestNetworksBuilder {
     pub fn new() -> Self {
-        // E2e tests skip the deposit-confirmation delay by default so they
-        // don't have to wait through the production-grade window. Tests that
-        // need a non-zero delay can override via `with_onchain_config`; later
-        // entries win because overrides are applied in insertion order.
-        let onchain_config_overrides = vec![(
-            "bitcoin_deposit_time_delay_ms".to_string(),
-            hashi_types::move_types::ConfigValue::U64(0),
-        )];
+        let onchain_config_overrides = vec![
+            (
+                "bitcoin_deposit_time_delay_ms".to_string(),
+                hashi_types::move_types::ConfigValue::U64(0),
+            ),
+            (
+                "mpc_nonce_accumulation_window_ms".to_string(),
+                hashi_types::move_types::ConfigValue::U64(0),
+            ),
+        ];
         Self {
             sui_builder: SuiNetworkBuilder::default(),
             hashi_builder: HashiNetworkBuilder::new(),
@@ -421,9 +425,23 @@ impl TestNetworksBuilder {
             tracing::info!("running hashi nodes resolved the guardian client from on-chain config");
         }
 
-        if nodes_started && !self.onchain_config_overrides.is_empty() {
-            apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
-                .await?;
+        // Overrides run against v1; keys it does not define wait for the upgrade.
+        let (deferred_overrides, v1_overrides): (Vec<_>, Vec<_>) = self
+            .onchain_config_overrides
+            .iter()
+            .cloned()
+            .partition(|(key, _)| {
+                v1_snapshot_dir.is_some() && KEYS_NEWER_THAN_V1_SNAPSHOT.contains(&key.as_str())
+            });
+        if nodes_started && !v1_overrides.is_empty() {
+            apply_onchain_config_overrides(&mut test_networks, &v1_overrides).await?;
+        }
+        if !deferred_overrides.is_empty() && !self.upgrade_to_current_source {
+            tracing::warn!(
+                keys = ?deferred_overrides.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                "config overrides are undefined in the v1 snapshot and this build stays on v1; \
+                 leaving them at the package default"
+            );
         }
 
         if nodes_started && test_networks.guardian_harness.is_some() {
@@ -446,6 +464,19 @@ impl TestNetworksBuilder {
             )
             .await?;
             tracing::info!("chain upgraded; the network runs the post-upgrade state");
+
+            // `update_config` cannot insert, and `init_defaults` runs only at the
+            // original publish, so a key this upgrade adds keeps its default.
+            if !deferred_overrides.is_empty()
+                && let Err(e) =
+                    apply_onchain_config_overrides(&mut test_networks, &deferred_overrides).await
+            {
+                tracing::warn!(
+                    keys = ?deferred_overrides.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                    "post-upgrade config overrides did not apply ({e:#}); \
+                     the upgraded package keeps its compiled-in defaults"
+                );
+            }
         }
 
         Ok(test_networks)
@@ -572,6 +603,11 @@ pub(crate) async fn apply_onchain_config_overrides(
         .await?;
 
     let hashi_ids = networks.hashi_network.ids();
+    let execute_package_id = nodes[0]
+        .hashi()
+        .onchain_state()
+        .package_id()
+        .unwrap_or(hashi_ids.package_id);
 
     // Build one executor per node, reused across all overrides.
     let mut executors: Vec<SuiTxExecutor> = nodes
@@ -603,6 +639,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         );
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateMpcConfig {
                 threshold_bps: mpc_threshold_bps,
@@ -624,6 +661,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         tracing::info!("applying on-chain config override: {key} = {value:?}");
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateConfig {
                 key: key.clone(),
@@ -663,8 +701,11 @@ pub(crate) async fn apply_onchain_config_overrides(
     Ok(())
 }
 
+/// `execute_package_id` must be the chain's latest package: calling the
+/// original id after an upgrade executes the old bytecode.
 async fn submit_proposal_through_quorum(
     hashi_ids: hashi::config::HashiIds,
+    execute_package_id: sui_sdk_types::Address,
     executors: &mut [hashi::sui_tx_executor::SuiTxExecutor],
     create_params: hashi::cli::client::CreateProposalParams,
     proposal_type_tag: sui_sdk_types::TypeTag,
@@ -677,7 +718,8 @@ async fn submit_proposal_through_quorum(
     use hashi::cli::upgrade::extract_proposal_id_from_response;
 
     let creator = executors[0].sender();
-    let create_tx = build_create_proposal_transaction(hashi_ids, creator, create_params);
+    let create_tx =
+        build_create_proposal_transaction(hashi_ids, execute_package_id, creator, create_params);
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
@@ -687,8 +729,13 @@ async fn submit_proposal_through_quorum(
     tracing::info!("{label} proposal {proposal_id} created; collecting votes");
     for executor in &mut executors[1..] {
         let voter = executor.sender();
-        let vote_tx =
-            build_vote_transaction(hashi_ids, voter, proposal_id, proposal_type_tag.clone());
+        let vote_tx = build_vote_transaction(
+            hashi_ids,
+            execute_package_id,
+            voter,
+            proposal_id,
+            proposal_type_tag.clone(),
+        );
         let vote_resp = executor.execute(vote_tx).await?;
         anyhow::ensure!(
             vote_resp.transaction().effects().status().success(),
@@ -698,7 +745,7 @@ async fn submit_proposal_through_quorum(
     let execute_tx = build_execute_proposal_transaction(
         hashi_ids,
         proposal_id,
-        hashi_ids.package_id,
+        execute_package_id,
         module_name,
     )?;
     let exec_resp = executors[0].execute(execute_tx).await?;
@@ -2578,11 +2625,11 @@ mod tests {
              derivation (c = {consumed}); it implies output weight {w_out}"
         );
         let gate = w_total - f;
-        let expected_w_out = w_node * gate.div_ceil(w_node);
-        assert_eq!(
-            w_out, expected_w_out,
-            "pool of {pool_size} implies output weight {w_out}, but collecting to \
-             the W-f gate ({gate}) rounds to {expected_w_out}"
+        let floor_w_out = w_node * gate.div_ceil(w_node);
+        assert!(
+            (floor_w_out..=w_total).contains(&w_out),
+            "pool of {pool_size} implies output weight {w_out}, outside the admissible \
+             range {floor_w_out}..={w_total} (W-f gate {gate}, node weight {w_node})"
         );
     }
 

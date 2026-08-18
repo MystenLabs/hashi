@@ -166,6 +166,23 @@ pub struct Metrics {
     pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
+    /// Nonce batches abandoned because the checkpoint clock never passed the
+    /// accumulation window's cutoff
+    pub mpc_nonce_window_cutoff_unreached_total: IntCounter,
+    /// Nonce batches abandoned because the on-chain certs never reached the floor
+    pub mpc_nonce_fetch_floor_unreached_total: IntCounter,
+    /// Nonce batches abandoned because this node's party loop admitted below the floor
+    pub mpc_nonce_floor_unreached_total: IntCounter,
+    pub mpc_nonce_local_skip_batches_total: IntCounter,
+    pub mpc_nonce_cutoff_unsettled_total: IntCounter,
+    pub mpc_nonce_window_closed_below_floor_total: IntCounter,
+    pub mpc_tob_fetch_stalls_total: IntCounterVec,
+    pub mpc_nonce_size_mismatch_total: IntCounter,
+    pub mpc_nonce_read_side_clock_errors_total: IntCounter,
+    /// Batch index of the most recent nonce batch this node accepted.
+    pub mpc_nonce_batch_index: IntGauge,
+    /// Dealer outputs retained in that batch (post-filter), not certs admitted.
+    pub mpc_nonce_batch_dealers: IntGauge,
 
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
@@ -212,8 +229,12 @@ const WITHDRAWAL_PHASE_SEC_BUCKETS: &[f64] = &[
 
 pub const MPC_LABEL_DKG: &str = "dkg";
 pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
+pub const MPC_LABEL_KEY_GENERATION: &str = "key_generation";
 pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
 pub const MPC_LABEL_SIGNING: &str = "signing";
+
+pub const STALL_OUTCOME_ABSORBED: &str = "absorbed";
+pub const STALL_OUTCOME_FAILED: &str = "failed";
 
 pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "not_found",
@@ -818,6 +839,25 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_nonce_size_mismatch_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_size_mismatch_total",
+                "AVID nonce batches whose built size differs from what the served cert list \
+                 implies. Not emitted on the vanilla path, where any divergence is a \
+                 node-local skip that already discards the batch — a zero there means \
+                 unchecked, not clean",
+                registry,
+            )
+            .unwrap(),
+            mpc_tob_fetch_stalls_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_tob_fetch_stalls_total",
+                "TOB certificate fetches abandoned after stalling, by protocol and by whether \
+                 the stall itself ended the operation: `absorbed` means it retried or carried \
+                 on without the read (including when a reconfig superseded it for unrelated \
+                 reasons), `failed` means this stall is what gave up.",
+                &["protocol", "outcome"],
+                registry,
+            )
+            .unwrap(),
             mpc_dealer_cert_shortfall_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_dealer_cert_shortfall_total",
                 "Dealer rounds that fell short of their cert quorum. Excludes rounds that reached \
@@ -897,6 +937,76 @@ impl Metrics {
                 "hashi_mpc_key_reregistration_bumps_total",
                 "Snapshot races observed by the lost-key heal (registration landed after the \
                  target committee froze; re-targeted one epoch later)",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_window_cutoff_unreached_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_window_cutoff_unreached_total",
+                "Nonce batches abandoned because the read side was never observed past the \
+                 accumulation window cutoff. Does not distinguish a stalled chain clock from \
+                 an unresponsive clock RPC: inside the wait loop the outer deadline fires \
+                 first, so a hung read lands here rather than in \
+                 hashi_mpc_nonce_read_side_clock_errors_total",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_fetch_floor_unreached_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_fetch_floor_unreached_total",
+                "Nonce batches abandoned because the on-chain certified weight never reached \
+                 the floor within the wait budget — a fleet-wide dealer shortage, not a \
+                 node-local one. Live path only; recovery does not wait for the floor",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_floor_unreached_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_floor_unreached_total",
+                "Nonce batches abandoned because this node's party loop admitted below the \
+                 floor, with no node-local skip and the window still open. Distinct from a \
+                 fleet shortage: the certs cleared the floor for the sizing walk but this \
+                 node admitted fewer — check the AVID per-kind quorum",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_local_skip_batches_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_local_skip_batches_total",
+                "Nonce batches discarded because this node skipped a dealer for a \
+                 node-local reason, so the batch cannot match the one its peers built",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_cutoff_unsettled_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_cutoff_unsettled_total",
+                "Nonce batches abandoned because successive reads kept moving the \
+                 accumulation window cutoff, so no snapshot could be confirmed",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_window_closed_below_floor_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_window_closed_below_floor_total",
+                "Nonce batches discarded because the accumulation window closed on the \
+                 cutoff while the admitted weight was still under the floor",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_read_side_clock_errors_total: register_int_counter_with_registry!(
+                "hashi_mpc_nonce_read_side_clock_errors_total",
+                "Read-side checkpoint clock reads that failed while waiting out an accumulation \
+                 window. Catches errors, and a hang only on the first probe; a hang inside the \
+                 wait loop is cut short by the shorter outer deadline and lands in \
+                 hashi_mpc_nonce_window_cutoff_unreached_total instead, so a zero here does not \
+                 rule out a broken clock RPC",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_batch_index: register_int_gauge_with_registry!(
+                "hashi_mpc_nonce_batch_index",
+                "Batch index of the most recent nonce batch this node accepted",
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_batch_dealers: register_int_gauge_with_registry!(
+                "hashi_mpc_nonce_batch_dealers",
+                "Dealer outputs retained in the most recent accepted nonce batch",
                 registry,
             )
             .unwrap(),

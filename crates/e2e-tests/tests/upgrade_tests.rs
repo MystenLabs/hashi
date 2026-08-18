@@ -188,10 +188,10 @@ async fn test_upgrade_via_proposal() -> Result<()> {
     let v1_result = executors[0].execute(builder).await;
     assert!(v1_result.is_err(), "v1 should be rejected after disable");
     let err_msg = v1_result.unwrap_err().to_string();
-    // Rejected at either layer: with v1 disabled the only enabled on-chain
-    // version is v2, which this binary (SUPPORTED_PACKAGE_VERSIONS = [1]) does
-    // not support, so the node-side executor guard refuses to submit; had it
-    // reached chain, `assert_version_enabled` would abort with EVersionDisabled.
+    // With v1 disabled the executor still submits (a later version is enabled,
+    // published and supported, so it does not halt); the call targets the v1
+    // package, whose `assert_version_enabled` aborts with EVersionDisabled. The
+    // halt arm below covers a binary that supports no enabled version.
     assert!(
         err_msg.contains("EVersionDisabled")
             || err_msg.contains("assert_version_enabled")

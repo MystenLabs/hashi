@@ -653,6 +653,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_nonce_accumulation_window_open() -> Result<()> {
+        init_test_logging();
+        let mut networks = setup_test_networks(
+            avid_override(TestNetworksBuilder::new().with_nodes(4)).with_onchain_config(
+                "mpc_nonce_accumulation_window_ms",
+                hashi_types::move_types::ConfigValue::U64(2_000),
+            ),
+        )
+        .await?;
+        rotate_into_avid(&mut networks).await?;
+        {
+            let hashi_ids = networks.hashi_network.ids();
+            let stamped_package = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state()
+                .active_package()
+                .expect("an active package after upgrade")
+                .0;
+            let mut executors: Vec<hashi::sui_tx_executor::SuiTxExecutor> = networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .map(|node| {
+                    hashi::sui_tx_executor::SuiTxExecutor::from_config(
+                        &node.hashi().config,
+                        node.hashi().onchain_state(),
+                    )
+                })
+                .collect::<Result<_>>()?;
+            crate::upgrade_flow::disable_version(&mut executors, hashi_ids, 1, stamped_package)
+                .await?;
+        }
+        {
+            let hashi = networks.hashi_network.nodes()[0].hashi();
+            let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
+            let window_ms = mpc_manager
+                .read()
+                .unwrap()
+                .mpc_config
+                .nonce_accumulation_window_ms;
+            assert!(
+                window_ms > 0,
+                "the accumulation window must be open for this test to mean anything. \
+                 Asserting a specific value here would be vacuous: the override this \
+                 harness applies is the compiled-in default, so an equality check passes \
+                 whether or not governance ever set it. Governance tuning of this key is \
+                 not covered by any test — see the update_config insert gap."
+            );
+            assert!(
+                !hashi
+                    .onchain_state()
+                    .state()
+                    .hashi()
+                    .config
+                    .enabled_versions
+                    .contains(&1),
+                "while the bare-only version is enabled every nonce bucket is created bare and \
+                 certs carry timestamp 0, which collapses the window to the floor-only rule — \
+                 this test would then pass while exercising the legacy path it exists to \
+                 distinguish from. The active package version does not establish this: the \
+                 layout is decided by whether the bare-only version is still enabled"
+            );
+        }
+        let deposit_amount_sats = 100_000u64;
+        let withdrawal_amount_sats = 30_000u64;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        withdraw_and_confirm(&mut networks, &hashi, user_key, withdrawal_amount_sats).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
         let networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
@@ -1538,6 +1611,7 @@ mod tests {
         let validator_address = executor.sender();
         let builder = build_create_proposal_transaction(
             hashi_ids,
+            hashi_ids.package_id,
             validator_address,
             CreateProposalParams::UpdateConfig {
                 key: "bitcoin_deposit_minimum".to_string(),
@@ -1638,6 +1712,7 @@ mod tests {
         for i in 0..3u64 {
             let builder = build_create_proposal_transaction(
                 hashi_ids,
+                hashi_ids.package_id,
                 creator,
                 CreateProposalParams::UpdateConfig {
                     // Never voted on or executed, so the values are inert.

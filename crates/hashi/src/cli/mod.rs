@@ -1618,6 +1618,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         let transaction = crate::sui_tx_executor::build_register_or_update_validator_tx(
             &mut client,
             &hashi_ids,
+            hashi_ids.package_id,
             &config,
             operator_address,
             None,

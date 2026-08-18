@@ -55,11 +55,11 @@ const CERT_LISTING_RETRY_DELAY: std::time::Duration = std::time::Duration::from_
 #[error("{0}")]
 struct InconsistentListing(String);
 
-fn inconsistent_listing(message: String) -> anyhow::Error {
+pub(crate) fn inconsistent_listing(message: String) -> anyhow::Error {
     anyhow::Error::new(InconsistentListing(message))
 }
 
-fn is_inconsistent_listing(error: &anyhow::Error) -> bool {
+pub fn is_inconsistent_listing(error: &anyhow::Error) -> bool {
     error.downcast_ref::<InconsistentListing>().is_some()
 }
 
@@ -305,6 +305,18 @@ impl OnchainState {
         self.version_support().active_version()
     }
 
+    /// Resolved from a single read guard: a torn read could pair a version with
+    /// an id from a different snapshot, which is the drift this pairing exists
+    /// to prevent.
+    pub fn active_package(&self) -> Option<(Address, u64)> {
+        let state = self.state();
+        let version = state
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()?;
+        let id = state.package_versions.get(version)?;
+        Some((id, version))
+    }
+
     /// Reason autonomous on-chain work must halt (governance pause, or an
     /// unsupported on-chain version), or `None` to proceed. Reads state once so
     /// callers get a single consistent snapshot. Mirrors — and subsumes — the
@@ -454,6 +466,26 @@ impl OnchainState {
 
     fn update_latest_checkpoint_info(&self, info: CheckpointInfo) {
         self.0.checkpoint.send_replace(info);
+    }
+
+    pub async fn read_side_checkpoint_timestamp_ms(&self) -> Result<u64> {
+        let info = self
+            .0
+            .client
+            .clone()
+            .ledger_client()
+            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        let ts = info
+            .timestamp
+            .ok_or_else(|| anyhow!("service info carried no timestamp"))?;
+        let seconds = u64::try_from(ts.seconds)
+            .map_err(|_| anyhow!("service info timestamp is before the epoch: {}", ts.seconds))?;
+        let millis = seconds
+            .checked_mul(1_000)
+            .ok_or_else(|| anyhow!("service info timestamp overflows ms: {seconds}s"))?;
+        Ok(millis + u64::from(ts.nanos.max(0) as u32) / 1_000_000)
     }
 
     pub fn package_id_original(&self) -> Address {
@@ -859,15 +891,17 @@ impl OnchainState {
             .map(|c| c.mpc_service_client())
     }
 
-    /// Fetches the EpochCertsV1 for the given key from on-chain.
-    /// Returns None if no certs exist for this key.
+    /// Returns None if no certs exist for this key. The two bucket structs are
+    /// BCS-identical, so one decode serves both; the layout selects the node
+    /// type, and callers must dispatch on it rather than on the package version
+    /// — a bucket created before a v1→v2 upgrade is still bare after it.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
-    pub async fn fetch_epoch_certs(
+    async fn fetch_epoch_certs_with_layout(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<move_types::EpochCertsV1>> {
+    ) -> Result<Option<(versioned_decode::TobCertLayout, move_types::EpochCertsV1)>> {
         let tob_id = self.tob_id();
         let key = TobKey {
             epoch,
@@ -896,82 +930,28 @@ impl OnchainState {
         let packages = self.state().package_versions().clone();
         while let Some(field) = stream.try_next().await? {
             if field.name().value() == key_bcs.as_slice() {
-                // Decode by the layout the chain reports (self-describing),
-                // rather than assuming `EpochCertsV1`. The bucket structs are
-                // BCS-identical, but a stamped bucket implies stamped node
-                // values this build cannot decode — so fail cleanly here
-                // instead of misparsing the linked-table nodes downstream.
                 let value_type = versioned_decode::field_value_type(&field)?;
-                match versioned_decode::TobCertLayout::from_struct_tag(&packages, &value_type)? {
-                    versioned_decode::TobCertLayout::Bare => {}
-                    versioned_decode::TobCertLayout::Stamped => anyhow::bail!(
-                        "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses \
-                         the stamped cert layout, which this binary does not support — upgrade \
-                         required"
-                    ),
-                }
+                let layout =
+                    versioned_decode::TobCertLayout::from_struct_tag(&packages, &value_type)?;
                 let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
-                return Ok(Some(epoch_certs));
+                return Ok(Some((layout, epoch_certs)));
             }
         }
         Ok(None)
     }
 
-    /// Fetches all raw certificates for the given `(epoch, batch_index, protocol_type)`
-    /// bucket from on-chain; caller is responsible for conversion.
-    pub async fn fetch_certs(
+    async fn collect_table_nodes<V: serde::de::DeserializeOwned>(
         &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        for attempt in 1..CERT_LISTING_ATTEMPTS {
-            match self
-                .fetch_certs_once(epoch, batch_index, protocol_type)
-                .await
-            {
-                Ok(certs) => return Ok(certs),
-                Err(e) if is_inconsistent_listing(&e) => {
-                    tracing::debug!(
-                        "epoch {epoch} {protocol_type:?}: {e}; re-reading (attempt {attempt} of \
-                         {CERT_LISTING_ATTEMPTS})"
-                    );
-                    tokio::time::sleep(CERT_LISTING_RETRY_DELAY).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        self.fetch_certs_once(epoch, batch_index, protocol_type)
-            .await
-    }
-
-    async fn fetch_certs_once(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        let epoch_certs = match self
-            .fetch_epoch_certs(epoch, batch_index, protocol_type)
-            .await?
-        {
-            Some(certs) => certs,
-            None => return Ok(None),
-        };
-        let Some(head) = epoch_certs.certs.head else {
-            return Ok(Some(vec![]));
-        };
-        let mut nodes: std::collections::HashMap<
-            Address,
-            move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>,
-        > = std::collections::HashMap::new();
+        table_id: Address,
+    ) -> Result<std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>> {
+        let mut nodes = std::collections::HashMap::new();
         let mut stream = self
             .0
             .client
             .clone()
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.certs.id)
+                    .with_parent(table_id)
                     .with_page_size(SCRAPE_PAGE_SIZE)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -984,6 +964,129 @@ impl OnchainState {
             let node = field.value().deserialize()?;
             nodes.insert(dealer, node);
         }
+        Ok(nodes)
+    }
+
+    /// Bare buckets, written before the v1→v2 upgrade, report `timestamp_ms: 0`,
+    /// which never trips the window's cutoff. A bucket's layout is fixed by
+    /// whichever version created it and never converts, so the layout the chain
+    /// reports — not the active version — decides how to decode.
+    pub async fn fetch_nonce_certs_stamped_or_bare(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
+        let protocol_type = move_types::ProtocolType::NonceGeneration;
+        self.retry_inconsistent_listing(epoch, protocol_type, || async {
+            let Some((layout, epoch_certs)) = self
+                .fetch_epoch_certs_with_layout(epoch, batch_index, protocol_type)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let Some(head) = epoch_certs.certs.head else {
+                return Ok(Some(vec![]));
+            };
+            let size = epoch_certs.certs.size;
+            let table_id = epoch_certs.certs.id;
+            let certs = match layout {
+                versioned_decode::TobCertLayout::Stamped => {
+                    let nodes = self.collect_table_nodes(table_id).await?;
+                    let stamped = walk_linked_table(head, size, nodes).map_err(|e| {
+                        inconsistent_listing(format!(
+                            "incomplete stamped cert listing for epoch {epoch} {protocol_type:?}: \
+                             {e}"
+                        ))
+                    })?;
+                    ensure_timestamp_ordered(&stamped)?;
+                    stamped
+                }
+                versioned_decode::TobCertLayout::Bare => {
+                    let nodes = self.collect_table_nodes(table_id).await?;
+                    walk_linked_table(head, size, nodes)
+                        .map_err(|e| {
+                            inconsistent_listing(format!(
+                                "incomplete cert listing for epoch {epoch} {protocol_type:?}: {e}"
+                            ))
+                        })?
+                        .into_iter()
+                        .map(|(dealer, submission)| {
+                            (
+                                dealer,
+                                move_types::StampedDealerSubmissionV1 {
+                                    submission,
+                                    timestamp_ms: 0,
+                                },
+                            )
+                        })
+                        .collect()
+                }
+            };
+            Ok(Some(certs))
+        })
+        .await
+    }
+
+    async fn retry_inconsistent_listing<T, F, Fut>(
+        &self,
+        epoch: u64,
+        protocol_type: move_types::ProtocolType,
+        read: F,
+    ) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        for attempt in 1..CERT_LISTING_ATTEMPTS {
+            match read().await {
+                Ok(v) => return Ok(v),
+                Err(e) if is_inconsistent_listing(&e) => {
+                    tracing::debug!(
+                        "epoch {epoch} {protocol_type:?}: {e}; re-reading (attempt {attempt} of \
+                         {CERT_LISTING_ATTEMPTS})"
+                    );
+                    tokio::time::sleep(CERT_LISTING_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        read().await
+    }
+
+    pub async fn fetch_certs(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        self.retry_inconsistent_listing(epoch, protocol_type, || async {
+            self.fetch_certs_once(epoch, batch_index, protocol_type)
+                .await
+        })
+        .await
+    }
+
+    async fn fetch_certs_once(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        let Some((layout, epoch_certs)) = self
+            .fetch_epoch_certs_with_layout(epoch, batch_index, protocol_type)
+            .await?
+        else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            layout == versioned_decode::TobCertLayout::Bare,
+            "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses the \
+             {layout:?} cert layout, which this read path cannot decode"
+        );
+        let Some(head) = epoch_certs.certs.head else {
+            return Ok(Some(vec![]));
+        };
+        let nodes = self.collect_table_nodes(epoch_certs.certs.id).await?;
         walk_linked_table(head, epoch_certs.certs.size, nodes)
             .map_err(|e| {
                 inconsistent_listing(format!(
@@ -992,6 +1095,36 @@ impl OnchainState {
             })
             .map(Some)
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "cert table is not timestamp-ordered: {later} stamped {later_ms} follows {earlier} \
+     stamped {earlier_ms}"
+)]
+pub struct UnorderedCertTableRead {
+    pub earlier: Address,
+    pub earlier_ms: u64,
+    pub later: Address,
+    pub later_ms: u64,
+}
+
+fn ensure_timestamp_ordered(
+    certs: &[(Address, move_types::StampedDealerSubmissionV1)],
+) -> Result<()> {
+    if let Some(bad) = certs
+        .windows(2)
+        .find(|w| w[1].1.timestamp_ms < w[0].1.timestamp_ms)
+    {
+        return Err(UnorderedCertTableRead {
+            earlier: bad[0].0,
+            earlier_ms: bad[0].1.timestamp_ms,
+            later: bad[1].0,
+            later_ms: bad[1].1.timestamp_ms,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn walk_linked_table<V>(

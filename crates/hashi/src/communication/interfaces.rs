@@ -47,6 +47,9 @@ pub enum ChannelError {
     #[error("Channel closed")]
     Closed,
 
+    #[error("Replay stream exhausted")]
+    Exhausted,
+
     #[error("Channel error: {0}")]
     Other(String),
 }

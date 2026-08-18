@@ -17,11 +17,9 @@
 //! rolled out before the on-chain package is upgraded. A full withdrawal here
 //! proves that configuration can still sign.
 //!
-//! Forward note: once the version-gated stamped nonce-cert path re-lands (the
-//! reverted #841 line of work), a v1-only snapshot chain is exactly the *bare*
-//! cert path (`supports_stamped_nonce_certs() == false`, timestamps synthesized
-//! to `0`) that no fresh-publish harness exercises — the marked assertion below
-//! should then also pin this test to that path.
+//! A v1-only snapshot chain is also exactly the *bare* cert path (timestamps
+//! synthesized to `0`) that no fresh-publish harness exercises, and the
+//! assertions below pin this test to it.
 
 use anyhow::Result;
 use e2e_tests::TestNetworksBuilder;
@@ -65,10 +63,7 @@ async fn snapshot_v1_signs_withdrawal_end_to_end() -> Result<()> {
         .await?;
 
     // The snapshot chain is a single-version v1 package (no upgrade has run),
-    // so the committee signs against the deployed bytecode. When the
-    // version-gated stamped nonce-cert path re-lands, also assert
-    // `!node0.onchain_state().supports_stamped_nonce_certs()` here to pin this
-    // to the *bare* cert path.
+    // so the committee signs against the deployed bytecode.
     let node0 = networks.hashi_network.nodes()[0].hashi().clone();
     assert_eq!(
         node0
@@ -79,6 +74,12 @@ async fn snapshot_v1_signs_withdrawal_end_to_end() -> Result<()> {
             .len(),
         1,
         "snapshot chain should be a single-version (v1) package before any upgrade"
+    );
+    assert_eq!(
+        node0.onchain_state().active_package(),
+        Some((hashi_ids.package_id, 1)),
+        "a v1-only snapshot chain must resolve to the original package at version 1, so the \
+         call target and the ABI it is shaped for agree"
     );
 
     // ── Deposit ─────────────────────────────────────────────────────────
