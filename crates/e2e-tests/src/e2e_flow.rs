@@ -1580,6 +1580,7 @@ mod tests {
         let validator_address = executor.sender();
         let builder = build_create_proposal_transaction(
             hashi_ids,
+            hashi_ids.package_id,
             validator_address,
             CreateProposalParams::UpdateConfig {
                 key: "bitcoin_deposit_minimum".to_string(),
@@ -1680,6 +1681,7 @@ mod tests {
         for i in 0..3u64 {
             let builder = build_create_proposal_transaction(
                 hashi_ids,
+                hashi_ids.package_id,
                 creator,
                 CreateProposalParams::UpdateConfig {
                     // Never voted on or executed, so the values are inert.

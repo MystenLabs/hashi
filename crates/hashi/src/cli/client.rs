@@ -426,6 +426,7 @@ impl HashiClient {
         let validator_address = self.resolve_validator_address()?;
         Ok(build_vote_transaction(
             self.hashi_ids,
+            self.call_package(),
             validator_address,
             proposal_id,
             type_arg,
@@ -454,7 +455,7 @@ impl HashiClient {
 
         builder.move_call(
             Function::new(
-                self.hashi_ids.package_id,
+                self.call_package(),
                 Identifier::from_static("proposal"),
                 Identifier::from_static("remove_vote"),
             )
@@ -473,6 +474,7 @@ impl HashiClient {
         let validator_address = self.resolve_validator_address()?;
         Ok(build_create_proposal_transaction(
             self.hashi_ids,
+            self.call_package(),
             validator_address,
             params,
         ))
@@ -547,6 +549,7 @@ impl HashiClient {
 /// This is a standalone function so it can be reused outside `HashiClient` (e.g. in tests).
 pub fn build_create_proposal_transaction(
     hashi_ids: HashiIds,
+    call_package: Address,
     validator_address: Address,
     params: CreateProposalParams,
 ) -> TransactionBuilder {
@@ -570,7 +573,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("upgrade"),
                     Identifier::from_static("propose"),
                 ),
@@ -593,7 +596,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("update_config"),
                     Identifier::from_static("propose"),
                 ),
@@ -629,7 +632,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("update_config"),
                     Identifier::from_static("propose"),
                 ),
@@ -647,7 +650,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("enable_version"),
                     Identifier::from_static("propose"),
                 ),
@@ -665,7 +668,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("disable_version"),
                     Identifier::from_static("propose"),
                 ),
@@ -683,7 +686,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("abort_reconfig"),
                     Identifier::from_static("propose"),
                 ),
@@ -701,7 +704,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("update_guardian"),
                     Identifier::from_static("propose"),
                 ),
@@ -719,7 +722,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    hashi_ids.package_id,
+                    call_package,
                     Identifier::from_static("emergency_pause"),
                     Identifier::from_static("propose"),
                 ),
@@ -863,6 +866,7 @@ fn build_metadata(
 /// committee member.
 pub fn build_vote_transaction(
     hashi_ids: HashiIds,
+    call_package: Address,
     validator_address: Address,
     proposal_id: Address,
     type_arg: TypeTag,
@@ -883,7 +887,7 @@ pub fn build_vote_transaction(
 
     builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package,
             Identifier::from_static("proposal"),
             Identifier::from_static("vote"),
         )

@@ -718,7 +718,8 @@ async fn submit_proposal_through_quorum(
     use hashi::cli::upgrade::extract_proposal_id_from_response;
 
     let creator = executors[0].sender();
-    let create_tx = build_create_proposal_transaction(hashi_ids, creator, create_params);
+    let create_tx =
+        build_create_proposal_transaction(hashi_ids, execute_package_id, creator, create_params);
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
@@ -728,8 +729,13 @@ async fn submit_proposal_through_quorum(
     tracing::info!("{label} proposal {proposal_id} created; collecting votes");
     for executor in &mut executors[1..] {
         let voter = executor.sender();
-        let vote_tx =
-            build_vote_transaction(hashi_ids, voter, proposal_id, proposal_type_tag.clone());
+        let vote_tx = build_vote_transaction(
+            hashi_ids,
+            execute_package_id,
+            voter,
+            proposal_id,
+            proposal_type_tag.clone(),
+        );
         let vote_resp = executor.execute(vote_tx).await?;
         anyhow::ensure!(
             vote_resp.transaction().effects().status().success(),
