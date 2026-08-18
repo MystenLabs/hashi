@@ -15941,3 +15941,213 @@ async fn test_publish_outcomes_are_counted_separately() {
         );
     }
 }
+
+struct BlockingDealerMessageStore {
+    message: avss::Message,
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl PublicMessagesStore for BlockingDealerMessageStore {
+    fn get_dealer_message(
+        &self,
+        _epoch: u64,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<avss::Message>> {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        Ok(Some(self.message.clone()))
+    }
+
+    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+        Ok(Vec::new())
+    }
+
+    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
+        Ok(Vec::new())
+    }
+
+    fn store_dealer_message(
+        &mut self,
+        _epoch: u64,
+        _dealer: &Address,
+        _message: &avss::Message,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn store_rotation_messages(
+        &mut self,
+        _epoch: u64,
+        _dealer: &Address,
+        _messages: &RotationMessages,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_rotation_messages(
+        &self,
+        _epoch: u64,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<RotationMessages>> {
+        Ok(None)
+    }
+
+    fn store_nonce_message(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _message: &batch_avss::Message,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_nonce_message(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<batch_avss::Message>> {
+        Ok(None)
+    }
+
+    fn list_nonce_messages(
+        &self,
+        _batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+        Ok(Vec::new())
+    }
+
+    fn store_avid_round_state(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_avid_round_state(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        Ok(None)
+    }
+
+    fn list_avid_round_states(
+        &self,
+        _batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+        Ok(Vec::new())
+    }
+
+    fn store_avid_held_echoes(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        Ok(None)
+    }
+
+    fn store_avid_dealer_builder(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _builder: &batch_avss_avid::AvssMessageBuilder,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_avid_dealer_builder(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+    ) -> anyhow::Result<Option<batch_avss_avid::AvssMessageBuilder>> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn retrieve_messages_does_not_starve_the_runtime() {
+    // One worker thread, so a handler that blocks it starves every other task.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let setup = TestSetup::new(4);
+    let dealer_message = setup
+        .create_manager(0)
+        .create_dealer_message(&mut rand::thread_rng());
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let manager = setup.create_manager_with_store(
+        0,
+        Box::new(BlockingDealerMessageStore {
+            message: dealer_message,
+            entered: entered_tx,
+            release: std::sync::Mutex::new(release_rx),
+        }),
+    );
+    let epoch = manager.mpc_config.epoch;
+
+    let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+    let mut config = crate::config::Config::new_for_testing();
+    config.db = Some(tmpdir.path().into());
+    let hashi = crate::Hashi::new_with_registry(
+        crate::ServerVersion::new("unknown", "unknown"),
+        None,
+        config,
+        &prometheus::Registry::new(),
+    )
+    .unwrap();
+    hashi.set_mpc_manager(manager);
+    let service = crate::grpc::HttpService::new(hashi);
+
+    let mut request = tonic::Request::new(hashi_types::proto::RetrieveMessagesRequest {
+        epoch: Some(epoch),
+        dealer: Some(setup.address(2).to_string()),
+        protocol_type: Some(hashi_types::proto::MpcProtocolType::Dkg as i32),
+        batch_index: None,
+    });
+    request.extensions_mut().insert(setup.address(1));
+
+    let handler = rt.spawn(async move {
+        use hashi_types::proto::mpc_service_server::MpcService;
+        service.retrieve_messages(request).await
+    });
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("handler never reached the storage read");
+    let (canary_tx, canary_rx) = std::sync::mpsc::channel();
+    rt.spawn(async move {
+        let _ = canary_tx.send(());
+    });
+    let polled = canary_rx.recv_timeout(Duration::from_secs(10));
+
+    release_tx.send(()).unwrap();
+    let response = rt.block_on(handler).unwrap();
+
+    polled.expect("worker thread was blocked by the storage read");
+    assert!(matches!(
+        response.unwrap().into_inner().messages,
+        Some(hashi_types::proto::retrieve_messages_response::Messages::DkgMessage(_))
+    ));
+}
