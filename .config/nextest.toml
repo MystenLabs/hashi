@@ -19,3 +19,9 @@ failure-output = "immediate-final"
 success-output = "never"
 # Don't stop on first failure - run all tests
 fail-fast = false
+# Kill a test that has been slow for 12 minutes and let `retries` re-run it.
+# Without this, a heavy e2e test that stalls (e.g. a synchronous DB write
+# blocking the single-thread runtime under CI I/O contention) runs until the
+# 6h GitHub job cap instead of failing and retrying. Legitimate e2e tests
+# finish well under 12 minutes, so this only fires on a genuine hang.
+slow-timeout = { period = "60s", terminate-after = 12 }
