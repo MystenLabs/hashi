@@ -90,7 +90,7 @@ fn receive_dealer_messages(
     let Messages::Dkg(msg) = messages else {
         panic!("receive_dealer_messages called with rotation messages");
     };
-    manager.cache_and_persist_dkg_message(manager.mpc_config.epoch, dealer, msg)?;
+    manager.persist_and_cache_dkg_message(manager.mpc_config.epoch, dealer, msg)?;
     let sig = manager.try_sign_dkg_message(dealer, messages)?;
     Ok(MemberSignature::new(
         manager.mpc_config.epoch,
@@ -1483,6 +1483,7 @@ struct InMemoryPublicMessagesStore {
     fail_nonce_reads: bool,
     fail_avid_round_state_reads: bool,
     fail_avid_held_echoes_reads: bool,
+    fail_avid_round_state_writes: bool,
 }
 
 impl InMemoryPublicMessagesStore {
@@ -1497,6 +1498,7 @@ impl InMemoryPublicMessagesStore {
             fail_nonce_reads: false,
             fail_avid_round_state_reads: false,
             fail_avid_held_echoes_reads: false,
+            fail_avid_round_state_writes: false,
         }
     }
 }
@@ -1613,6 +1615,9 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
         dealer: &Address,
         state: &AvidRoundState,
     ) -> anyhow::Result<()> {
+        if self.fail_avid_round_state_writes {
+            return Err(anyhow::anyhow!("avid round state write failure"));
+        }
         self.avid_round_stored
             .lock()
             .unwrap()
@@ -1911,6 +1916,7 @@ fn test_receive_dealer_message_storage_failure() {
 
     // Verify operation fails with storage error
     assert!(result.is_err(), "Should fail when storage fails");
+    assert!(receiver_manager.current_dkg_messages.is_empty());
     match result {
         Err(MpcError::StorageError(msg)) => {
             assert!(
@@ -2158,7 +2164,7 @@ async fn test_run_dkg_with_complaint_recovery() {
                     unreachable!()
                 };
                 manager
-                    .cache_and_persist_dkg_message(manager.mpc_config.epoch, dealer_addr, msg)
+                    .persist_and_cache_dkg_message(manager.mpc_config.epoch, dealer_addr, msg)
                     .unwrap();
                 continue;
             }
@@ -2553,7 +2559,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
 
     // Party 2 stores dealer 1's cheating message and creates complaint during processing
     party_manager
-        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_1_addr, &dealer_1_msg)
+        .persist_and_cache_dkg_message(party_manager.mpc_config.epoch, dealer_1_addr, &dealer_1_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_1_addr)
@@ -3912,7 +3918,7 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
 }
 
 #[test]
-fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_non_current_epoch() {
+fn test_persist_and_cache_rotation_messages_does_not_overwrite_in_memory_with_non_current_epoch() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
     let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
@@ -3933,7 +3939,7 @@ fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_no
     );
 
     manager
-        .cache_and_persist_rotation_messages(prev_epoch, dealer_address, &prev_msgs)
+        .persist_and_cache_rotation_messages(prev_epoch, dealer_address, &prev_msgs)
         .unwrap();
 
     let stored_prev = manager
@@ -3958,7 +3964,7 @@ fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_no
 }
 
 #[test]
-fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_current_epoch() {
+fn test_persist_and_cache_dkg_message_does_not_overwrite_in_memory_with_non_current_epoch() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
@@ -3980,7 +3986,7 @@ fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_curr
     );
 
     manager
-        .cache_and_persist_dkg_message(prev_epoch, dealer_address, &prev_msg)
+        .persist_and_cache_dkg_message(prev_epoch, dealer_address, &prev_msg)
         .unwrap();
 
     let stored_prev = manager
@@ -4005,7 +4011,7 @@ fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_curr
 }
 
 #[test]
-fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_current_epoch() {
+fn test_persist_and_cache_nonce_message_does_not_overwrite_in_memory_with_non_current_epoch() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
     let mut manager =
@@ -4028,7 +4034,7 @@ fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_cu
     );
 
     manager
-        .cache_and_persist_nonce_message(prev_epoch, dealer_address, &prev_nonce)
+        .persist_and_cache_nonce_message(prev_epoch, dealer_address, &prev_nonce)
         .unwrap();
 
     let stored_prev_msg = manager
@@ -4435,7 +4441,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         unreachable!()
     };
     party_manager
-        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .persist_and_cache_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -4511,7 +4517,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         unreachable!()
     };
     party_manager
-        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .persist_and_cache_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -4706,7 +4712,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         unreachable!()
     };
     party_manager
-        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .persist_and_cache_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -4788,7 +4794,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
         unreachable!()
     };
     party_manager
-        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .persist_and_cache_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -5536,7 +5542,7 @@ async fn test_nonce_equivocation_is_rejected_for_a_pruned_batch() {
     manager
         .write()
         .unwrap()
-        .cache_and_persist_nonce_message(epoch, dealer, &certified)
+        .persist_and_cache_nonce_message(epoch, dealer, &certified)
         .unwrap();
 
     // Advance far enough that batch 0 falls outside the retained window.
@@ -5582,7 +5588,7 @@ async fn test_nonce_equivocation_is_rejected_after_a_restart() {
     );
 
     manager
-        .cache_and_persist_nonce_message(epoch, dealer, &certified)
+        .persist_and_cache_nonce_message(epoch, dealer, &certified)
         .unwrap();
 
     // The restart: in-memory caches are gone, the store still holds the deal.
@@ -5731,7 +5737,7 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
     // reloaded the message but `message_responses` is empty.
     let mut receiver_manager = setup.create_manager(0);
     receiver_manager
-        .cache_and_persist_dkg_message(
+        .persist_and_cache_dkg_message(
             receiver_manager.mpc_config.epoch,
             dealer_addr,
             &dealer_message,
@@ -7891,7 +7897,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
         "Test precondition: the stored message must differ from the certified one",
     );
     test_manager
-        .cache_and_persist_dkg_message(epoch, diverged_dealer, other_msg)
+        .persist_and_cache_dkg_message(epoch, diverged_dealer, other_msg)
         .unwrap();
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -8140,7 +8146,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
     test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
     test_manager
-        .cache_and_persist_rotation_messages(epoch, diverged_dealer, &diverged)
+        .persist_and_cache_rotation_messages(epoch, diverged_dealer, &diverged)
         .unwrap();
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -8263,7 +8269,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
     test_manager.previous_output = Some(test_dkg_output.clone());
     for (dealer_addr, msgs) in &certified {
         test_manager
-            .cache_and_persist_rotation_messages(epoch, *dealer_addr, msgs)
+            .persist_and_cache_rotation_messages(epoch, *dealer_addr, msgs)
             .unwrap();
     }
     let test_manager = Arc::new(RwLock::new(test_manager));
@@ -8381,10 +8387,10 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
     test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
     test_manager
-        .cache_and_persist_rotation_messages(epoch, unrepairable, &diverged_first)
+        .persist_and_cache_rotation_messages(epoch, unrepairable, &diverged_first)
         .unwrap();
     test_manager
-        .cache_and_persist_rotation_messages(epoch, repairable, &diverged_later)
+        .persist_and_cache_rotation_messages(epoch, repairable, &diverged_later)
         .unwrap();
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -9421,7 +9427,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         // Create and store rotation messages
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
         dealer_manager
-            .cache_and_persist_rotation_messages(
+            .persist_and_cache_rotation_messages(
                 dealer_manager.mpc_config.epoch,
                 dealer_addr,
                 &msgs,
@@ -15641,7 +15647,7 @@ async fn test_recover_nonce_shares_via_complaint() {
 
     // Store the cheating message in test manager
     test_manager
-        .cache_and_persist_nonce_message(
+        .persist_and_cache_nonce_message(
             test_manager.mpc_config.epoch,
             dealer_addr,
             &cheating_messages,
@@ -15749,7 +15755,7 @@ async fn test_recover_nonce_shares_via_complaint_db_fallback() {
     // Store the message (populates both cache AND DB) and process it to
     // generate the complaint we'll later try to recover from.
     test_manager
-        .cache_and_persist_nonce_message(
+        .persist_and_cache_nonce_message(
             test_manager.mpc_config.epoch,
             dealer_addr,
             &cheating_messages,
@@ -15845,7 +15851,7 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
             if dealer_idx == cheating_dealer_idx && mgr_idx == test_party_idx {
                 // Validator 0 can't sign — just store the message
                 manager
-                    .cache_and_persist_nonce_message(
+                    .persist_and_cache_nonce_message(
                         manager.mpc_config.epoch,
                         dealer_addr,
                         nonce_msg,
@@ -17367,4 +17373,54 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
         bundle.avid_vote.is_none() || bundle.common.is_some(),
         "served an AVID vote with no common message"
     );
+}
+
+#[test]
+fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let mut store = InMemoryPublicMessagesStore::new();
+    store.fail_avid_round_state_writes = true;
+    let store = Arc::new(store);
+    let mut voter = setup.create_manager_with_store(1, store.clone());
+    let epoch = voter.mpc_config.epoch;
+
+    let optimistic = voter.handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: fx.optimistic[1].1.clone(),
+        },
+    );
+    assert!(
+        matches!(optimistic, Err(MpcError::StorageError(_))),
+        "optimistic phase must fail on the round state write: {optimistic:?}"
+    );
+
+    let dispersal = voter.handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: dispersals[1].1.clone(),
+        },
+    );
+    assert!(
+        matches!(dispersal, Err(MpcError::NotReady(_))),
+        "dispersal must be blocked by the missing round state: {dispersal:?}"
+    );
+
+    assert!(
+        store
+            .get_avid_held_echoes(epoch, batch_index, &fx.dealer_addr)
+            .unwrap()
+            .is_none(),
+        "persisted held echoes with no durable common message"
+    );
+    assert!(voter.current_avid_round_state.is_empty());
+    assert!(voter.dealer_avid_nonce_outputs.is_empty());
+    assert!(voter.current_avid_verified_common.is_empty());
 }
