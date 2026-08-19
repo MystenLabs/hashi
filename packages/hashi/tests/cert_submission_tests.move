@@ -10,6 +10,20 @@ const VOTER1: address = @0x1;
 const VOTER2: address = @0x2;
 const VOTER3: address = @0x3;
 
+fun bytes(len: u64, fill: u8): vector<u8> {
+    let mut out = vector[];
+    len.do!(|_| out.push_back(fill));
+    out
+}
+
+fun messages_hash(): vector<u8> {
+    bytes(32, 7)
+}
+
+fun signature(): vector<u8> {
+    bytes(96, 9)
+}
+
 #[test]
 fun test_dkg_and_rotation_certs_use_separate_buckets() {
     let voters = vector[VOTER1, VOTER2, VOTER3];
@@ -17,23 +31,23 @@ fun test_dkg_and_rotation_certs_use_separate_buckets() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let epoch = ctx.epoch();
 
-    let rot_cert = hashi::committee::new_committee_signature(epoch, vector[], vector[]);
+    let rot_cert = hashi::committee::new_committee_signature(epoch, signature(), vector[]);
     hashi::cert_submission::submit_rotation_cert(
         &mut hashi,
         epoch,
         VOTER1,
-        vector[1u8, 2, 3],
+        messages_hash(),
         rot_cert,
         ctx,
     );
 
     let ctx2 = &mut sui::tx_context::new_from_hint(VOTER2, 1, 0, 0, 0);
-    let dkg_cert = hashi::committee::new_committee_signature(epoch, vector[], vector[]);
+    let dkg_cert = hashi::committee::new_committee_signature(epoch, signature(), vector[]);
     hashi::cert_submission::submit_dkg_cert(
         &mut hashi,
         epoch,
         VOTER2,
-        vector[1u8, 2, 3],
+        messages_hash(),
         dkg_cert,
         ctx2,
     );
@@ -61,13 +75,13 @@ fun test_nonce_cert_is_stamped_with_clock() {
     let mut clock = sui::clock::create_for_testing(ctx);
     clock.set_for_testing(123);
 
-    let nonce_cert = hashi::committee::new_committee_signature(epoch, vector[], vector[]);
+    let nonce_cert = hashi::committee::new_committee_signature(epoch, signature(), vector[]);
     hashi::cert_submission::submit_nonce_cert(
         &mut hashi,
         epoch,
         0,
         VOTER1,
-        vector[1u8, 2, 3],
+        messages_hash(),
         nonce_cert,
         &clock,
         ctx,
@@ -94,12 +108,12 @@ fun test_destroy_all_stamped_drains_nonce_bucket() {
         hashi::tob::protocol_type_nonce_generation(),
         ctx,
     );
-    let sig = hashi::committee::new_committee_signature(0, vector[], vector[]);
+    let sig = hashi::committee::new_committee_signature(0, signature(), vector[]);
     hashi::tob::submit_stamped_cert_with_signature(
         &mut bucket,
         0,
         VOTER1,
-        vector[1u8, 2, 3],
+        messages_hash(),
         &sig,
         123,
     );
@@ -130,8 +144,8 @@ fun test_nonce_cert_follows_a_bare_bucket_after_v1_is_disabled() {
         epoch,
         0,
         VOTER1,
-        vector[1u8, 2, 3],
-        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        messages_hash(),
+        hashi::committee::new_committee_signature(epoch, signature(), vector[]),
         &clock,
         ctx,
     );
@@ -151,8 +165,8 @@ fun test_nonce_cert_follows_a_bare_bucket_after_v1_is_disabled() {
         epoch,
         0,
         VOTER2,
-        vector[4u8, 5, 6],
-        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        bytes(32, 4),
+        hashi::committee::new_committee_signature(epoch, signature(), vector[]),
         &clock,
         ctx2,
     );
@@ -178,8 +192,8 @@ fun test_stamped_bucket_takes_a_second_writer_and_survives_v1_reenable() {
         epoch,
         0,
         VOTER1,
-        vector[1u8, 2, 3],
-        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        messages_hash(),
+        hashi::committee::new_committee_signature(epoch, signature(), vector[]),
         &clock,
         ctx,
     );
@@ -200,8 +214,8 @@ fun test_stamped_bucket_takes_a_second_writer_and_survives_v1_reenable() {
         epoch,
         0,
         VOTER2,
-        vector[4u8, 5, 6],
-        hashi::committee::new_committee_signature(epoch, vector[], vector[]),
+        bytes(32, 4),
+        hashi::committee::new_committee_signature(epoch, signature(), vector[]),
         &clock,
         ctx2,
     );
@@ -211,5 +225,33 @@ fun test_stamped_bucket_takes_a_second_writer_and_survives_v1_reenable() {
     assert!(hashi.epoch_certs_stamped_ref(nonce_key).submission_timestamp_ms(VOTER2) == 456);
 
     clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = ::hashi::tob::EInvalidMessagesHashLength)]
+fun test_cert_with_short_messages_hash_is_rejected() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let epoch = ctx.epoch();
+
+    let cert = hashi::committee::new_committee_signature(epoch, signature(), vector[]);
+    hashi::cert_submission::submit_dkg_cert(&mut hashi, epoch, VOTER1, bytes(31, 7), cert, ctx);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = ::hashi::tob::EInvalidSignatureLength)]
+fun test_cert_with_short_signature_is_rejected() {
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let epoch = ctx.epoch();
+
+    let cert = hashi::committee::new_committee_signature(epoch, bytes(95, 9), vector[]);
+    hashi::cert_submission::submit_dkg_cert(&mut hashi, epoch, VOTER1, messages_hash(), cert, ctx);
+
     std::unit_test::destroy(hashi);
 }

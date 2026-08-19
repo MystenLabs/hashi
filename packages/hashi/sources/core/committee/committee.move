@@ -280,6 +280,10 @@ public(package) fun signature_epoch(self: &CommitteeSignature): u64 {
     self.epoch
 }
 
+public(package) fun signature_length(self: &CommitteeSignature): u64 {
+    self.signature.length()
+}
+
 // === Accessors for CertifiedMessage ===
 
 public(package) fun cert_epoch<T>(self: &CertifiedMessage<T>): u64 {

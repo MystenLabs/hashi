@@ -13,6 +13,15 @@ const EWrongEpoch: vector<u8> = b"Certificate epoch does not match the bucket's 
 #[error]
 const ETooEarlyToDestroy: vector<u8> =
     b"TOB certificates may only be destroyed two epochs after their epoch";
+#[error]
+const EInvalidMessagesHashLength: vector<u8> = b"Dealer messages hash must be 32 bytes";
+#[error]
+const EInvalidSignatureLength: vector<u8> = b"Committee signature must be 96 bytes";
+
+// ~~~~~~~ Constants ~~~~~~~
+
+const MESSAGES_HASH_LENGTH: u64 = 32;
+const SIGNATURE_LENGTH: u64 = 96;
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -127,6 +136,7 @@ public(package) fun submit_cert(
     signers_bitmap: vector<u8>,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
+    assert_field_lengths(&messages_hash, signature.length());
     if (epoch_certs.certs.contains(dealer)) {
         return
     };
@@ -144,6 +154,7 @@ public(package) fun submit_cert_with_signature(
     sig: &CommitteeSignature,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
+    assert_field_lengths(&messages_hash, sig.signature_length());
     if (epoch_certs.certs.contains(dealer)) {
         return
     };
@@ -161,6 +172,7 @@ public(package) fun submit_stamped_cert_with_signature(
     timestamp_ms: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
+    assert_field_lengths(&messages_hash, sig.signature_length());
     if (epoch_certs.certs.contains(dealer)) {
         return
     };
@@ -168,6 +180,11 @@ public(package) fun submit_stamped_cert_with_signature(
     let submission = DealerSubmissionV1 { message, signature: *sig };
     let stamped = StampedDealerSubmissionV1 { submission, timestamp_ms };
     epoch_certs.certs.push_back(dealer, stamped);
+}
+
+fun assert_field_lengths(messages_hash: &vector<u8>, signature_length: u64) {
+    assert!(messages_hash.length() == MESSAGES_HASH_LENGTH, EInvalidMessagesHashLength);
+    assert!(signature_length == SIGNATURE_LENGTH, EInvalidSignatureLength);
 }
 
 /// Remove all certificates and destroy the EpochCertsV1 in one transaction.
