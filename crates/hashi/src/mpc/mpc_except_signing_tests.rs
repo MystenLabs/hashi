@@ -2838,7 +2838,11 @@ async fn test_run_as_dealer_p2p_send_error() {
     let result =
         MpcManager::run_dkg_as_dealer(&test_manager, &failing_p2p, &mut mock_tob, &metrics).await;
 
-    assert!(result.is_ok());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 3, got: 1 }),
+        "W=5 t=2 f=1 with every peer failing leaves the dealer's own weight, got {err:?}"
+    );
     assert_eq!(mock_tob.published_count(), 0);
     assert!(logs_contain("Failed to send message"));
     assert!(logs_contain("network error"));
@@ -3023,7 +3027,11 @@ async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
     )
     .await;
 
-    assert!(result.is_ok());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 3, got: 2 }),
+        "W=5 t=2 f=1 with 3 of 4 peers failing leaves own weight plus one, got {err:?}"
+    );
     assert_eq!(mock_tob.published_count(), 0);
     // Verify logging occurred for the 3 failures
     assert!(logs_contain("Failed to send message"));
@@ -6889,6 +6897,42 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
     assert!(
         receiver_manager.dealer_outputs.is_empty(),
         "No rotation outputs should be stored when validation fails"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_run_key_rotation_as_dealer_reports_a_shortfall() {
+    let rotation_setup = RotationTestSetup::new();
+    let (dealer_manager, previous, _) = rotation_setup.create_rotation_dealer_with_memory_store(0);
+    let dealer = Arc::new(RwLock::new(dealer_manager));
+
+    let failing_p2p = FailingP2PChannel {
+        error_message: "network error".to_string(),
+    };
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let metrics = test_metrics();
+
+    let result = MpcManager::run_key_rotation_as_dealer(
+        &dealer,
+        &previous,
+        &failing_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 7, got: 3 }),
+        "weights [3,2,4,1,2] give t+f=7 against dealer 0's own weight of 3, got {err:?}"
+    );
+    assert_eq!(mock_tob.published_count(), 0);
+    assert_eq!(
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[crate::metrics::MPC_LABEL_KEY_ROTATION])
+            .get(),
+        1
     );
 }
 
@@ -13827,6 +13871,7 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
@@ -13839,16 +13884,31 @@ async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
     let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
 
-    MpcManager::run_as_avid_nonce_dealer(
+    let metrics = test_metrics();
+    let result = MpcManager::run_as_avid_nonce_dealer(
         &dealer,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
-    .await
-    .unwrap();
+    .await;
 
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 4, got: 3 }),
+        "W=6 f=2 t=2 gives a collector bar of 4 with 3 confirmed, got {err:?}"
+    );
+    assert!(logs_contain(
+        "abandoned: confirmed weight 3 < required 4 (W=6, f=2, t+f=4, batch_index=0)"
+    ));
+    assert_eq!(
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[crate::metrics::MPC_LABEL_NONCE_GENERATION])
+            .get(),
+        1
+    );
     assert_eq!(
         mock_tob.published_count(),
         0,
