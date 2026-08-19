@@ -1366,6 +1366,10 @@ impl MpcManager {
                 .mpc_dealer_cert_shortfall_total
                 .with_label_values(&[MPC_LABEL_DKG])
                 .inc();
+            return Err(MpcError::NotEnoughApprovals {
+                needed: dealer_data.required_reduced_weight as usize,
+                got: aggregator.reduced_weight() as usize,
+            });
         }
         Ok(())
     }
@@ -1661,6 +1665,10 @@ impl MpcManager {
                 .mpc_dealer_cert_shortfall_total
                 .with_label_values(&[MPC_LABEL_KEY_ROTATION])
                 .inc();
+            return Err(MpcError::NotEnoughApprovals {
+                needed: dealer_data.required_reduced_weight as usize,
+                got: aggregator.reduced_weight() as usize,
+            });
         }
         Ok(())
     }
@@ -1945,6 +1953,10 @@ impl MpcManager {
                 .mpc_dealer_cert_shortfall_total
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .inc();
+            return Err(MpcError::NotEnoughApprovals {
+                needed: dealer_data.required_reduced_weight as usize,
+                got: aggregator.reduced_weight() as usize,
+            });
         }
         Ok(())
     }
@@ -3094,14 +3106,19 @@ impl MpcManager {
         let pending = dealer_data.total_reduced_weight - confirmed;
         if pending > max_faulty || confirmed < min_confirm_weight {
             tracing::warn!(
-                "AVID nonce round abandoned: pending weight {pending} > f={max_faulty} or \
-                 confirmed weight {confirmed} < t+f={min_confirm_weight} (batch_index={batch_index})"
+                "AVID nonce round abandoned: confirmed weight {confirmed} < required \
+                 {decided_weight} (W={}, f={max_faulty}, t+f={min_confirm_weight}, \
+                 batch_index={batch_index})",
+                dealer_data.total_reduced_weight
             );
             metrics
                 .mpc_dealer_cert_shortfall_total
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .inc();
-            return Ok(());
+            return Err(MpcError::NotEnoughApprovals {
+                needed: decided_weight as usize,
+                got: confirmed as usize,
+            });
         }
         tracing::info!(
             "AVID nonce round entered the pessimistic path: dealer {address:?}, \
@@ -3199,7 +3216,10 @@ impl MpcManager {
             .mpc_dealer_cert_shortfall_total
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .inc();
-        Ok(())
+        Err(MpcError::NotEnoughApprovals {
+            needed: dealer_data.vote_quorum_weight as usize,
+            got: vote_aggregator.reduced_weight() as usize,
+        })
     }
 
     fn reduced_weight_of_cert(&self, cert: &DealerCertificate) -> MpcResult<u32> {
