@@ -41,8 +41,10 @@ const KYOTO_MAX_RESTART_DELAY_JITTER: Duration = Duration::from_secs(30);
 /// refreshed before it's dropped from the confirmation-metrics cache.
 const STALE_OBSERVATION_BLOCKS: u32 = 10;
 
-/// Ceiling on a single round-trip through the monitor loop.
-const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Ceiling on a single round-trip through the monitor loop. Above the 60s
+/// timeout corepc puts on its RPC transport, so this only fires when the loop
+/// never picked the request up — never on an RPC that is still in flight.
+const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
@@ -219,14 +221,24 @@ pub struct Monitor {
     trusted_peer_rotation: std::iter::Cycle<std::vec::IntoIter<kyoto::TrustedPeer>>,
 }
 
-/// bitcoind is still catching up (-8 out of range, -28 warming up) or briefly
-/// unreachable; anything else will not resolve by waiting.
+/// bitcoind is still catching up (-8 out of range, -28 warming up), overloaded,
+/// or briefly unreachable; anything else will not clear by waiting.
 fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
+    use jsonrpc::http::minreq_http::Error as TransportError;
+
+    let corepc_client::client_sync::Error::JsonRpc(e) = e else {
+        return false;
+    };
     match e {
-        corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Transport(_)) => true,
-        corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)) => {
-            matches!(e.code, -8 | -28)
-        }
+        jsonrpc::error::Error::Rpc(e) => matches!(e.code, -8 | -28),
+        jsonrpc::error::Error::Transport(e) => match e.downcast_ref::<TransportError>() {
+            // A refused connection and an HTTP error status arrive alike, but
+            // only 503 (bitcoind's RPC work queue is full) is worth waiting
+            // out; 401 and 403 mean the credentials are wrong.
+            Some(TransportError::Http(e)) => e.status_code == 503,
+            Some(_) => true,
+            None => false,
+        },
         _ => false,
     }
 }
@@ -260,9 +272,9 @@ impl Monitor {
             .build()
     }
 
-    /// Kyoto re-syncs from its checkpoint on every build, so anchoring at genesis
-    /// replays the whole chain. Anchor non-mainnet at `start_height`; mainnet
-    /// keeps the soft-fork activation anchors.
+    /// Kyoto re-syncs from its checkpoint on every build, so anchor as high as
+    /// possible without passing `start_height`: mainnet reuses the soft-fork
+    /// activation heights, everything else resolves the exact block.
     async fn resolve_start_checkpoint(
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
         config: &MonitorConfig,
@@ -1596,6 +1608,35 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("start height 300000"), "{err}");
+    }
+
+    #[test]
+    fn only_recoverable_transport_errors_are_retried() {
+        use jsonrpc::http::minreq_http::Error as TransportError;
+        use jsonrpc::http::minreq_http::HttpError;
+
+        let http = |status_code| {
+            corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Transport(Box::new(
+                TransportError::Http(HttpError {
+                    status_code,
+                    body: String::new(),
+                }),
+            )))
+        };
+        assert!(is_transient_rpc_error(&http(503)));
+        assert!(!is_transient_rpc_error(&http(401)));
+        assert!(!is_transient_rpc_error(&http(403)));
+
+        // Against a port nothing is listening on, so the retryable branch is
+        // exercised on a real error rather than a hand-built one.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let refused = corepc_client::client_sync::v29::Client::new(&format!("http://{addr}"))
+            .get_blockchain_info()
+            .unwrap_err();
+        assert!(is_transient_rpc_error(&refused), "{refused}");
     }
 
     #[test]
