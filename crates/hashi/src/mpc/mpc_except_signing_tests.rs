@@ -56,7 +56,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 const TEST_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
-const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 2000;
+const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Use 0 for weight_reduction_allowed_delta in tests to disable weight reduction.
 const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
 /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
@@ -1441,11 +1441,11 @@ fn test_mpc_manager_new_with_weighted_committee() {
     let manager = setup.create_manager(0);
 
     // With total_weight=15:
-    // threshold = ceil(15*3333/10000) = ceil(4.9995) = 5
-    // max_faulty = ceil(15*2000/10000) = ceil(3.0) = 3
+    // max_faulty = floor(15*3333/10000) = floor(4.9995) = 4
+    // threshold  = 15 - 2*4 = 7
     // (after prop_reduce with allowed_delta=0, no reduction)
-    assert_eq!(manager.mpc_config.threshold, 5);
-    assert_eq!(manager.mpc_config.max_faulty, 3);
+    assert_eq!(manager.mpc_config.threshold, 7);
+    assert_eq!(manager.mpc_config.max_faulty, 4);
 }
 
 #[test]
@@ -2522,7 +2522,7 @@ async fn test_run_as_party_success() {
 #[tokio::test]
 async fn test_run_as_party_recovers_shares_via_complaint() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
 
     // Create dealer 0 with normal message
     let dealer_0_addr = setup.address(0);
@@ -2647,7 +2647,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
 
     // Verify output is valid
     assert_eq!(output.key_shares.shares.len(), 1);
-    assert_eq!(output.commitments.len(), 5);
+    assert_eq!(output.commitments.len(), 7);
 }
 
 #[tokio::test]
@@ -2660,10 +2660,9 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
     // the stale output from the wrong message would be used, producing a
     // different verifying key than other nodes.
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
-    // BFT threshold = (total_weight - 1) / 3 + 1 = (5-1)/3 + 1 = 2
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
     let threshold = setup.dkg_config().threshold as usize;
-    assert_eq!(threshold, 2);
+    assert_eq!(threshold, 3);
 
     // Create all managers
     let mut managers: Vec<_> = (0..setup.num_validators())
@@ -2715,7 +2714,7 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
     let cert_1 =
         create_test_certificate(setup.committee(), &msg_1, dealer_addr_1, signatures_1).unwrap();
 
-    // TOB delivers both certificates. Both dealers are needed to reach threshold=2.
+    // TOB delivers both certificates. Both dealers are needed to reach threshold=3.
     // Dealer 0 has a hash mismatch on test_manager → needs retrieval + delete.
     let all_certificates = vec![
         CertificateV1::Dkg(cert_0), // hash mismatch on test_manager
@@ -2756,7 +2755,7 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
 async fn test_run_as_party_requires_different_dealers() {
     // Test that having t certificates from a single dealer is not sufficient
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
 
     // Create all managers
     let mut managers: Vec<_> = (0..setup.num_validators())
@@ -2817,7 +2816,7 @@ async fn test_run_as_party_requires_different_dealers() {
 
     // Verify it correctly waited for 2 different dealers
     assert_eq!(output.key_shares.shares.len(), 1); // weight = 1
-    assert_eq!(output.commitments.len(), setup.num_validators()); // total weight = 5
+    assert_eq!(output.commitments.len(), 7); // total weight = 7
 
     // Verify TOB consumed all 3 messages (not just the first 2)
     assert_eq!(mock_tob.pending_messages(), Some(0));
@@ -2959,7 +2958,7 @@ async fn test_run_as_dealer_tob_publish_error() {
 #[tokio::test]
 async fn test_run_as_dealer_partial_failures_still_collects_enough() {
     // Use 7 validators so we have more room for failures
-    // threshold=4, max_faulty=1, required_sigs=5
+    // threshold=3, max_faulty=2, required_sigs=5
     // Dealer sends to 6 others, fail 1, succeed 5
     let setup = TestSetup::new(7);
 
@@ -3269,24 +3268,26 @@ async fn test_run_as_party_sufficient_combined_weight() {
 async fn test_run_as_party_exact_weight_threshold() {
     // Test edge case where accumulated weight exactly equals threshold
     // Use weights [1, 1, 1, 1, 1] (all equal), total_weight=5
-    // BFT threshold = (total_weight - 1) / 3 + 1 = (5-1)/3 + 1 = 1 + 1 = 2
-    // So we need exactly 2 dealers (weight 1+1 = 2) to reach threshold
+    // f = max(1, floor(5*3333/10000)) = 1, t = 5 - 2*1 = 3
+    // So we need exactly 3 dealers (weight 1+1+1 = 3) to reach threshold
     let test_setup = setup_weight_based_test(vec![1, 1, 1, 1, 1], 2, None);
     let (result, mock_tob) = setup_party_and_run(&test_setup, 0).await;
 
     assert!(result.is_ok());
 
-    // Should consume exactly 2 certificates (weight 1+1 = 2 = threshold)
+    // Should consume exactly 3 certificates (weight 1+1+1 = 3 = threshold)
     let remaining = mock_tob.pending_messages().unwrap();
     assert_eq!(
-        remaining, 3,
-        "Should consume exactly 2 certificates to reach threshold"
+        remaining, 2,
+        "Should consume exactly 3 certificates to reach threshold"
     );
 }
 
 #[tokio::test]
 async fn test_run_as_party_with_reduced_weights() {
-    let weights = vec![100, 100, 100, 100];
+    // 104 (not 100): reduction at allowed_delta = 0 needs a divisor that divides the weights,
+    // `t` and `f` exactly. With w=104 -> f=138, t=140, all even, so d=2 is feasible.
+    let weights = vec![104, 104, 104, 104];
     let test_setup = setup_weight_based_test(weights.clone(), 0, None); // threshold computed automatically
 
     let manager = test_setup.setup.create_manager(0);
@@ -3381,7 +3382,7 @@ async fn test_run_as_party_skips_duplicate_dealers() {
 #[tokio::test]
 async fn test_run_as_party_retrieves_missing_dealer_messages() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
 
     // Create 3 dealers with their messages
     let dealer1_addr = setup.address(0);
@@ -3447,7 +3448,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     dealers.insert(dealer2_addr, dealer2_mgr);
     let mock_p2p = MockP2PChannel::new(dealers, party_addr);
 
-    // Create mock TOB with certificates - threshold is 2, so we need 2 dealers
+    // Create mock TOB with certificates - threshold is 3, so we need 2 dealers (weight 2+2)
     let certificates = vec![CertificateV1::Dkg(cert1), CertificateV1::Dkg(cert2)];
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
@@ -3480,7 +3481,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
 async fn test_run_as_party_aborts_on_retrieval_failure() {
     // Tests that run_as_party aborts with error when message retrieval fails
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
 
     // Create 3 dealers with their messages
     let dealer1_addr = setup.address(0);
@@ -3594,7 +3595,7 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
 #[tokio::test]
 async fn test_run_as_party_aborts_on_failed_recovery() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
 
     // Create dealer 0 with a message - recovery will fail
     let dealer0_addr = setup.address(0);
@@ -4453,9 +4454,9 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
             .contains_key(&ComplaintsToProcessKey::Dkg(dealer_addr))
     );
 
-    // Create exactly threshold (2) parties that can respond
+    // Create exactly threshold (3) parties that can respond
     let mut other_managers = vec![];
-    for party_id in 2..4 {
+    for party_id in 2..5 {
         let addr = setup.address(party_id);
         let mut mgr = setup.create_manager(party_id);
         receive_dealer_messages(&mut mgr, &cheating_message, dealer_addr).unwrap();
@@ -4529,9 +4530,9 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
             .contains_key(&ComplaintsToProcessKey::Dkg(dealer_addr))
     );
 
-    // Create 2 parties that can respond (threshold is 2)
+    // Create 3 parties that can respond (threshold is 3)
     let mut other_managers = vec![];
-    for party_id in 2..4 {
+    for party_id in 2..5 {
         let addr = setup.address(party_id);
         let mut mgr = setup.create_manager(party_id);
         receive_dealer_messages(&mut mgr, &cheating_message, dealer_addr).unwrap();
@@ -4541,8 +4542,8 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
     // Add a non-existent signer that will fail
     let failing_signer = Address::new([99; 32]);
 
-    // Signer list: [failing_signer, valid_signer1, valid_signer2]
-    // The first signer fails, but recovery should still succeed with the remaining two
+    // Signer list: [failing_signer, valid_signer1, valid_signer2, valid_signer3]
+    // The first signer fails, but recovery should still succeed with the remaining three
     let mut signer_addresses = vec![failing_signer];
     signer_addresses.extend(other_managers.iter().map(|(addr, _)| *addr));
 
@@ -4724,7 +4725,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
             .contains_key(&ComplaintsToProcessKey::Dkg(dealer_addr))
     );
 
-    // Create only 1 other party that can respond (threshold is 2, so insufficient)
+    // Create only 1 other party that can respond (threshold is 3, so insufficient)
     let mut other_managers = vec![];
     for party_id in 2..3 {
         let addr = setup.address(party_id);
@@ -4828,6 +4829,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
 
     // Modify party_manager's config to exclude parties 3 and 4. Their responses can
     // no longer be verified (party IDs not in the nodes list), so they are skipped.
+    // The retained set must still satisfy `t < W`, so shrink the threshold with it.
     let config = setup.dkg_config();
     let smaller_nodes = fastcrypto_tbls::nodes::Nodes::new(
         config
@@ -4838,6 +4840,7 @@ async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
             .collect(),
     )
     .unwrap();
+    party_manager.mpc_config.threshold = smaller_nodes.total_weight() - 1;
     party_manager.mpc_config.nodes = smaller_nodes;
 
     let p2p = PreCollectedP2PChannel::new(responses);
@@ -6198,7 +6201,7 @@ async fn test_restart_dealer_reuses_stored_message() {
 #[tokio::test]
 async fn test_restart_party_uses_stored_messages_without_retrieval() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
+    let setup = TestSetup::with_weights(&[2, 2, 1, 1, 1]);
 
     // Create dealers with messages (simulating what happened before restart)
     let dealer1_addr = setup.address(0);
@@ -6337,14 +6340,17 @@ struct RotationTestSetup {
 
 impl RotationTestSetup {
     /// Creates a rotation test setup with weighted validators and completed DKG.
-    /// Uses weights [3, 2, 4, 1, 2] (total = 12, threshold = ceil(12*3333/10000) = 4).
-    /// Dealers are validators 0, 1, 4 (total weight = 7 >= threshold + max_faulty = 7).
+    /// Uses weights [30, 20, 40, 10, 20] (total = 120, max_faulty = floor(120*3333/10000) = 39,
+    /// threshold = 120 - 2*39 = 42). Weights are scaled x10 so `t` is ~35% of W rather than the
+    /// 50% a 12-weight committee forces: `t = W - 2f` with `t > f` pins `f <= ceil(W/3) - 1`, so
+    /// small committees get a disproportionately large threshold.
+    /// Dealers are validators 0, 1, 2, 4 (total weight = 110 >= threshold + max_faulty = 81).
     fn new() -> Self {
         let mut rng = rand::thread_rng();
-        let weights = [3, 2, 4, 1, 2];
+        let weights = [30, 20, 40, 10, 20];
         let setup = TestSetup::with_weights(&weights);
 
-        let dealer_indices = vec![0usize, 1, 4];
+        let dealer_indices = vec![0usize, 1, 2, 4];
         let mut dealer_managers: Vec<_> = dealer_indices
             .iter()
             .map(|&i| setup.create_manager(i))
@@ -6406,7 +6412,6 @@ impl RotationTestSetup {
         let committee = self.setup.committee();
         let (nodes, threshold, _max_faulty) = build_reduced_nodes(
             committee,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_WEIGHT_DIVISOR,
@@ -6441,7 +6446,6 @@ impl RotationTestSetup {
         if let Some(ref prev) = previous_committee {
             let (nodes, threshold, _max_faulty) = build_reduced_nodes(
                 prev,
-                TEST_THRESHOLD_IN_BASIS_POINTS,
                 TEST_MAX_FAULTY_IN_BASIS_POINTS,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_WEIGHT_DIVISOR,
@@ -6838,15 +6842,15 @@ fn test_try_sign_rotation_messages_re_acks_after_restart() {
 fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
     let rotation_setup = RotationTestSetup::new();
 
-    // Create receiver (party 2 with weight=4)
+    // Create receiver (party 2 with weight=40)
     let (mut receiver_manager, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(2);
 
-    // Create rotation dealer (party 0 with weight=3, owns share indices 1, 2, 3)
+    // Create rotation dealer (party 0 with weight=30, owns share indices 1..=30)
     let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
     let rotation_dealer_addr = rotation_setup.setup.address(0);
 
-    // Tamper with bundle: add a message with a share_index that belongs to party 2 (index 6)
+    // Tamper with bundle: add a message with a share_index that belongs to party 2 (index 51)
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map.clone(),
         Messages::Dkg(_)
@@ -6856,7 +6860,7 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
             panic!("Expected rotation messages")
         }
     };
-    let stolen_share_index = std::num::NonZeroU16::new(6).unwrap(); // Belongs to party 2, not party 0
+    let stolen_share_index = std::num::NonZeroU16::new(51).unwrap(); // Belongs to party 2, not party 0
     // Use any message as the content - the validation will fail on share_index ownership
     let any_message = rotation_map.iter().next().unwrap().1.clone();
     let mut tampered_map = rotation_map.clone();
@@ -6896,7 +6900,7 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
 async fn test_run_key_rotation() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, f = 39, threshold = 42)
     // Dealers are validators 0, 1, 4
 
     // Create test_manager (validator 0, weight=3) with memory store for message retrieval
@@ -6926,7 +6930,7 @@ async fn test_run_key_rotation() {
     let mut rotation_certificates = Vec::new();
     {
         let mut other_managers = mock_p2p.managers.lock().unwrap();
-        let validator_idx = 3; // weight = 1
+        let validator_idx = 2; // weight = 40, still far below the t+f quorum of 81
         let addr = rotation_setup.setup.address(validator_idx);
 
         // First, get the data we need from manager 3
@@ -6948,7 +6952,7 @@ async fn test_run_key_rotation() {
         // about who signs, not which share indices the dealer covers, which is
         // what the test is exercising.
         let mut signatures = vec![MemberSignature::new(epoch, addr, own_sig)];
-        for other_validator_idx in [1, 2, 4] {
+        for other_validator_idx in [1, 3, 4] {
             let other_addr = rotation_setup.setup.address(other_validator_idx);
             let other_manager = other_managers.get_mut(&other_addr).unwrap();
             let other_prev_output = other_manager.previous_output.clone().unwrap();
@@ -6988,10 +6992,10 @@ async fn test_run_key_rotation() {
     .unwrap();
 
     // Verify results
-    // Validator 0 has weight=3, so should have 3 shares
+    // Validator 0 has weight=30, so should have 30 shares
     assert_eq!(
         new_output.key_shares.shares.len(),
-        3,
+        30,
         "Should have shares equal to validator weight"
     );
 
@@ -7007,10 +7011,10 @@ async fn test_run_key_rotation() {
         "Public key should be preserved after rotation"
     );
 
-    // Verify commitments exist for all share indices (total weight = 12)
+    // Verify commitments exist for all share indices (total weight = 120)
     assert_eq!(
         new_output.commitments.len(),
-        12,
+        120,
         "Should have commitments for all share indices"
     );
 
@@ -7136,7 +7140,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
     );
 
     // Verify rotation completed successfully via party phase only
-    assert_eq!(new_output.key_shares.shares.len(), 3);
+    assert_eq!(new_output.key_shares.shares.len(), 30);
     assert_eq!(new_output.public_key, test_dkg_output.public_key);
 }
 
@@ -7519,8 +7523,8 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     let rotation_setup = RotationTestSetup::new();
     // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
 
-    let test_party_idx = 0; // weight=3, victim of cheating
-    let cheating_dealer_idx = 3; // weight=1
+    let test_party_idx = 0; // weight=30, victim of cheating
+    let cheating_dealer_idx = 2; // weight=40; party 0's 30 + this 40 clears threshold 42
 
     // Create test_manager (validator 0)
     let (mut test_manager, test_dkg_output, _) =
@@ -7639,8 +7643,8 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     // Verify output is valid despite cheating dealer
     assert_eq!(
         new_output.key_shares.shares.len(),
-        3,
-        "Validator 0 (weight=3) should have 3 shares"
+        30,
+        "Validator 0 (weight=30) should have 30 shares"
     );
     assert_eq!(
         new_output.public_key, test_dkg_output.public_key,
@@ -7648,7 +7652,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     );
     assert_eq!(
         new_output.commitments.len(),
-        12,
+        120,
         "Should have commitments for all share indices"
     );
 
@@ -9814,8 +9818,8 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
 fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     let mut rng = rand::thread_rng();
 
-    // 5 members with weight 3 each. Total=15, threshold=ceil(15/3)=5.
-    // Each dealer has weight 3, so 2 dealers (weight 6) meet threshold.
+    // 5 members with weight 3 each. Total=15, f=floor(15*3333/10000)=4, threshold=15-2*4=7.
+    // Each dealer has weight 3, so 3 dealers (weight 9) meet threshold.
     let weights = [3u16, 3, 3, 3, 3];
     let setup = TestSetup::with_weights(&weights);
     let epoch = setup.epoch(); // 100
@@ -9844,8 +9848,9 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         }
     }
 
-    // Complete DKG with threshold subset (dealers 0,1 — weight 6 >= 5).
-    let threshold_dealers: Vec<Address> = vec![setup.address(0), setup.address(1)];
+    // Complete DKG with threshold subset (dealers 0,1,2 — weight 9 >= 7).
+    let threshold_dealers: Vec<Address> =
+        vec![setup.address(0), setup.address(1), setup.address(2)];
     let key_threshold = target_manager
         .complete_dkg(threshold_dealers.iter().copied())
         .unwrap()
@@ -9876,7 +9881,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     let mut certificates = Vec::new();
     for (i, msg) in dealer_messages.iter().enumerate() {
         let dealer_addr = setup.address(dealer_indices[i]);
-        let sigs: Vec<MemberSignature> = [0usize, 1]
+        let sigs: Vec<MemberSignature> = [0usize, 1, 2]
             .iter()
             .map(|&signer_idx| {
                 setup.signing_keys[signer_idx].sign(
@@ -10000,7 +10005,8 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
             let _ = receive_dealer_messages(dm, msg, dealer_addr);
         }
     }
-    let threshold_dealers: Vec<Address> = vec![setup.address(0), setup.address(1)];
+    let threshold_dealers: Vec<Address> =
+        vec![setup.address(0), setup.address(1), setup.address(2)];
     let expected_public_key = target_manager
         .complete_dkg(threshold_dealers.iter().copied())
         .unwrap()
@@ -10011,7 +10017,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     let mut certificates = Vec::new();
     for (i, msg) in dealer_messages.iter().enumerate() {
         let dealer_addr = setup.address(dealer_indices[i]);
-        let sigs: Vec<MemberSignature> = [0usize, 1]
+        let sigs: Vec<MemberSignature> = [0usize, 1, 2]
             .iter()
             .map(|&signer_idx| {
                 setup.signing_keys[signer_idx].sign(
@@ -10150,7 +10156,7 @@ fn test_recover_current_dkg() {
             .unwrap();
     }
     let expected_public_key = target_manager
-        .complete_dkg([setup.address(0), setup.address(1)].into_iter())
+        .complete_dkg([setup.address(0), setup.address(1), setup.address(2)].into_iter())
         .unwrap()
         .public_key;
 
@@ -10160,7 +10166,7 @@ fn test_recover_current_dkg() {
         .enumerate()
         .map(|(i, msg)| {
             let dealer_addr = setup.address(dealer_indices[i]);
-            let sigs: Vec<MemberSignature> = [0usize, 1]
+            let sigs: Vec<MemberSignature> = [0usize, 1, 2]
                 .iter()
                 .map(|&s| {
                     setup.signing_keys[s].sign(
@@ -13068,10 +13074,10 @@ fn extract_echo_for(echoes: &[(Address, Messages)], recipient: Address) -> batch
 
 #[test]
 fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
-    // W=6 -> t=2, f=2; pending = {4, 5} sits exactly on the dispersal bound (pending weight = f).
+    // W=6 -> t=4, f=1; pending = {5} sits exactly on the dispersal bound (pending weight = f).
     let setup = TestSetup::new_avid(6);
     let batch_index = 3u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
 
     let messages = fx
         .dealer
@@ -13301,7 +13307,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
 fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let mut receiver = setup.create_manager(1);
 
     let request = SendMessagesRequest {
@@ -13347,7 +13353,7 @@ fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
 fn test_handle_avid_optimistic_rejects_dealer_equivocation() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let mut receiver = setup.create_manager(1);
     receiver
         .handle_send_messages_request(
@@ -13392,7 +13398,7 @@ fn test_handle_avid_optimistic_rejects_dealer_equivocation() {
 fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -13452,7 +13458,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
 fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -13476,7 +13482,7 @@ fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
 fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -13520,14 +13526,14 @@ fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
 fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals_a = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
-    // A second valid Confirm cert with signers {0, 1, 2, 4} (weight 4 = t+f) yields pending
-    // {3, 5} — a structurally valid but different dispersal, hence a different AvidVote.
+    // A second valid Confirm cert with signers {0, 1, 2, 4, 5} (weight 5 = W-f) yields pending
+    // {3} — a structurally valid but different dispersal, hence a different AvidVote.
     let mut sigs = Vec::new();
     for i in [0usize, 1, 2] {
         let avss = extract_optimistic(&fx.optimistic[i].1).clone();
@@ -13546,6 +13552,16 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         mgr4.mpc_config.epoch,
         mgr4.address,
         sig4,
+    ));
+    let mut mgr5 = setup.create_manager(5);
+    let avss5 = extract_optimistic(&fx.optimistic[5].1).clone();
+    let sig5 = mgr5
+        .try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss5)
+        .unwrap();
+    sigs.push(MemberSignature::new(
+        mgr5.mpc_config.epoch,
+        mgr5.address,
+        sig5,
     ));
     let confirm_target = DealerMessagesHash {
         dealer_address: fx.dealer_addr,
@@ -13643,7 +13659,7 @@ fn test_avid_optimistic_ingest_fails_closed_when_the_store_read_fails() {
 fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -13683,7 +13699,7 @@ fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
 fn test_handle_avid_echo_push_is_rejected() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -13967,7 +13983,7 @@ fn test_handle_send_rejects_vanilla_nonce_message_in_avid_epoch() {
 fn test_avid_nonce_retrieval() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -13998,7 +14014,7 @@ fn test_avid_nonce_retrieval() {
         batch_index: Some(batch_index),
     };
     let response = voter
-        .handle_retrieve_messages_request(setup.address(4), &request)
+        .handle_retrieve_messages_request(setup.address(5), &request)
         .unwrap();
     let Messages::AvidNonceRetrieval(bundle) = response.messages else {
         panic!("expected an AVID retrieval bundle");
@@ -14031,7 +14047,7 @@ fn test_avid_nonce_retrieval() {
         )
         .unwrap();
     let response = optimistic_only
-        .handle_retrieve_messages_request(setup.address(4), &request)
+        .handle_retrieve_messages_request(setup.address(5), &request)
         .unwrap();
     let Messages::AvidNonceRetrieval(bundle) = response.messages else {
         panic!("expected an AVID retrieval bundle");
@@ -14041,7 +14057,7 @@ fn test_avid_nonce_retrieval() {
 
     // A node with no state for the round answers NotFound.
     let fresh = setup.create_manager(3);
-    let result = fresh.handle_retrieve_messages_request(setup.address(4), &request);
+    let result = fresh.handle_retrieve_messages_request(setup.address(5), &request);
     assert!(matches!(result, Err(MpcError::NotFound(_))));
 }
 
@@ -14431,8 +14447,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         )
     };
 
-    let just_below_quorum = [0usize, 1];
-    let in_band = [0usize, 1, 3];
+    let just_below_quorum = [0usize, 2];
+    let in_band = [0usize, 1];
     let all = [0usize, 1, 2, 3];
     assert_eq!(
         weight_of(&just_below_quorum),
@@ -14513,7 +14529,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 
 #[test]
 fn test_avid_sizing_counts_past_the_floor() {
-    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let setup = TestSetup::with_weights_avid(&[3, 3, 3, 1]);
     let mgr = setup.create_manager(0);
     let total = mgr.mpc_config.nodes.total_weight() as u32;
     let floor = mgr.required_nonce_weight();
@@ -14540,7 +14556,7 @@ fn test_avid_sizing_counts_past_the_floor() {
     };
 
     assert!(
-        4 + 3 + 2 >= floor && floor > 4 + 3,
+        3 + 3 + 3 >= floor && floor > 3 + 3,
         "weights must cross the floor at dealer 2 or this test proves nothing"
     );
     let certs = VerifiedNonceCerts(vec![
@@ -15032,12 +15048,12 @@ fn test_avid_voter_state_survives_restart() {
 
     let voter_store = SharedMemoryStore::new();
     let mut voter = setup.create_manager_with_store(1, Arc::new(voter_store.clone()));
-    let mut others: HashMap<usize, MpcManager> = [2, 3, 4]
+    let mut others: HashMap<usize, MpcManager> = [2, 3, 4, 5]
         .into_iter()
-        .zip([2, 3, 4].map(|i| setup.create_manager(i)))
+        .zip([2, 3, 4, 5].map(|i| setup.create_manager(i)))
         .collect();
     let mut confirm_sigs = vec![flow.my_signature.clone()];
-    for i in [1usize, 2, 3, 4] {
+    for i in [1usize, 2, 3, 4, 5] {
         let addr = setup.address(i);
         let (_, msg) = flow
             .recipient_messages
@@ -15067,8 +15083,13 @@ fn test_avid_voter_state_survives_restart() {
         agg.finish().unwrap()
     };
 
-    let cert_a = cert(&confirm_sigs[..4]);
-    let cert_b = cert(&confirm_sigs);
+    let cert_a = cert(&confirm_sigs[..5]);
+    let sigs_b: Vec<MemberSignature> = confirm_sigs[..4]
+        .iter()
+        .chain(confirm_sigs[5..].iter())
+        .cloned()
+        .collect();
+    let cert_b = cert(&sigs_b);
     let dispersals_a = dealer
         .create_avid_nonce_dispersal_messages(&flow.builder, cert_a, batch_index)
         .unwrap();
@@ -16628,7 +16649,6 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
 
     let (nodes, threshold, max_faulty) = build_reduced_nodes(
         &weighted,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         ALLOWED_DELTA,
         TEST_WEIGHT_DIVISOR,
@@ -16644,11 +16664,60 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
     );
     assert_eq!(nodes.total_weight(), 242, "W moved");
     assert_eq!(threshold, 82, "t moved");
-    assert_eq!(max_faulty, 49, "f moved");
+    assert_eq!(max_faulty, 82, "f moved");
     assert!(
         u32::from(threshold) + u32::from(max_faulty) <= u32::from(nodes.total_weight()),
         "t + f must stay within W or no certificate can ever be formed"
     );
+}
+
+#[test]
+fn derived_threshold_keeps_t_plus_2f_within_w() {
+    for f_bps in [1000u16, 2000, 2500, 3000, 3333] {
+        for stakes in [
+            [1000u64, 2500, 3000, 3500],
+            [2500, 2500, 2500, 2500],
+            [100, 300, 600, 9000],
+        ] {
+            let setup = TestSetup::new(4);
+            let members: Vec<_> = setup
+                .committee()
+                .members()
+                .iter()
+                .zip(stakes)
+                .map(|(m, stake)| {
+                    CommitteeMember::new(
+                        m.validator_address(),
+                        m.public_key().clone(),
+                        m.encryption_public_key().clone(),
+                        stake,
+                    )
+                })
+                .collect();
+            let committee = Committee::new(
+                members,
+                setup.epoch(),
+                TEST_THRESHOLD_IN_BASIS_POINTS,
+                TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+                f_bps,
+                0,
+            );
+            let (nodes, t, f) = build_reduced_nodes(
+                &committee,
+                f_bps,
+                TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+                TEST_WEIGHT_DIVISOR,
+                TEST_CHAIN_ID,
+            )
+            .unwrap();
+            assert!(
+                u32::from(t) + 2 * u32::from(f) <= u32::from(nodes.total_weight()),
+                "t + 2f exceeds W after reduction: t={t} f={f} W={} f_bps={f_bps} stakes={stakes:?}",
+                nodes.total_weight(),
+            );
+            assert!(t > f, "t must exceed f: t={t} f={f} f_bps={f_bps}");
+        }
+    }
 }
 
 #[test]
@@ -17300,7 +17369,7 @@ impl PublicMessagesStore for RacingAvidStore {
 fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -17379,7 +17448,7 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
 fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
