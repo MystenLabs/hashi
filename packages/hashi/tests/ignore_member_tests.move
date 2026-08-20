@@ -211,7 +211,7 @@ fun test_formation_skips_ignored_member() {
         .new_committee_from_voting_powers_for_testing(
             1,
             voting_powers(1, 2, 3),
-            mpc_config::new_for_testing(3334, 800, 3333, 0),
+            mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
         );
     assert!(next.n_members() == 2);
     assert!(!next.has_member(&VOTER2));
@@ -239,7 +239,7 @@ fun test_formation_includes_unignored_member() {
         .new_committee_from_voting_powers_for_testing(
             1,
             voting_powers(1, 1, 1),
-            mpc_config::new_for_testing(3334, 800, 3333, 0),
+            mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
         );
     assert!(next.n_members() == 3);
     assert!(next.has_member(&VOTER2));
@@ -272,7 +272,7 @@ fun test_ignore_mid_reconfig_affects_next_formation_only() {
     let pending = committee::new_committee(
         1,
         members,
-        mpc_config::new_for_testing(3334, 800, 3333, 0),
+        mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
     );
     hashi.committee_set_mut().set_pending_reconfig_for_testing(pending);
 
@@ -290,7 +290,7 @@ fun test_ignore_mid_reconfig_affects_next_formation_only() {
         .new_committee_from_voting_powers_for_testing(
             2,
             voting_powers(1, 1, 1),
-            mpc_config::new_for_testing(3334, 800, 3333, 0),
+            mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
         );
     assert!(!next.has_member(&VOTER3));
     assert!(next.total_weight() == 2);
