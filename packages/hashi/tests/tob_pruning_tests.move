@@ -60,6 +60,11 @@ fun add_bucket(hashi: &mut Hashi, key: hashi::tob::TobKey, ctx: &mut TxContext) 
     hashi.epoch_certs(key, ctx);
 }
 
+/// Create a stamped nonce bucket, bypassing the submit path's epoch check.
+fun add_stamped_bucket(hashi: &mut Hashi, key: hashi::tob::TobKey, ctx: &mut TxContext) {
+    hashi.epoch_certs_stamped(key, ctx);
+}
+
 // ~~~~~~~ Nonce Bucket Floors ~~~~~~~
 
 #[test]
@@ -124,6 +129,18 @@ fun nonce_previous_committee_epoch_prunable() {
     cert_submission::destroy_nonce_certs(&mut hashi, 2, 0);
 
     assert!(!hashi.tob_contains(nonce_key(2, 0)));
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun stamped_nonce_bucket_is_destroyed() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
+    let mut hashi = hashi_at_current_epoch(ctx);
+    add_stamped_bucket(&mut hashi, nonce_key(8, 0), ctx);
+
+    cert_submission::destroy_nonce_certs(&mut hashi, 8, 0);
+
+    assert!(!hashi.tob_contains(nonce_key(8, 0)));
     std::unit_test::destroy(hashi);
 }
 
@@ -283,20 +300,37 @@ fun destroy_callable_while_paused_and_reconfiguring() {
     std::unit_test::destroy(hashi);
 }
 
-/// The destroy entries probe by STORED type: a bucket written under a
-/// different value layout (e.g. a future StampedEpochCertsV1) is left in
-/// place for the module version that understands it — no abort, no
-/// wrong-typed destruction.
 #[test]
-fun destroy_leaves_foreign_typed_bucket_in_place() {
+#[expected_failure(abort_code = cert_submission::EUnsupportedCertBucketLayout)]
+/// A present bucket with an unknown layout must fail loudly. Otherwise the
+/// off-chain sweep would log success while the bucket remained forever.
+fun destroy_rejects_unknown_bucket_layout() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
     let mut hashi = hashi_at_current_epoch(ctx);
     hashi.tob_mut().add(nonce_key(8, 0), 42u64);
 
     cert_submission::destroy_nonce_certs(&mut hashi, 8, 0);
 
-    assert!(hashi.tob_contains(nonce_key(8, 0)));
-    std::unit_test::destroy(hashi);
+    abort
+}
+
+#[test]
+#[expected_failure(abort_code = cert_submission::ETooEarlyToDestroyKeyGenCerts)]
+/// The legacy ABI is retained for upgrade compatibility, but it must not
+/// retain its old `+2` key-generation bypass.
+fun legacy_destroy_all_obeys_keygen_retention_floor() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, CURRENT_EPOCH);
+    let mut hashi = hashi_at_current_epoch(ctx);
+    add_bucket(&mut hashi, dkg_key(3), ctx);
+
+    cert_submission::destroy_all_certs_for_testing(
+        &mut hashi,
+        3,
+        option::none(),
+        hashi::tob::protocol_type_dkg(),
+    );
+
+    abort
 }
 
 // ~~~~~~~ Bucket Draining ~~~~~~~
