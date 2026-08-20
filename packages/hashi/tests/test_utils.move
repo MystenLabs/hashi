@@ -172,7 +172,7 @@ public fun create_hashi_with_committee_and_registry(
     let committee = committee::new_committee(
         ctx.epoch(),
         members,
-        hashi::mpc_config::new_for_testing(3334, 800, 3333, 0),
+        hashi::mpc_config::new_for_testing(800, 3333, 0, 0),
     );
 
     let sk = bls_sk_for_testing();
