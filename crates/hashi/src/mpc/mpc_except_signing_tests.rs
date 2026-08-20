@@ -2829,7 +2829,11 @@ async fn test_run_as_dealer_p2p_send_error() {
     let result =
         MpcManager::run_dkg_as_dealer(&test_manager, &failing_p2p, &mut mock_tob, &metrics).await;
 
-    assert!(result.is_ok());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 3, got: 1 }),
+        "W=5 t=2 f=1 with every peer failing leaves the dealer's own weight, got {err:?}"
+    );
     assert_eq!(mock_tob.published_count(), 0);
     assert!(logs_contain("Failed to send message"));
     assert!(logs_contain("network error"));
@@ -3014,7 +3018,11 @@ async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
     )
     .await;
 
-    assert!(result.is_ok());
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 3, got: 2 }),
+        "W=5 t=2 f=1 with 3 of 4 peers failing leaves own weight plus one, got {err:?}"
+    );
     assert_eq!(mock_tob.published_count(), 0);
     // Verify logging occurred for the 3 failures
     assert!(logs_contain("Failed to send message"));
@@ -6876,6 +6884,42 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn test_run_key_rotation_as_dealer_reports_a_shortfall() {
+    let rotation_setup = RotationTestSetup::new();
+    let (dealer_manager, previous, _) = rotation_setup.create_rotation_dealer_with_memory_store(0);
+    let dealer = Arc::new(RwLock::new(dealer_manager));
+
+    let failing_p2p = FailingP2PChannel {
+        error_message: "network error".to_string(),
+    };
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let metrics = test_metrics();
+
+    let result = MpcManager::run_key_rotation_as_dealer(
+        &dealer,
+        &previous,
+        &failing_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await;
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 7, got: 3 }),
+        "weights [3,2,4,1,2] give t+f=7 against dealer 0's own weight of 3, got {err:?}"
+    );
+    assert_eq!(mock_tob.published_count(), 0);
+    assert_eq!(
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[crate::metrics::MPC_LABEL_KEY_ROTATION])
+            .get(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn test_run_key_rotation() {
     let mut rng = rand::thread_rng();
@@ -10729,9 +10773,9 @@ fn test_recover_current_rotation() {
     // rotation messages (for current_output) and the epoch-100 DKG messages (for
     // previous_output); the InMemory store keys by dealer, with separate maps per type.
     let receiver_index = 3usize;
-    let build_store = || {
+    let build_store_from = |dealers: &[(Address, RotationMessages)]| {
         let store = InMemoryPublicMessagesStore::new();
-        for (dealer_addr, msgs) in &rotation_messages_by_dealer {
+        for (dealer_addr, msgs) in dealers {
             store
                 .store_rotation_messages(rotation_epoch, dealer_addr, msgs)
                 .unwrap();
@@ -10749,6 +10793,7 @@ fn test_recover_current_rotation() {
         }
         store
     };
+    let build_store = || build_store_from(&rotation_messages_by_dealer);
     let make_manager = |store: Arc<dyn PublicMessagesStore>| {
         MpcManager::new(
             rotation_setup.setup.address(receiver_index),
@@ -10838,6 +10883,72 @@ fn test_recover_current_rotation() {
         ),
         MpcOutputRecoveryOutcome::NotApplicable
     ));
+    let crossing_idx = 1usize;
+    let (crossing_addr, crossing_msgs) = rotation_messages_by_dealer[crossing_idx].clone();
+    let mut tampered = crossing_msgs.clone();
+    let first = *crossing_msgs.keys().next().unwrap();
+    let last = *crossing_msgs.keys().last().unwrap();
+    assert_ne!(
+        first, last,
+        "the crossing dealer must own more than one share index"
+    );
+    tampered.insert(last, crossing_msgs.get(&first).unwrap().clone());
+    let tampered_messages = Messages::Rotation(tampered.clone());
+    let crossing_cert = create_rotation_test_certificate(
+        committee_set.committees().get(&rotation_epoch).unwrap(),
+        &tampered_messages,
+        crossing_addr,
+        (0..2)
+            .map(|i| {
+                let addr = rotation_setup.setup.address(i);
+                let signed = rotation_setup.setup.signing_keys[i].sign(
+                    rotation_epoch,
+                    addr,
+                    &DealerMessagesHash {
+                        dealer_address: crossing_addr,
+                        messages_hash: tampered_messages.compute_hash(),
+                    },
+                );
+                MemberSignature::new(rotation_epoch, addr, signed.signature().clone())
+            })
+            .collect(),
+    )
+    .unwrap();
+    let mut certs_with_tampered = rotation_certificates.clone();
+    certs_with_tampered[crossing_idx] =
+        VerifiedCertificateV1::new_unchecked(CertificateV1::Rotation(crossing_cert));
+    let mut dealers_with_tampered = rotation_messages_by_dealer.clone();
+    dealers_with_tampered[crossing_idx] = (crossing_addr, tampered);
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store_from(
+        &dealers_with_tampered,
+    )))));
+    let MpcOutputRecoveryOutcome::Recovered(output) =
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &certs_with_tampered,
+            &dkg_certs,
+            &onchain_key,
+        )
+    else {
+        panic!("an unusable share past the threshold must not be walked");
+    };
+    assert_eq!(output.public_key, expected_public_key);
+
+    let (_, prefix_dealers) = rotation_messages_by_dealer.split_last().unwrap();
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store_from(
+        prefix_dealers,
+    )))));
+    let MpcOutputRecoveryOutcome::Recovered(output) =
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &rotation_certificates,
+            &dkg_certs,
+            &onchain_key,
+        )
+    else {
+        panic!("a dealer past the threshold prefix must not be walked");
+    };
+    assert_eq!(output.public_key, expected_public_key);
 }
 
 #[test]
@@ -13807,6 +13918,7 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
@@ -13819,16 +13931,31 @@ async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
     let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
 
-    MpcManager::run_as_avid_nonce_dealer(
+    let metrics = test_metrics();
+    let result = MpcManager::run_as_avid_nonce_dealer(
         &dealer,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
-    .await
-    .unwrap();
+    .await;
 
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotEnoughApprovals { needed: 4, got: 3 }),
+        "W=6 f=2 t=2 gives a collector bar of 4 with 3 confirmed, got {err:?}"
+    );
+    assert!(logs_contain(
+        "abandoned: confirmed weight 3 < required 4 (W=6, f=2, t+f=4, batch_index=0)"
+    ));
+    assert_eq!(
+        metrics
+            .mpc_dealer_cert_shortfall_total
+            .with_label_values(&[crate::metrics::MPC_LABEL_NONCE_GENERATION])
+            .get(),
+        1
+    );
     assert_eq!(
         mock_tob.published_count(),
         0,

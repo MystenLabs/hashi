@@ -61,39 +61,18 @@ impl crate::leader::retry::RetryPolicy for UtxoCleanupErrorKind {
 
 impl LeaderService {
     /// Check for and delete expired deposit requests.
-    /// Deposit requests are sorted by timestamp and deleted if they are older than
-    /// MAX_DEPOSIT_REQUEST_AGE_MS.
+    /// Unapproved requests expire based on creation time; approved requests expire based on
+    /// approval time.
     pub(super) fn check_delete_expired_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         if self.deposit_gc_task.is_some() {
             debug!("Deposit GC task already in-flight, skipping");
             return;
         }
 
-        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        // Approved deposits are awaiting confirmation and must not expire.
-        deposit_requests.retain(|r| r.approval_cert.is_none());
-        deposit_requests.sort_by_key(|r| r.created_timestamp_ms);
-
-        let Some(oldest_request) = deposit_requests.first() else {
-            return;
-        };
-
-        if checkpoint_timestamp_ms
-            < oldest_request.created_timestamp_ms
-                + MAX_DEPOSIT_REQUEST_AGE_MS
-                + DEPOSIT_REQUEST_DELETE_DELAY_MS
-        {
-            return;
-        }
-
-        let expired_requests: Vec<_> = deposit_requests
-            .iter()
-            .filter(|r| {
-                checkpoint_timestamp_ms > r.created_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
-            })
-            .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
-            .cloned()
-            .collect();
+        let expired_requests = find_expired_deposit_requests(
+            self.inner.onchain_state().deposit_requests(),
+            checkpoint_timestamp_ms,
+        );
         if expired_requests.is_empty() {
             return;
         }
@@ -376,6 +355,39 @@ impl LeaderService {
     }
 }
 
+fn deposit_request_expiration_timestamp_ms(request: &DepositRequest) -> u64 {
+    let reference_timestamp_ms = match (&request.approval_cert, request.approved_timestamp_ms) {
+        (Some(_), Some(approved_timestamp_ms)) => approved_timestamp_ms,
+        _ => request.created_timestamp_ms,
+    };
+    reference_timestamp_ms.saturating_add(MAX_DEPOSIT_REQUEST_AGE_MS)
+}
+
+fn find_expired_deposit_requests(
+    mut deposit_requests: Vec<DepositRequest>,
+    checkpoint_timestamp_ms: u64,
+) -> Vec<DepositRequest> {
+    deposit_requests.sort_by_key(deposit_request_expiration_timestamp_ms);
+
+    let Some(oldest_request) = deposit_requests.first() else {
+        return Vec::new();
+    };
+    if checkpoint_timestamp_ms
+        < deposit_request_expiration_timestamp_ms(oldest_request)
+            .saturating_add(DEPOSIT_REQUEST_DELETE_DELAY_MS)
+    {
+        return Vec::new();
+    }
+
+    deposit_requests
+        .into_iter()
+        .filter(|request| {
+            checkpoint_timestamp_ms > deposit_request_expiration_timestamp_ms(request)
+        })
+        .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
+        .collect()
+}
+
 /// Return UTXO IDs whose `spent_epoch` is set — these are spent UTXOs
 /// still present in `utxo_records` that need to be cleaned up on-chain.
 /// Capped at [`MAX_UTXO_CLEANUPS_PER_GC`]; the remainder is picked up by a
@@ -397,6 +409,8 @@ mod tests {
     use super::*;
     use crate::onchain::types::Utxo;
     use hashi_types::bitcoin_txid::BitcoinTxid;
+    use hashi_types::move_types::CommitteeSignature;
+    use sui_sdk_types::Digest;
 
     /// Helper: build a `UtxoId` from a distinguishing byte and vout.
     fn utxo_id(byte: u8, vout: u32) -> UtxoId {
@@ -420,6 +434,54 @@ mod tests {
             spent_by: None,
             spent_epoch,
         }
+    }
+
+    fn deposit_request(
+        id: u64,
+        created_timestamp_ms: u64,
+        approved_timestamp_ms: Option<u64>,
+    ) -> DepositRequest {
+        let mut id_bytes = [0; 32];
+        id_bytes[24..].copy_from_slice(&id.to_be_bytes());
+        DepositRequest {
+            id: Address::new(id_bytes),
+            sender: Address::ZERO,
+            created_timestamp_ms,
+            sui_tx_digest: Digest::new([0; 32]),
+            utxo: Utxo {
+                id: utxo_id(0, id as u32),
+                amount: 1_000,
+                derivation_path: None,
+            },
+            approval_cert: approved_timestamp_ms.map(|_| CommitteeSignature {
+                epoch: 0,
+                signature: Vec::new(),
+                signers_bitmap: Vec::new(),
+            }),
+            approved_timestamp_ms,
+            confirmed_timestamp_ms: None,
+        }
+    }
+
+    #[test]
+    fn deposit_expiration_uses_the_relevant_lifecycle_timestamp() {
+        let unapproved = deposit_request(1, 100, None);
+        let approved = deposit_request(2, 100, Some(100_000));
+        let mut malformed = deposit_request(3, 100, None);
+        malformed.approval_cert = approved.approval_cert.clone();
+
+        assert_eq!(
+            deposit_request_expiration_timestamp_ms(&unapproved),
+            100 + MAX_DEPOSIT_REQUEST_AGE_MS
+        );
+        assert_eq!(
+            deposit_request_expiration_timestamp_ms(&approved),
+            100_000 + MAX_DEPOSIT_REQUEST_AGE_MS
+        );
+        assert_eq!(
+            deposit_request_expiration_timestamp_ms(&malformed),
+            100 + MAX_DEPOSIT_REQUEST_AGE_MS
+        );
     }
 
     #[test]
