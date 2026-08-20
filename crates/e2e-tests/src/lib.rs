@@ -572,15 +572,11 @@ pub(crate) async fn apply_onchain_config_overrides(
     use sui_sdk_types::StructTag;
     use sui_sdk_types::TypeTag;
 
-    let mut mpc_threshold_bps: Option<u64> = None;
     let mut mpc_max_faulty_bps: Option<u64> = None;
     let mut mpc_weight_reduction_allowed_delta: Option<u64> = None;
     let mut other_overrides: Vec<(String, ConfigValue)> = Vec::new();
     for (key, value) in overrides {
         match (key.as_str(), value) {
-            ("mpc_threshold_in_basis_points", ConfigValue::U64(v)) => {
-                mpc_threshold_bps = Some(*v);
-            }
             ("mpc_max_faulty_in_basis_points", ConfigValue::U64(v)) => {
                 mpc_max_faulty_bps = Some(*v);
             }
@@ -590,9 +586,8 @@ pub(crate) async fn apply_onchain_config_overrides(
             _ => other_overrides.push((key.clone(), value.clone())),
         }
     }
-    let has_mpc_overrides = mpc_threshold_bps.is_some()
-        || mpc_max_faulty_bps.is_some()
-        || mpc_weight_reduction_allowed_delta.is_some();
+    let has_mpc_overrides =
+        mpc_max_faulty_bps.is_some() || mpc_weight_reduction_allowed_delta.is_some();
 
     let nodes = networks.hashi_network.nodes();
 
@@ -633,7 +628,6 @@ pub(crate) async fn apply_onchain_config_overrides(
     if has_mpc_overrides {
         tracing::info!(
             "applying MPC config overrides atomically: \
-             threshold_bps={mpc_threshold_bps:?}, \
              max_faulty_bps={mpc_max_faulty_bps:?}, \
              weight_reduction_allowed_delta={mpc_weight_reduction_allowed_delta:?}"
         );
@@ -642,7 +636,6 @@ pub(crate) async fn apply_onchain_config_overrides(
             execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateMpcConfig {
-                threshold_bps: mpc_threshold_bps,
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
                 nonce_generation_protocol: None,
@@ -2772,10 +2765,6 @@ mod tests {
     fn avid_fault_tolerant_builder() -> TestNetworksBuilder {
         TestNetworksBuilder::new()
             .with_nodes(4)
-            .with_onchain_config(
-                "mpc_threshold_in_basis_points",
-                hashi_types::move_types::ConfigValue::U64(5000),
-            )
             .with_onchain_config(
                 "mpc_max_faulty_in_basis_points",
                 hashi_types::move_types::ConfigValue::U64(2500),

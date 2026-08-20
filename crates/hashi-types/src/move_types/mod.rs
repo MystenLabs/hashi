@@ -366,15 +366,11 @@ pub enum ConfigValue {
 
 /// MPC parameter keys, in the canonical order Move's `mpc_config::pin` writes
 /// them. Load-bearing for [`Config::from_mpc_params`].
-const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
 const KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS: &str = "mpc_nonce_accumulation_window_ms";
 
-/// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS`
-/// in `mpc_config.move`.
-pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3334;
 /// Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in `mpc_config.move`.
 pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 /// Mirrors `DEFAULT_MAX_FAULTY_IN_BASIS_POINTS` in `mpc_config.move`.
@@ -436,17 +432,12 @@ impl Config {
     /// committees only (tests, fallbacks); the scrape/wire paths carry the
     /// on-chain config verbatim via [`Config::from_entries`].
     pub fn from_mpc_params(
-        threshold_in_basis_points: u16,
         weight_reduction_allowed_delta: u16,
         max_faulty_in_basis_points: u16,
         nonce_generation_protocol: u16,
         nonce_accumulation_window_ms: u64,
     ) -> Self {
         Self(vec![
-            (
-                KEY_MPC_THRESHOLD_IN_BASIS_POINTS.to_string(),
-                ConfigValue::U64(threshold_in_basis_points as u64),
-            ),
             (
                 KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA.to_string(),
                 ConfigValue::U64(weight_reduction_allowed_delta as u64),
@@ -464,13 +455,6 @@ impl Config {
                 ConfigValue::U64(nonce_accumulation_window_ms),
             ),
         ])
-    }
-
-    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
-        self.mpc_param(
-            KEY_MPC_THRESHOLD_IN_BASIS_POINTS,
-            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
-        )
     }
 
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
@@ -1952,7 +1936,7 @@ mod tests {
 
     #[test]
     fn committee_mpc_config_carried_verbatim_through_bcs() {
-        let committee = crate::committee::Committee::new(vec![], 5, 3334, 800, 3333, 1);
+        let committee = crate::committee::Committee::new(vec![], 5, 800, 3333, 1);
         let move_committee = Committee::from(&committee);
 
         // Round-trip the serialized committee and confirm the verbatim config
@@ -1960,7 +1944,6 @@ mod tests {
         let bytes = bcs::to_bytes(&move_committee).expect("serialize");
         let decoded: Committee = bcs::from_bytes(&bytes).expect("deserialize");
         assert_eq!(decoded.config, move_committee.config);
-        assert_eq!(decoded.config.mpc_threshold_in_basis_points(), 3334);
         assert_eq!(decoded.config.mpc_weight_reduction_allowed_delta(), 800);
         assert_eq!(decoded.config.mpc_max_faulty_in_basis_points(), 3333);
         assert_eq!(decoded.config.mpc_nonce_generation_protocol(), 1);
@@ -1975,16 +1958,15 @@ mod tests {
     /// The expected vector must equal what Move's `mpc_config::pin` produces.
     #[test]
     fn committee_mpc_config_bcs_is_pinned() {
-        let mpc = Config::from_mpc_params(3334, 800, 3333, 1, 700);
+        let mpc = Config::from_mpc_params(800, 3333, 1, 700);
         let bytes = bcs::to_bytes(&mpc).expect("serialize");
 
-        // VecMap<String,Value> = ULEB128 len (5) then, per entry, ULEB128 key
+        // VecMap<String,Value> = ULEB128 len (4) then, per entry, ULEB128 key
         // length, key bytes, 1-byte Value variant tag (U64 = 0), 8-byte LE u64.
         let expected: Vec<u8> = {
-            let mut v = vec![5u8];
+            let mut v = vec![4u8];
             for (key, val) in [
-                ("mpc_threshold_in_basis_points", 3334u64),
-                ("mpc_weight_reduction_allowed_delta", 800),
+                ("mpc_weight_reduction_allowed_delta", 800u64),
                 ("mpc_max_faulty_in_basis_points", 3333),
                 ("mpc_nonce_generation_protocol", 1),
                 ("mpc_nonce_accumulation_window_ms", 700),
@@ -2001,7 +1983,7 @@ mod tests {
         // And the bytes decode back to the same entries.
         let decoded: Config = bcs::from_bytes(&bytes).expect("deserialize");
         assert_eq!(decoded, mpc);
-        assert!(matches!(decoded.entries()[0].1, ConfigValue::U64(3334)));
+        assert!(matches!(decoded.entries()[0].1, ConfigValue::U64(800)));
     }
 
     /// Pins the BCS encoding of the wide-integer `ConfigValue` variants against

@@ -476,7 +476,6 @@ pub async fn create_update_config_proposal(
 
 pub async fn create_update_mpc_config_proposal(
     config: &CliConfig,
-    threshold_bps: Option<u64>,
     max_faulty_bps: Option<u64>,
     weight_reduction_allowed_delta: Option<u64>,
     nonce_generation_protocol: Option<u64>,
@@ -484,12 +483,6 @@ pub async fn create_update_mpc_config_proposal(
     tx_opts: &TxOptions,
 ) -> Result<()> {
     const MAX_BPS: u64 = 10_000;
-    if let Some(t) = threshold_bps {
-        anyhow::ensure!(
-            (1..=MAX_BPS).contains(&t),
-            "--threshold-bps must be in 1..={MAX_BPS}, got {t}"
-        );
-    }
     if let Some(f) = max_faulty_bps {
         anyhow::ensure!(
             f <= MAX_BPS,
@@ -510,7 +503,6 @@ pub async fn create_update_mpc_config_proposal(
     }
 
     let count = [
-        threshold_bps,
         max_faulty_bps,
         weight_reduction_allowed_delta,
         nonce_generation_protocol,
@@ -520,7 +512,7 @@ pub async fn create_update_mpc_config_proposal(
     .count();
     if count == 0 {
         anyhow::bail!(
-            "must provide at least one of --threshold-bps, --max-faulty-bps, --weight-reduction-allowed-delta, --nonce-generation-protocol"
+            "must provide at least one of --max-faulty-bps, --weight-reduction-allowed-delta, --nonce-generation-protocol"
         );
     }
 
@@ -528,7 +520,6 @@ pub async fn create_update_mpc_config_proposal(
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
-        threshold_bps,
         max_faulty_bps,
         weight_reduction_allowed_delta,
         nonce_generation_protocol,

@@ -182,10 +182,10 @@ fun test_seed_absent_defaults_fills_gaps_without_clobbering() {
     let mut config = config::empty();
     let custom_window = 7_777;
     config.upsert(b"mpc_nonce_accumulation_window_ms", config_value::new_u64(custom_window));
-    assert!(!config.contains(b"mpc_threshold_in_basis_points"));
+    assert!(!config.contains(b"mpc_max_faulty_in_basis_points"));
 
     hashi::mpc_config::seed_absent_defaults(&mut config);
 
     assert!(hashi::mpc_config::nonce_accumulation_window_ms(&config) == custom_window);
-    assert!(config.contains(b"mpc_threshold_in_basis_points"));
+    assert!(config.contains(b"mpc_max_faulty_in_basis_points"));
 }

@@ -55,7 +55,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
-const TEST_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
 const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Use 0 for weight_reduction_allowed_delta in tests to disable weight reduction.
 const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
@@ -161,7 +160,6 @@ impl TestSetup {
         let committee = Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
@@ -170,7 +168,6 @@ impl TestSetup {
         let previous_committee = Committee::new(
             members,
             epoch - 1,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
@@ -249,7 +246,6 @@ impl TestSetup {
         let committee = Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
@@ -258,7 +254,6 @@ impl TestSetup {
         let previous_committee = Committee::new(
             members,
             epoch - 1,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
@@ -1195,7 +1190,6 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1281,7 +1275,6 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1387,7 +1380,6 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -7717,7 +7709,6 @@ async fn test_prepare_previous_output_for_new_member() {
     let new_current_committee = Committee::new(
         current_members,
         epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -9711,7 +9702,6 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     let previous_committee = Committee::new(
         previous_members,
         epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -9719,7 +9709,6 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     let target_committee = Committee::new(
         target_members,
         target_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -9907,7 +9896,6 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     let previous_committee = Committee::new(
         members.clone(),
         epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -9915,7 +9903,6 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     let target_committee = Committee::new(
         members,
         target_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10041,7 +10028,6 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     let previous_committee = Committee::new(
         members.clone(),
         epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10049,7 +10035,6 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     let target_committee = Committee::new(
         members,
         target_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10188,7 +10173,6 @@ fn test_recover_current_dkg() {
     let target_committee = Committee::new(
         committee.members().to_vec(),
         epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10362,7 +10346,6 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
     let target_committee = Committee::new(
         committee.members().to_vec(),
         epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10445,7 +10428,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let committee_at_100 = Committee::new(
         members.clone(),
         dkg_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10453,7 +10435,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let committee_at_101 = Committee::new(
         members.clone(),
         rotation_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10573,7 +10554,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let dkg_epoch_committee = Committee::new(
         members.clone(),
         dkg_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10581,7 +10561,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let previous_committee = Committee::new(
         members,
         rotation_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10589,7 +10568,6 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let target_committee = Committee::new(
         target_members,
         target_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -10688,7 +10666,6 @@ fn test_recover_current_rotation() {
         Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -10890,7 +10867,6 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         Committee::new(
             members.clone(),
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -16057,7 +16033,6 @@ fn make_jumped_committee_set(setup: &mut TestSetup, prev_epoch: u64) {
     let prev_committee = Committee::new(
         members,
         prev_epoch,
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
@@ -16641,7 +16616,6 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
     let weighted = Committee::new(
         members,
         setup.epoch(),
-        TEST_THRESHOLD_IN_BASIS_POINTS,
         ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0, // Vanilla
@@ -16697,7 +16671,6 @@ fn derived_threshold_keeps_t_plus_2f_within_w() {
             let committee = Committee::new(
                 members,
                 setup.epoch(),
-                TEST_THRESHOLD_IN_BASIS_POINTS,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 f_bps,
                 0,

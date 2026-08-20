@@ -42,7 +42,6 @@ pub enum CreateProposalParams {
         metadata: Vec<(String, String)>,
     },
     UpdateMpcConfig {
-        threshold_bps: Option<u64>,
         max_faulty_bps: Option<u64>,
         weight_reduction_allowed_delta: Option<u64>,
         nonce_generation_protocol: Option<u64>,
@@ -648,14 +647,12 @@ pub fn build_create_proposal_transaction(
             );
         }
         CreateProposalParams::UpdateMpcConfig {
-            threshold_bps,
             max_faulty_bps,
             weight_reduction_allowed_delta,
             nonce_generation_protocol,
             metadata,
         } => {
             let entries: Vec<(String, ConfigValue)> = [
-                ("mpc_threshold_in_basis_points", threshold_bps),
                 ("mpc_max_faulty_in_basis_points", max_faulty_bps),
                 (
                     "mpc_weight_reduction_allowed_delta",

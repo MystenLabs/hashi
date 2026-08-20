@@ -1804,19 +1804,13 @@ mod tests {
             .await?;
 
         use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-        use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
         let hashi = networks.hashi_network.nodes()[0].hashi();
-        let threshold_bps = hashi.onchain_state().mpc_threshold_in_basis_points();
         let weight_reduction_allowed_delta =
             hashi.onchain_state().mpc_weight_reduction_allowed_delta();
         let max_faulty_bps = hashi.onchain_state().mpc_max_faulty_in_basis_points();
 
-        assert_eq!(
-            threshold_bps, DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
-            "on-chain mpc_threshold_in_basis_points ({threshold_bps}) != Rust default ({DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS})"
-        );
         assert_eq!(
             weight_reduction_allowed_delta, DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             "on-chain mpc_weight_reduction_allowed_delta ({weight_reduction_allowed_delta}) != Rust default ({DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA})"
@@ -1846,7 +1840,6 @@ mod tests {
 
     async fn varying_t_and_allowed_delta_flow(mut networks: TestNetworks) -> Result<()> {
         use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-        use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
         // Wait for DKG (epoch 1 committee created with defaults).
@@ -1873,10 +1866,6 @@ mod tests {
             .current_committee()
             .unwrap();
         assert_eq!(
-            epoch1_committee.mpc_threshold_in_basis_points(),
-            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS
-        );
-        assert_eq!(
             epoch1_committee.mpc_weight_reduction_allowed_delta(),
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA
         );
@@ -1886,16 +1875,11 @@ mod tests {
         );
 
         // Change config between epochs.
-        let new_threshold: u64 = 5000;
         let new_delta: u64 = 1200;
         let new_max_faulty: u64 = 2000;
         crate::apply_onchain_config_overrides(
             &mut networks,
             &[
-                (
-                    "mpc_threshold_in_basis_points".into(),
-                    hashi_types::move_types::ConfigValue::U64(new_threshold),
-                ),
                 (
                     "mpc_weight_reduction_allowed_delta".into(),
                     hashi_types::move_types::ConfigValue::U64(new_delta),
@@ -1948,11 +1932,6 @@ mod tests {
         };
         let epoch1 = committees.get(&initial_epoch).expect("epoch 1 committee");
         assert_eq!(
-            epoch1.mpc_threshold_in_basis_points(),
-            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
-            "epoch {initial_epoch} committee should retain original threshold_basis_points"
-        );
-        assert_eq!(
             epoch1.mpc_weight_reduction_allowed_delta(),
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             "epoch {initial_epoch} committee should retain original allowed_delta"
@@ -1965,11 +1944,6 @@ mod tests {
 
         // Epoch 2 committee has new values.
         let epoch2 = committees.get(&target_epoch).expect("epoch 2 committee");
-        assert_eq!(
-            epoch2.mpc_threshold_in_basis_points(),
-            new_threshold as u16,
-            "epoch {target_epoch} committee should have updated threshold_basis_points"
-        );
         assert_eq!(
             epoch2.mpc_weight_reduction_allowed_delta(),
             new_delta as u16,
@@ -2002,22 +1976,47 @@ mod tests {
         {
             r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
-        let initial_epoch = nodes[0].current_epoch().unwrap();
-        let pk_before = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+        let mut epoch = nodes[0].current_epoch().unwrap();
+        crate::apply_onchain_config_overrides(
+            &mut networks,
+            &[(
+                "mpc_max_faulty_in_basis_points".into(),
+                hashi_types::move_types::ConfigValue::U64(1000),
+            )],
+        )
+        .await?;
+        epoch += 1;
+        networks.sui_network.force_close_epoch().await?;
+        {
+            let futs: Vec<_> = networks
+                .hashi_network()
+                .nodes()
+                .iter()
+                .map(|n| n.wait_for_epoch(epoch, Duration::from_secs(480)))
+                .collect();
+            for (i, r) in futures::future::join_all(futs)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {epoch}: {e}"));
+            }
+        }
+        let pk_before = networks.hashi_network().nodes()[0]
+            .hashi()
+            .mpc_handle()
+            .unwrap()
+            .public_key()
+            .unwrap();
 
-        let low_threshold_bps: u64 = 2500;
-        let low_max_faulty_bps: u64 = 2000;
+        let raised_max_faulty_bps: u64 = 2000;
         let low_delta: u64 = 800;
         crate::apply_onchain_config_overrides(
             &mut networks,
             &[
                 (
-                    "mpc_threshold_in_basis_points".into(),
-                    hashi_types::move_types::ConfigValue::U64(low_threshold_bps),
-                ),
-                (
                     "mpc_max_faulty_in_basis_points".into(),
-                    hashi_types::move_types::ConfigValue::U64(low_max_faulty_bps),
+                    hashi_types::move_types::ConfigValue::U64(raised_max_faulty_bps),
                 ),
                 (
                     "mpc_weight_reduction_allowed_delta".into(),
@@ -2027,6 +2026,7 @@ mod tests {
         )
         .await?;
 
+        let initial_epoch = epoch;
         for offset in 1..=2 {
             let target = initial_epoch + offset;
             networks.sui_network.force_close_epoch().await?;

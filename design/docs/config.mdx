@@ -156,18 +156,6 @@ The MPC parameters are snapshotted (pinned) onto each committee at
 reconfiguration. An `UpdateConfig` that changes them mid-epoch never affects
 the active committee; new values take effect when the next committee forms.
 
-### `mpc_threshold_in_basis_points`
-
-| | |
-|---|---|
-| **Type** | `u64` |
-| **Default** | `3334` |
-| **Valid range** | `1` to `10000` |
-| **Unit** | basis points of committee voting weight |
-
-The MPC signing threshold: the minimum fraction of total committee voting
-weight whose shares are required to produce a threshold signature.
-
 ### `mpc_max_faulty_in_basis_points`
 
 | | |
