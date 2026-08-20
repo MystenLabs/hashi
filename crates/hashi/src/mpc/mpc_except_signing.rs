@@ -5392,6 +5392,9 @@ impl MpcManager {
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
+            if certified_share_indices.len() >= context.input_threshold as usize {
+                break;
+            }
             let CertificateV1::Rotation(rotation_cert) = cert.inner() else {
                 return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all Rotation certificates".into(),
@@ -5422,6 +5425,9 @@ impl MpcManager {
                 });
             }
             for (share_index, message) in rotation_msgs {
+                if certified_share_indices.len() >= context.input_threshold as usize {
+                    break;
+                }
                 if certified_share_indices.contains(&share_index) {
                     tracing::warn!(
                         "reconstruct_rotation: share_index={share_index} was already claimed \
@@ -5471,8 +5477,6 @@ impl MpcManager {
                 certified_share_indices.push(share_index);
             }
         }
-        // Unlike normal flow which accumulates until threshold in a loop, reconstruction
-        // receives all certificates at once. Check threshold for better error handling.
         if certified_share_indices.len() < context.input_threshold as usize {
             return Err(MpcError::NotEnoughApprovals {
                 needed: context.input_threshold as usize,

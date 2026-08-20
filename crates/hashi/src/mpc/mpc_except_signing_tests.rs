@@ -10758,9 +10758,9 @@ fn test_recover_current_rotation() {
     // rotation messages (for current_output) and the epoch-100 DKG messages (for
     // previous_output); the InMemory store keys by dealer, with separate maps per type.
     let receiver_index = 3usize;
-    let build_store = || {
+    let build_store_from = |dealers: &[(Address, RotationMessages)]| {
         let store = InMemoryPublicMessagesStore::new();
-        for (dealer_addr, msgs) in &rotation_messages_by_dealer {
+        for (dealer_addr, msgs) in dealers {
             store
                 .store_rotation_messages(rotation_epoch, dealer_addr, msgs)
                 .unwrap();
@@ -10778,6 +10778,7 @@ fn test_recover_current_rotation() {
         }
         store
     };
+    let build_store = || build_store_from(&rotation_messages_by_dealer);
     let make_manager = |store: Arc<dyn PublicMessagesStore>| {
         MpcManager::new(
             rotation_setup.setup.address(receiver_index),
@@ -10867,6 +10868,72 @@ fn test_recover_current_rotation() {
         ),
         MpcOutputRecoveryOutcome::NotApplicable
     ));
+    let crossing_idx = 1usize;
+    let (crossing_addr, crossing_msgs) = rotation_messages_by_dealer[crossing_idx].clone();
+    let mut tampered = crossing_msgs.clone();
+    let first = *crossing_msgs.keys().next().unwrap();
+    let last = *crossing_msgs.keys().last().unwrap();
+    assert_ne!(
+        first, last,
+        "the crossing dealer must own more than one share index"
+    );
+    tampered.insert(last, crossing_msgs.get(&first).unwrap().clone());
+    let tampered_messages = Messages::Rotation(tampered.clone());
+    let crossing_cert = create_rotation_test_certificate(
+        committee_set.committees().get(&rotation_epoch).unwrap(),
+        &tampered_messages,
+        crossing_addr,
+        (0..2)
+            .map(|i| {
+                let addr = rotation_setup.setup.address(i);
+                let signed = rotation_setup.setup.signing_keys[i].sign(
+                    rotation_epoch,
+                    addr,
+                    &DealerMessagesHash {
+                        dealer_address: crossing_addr,
+                        messages_hash: tampered_messages.compute_hash(),
+                    },
+                );
+                MemberSignature::new(rotation_epoch, addr, signed.signature().clone())
+            })
+            .collect(),
+    )
+    .unwrap();
+    let mut certs_with_tampered = rotation_certificates.clone();
+    certs_with_tampered[crossing_idx] =
+        VerifiedCertificateV1::new_unchecked(CertificateV1::Rotation(crossing_cert));
+    let mut dealers_with_tampered = rotation_messages_by_dealer.clone();
+    dealers_with_tampered[crossing_idx] = (crossing_addr, tampered);
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store_from(
+        &dealers_with_tampered,
+    )))));
+    let MpcOutputRecoveryOutcome::Recovered(output) =
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &certs_with_tampered,
+            &dkg_certs,
+            &onchain_key,
+        )
+    else {
+        panic!("an unusable share past the threshold must not be walked");
+    };
+    assert_eq!(output.public_key, expected_public_key);
+
+    let (_, prefix_dealers) = rotation_messages_by_dealer.split_last().unwrap();
+    let mgr = Arc::new(RwLock::new(make_manager(Arc::new(build_store_from(
+        prefix_dealers,
+    )))));
+    let MpcOutputRecoveryOutcome::Recovered(output) =
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &rotation_certificates,
+            &dkg_certs,
+            &onchain_key,
+        )
+    else {
+        panic!("a dealer past the threshold prefix must not be walked");
+    };
+    assert_eq!(output.public_key, expected_public_key);
 }
 
 #[test]
