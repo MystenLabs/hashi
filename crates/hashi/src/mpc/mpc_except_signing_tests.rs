@@ -2831,8 +2831,8 @@ async fn test_run_as_dealer_p2p_send_error() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MpcError::NotEnoughApprovals { needed: 3, got: 1 }),
-        "W=5 t=2 f=1 with every peer failing leaves the dealer's own weight, got {err:?}"
+        matches!(err, MpcError::NotEnoughApprovals { needed: 4, got: 1 }),
+        "W=5 t=3 f=1 with every peer failing leaves the dealer's own weight, got {err:?}"
     );
     assert_eq!(mock_tob.published_count(), 0);
     assert!(logs_contain("Failed to send message"));
@@ -3020,8 +3020,8 @@ async fn test_run_as_dealer_partial_failures_insufficient_signatures() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MpcError::NotEnoughApprovals { needed: 3, got: 2 }),
-        "W=5 t=2 f=1 with 3 of 4 peers failing leaves own weight plus one, got {err:?}"
+        matches!(err, MpcError::NotEnoughApprovals { needed: 4, got: 2 }),
+        "W=5 t=3 f=1 with 3 of 4 peers failing leaves own weight plus one, got {err:?}"
     );
     assert_eq!(mock_tob.published_count(), 0);
     // Verify logging occurred for the 3 failures
@@ -6907,8 +6907,14 @@ async fn test_run_key_rotation_as_dealer_reports_a_shortfall() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MpcError::NotEnoughApprovals { needed: 7, got: 3 }),
-        "weights [3,2,4,1,2] give t+f=7 against dealer 0's own weight of 3, got {err:?}"
+        matches!(
+            err,
+            MpcError::NotEnoughApprovals {
+                needed: 81,
+                got: 30
+            }
+        ),
+        "weights [30,20,40,10,20] give t+f=81 against dealer 0's own weight of 30, got {err:?}"
     );
     assert_eq!(mock_tob.published_count(), 0);
     assert_eq!(
@@ -13923,7 +13929,7 @@ async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    // Nodes 3, 4, 5 unreachable: pending weight 3 > f=2 — beyond AVID's dispersal bound.
+    // Nodes 3, 4, 5 unreachable: pending weight 3 > f=1 — beyond AVID's dispersal bound.
     let others: HashMap<_, _> = (1..3)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
@@ -13943,11 +13949,11 @@ async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MpcError::NotEnoughApprovals { needed: 4, got: 3 }),
-        "W=6 f=2 t=2 gives a collector bar of 4 with 3 confirmed, got {err:?}"
+        matches!(err, MpcError::NotEnoughApprovals { needed: 5, got: 3 }),
+        "W=6 f=1 t=4 gives a collector bar of 5 with 3 confirmed, got {err:?}"
     );
     assert!(logs_contain(
-        "abandoned: confirmed weight 3 < required 4 (W=6, f=2, t+f=4, batch_index=0)"
+        "abandoned: confirmed weight 3 < required 5 (W=6, f=1, t+f=5, batch_index=0)"
     ));
     assert_eq!(
         metrics
@@ -16933,6 +16939,60 @@ fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
     let fresh = Committee::new(members, setup.epoch(), 100, 3333, 0);
     let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
     assert_eq!((nodes.total_weight(), t, f), (103, 36, 34));
+}
+
+#[test]
+fn a_committee_below_the_reduction_floor_is_rejected_not_panicked_on() {
+    let setup = TestSetup::new(4);
+    let members: Vec<_> = setup
+        .committee()
+        .members()
+        .iter()
+        .map(|m| {
+            CommitteeMember::new(
+                m.validator_address(),
+                m.public_key().clone(),
+                m.encryption_public_key().clone(),
+                10,
+            )
+        })
+        .collect();
+    let committee = Committee::new(members, setup.epoch(), 0, 3333, 0);
+    let err = build_reduced_nodes(
+        &committee,
+        TEST_WEIGHT_DIVISOR,
+        crate::constants::SUI_TESTNET_CHAIN_ID,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, MpcError::CryptoError(ref m) if m.contains("below the reduction floor")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn derived_threshold_rejects_a_faulty_bound_too_small_to_form_a_certificate() {
+    const ALLOWED_DELTA: u16 = 1000;
+    let setup = TestSetup::new(4);
+    let members: Vec<_> = setup
+        .committee()
+        .members()
+        .iter()
+        .map(|m| {
+            CommitteeMember::new(
+                m.validator_address(),
+                m.public_key().clone(),
+                m.encryption_public_key().clone(),
+                2500,
+            )
+        })
+        .collect();
+    let committee = Committee::new(members, setup.epoch(), ALLOWED_DELTA, 100, 0);
+    let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
+    assert!(
+        matches!(err, MpcError::CryptoError(ref m) if m.contains("no dealer certificate can ever form")),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]

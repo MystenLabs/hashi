@@ -6826,10 +6826,18 @@ fn build_reduced_nodes(
         lower_bound,
     )
     .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-    if reduced_threshold >= nodes.total_weight() {
+    if u32::from(reduced_threshold) + u32::from(reduced_max_faulty)
+        > u32::from(nodes.total_weight())
+    {
+        let driver = match legacy_threshold_in_basis_points {
+            Some(bps) => format!("pinned mpc_threshold_in_basis_points {bps}"),
+            None => format!("max_faulty_in_basis_points {max_faulty_in_basis_points}"),
+        };
         return Err(MpcError::CryptoError(format!(
-            "reduced threshold {reduced_threshold} must be below reduced total weight {}: \
-             max_faulty_in_basis_points {max_faulty_in_basis_points} is too small for W={total_weight}",
+            "reduced t {reduced_threshold} + f {reduced_max_faulty} exceeds reduced total weight \
+             {}, so no dealer certificate can ever form: {driver} with \
+             weight_reduction_allowed_delta {weight_reduction_allowed_delta_in_basis_points} \
+             at W={total_weight}",
             nodes.total_weight()
         )));
     }
