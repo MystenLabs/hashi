@@ -821,6 +821,7 @@ Create proposals:
 hashi proposal create update-config <key> <value> [-m key=value]
 hashi proposal create update-mpc-config [--threshold-bps <N>] [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
 hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=value]
+hashi proposal create upgrade-v2 [--package-path <path> | --digest <hex>] --exclusive <true|false> [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
 hashi proposal create abort-reconfig [--epoch <N>] [-m key=value]
@@ -898,6 +899,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | **UpdateConfig** | 2/3 | Change protocol parameters | `key` and type-prefixed `value` |
 | **UpdateMpcConfig** | 2/3 | Change MPC threshold/faulty/delta | `--threshold-bps`, `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
 | **Upgrade** | 2/3 | Publish a new package version | `--package-path` or `--digest` |
+| **UpgradeV2** | 2/3 | Publish with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
 | **AbortReconfig** | 2/3 | Abort a stuck reconfiguration | `--epoch` of pending reconfig |
@@ -944,15 +946,20 @@ hashi config on-chain
 
 ### 7.4 Package upgrade flow
 
+Every package upgrade must first be classified as exclusive or non-exclusive.
+See [Move Package Upgrades](move-upgrades.mdx) for the safety criteria, binary
+rollout contract, and the special testnet v1-to-v2 sequence.
+
 ```bash
 # Build and propose (CLI verifies PACKAGE_VERSION is incremented)
-hashi proposal create upgrade --package-path /path/to/packages/hashi
+hashi proposal create upgrade-v2 --exclusive true --package-path /path/to/packages/hashi
 
 # Vote (--execute is NOT supported for Upgrade proposals)
 hashi proposal vote 0x<proposal-id>
 
-# After quorum: execute the upgrade
-hashi proposal execute 0x<proposal-id>
+# After quorum: use the release tooling to build and submit one programmable
+# transaction containing proposal execution, package publication, and upgrade
+# finalization. The generic `proposal execute` command rejects upgrade types.
 ```
 
 ---

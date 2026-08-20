@@ -14,7 +14,6 @@ use tabled::Tabled;
 use crate::cli::TxOptions;
 use crate::cli::client::CreateProposalParams;
 use crate::cli::client::HashiClient;
-use crate::cli::client::get_proposal_type_arg;
 use crate::cli::config::CliConfig;
 use crate::cli::print_detail;
 use crate::cli::print_info;
@@ -216,7 +215,7 @@ pub async fn vote(
     print_info("Building vote transaction...");
 
     // Infer the type tag from the on-chain proposal type
-    let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
+    let type_arg = client.proposal_type_arg(&proposal.proposal_type)?;
     let tx = client.build_vote_transaction(proposal_addr, type_arg)?;
 
     print_info(&format!(
@@ -239,7 +238,10 @@ pub async fn vote(
     // Upgrade proposals require the dedicated upgrade flow — the generic
     // `<module>::execute` path can't construct an UpgradeTicket.
     use crate::onchain::types::ProposalType;
-    if matches!(proposal.proposal_type, ProposalType::Upgrade) {
+    if matches!(
+        proposal.proposal_type,
+        ProposalType::Upgrade | ProposalType::UpgradeV2
+    ) {
         print_warning(
             "--execute is not supported for Upgrade proposals; run the \
              dedicated upgrade flow once quorum is reached.",
@@ -320,7 +322,7 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     print_info("Building remove_vote transaction...");
 
     // Infer the type tag from the on-chain proposal type
-    let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
+    let type_arg = client.proposal_type_arg(&proposal.proposal_type)?;
     let tx = client.build_remove_vote_transaction(proposal_addr, type_arg)?;
 
     print_info(&format!(
@@ -349,7 +351,10 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     let proposal_type_str = display::format_proposal_type(proposal_type);
 
     use crate::onchain::types::ProposalType;
-    if matches!(proposal_type, ProposalType::Upgrade) {
+    if matches!(
+        proposal_type,
+        ProposalType::Upgrade | ProposalType::UpgradeV2
+    ) {
         anyhow::bail!(
             "Upgrade proposals cannot be executed via the CLI. \
              Use the full upgrade flow (execute + publish + finalize) instead."
@@ -382,15 +387,28 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
 /// currently published version (pre-flight check) before submitting the
 /// proposal. The `--digest` path skips that check and is retained only for
 /// callers with a pre-built package.
+pub struct CreateUpgradeProposalArgs<'a> {
+    pub digest: Option<&'a str>,
+    pub package_path: Option<&'a std::path::Path>,
+    pub sui_binary: &'a std::path::Path,
+    pub sui_client_config: Option<&'a std::path::Path>,
+    pub upgrade_v2_exclusive: Option<bool>,
+    pub metadata: Vec<(String, String)>,
+}
+
 pub async fn create_upgrade_proposal(
     config: &CliConfig,
-    digest: Option<&str>,
-    package_path: Option<&std::path::Path>,
-    sui_binary: &std::path::Path,
-    sui_client_config: Option<&std::path::Path>,
-    metadata: Vec<(String, String)>,
+    args: CreateUpgradeProposalArgs<'_>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
+    let CreateUpgradeProposalArgs {
+        digest,
+        package_path,
+        sui_binary,
+        sui_client_config,
+        upgrade_v2_exclusive,
+        metadata,
+    } = args;
     let mut client = HashiClient::new(config).await?;
 
     let digest_bytes = match (digest, package_path) {
@@ -426,18 +444,43 @@ pub async fn create_upgrade_proposal(
         (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
     };
 
-    print_detail(&format!("\n{}", "Creating Upgrade Proposal:".bold()));
+    let proposal_name = if upgrade_v2_exclusive.is_some() {
+        "UpgradeV2"
+    } else {
+        "Upgrade"
+    };
+    print_detail(&format!(
+        "\n{}",
+        format!("Creating {proposal_name} Proposal:").bold()
+    ));
     print_detail(&format!("  Digest: 0x{}", hex::encode(&digest_bytes)));
+    if let Some(exclusive) = upgrade_v2_exclusive {
+        print_detail(&format!("  Exclusive: {exclusive}"));
+    }
     print_metadata(&metadata);
 
     prompt_continue("create this upgrade proposal", tx_opts).await?;
 
-    let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
-        digest: digest_bytes,
-        metadata,
-    })?;
+    let (tx, module) = if let Some(exclusive) = upgrade_v2_exclusive {
+        (
+            client.build_create_proposal_transaction(CreateProposalParams::UpgradeV2 {
+                digest: digest_bytes,
+                exclusive,
+                metadata,
+            })?,
+            "upgrade_v2",
+        )
+    } else {
+        (
+            client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
+                digest: digest_bytes,
+                metadata,
+            })?,
+            "upgrade",
+        )
+    };
 
-    print_info("Transaction: upgrade::propose");
+    print_info(&format!("Transaction: {module}::propose"));
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
     print_created_proposal_id(response.as_ref());
     Ok(())

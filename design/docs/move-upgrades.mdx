@@ -1,0 +1,143 @@
+---
+title: Move Package Upgrades
+description: >-
+  How Hashi classifies Move upgrades as exclusive or non-exclusive, rolls out
+  validator binaries, and retires old package versions safely.
+keywords:
+  - Move upgrade
+  - package version
+  - exclusive upgrade
+  - validator rollout
+  - governance
+goal:
+  description: >-
+    Reader can classify a Hashi Move upgrade, coordinate the validator binary
+    rollout, and execute the matching onchain governance process safely
+  requires:
+    - has_frontmatter:
+        - title
+        - description
+        - keywords
+      label: Has required frontmatter fields
+    - min_words: 500
+      label: Needs more content depth
+    - has_questions: true
+      label: Needs questions for AI search visibility
+    - has_answer: true
+      label: Needs answer summary for AI citation
+questions:
+  - When must a Hashi Move upgrade be exclusive?
+  - What happens to an old validator binary after an exclusive upgrade?
+  - How should validators coordinate a Move package upgrade?
+  - What is the testnet v1 to v2 upgrade plan?
+answer: >-
+  Every Hashi Move upgrade must explicitly be classified as exclusive or
+  non-exclusive. Exclusive upgrades atomically enable only the new package
+  version and are the safe default when versions share mutable state.
+  Non-exclusive upgrades are allowed only after review proves that old and new
+  entry functions can safely operate on the same state. Validators representing
+  at least two thirds of committee weight upgrade their binaries and verify
+  health before voting; reaching vote quorum does not publish the package.
+---
+
+Hashi package versions are separate callable Sui packages, but they operate on
+the same shared `Hashi` object. Publishing a new package therefore does not make
+an old package harmless. If an old entry function interprets shared state using
+an obsolete invariant, it can overwrite or destroy work performed by the new
+version.
+
+The withdrawal v2 work exposed a concrete example. A request committed by v2
+could remain in a location that v1 treated as cancellable. While v1 remained
+enabled, its cancellation path could destroy that committed request, stranding
+burned hBTC and locked UTXOs. This is why package publication and version
+retirement sometimes need to be one atomic governance action.
+
+## Required classification
+
+Every upgrade proposal must be labeled **exclusive** or **non-exclusive** in
+its design and rollout plan. Reviewers should treat a missing classification as
+an incomplete upgrade.
+
+Use an **exclusive upgrade** when any of the following is true:
+
+- The new version changes the meaning, location, or lifecycle of shared state.
+- An old entry function could undo, overwrite, replay, or misclassify a new
+  version's write.
+- Safety depends on all callers using the new validation or authorization rule.
+- Cross-version behavior has not been tested directly.
+
+Exclusive should be the default when there is doubt. It atomically replaces the
+enabled-version set with the newly committed version, so no transaction can
+observe the new version enabled while an older version is still callable.
+
+Use a **non-exclusive upgrade** only when retaining an older version is an
+intentional compatibility feature. The review must explain why old and new
+entry functions are safe against the same shared state and include direct
+cross-version tests for state both versions can mutate. A desire to let old
+validator binaries keep working is not, by itself, enough: binary rollout is an
+operational concern and must not weaken an onchain safety invariant.
+
+The `upgrade_v2::Upgrade` proposal records this decision in its `exclusive`
+field. Execution returns the Sui `UpgradeTicket` together with a non-droppable
+authorization carrying the approved setting. Finalization consumes both in the
+same programmable transaction, binding the committee vote to the version policy
+that is applied when the package is committed. The CLI requires
+`--exclusive true` or `--exclusive false`; omission is rejected so the
+classification cannot be an accidental default.
+
+## Validator rollout contract
+
+An exclusive upgrade deliberately makes old binaries unable to perform normal
+writes once the upgrade checkpoint is observed. An old binary does not contain
+the code or ABI routing for the newest package, and the previous package is no
+longer enabled. Updated Hashi nodes detect that they support no enabled package
+version and halt autonomous mutations instead of falling back unsafely.
+
+Use this sequence for every upgrade:
+
+1. Build the exact Move package and record its digest in the proposal.
+2. Release a node binary that understands both the currently active package and
+   the proposed package.
+3. Restart validators one at a time. Each validator verifies healthy operation
+   on the current package before casting its vote.
+4. Confirm that upgraded validators represent at least two thirds of committee
+   **weight**, not merely two thirds of node count.
+5. Reach proposal quorum, then separately execute and publish the upgrade.
+   Votes never auto-publish a package.
+6. Verify the package-upgrade checkpoint, enabled-version set, active routing,
+   and validator health before resuming ordinary rollout work.
+
+This ordering means the network retains quorum-capable updated software before
+an exclusive publication causes old binaries to stop writing.
+
+## Current testnet v1 to v2 plan
+
+The deployed testnet v1 package only has the legacy `upgrade` proposal. That
+proposal always leaves previous versions enabled, so it cannot make the first
+v1-to-v2 transition atomic. Testnet carries no real funds, and we accept a small
+race window for this one migration.
+
+Minimize that window as follows:
+
+1. Avoid active withdrawals during the rollout window.
+2. Create and fully vote both the v2 upgrade proposal and a
+   `DisableVersion(1)` proposal while v1 is active. Proposal creation permits
+   targeting the current version; only execution rejects disabling it.
+3. Execute, publish, and finalize v2 through the legacy v1 upgrade path.
+4. Wait for that transaction to succeed and obtain the newly published v2
+   package ID.
+5. Immediately execute the already-approved disable-v1 proposal through the v2
+   package.
+6. Verify that v1 calls fail with `EVersionDisabled` and that validators route
+   ordinary work through v2.
+
+These are necessarily two transactions. They must not be submitted
+concurrently because shared-object ordering is not guaranteed; disable-v1 must
+execute through v2 after publication. Emergency pause is not a complete
+substitute because the legacy v1 withdrawal cancellation entry does not honor
+the pause flag.
+
+Before the first mainnet publish, remove the legacy `upgrade` module, rename
+`upgrade_v2` to `upgrade`, and squash testnet-only package-version and storage
+assumptions. Mainnet should begin with the atomic proposal type as its only
+upgrade path.
