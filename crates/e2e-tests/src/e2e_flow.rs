@@ -695,6 +695,27 @@ mod tests {
                 stamped_package,
             )
             .await?;
+
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let v1_disabled = networks.hashi_network.nodes().iter().all(|node| {
+                        !node
+                            .hashi()
+                            .onchain_state()
+                            .state()
+                            .hashi()
+                            .config
+                            .enabled_versions
+                            .contains(&1)
+                    });
+                    if v1_disabled {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await
+            .map_err(|_| anyhow!("timed out waiting for every node to observe v1 disabled"))?;
         }
         {
             let hashi = networks.hashi_network.nodes()[0].hashi();
