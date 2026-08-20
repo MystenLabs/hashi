@@ -16625,10 +16625,15 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
         u32::from(threshold) + u32::from(max_faulty) <= u32::from(nodes.total_weight()),
         "t + f must stay within W or no certificate can ever be formed"
     );
+    assert!(
+        u32::from(threshold) + 2 * u32::from(max_faulty) > u32::from(nodes.total_weight()),
+        "reduction ceils t and f while flooring weights, so t + 2f = W does not survive it; \
+         this records that, it is not an endorsement"
+    );
 }
 
 #[test]
-fn derived_threshold_makes_t_plus_2f_equal_w_before_reduction() {
+fn derived_threshold_makes_t_plus_2f_equal_w() {
     for f_bps in [1000u16, 2000, 2500, 3000, 3333] {
         for stakes in [
             [1000u64, 2500, 3000, 3500],
@@ -16659,6 +16664,13 @@ fn derived_threshold_makes_t_plus_2f_equal_w_before_reduction() {
             );
             let (nodes, t, f) =
                 build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+            assert_eq!(
+                stakes.iter().sum::<u64>() % u64::from(nodes.total_weight()),
+                0,
+                "the identity survives here only because \
+                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA={TEST_WEIGHT_REDUCTION_ALLOWED_DELTA} forces \
+                 an exact divisor; it does not survive lossy reduction",
+            );
             assert_eq!(
                 u32::from(t) + 2 * u32::from(f),
                 u32::from(nodes.total_weight()),
@@ -16740,8 +16752,10 @@ fn an_underivable_previous_committee_does_not_block_startup() {
     setup.committee_set.set_committees(committees);
 
     let manager = setup.create_manager(0);
+    assert!(manager.previous_committee.is_none());
     assert!(manager.previous_nodes.is_none());
     assert!(manager.previous_reconfig_output_threshold.is_none());
+    assert!(manager.previous_reconfig_output_max_faulty.is_none());
     assert!(manager.mpc_config.threshold > 0);
 }
 

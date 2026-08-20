@@ -103,7 +103,7 @@ fun seed_if_absent(config: &mut Config, key: vector<u8>, default: u64) {
     };
 }
 
-public(package) fun repair_out_of_range(config: &mut Config) {
+fun repair_out_of_range(config: &mut Config) {
     reset_if_out_of_range(
         config,
         KEY_MAX_FAULTY_IN_BASIS_POINTS,
@@ -132,7 +132,8 @@ public(package) fun init_defaults(config: &mut Config) {
     );
 }
 
-public(package) fun pin(config: &Config): Config {
+public(package) fun pin(config: &mut Config): Config {
+    repair_out_of_range(config);
     let mut mpc = config::empty();
     mpc.upsert(
         KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,

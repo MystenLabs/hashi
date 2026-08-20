@@ -312,26 +312,30 @@ impl MpcManager {
                 None => (committee_set.epoch(), None),
             };
         let (
+            previous_committee,
             previous_nodes,
             previous_reconfig_output_threshold,
             previous_reconfig_output_max_faulty,
-        ) = match previous_committee.as_ref() {
+        ) = match previous_committee {
             Some(prev_committee) => {
-                match build_reduced_nodes(prev_committee, weight_divisor, chain_id) {
-                    Ok((nodes, threshold, prev_max_faulty)) => {
-                        (Some(nodes), Some(threshold), Some(prev_max_faulty))
-                    }
+                match build_reduced_nodes(&prev_committee, weight_divisor, chain_id) {
+                    Ok((nodes, threshold, prev_max_faulty)) => (
+                        Some(prev_committee),
+                        Some(nodes),
+                        Some(threshold),
+                        Some(prev_max_faulty),
+                    ),
                     Err(e) => {
                         tracing::warn!(
                             epoch = prev_committee.epoch(),
                             error = %e,
-                            "cannot derive parameters for the previous committee; reconstruction of its output is unavailable"
+                            "cannot derive parameters for the previous committee; treating this node as not a member of it"
                         );
-                        (None, None, None)
+                        (None, None, None, None)
                     }
                 }
             }
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
         let previous_reconfig_input_threshold = committee_set
             .committees()
@@ -6783,14 +6787,29 @@ fn build_reduced_nodes(
         legacy_pinned = legacy_threshold_in_basis_points.is_some(),
         "build_reduced_nodes: pre-reduction parameters"
     );
-    Nodes::prop_reduce(
+    // `prop_reduce` asserts this rather than returning it, and a panic bypasses every caller's
+    // error handling.
+    if total_weight < lower_bound {
+        return Err(MpcError::CryptoError(format!(
+            "total weight {total_weight} is below the reduction floor {lower_bound}"
+        )));
+    }
+    let (nodes, reduced_threshold, reduced_max_faulty) = Nodes::prop_reduce(
         nodes_vec,
         threshold,
         max_faulty,
         weight_reduction_allowed_delta,
         lower_bound,
     )
-    .map_err(|e| MpcError::CryptoError(e.to_string()))
+    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+    if reduced_threshold >= nodes.total_weight() {
+        return Err(MpcError::CryptoError(format!(
+            "reduced threshold {reduced_threshold} must be below reduced total weight {}: \
+             max_faulty_in_basis_points {max_faulty_in_basis_points} is too small for W={total_weight}",
+            nodes.total_weight()
+        )));
+    }
+    Ok((nodes, reduced_threshold, reduced_max_faulty))
 }
 
 fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {

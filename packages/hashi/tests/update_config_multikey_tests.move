@@ -429,17 +429,17 @@ fun test_out_of_range_max_faulty_is_repaired_in_place_at_reconfig() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
 
     hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(5000));
-    mpc_config::repair_out_of_range(hashi.config_mut());
+    let _ = mpc_config::pin(hashi.config_mut());
     assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_FAULTY_BPS);
-    let pinned = mpc_config::pin(hashi.config());
+    let pinned = mpc_config::pin(hashi.config_mut());
     assert!(mpc_config::max_faulty_in_basis_points(&pinned) == MAX_FAULTY_BPS);
 
     hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(0));
-    mpc_config::repair_out_of_range(hashi.config_mut());
+    let _ = mpc_config::pin(hashi.config_mut());
     assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == DEFAULT_MAX_FAULTY_BPS);
 
     hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(2000));
-    mpc_config::repair_out_of_range(hashi.config_mut());
+    let _ = mpc_config::pin(hashi.config_mut());
     assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
 
     std::unit_test::destroy(hashi);
