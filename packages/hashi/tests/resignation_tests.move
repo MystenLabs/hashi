@@ -26,7 +26,7 @@ fun committee_for_testing(epoch: u64, voters: vector<address>): committee::Commi
     voters.do!(|voter| {
         members.push_back(committee::new_committee_member(voter, public_key, sk, 1));
     });
-    committee::new_committee(epoch, members, mpc_config::new_for_testing(3334, 800, 3333, 0))
+    committee::new_committee(epoch, members, mpc_config::new_for_testing(3334, 800, 3333, 0, 0))
 }
 
 fun cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {
@@ -98,7 +98,7 @@ fun test_resign_sets_flag_and_formation_skips() {
         .new_committee_from_voting_powers_for_testing(
             1,
             powers,
-            mpc_config::new_for_testing(3334, 800, 3333, 0),
+            mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
         );
     assert!(next.n_members() == 2);
     assert!(!next.has_member(&VOTER3));
@@ -170,7 +170,7 @@ fun test_withdraw_resignation_clears_flag() {
         .new_committee_from_voting_powers_for_testing(
             1,
             powers,
-            mpc_config::new_for_testing(3334, 800, 3333, 0),
+            mpc_config::new_for_testing(3334, 800, 3333, 0, 0),
         );
     assert!(next.n_members() == 3);
 
