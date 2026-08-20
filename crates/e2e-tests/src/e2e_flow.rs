@@ -682,8 +682,19 @@ mod tests {
                     )
                 })
                 .collect::<Result<_>>()?;
-            crate::upgrade_flow::disable_version(&mut executors, hashi_ids, 1, stamped_package)
-                .await?;
+            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                &mut networks.sui_network.client.clone(),
+                hashi_ids.hashi_object_id,
+            )
+            .await?;
+            crate::upgrade_flow::disable_version(
+                &mut executors,
+                hashi_ids,
+                hashi_isv,
+                1,
+                stamped_package,
+            )
+            .await?;
         }
         {
             let hashi = networks.hashi_network.nodes()[0].hashi();
