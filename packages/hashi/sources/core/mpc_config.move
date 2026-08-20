@@ -111,6 +111,14 @@ fun repair_out_of_range(config: &mut Config) {
         MAX_FAULTY_BPS,
         DEFAULT_MAX_FAULTY_IN_BASIS_POINTS,
     );
+    let max_delta = max_faulty_in_basis_points(config) - 1;
+    clamp_at_most(config, KEY_WEIGHT_REDUCTION_ALLOWED_DELTA, max_delta);
+}
+
+fun clamp_at_most(config: &mut Config, key: vector<u8>, hi: u64) {
+    config.try_get(key).map!(|v| v.as_u64()).do!(|value| if (value > hi) {
+        config.upsert(key, config_value::new_u64(hi));
+    });
 }
 
 public(package) fun init_defaults(config: &mut Config) {

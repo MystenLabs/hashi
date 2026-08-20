@@ -444,3 +444,22 @@ fun test_out_of_range_max_faulty_is_repaired_in_place_at_reconfig() {
 
     std::unit_test::destroy(hashi);
 }
+
+#[test]
+fun test_delta_is_clamped_below_max_faulty_at_reconfig() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == DEFAULT_MAX_FAULTY_BPS);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
+    let _ = mpc_config::pin(hashi.config_mut());
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
+
+    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(500));
+    let _ = mpc_config::pin(hashi.config_mut());
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 500);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 499);
+
+    std::unit_test::destroy(hashi);
+}
