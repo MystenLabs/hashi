@@ -1981,7 +1981,7 @@ mod tests {
             &mut networks,
             &[(
                 "mpc_max_faulty_in_basis_points".into(),
-                hashi_types::move_types::ConfigValue::U64(1000),
+                hashi_types::move_types::ConfigValue::U64(3000),
             )],
         )
         .await?;
@@ -2009,7 +2009,7 @@ mod tests {
             .public_key()
             .unwrap();
 
-        let raised_max_faulty_bps: u64 = 2000;
+        let raised_max_faulty_bps: u64 = 3333;
         let low_delta: u64 = 800;
         crate::apply_onchain_config_overrides(
             &mut networks,

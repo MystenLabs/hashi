@@ -371,6 +371,8 @@ const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
 const KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS: &str = "mpc_nonce_accumulation_window_ms";
 
+const LEGACY_KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
+
 /// Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in `mpc_config.move`.
 pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 /// Mirrors `DEFAULT_MAX_FAULTY_IN_BASIS_POINTS` in `mpc_config.move`.
@@ -483,6 +485,13 @@ impl Config {
             KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS,
             DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS,
         )
+    }
+
+    pub fn legacy_pinned_mpc_threshold(&self) -> Option<&ConfigValue> {
+        self.0
+            .iter()
+            .find(|(key, _)| key == LEGACY_KEY_MPC_THRESHOLD_IN_BASIS_POINTS)
+            .map(|(_, value)| value)
     }
 
     fn mpc_param(&self, key: &str, default: u16) -> u16 {

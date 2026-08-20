@@ -20,6 +20,8 @@ const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
 
 const MAX_BPS: u64 = 10000;
 
+const MAX_FAULTY_BPS: u64 = 3333;
+
 const KEY_REMOVED_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_points";
 const KEY_MAX_FAULTY_IN_BASIS_POINTS: vector<u8> = b"mpc_max_faulty_in_basis_points";
 const KEY_WEIGHT_REDUCTION_ALLOWED_DELTA: vector<u8> = b"mpc_weight_reduction_allowed_delta";
@@ -36,7 +38,7 @@ public(package) fun is_valid_value(key: &std::string::String, value: &config_val
     } else if (k == &KEY_WEIGHT_REDUCTION_ALLOWED_DELTA) {
         value.is_u64() && (*value).as_u64() <= MAX_BPS
     } else if (k == &KEY_MAX_FAULTY_IN_BASIS_POINTS) {
-        value.is_u64() && (*value).as_u64() <= MAX_BPS
+        value.is_u64() && (*value).as_u64() > 0 && (*value).as_u64() <= MAX_FAULTY_BPS
     } else if (k == &KEY_NONCE_GENERATION_PROTOCOL) {
         value.is_u64() && (*value).as_u64() <= 1
     } else if (k == &KEY_NONCE_ACCUMULATION_WINDOW_MS) {
@@ -89,10 +91,26 @@ public(package) fun seed_absent_defaults(config: &mut Config) {
     );
 }
 
+fun reset_if_out_of_range(config: &mut Config, key: vector<u8>, lo: u64, hi: u64, default: u64) {
+    config.try_get(key).map!(|v| v.as_u64()).do!(|value| if (value < lo || value > hi) {
+        config.upsert(key, config_value::new_u64(default));
+    });
+}
+
 fun seed_if_absent(config: &mut Config, key: vector<u8>, default: u64) {
     if (!config.contains(key)) {
         config.upsert(key, config_value::new_u64(default));
     };
+}
+
+public(package) fun repair_out_of_range(config: &mut Config) {
+    reset_if_out_of_range(
+        config,
+        KEY_MAX_FAULTY_IN_BASIS_POINTS,
+        1,
+        MAX_FAULTY_BPS,
+        DEFAULT_MAX_FAULTY_IN_BASIS_POINTS,
+    );
 }
 
 public(package) fun init_defaults(config: &mut Config) {
@@ -114,12 +132,6 @@ public(package) fun init_defaults(config: &mut Config) {
     );
 }
 
-/// Snapshot the MPC parameters from `config` into a fresh store to pin onto a
-/// `Committee` for the epoch. The full key set is always materialized (using
-/// defaults for absent keys) and inserted in a fixed canonical order, so the
-/// snapshot's BCS encoding is deterministic. The committee is signed, so the
-/// Rust mirror (`move_types::Committee`'s `From`) must build this map in the
-/// same order with the same keys.
 public(package) fun pin(config: &Config): Config {
     let mut mpc = config::empty();
     mpc.upsert(
@@ -144,9 +156,6 @@ public(package) fun pin(config: &Config): Config {
 // ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
-/// Build a pinned MPC parameter store directly from explicit values, in the
-/// same canonical key order as `pin`. Used by tests that construct committees
-/// without a full governed config.
 public(package) fun new_for_testing(
     weight_reduction_allowed_delta: u64,
     max_faulty_in_basis_points: u64,

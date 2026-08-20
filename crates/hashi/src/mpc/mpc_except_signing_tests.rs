@@ -1925,7 +1925,7 @@ fn test_complete_dkg_success() {
     let mut rng = rand::thread_rng();
 
     // Use different weights: [3, 2, 4, 1, 2] (total = 12)
-    // threshold = ceil(12 * 3333 / 10000) = 4
+    // f = floor(12 * 3333 / 10000) = 3, threshold = 12 - 2*3 = 6
     let weights = [3, 2, 4, 1, 2];
     let setup = TestSetup::with_weights(&weights);
 
@@ -6402,14 +6402,8 @@ impl RotationTestSetup {
     /// This matches `run_as_party` behavior during live DKG.
     fn threshold_dealer_addresses(&self) -> Vec<Address> {
         let committee = self.setup.committee();
-        let (nodes, threshold, _max_faulty) = build_reduced_nodes(
-            committee,
-            TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
-            TEST_WEIGHT_DIVISOR,
-            TEST_CHAIN_ID,
-        )
-        .unwrap();
+        let (nodes, threshold, _max_faulty) =
+            build_reduced_nodes(committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
         let mut result = Vec::new();
         let mut weight_sum = 0u16;
         for addr in self.certificates.keys() {
@@ -6436,14 +6430,8 @@ impl RotationTestSetup {
             .next_back()
             .map(|(_, c)| c.clone());
         if let Some(ref prev) = previous_committee {
-            let (nodes, threshold, _max_faulty) = build_reduced_nodes(
-                prev,
-                TEST_MAX_FAULTY_IN_BASIS_POINTS,
-                TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
-                TEST_WEIGHT_DIVISOR,
-                TEST_CHAIN_ID,
-            )
-            .unwrap();
+            let (nodes, threshold, _max_faulty) =
+                build_reduced_nodes(prev, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
             manager.previous_nodes = Some(nodes);
             manager.previous_reconfig_output_threshold = Some(threshold);
             manager.previous_reconfig_input_threshold = Some(threshold);
@@ -6635,11 +6623,11 @@ fn test_send_messages_does_not_persist_a_batch_with_a_foreign_share_index() {
 fn test_try_sign_rotation_messages_all_or_nothing() {
     let rotation_setup = RotationTestSetup::new();
 
-    // Create receiver (party 2 with weight=4)
+    // Create receiver (party 2 with weight=40)
     let (mut receiver_manager, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(2);
 
-    // Create rotation dealer (party 0 with weight=3)
+    // Create rotation dealer (party 0 with weight=30)
     let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
     let rotation_dealer_addr = rotation_setup.setup.address(0);
 
@@ -6669,7 +6657,7 @@ fn test_try_sign_rotation_messages_all_or_nothing() {
         }
     };
 
-    // Verify outputs were stored (rotation_dealer has weight=3, so creates 3 rotation messages)
+    // Verify outputs were stored (rotation_dealer has weight=30, so creates 30 rotation messages)
     let rotation_outputs_after = receiver_manager.dealer_outputs.len();
     assert_eq!(
         rotation_outputs_after - rotation_outputs_before,
@@ -6893,9 +6881,9 @@ async fn test_run_key_rotation() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
     // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, f = 39, threshold = 42)
-    // Dealers are validators 0, 1, 4
+    // Dealers are validators 0, 1, 2, 4
 
-    // Create test_manager (validator 0, weight=3) with memory store for message retrieval
+    // Create test_manager (validator 0, weight=30) with memory store for message retrieval
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
@@ -6918,11 +6906,11 @@ async fn test_run_key_rotation() {
 
     // Create rotation certificates covering < threshold share indices
     // so test_manager must run as dealer.
-    // Validator 3 has weight=1 (1 share index), which is < threshold (4).
+    // Validator 2 has weight=40 (40 share indices), which is < threshold (42).
     let mut rotation_certificates = Vec::new();
     {
         let mut other_managers = mock_p2p.managers.lock().unwrap();
-        let validator_idx = 2; // weight = 40, still far below the t+f quorum of 81
+        let validator_idx = 2; // weight = 40, just under the threshold of 42
         let addr = rotation_setup.setup.address(validator_idx);
 
         // First, get the data we need from manager 3
@@ -7033,9 +7021,9 @@ async fn test_run_key_rotation() {
 async fn test_run_key_rotation_skips_dealer_phase() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
-    // Create test_manager (validator 0, weight=3) with memory store
+    // Create test_manager (validator 0, weight=30) with memory store
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
@@ -7052,8 +7040,8 @@ async fn test_run_key_rotation_skips_dealer_phase() {
     }
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
-    // Create rotation certificates from validators 2 (weight=4) and 3 (weight=1).
-    // Combined 5 share indices >= threshold (4) for the party phase.
+    // Create rotation certificates from validators 2 (weight=40) and 3 (weight=10).
+    // Combined 50 share indices >= threshold (42) for the party phase.
     let mut rotation_certificates = Vec::new();
     {
         let mut other_managers = mock_p2p.managers.lock().unwrap();
@@ -7109,9 +7097,9 @@ async fn test_run_key_rotation_skips_dealer_phase() {
         }
     }
 
-    // 2 certs from validators 2 (weight=4) and 3 (weight=1).
+    // 2 certs from validators 2 (weight=40) and 3 (weight=10).
     // certified_dealers() returns their addresses; run_key_rotation computes
-    // weight using previous_committee: 4+1 = 5 >= threshold (4), so dealer skips.
+    // weight using previous_committee: 40+10 = 50 >= threshold (42), so dealer skips.
     let mut mock_tob = MockOrderedBroadcastChannel::new(rotation_certificates);
 
     let new_output = MpcManager::run_key_rotation(
@@ -7140,7 +7128,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
 async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
-    // weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
@@ -7201,7 +7189,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
         );
         rotation_certificates.push(CertificateV1::Rotation(cert));
 
-        // Validator 1: valid rotation messages (weight=2).
+        // Validator 1: valid rotation messages (weight=20).
         let (v1_rotation_messages, v1_own_sig, epoch) = {
             let manager = other_managers.get_mut(&validator_1_addr).unwrap();
             let prev_output = manager.previous_output.clone().unwrap();
@@ -7266,8 +7254,8 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
     .unwrap();
 
     // Dealer MUST have published: the filter excluded the empty-messages dealer
-    // (validator 2, weight=4) from the share count, leaving only
-    // validator 1's 2 shares — below threshold 4.
+    // (validator 2, weight=40) from the share count, leaving only
+    // validator 1's 20 shares — below threshold 42.
     assert!(
         mock_tob.published_count() > 0,
         "Dealer phase must run when empty-messages dealers are excluded from share count"
@@ -7279,17 +7267,17 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
 async fn test_run_key_rotation_recovers_from_hash_mismatch() {
     // Test that run_key_rotation_as_party retrieves the correct message and reprocesses
     // when the RPC handler previously stored outputs from a different message.
-    // The test_manager is validator 0 (weight=3) and is NOT a dealer —
-    // the TOB provides enough certs (validators 2+3, weight=4+1=5 >= threshold=4)
+    // The test_manager is validator 0 (weight=30) and is NOT a dealer —
+    // the TOB provides enough certs (validators 2+3, weight=40+10=50 >= threshold=42)
     // to skip the dealer phase. Validator 2's cert has a hash mismatch on test_manager.
     //
     // Key rotation preserves the vk regardless of which message is used (same secret),
     // so we compare key_shares instead — stale outputs produce wrong shares.
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
-    // weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
-    // Create test_manager (validator 0, weight=3) with memory store
+    // Create test_manager (validator 0, weight=30) with memory store
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
@@ -7304,15 +7292,15 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         other_managers_map.insert(rotation_setup.setup.address(i), manager);
     }
 
-    // Create rotation certificates from validators 2 (weight=4) and 3 (weight=1).
-    // Combined weight = 5 >= threshold (4), so dealer phase is skipped.
+    // Create rotation certificates from validators 2 (weight=40) and 3 (weight=10).
+    // Combined weight = 50 >= threshold (42), so dealer phase is skipped.
     // Validator 2's cert has a hash mismatch on test_manager.
     let mut rotation_certificates = Vec::new();
 
     // Save correct rotation messages for building a reference output later.
     let mut correct_rotation_msgs: HashMap<Address, Messages> = HashMap::new();
 
-    // Certificate for validator 2 (weight=4) — MISMATCHED on test_manager
+    // Certificate for validator 2 (weight=40) — MISMATCHED on test_manager
     {
         let mut other_managers = other_managers_map.iter_mut().collect::<HashMap<_, _>>();
         let addr_2 = rotation_setup.setup.address(2);
@@ -7399,7 +7387,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         correct_rotation_msgs.insert(addr_2, correct_messages);
     }
 
-    // Certificate for validator 3 (weight=1) — clean, no mismatch
+    // Certificate for validator 3 (weight=10) — clean, no mismatch
     {
         let mut other_managers = other_managers_map.iter_mut().collect::<HashMap<_, _>>();
         let addr_3 = rotation_setup.setup.address(3);
@@ -7513,7 +7501,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
 async fn test_run_key_rotation_with_complaint_recovery() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
     let test_party_idx = 0; // weight=30, victim of cheating
     let cheating_dealer_idx = 2; // weight=40; party 0's 30 + this 40 clears threshold 42
@@ -7573,7 +7561,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     };
 
     // Create other managers for MockP2P (validators 1-4), collecting all signatures
-    // for the certificate. Recovery needs threshold (4) complaint responses from signers.
+    // for the certificate. Recovery needs threshold (42) complaint responses from signers.
     let mut other_managers_map = HashMap::new();
     let mut signer_sigs = Vec::new();
     for i in 1..5 {
@@ -7662,7 +7650,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
 #[tokio::test]
 async fn test_prepare_previous_output_for_new_member() {
     let rotation_setup = RotationTestSetup::new();
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
     // Create existing members (validators 0-4) with completed DKG and previous_dkg_output set
     let mut existing_managers_map = HashMap::new();
@@ -8425,11 +8413,11 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     let rotation_setup = RotationTestSetup::new();
     let mut rng = rand::thread_rng();
 
-    // Create receiver (party 2 with weight=4)
+    // Create receiver (party 2 with weight=40)
     let (mut receiver_manager, receiver_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(2);
 
-    // Create rotation dealer (party 0 with weight=3, so 3 rotation messages)
+    // Create rotation dealer (party 0 with weight=30, so 30 rotation messages)
     let (_, dealer_dkg_output, rotation_messages) = rotation_setup.create_rotation_dealer(0);
     let rotation_dealer_addr = rotation_setup.setup.address(0);
 
@@ -8615,15 +8603,15 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
 async fn test_recover_rotation_shares_via_complaint_success() {
     let rotation_setup = RotationTestSetup::new();
     let mut rng = rand::thread_rng();
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
-    // Create test party (validator 2, weight=4) - this party will be the victim
+    // Create test party (validator 2, weight=40) - this party will be the victim
     let test_party_idx = 2;
     let (mut test_manager, _test_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(test_party_idx);
     let test_addr = rotation_setup.setup.address(test_party_idx);
 
-    // Create rotation dealer (validator 0, weight=3)
+    // Create rotation dealer (validator 0, weight=30)
     let dealer_idx = 0;
     let (mut dealer_manager, dealer_dkg_output, valid_rotation_messages) =
         rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
@@ -8824,12 +8812,12 @@ fn test_handle_complain_request_success() {
     let rotation_setup = RotationTestSetup::new();
     let mut rng = rand::thread_rng();
 
-    // Create victim party (validator 2, weight=4) who will generate a complaint
+    // Create victim party (validator 2, weight=40) who will generate a complaint
     let victim_idx = 2;
     let (victim_manager, victim_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(victim_idx);
 
-    // Create rotation dealer (validator 0, weight=3)
+    // Create rotation dealer (validator 0, weight=30)
     let dealer_idx = 0;
     let (_, dealer_dkg_output, valid_rotation_messages) =
         rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
@@ -9519,7 +9507,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
 fn test_party_restart_uses_stored_rotation_messages() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total = 12, threshold = 4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total = 120, threshold = 42)
 
     let party_index = 3; // Not a dealer in rotation (dealers are 0, 1, 2)
 
@@ -9654,8 +9642,8 @@ fn test_party_restart_uses_stored_rotation_messages() {
 fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
 
-    // Previous committee: 5 members with weights [3, 2, 4, 1, 2]
-    // (total=12, threshold=4). Dealers: 0, 1, 4 (total weight=7 >= threshold).
+    // Previous committee: 5 members with weights [30, 20, 40, 10, 20]
+    // (total=120, threshold=42). Dealers: 0, 1, 2, 4 (total weight=110 >= threshold).
     let rotation_setup = RotationTestSetup::new();
     let epoch = rotation_setup.setup.epoch(); // = 100
 
@@ -10407,10 +10395,10 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
 fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
 
-    // Step 1: Complete DKG at epoch 100 with 5 members, weights [3, 2, 4, 1, 2]
+    // Step 1: Complete DKG at epoch 100 with 5 members, weights [30, 20, 40, 10, 20]
     let rotation_setup = RotationTestSetup::new();
     let dkg_epoch = rotation_setup.setup.epoch(); // = 100
-    // RotationTestSetup uses weights [3, 2, 4, 1, 2] (total=12, threshold=4)
+    // RotationTestSetup uses weights [30, 20, 40, 10, 20] (total=120, threshold=42)
 
     // Get DKG outputs for all 5 members
     let mut dkg_outputs = Vec::new();
@@ -10450,7 +10438,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         .set_committees(rotation_committees);
 
     // Create rotation MpcManagers at epoch 101 with KeyRotation protocol type.
-    // Dealers: indices 0, 1, 4 (total weight = 3+2+2 = 7 >= threshold 4).
+    // Dealers: indices 0, 1, 4 (total weight = 30+20+20 = 70 >= threshold 42).
     let dealer_indices = [0usize, 1, 4];
     let mut rotation_certificates = Vec::new();
     let mut rotation_messages_by_dealer: Vec<(Address, Messages)> = Vec::new();
@@ -10651,7 +10639,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
 fn test_recover_current_rotation() {
     let mut rng = rand::thread_rng();
 
-    // Epoch 100: DKG with 5 members, weights [3, 2, 4, 1, 2]; dealers 0, 1, 4.
+    // Epoch 100: DKG with 5 members, weights [30, 20, 40, 10, 20]; dealers 0, 1, 2, 4.
     let rotation_setup = RotationTestSetup::new();
     let dkg_epoch = rotation_setup.setup.epoch();
     let rotation_epoch = dkg_epoch + 1;
@@ -16621,14 +16609,8 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
         0, // Vanilla
     );
 
-    let (nodes, threshold, max_faulty) = build_reduced_nodes(
-        &weighted,
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
-        ALLOWED_DELTA,
-        TEST_WEIGHT_DIVISOR,
-        TEST_CHAIN_ID,
-    )
-    .unwrap();
+    let (nodes, threshold, max_faulty) =
+        build_reduced_nodes(&weighted, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
 
     let weights: Vec<u16> = nodes.iter().map(|n| n.weight).collect();
     assert_eq!(
@@ -16646,7 +16628,7 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
 }
 
 #[test]
-fn derived_threshold_keeps_t_plus_2f_within_w() {
+fn derived_threshold_makes_t_plus_2f_equal_w_before_reduction() {
     for f_bps in [1000u16, 2000, 2500, 3000, 3333] {
         for stakes in [
             [1000u64, 2500, 3000, 3500],
@@ -16675,21 +16657,172 @@ fn derived_threshold_keeps_t_plus_2f_within_w() {
                 f_bps,
                 0,
             );
-            let (nodes, t, f) = build_reduced_nodes(
-                &committee,
-                f_bps,
-                TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
-                TEST_WEIGHT_DIVISOR,
-                TEST_CHAIN_ID,
-            )
-            .unwrap();
-            assert!(
-                u32::from(t) + 2 * u32::from(f) <= u32::from(nodes.total_weight()),
-                "t + 2f exceeds W after reduction: t={t} f={f} W={} f_bps={f_bps} stakes={stakes:?}",
-                nodes.total_weight(),
+            let (nodes, t, f) =
+                build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+            assert_eq!(
+                u32::from(t) + 2 * u32::from(f),
+                u32::from(nodes.total_weight()),
+                "t + 2f must equal W exactly: t={t} f={f} f_bps={f_bps} stakes={stakes:?}",
             );
             assert!(t > f, "t must exceed f: t={t} f={f} f_bps={f_bps}");
         }
+    }
+}
+
+#[test]
+fn a_legacy_pinned_committee_keeps_its_original_parameters() {
+    let setup = TestSetup::new(4);
+    let stakes: [u64; 4] = [25, 25, 25, 26];
+    let members: Vec<_> = setup
+        .committee()
+        .members()
+        .iter()
+        .zip(stakes)
+        .map(|(m, stake)| {
+            CommitteeMember::new(
+                m.validator_address(),
+                m.public_key().clone(),
+                m.encryption_public_key().clone(),
+                stake,
+            )
+        })
+        .collect();
+
+    let legacy_config = hashi_types::move_types::Config::from_entries(vec![
+        (
+            "mpc_threshold_in_basis_points".to_string(),
+            hashi_types::move_types::ConfigValue::U64(3334),
+        ),
+        (
+            "mpc_weight_reduction_allowed_delta".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        ),
+        (
+            "mpc_max_faulty_in_basis_points".to_string(),
+            hashi_types::move_types::ConfigValue::U64(3333),
+        ),
+        (
+            "mpc_nonce_generation_protocol".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        ),
+        (
+            "mpc_nonce_accumulation_window_ms".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        ),
+    ]);
+    let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
+    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    assert_eq!(nodes.total_weight(), 101);
+    assert_eq!((t, f), (34, 34));
+
+    let fresh = Committee::new(members.clone(), setup.epoch(), 0, 3333, 0);
+    assert!(fresh.config().legacy_pinned_mpc_threshold().is_none());
+    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    assert_eq!(nodes.total_weight(), 101);
+    assert_eq!((t, f), (35, 33));
+}
+
+#[test]
+fn an_underivable_previous_committee_does_not_block_startup() {
+    let mut setup = TestSetup::new(4);
+    let epoch = setup.epoch();
+    let members = setup.committee().members().to_vec();
+    let broken = Committee::with_config(
+        members,
+        epoch - 1,
+        hashi_types::move_types::Config::from_entries(vec![(
+            "mpc_threshold_in_basis_points".to_string(),
+            hashi_types::move_types::ConfigValue::Bool(true),
+        )]),
+    );
+    let mut committees = setup.committee_set.committees().clone();
+    committees.insert(epoch - 1, broken);
+    setup.committee_set.set_committees(committees);
+
+    let manager = setup.create_manager(0);
+    assert!(manager.previous_nodes.is_none());
+    assert!(manager.previous_reconfig_output_threshold.is_none());
+    assert!(manager.mpc_config.threshold > 0);
+}
+
+#[test]
+fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
+    let setup = TestSetup::new(4);
+    let stakes: [u64; 4] = [51, 52, 52, 52];
+    let members: Vec<_> = setup
+        .committee()
+        .members()
+        .iter()
+        .zip(stakes)
+        .map(|(m, stake)| {
+            CommitteeMember::new(
+                m.validator_address(),
+                m.public_key().clone(),
+                m.encryption_public_key().clone(),
+                stake,
+            )
+        })
+        .collect();
+    let legacy_config = hashi_types::move_types::Config::from_entries(vec![
+        (
+            "mpc_threshold_in_basis_points".to_string(),
+            hashi_types::move_types::ConfigValue::U64(3334),
+        ),
+        (
+            "mpc_weight_reduction_allowed_delta".to_string(),
+            hashi_types::move_types::ConfigValue::U64(100),
+        ),
+        (
+            "mpc_max_faulty_in_basis_points".to_string(),
+            hashi_types::move_types::ConfigValue::U64(3333),
+        ),
+        (
+            "mpc_nonce_generation_protocol".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        ),
+        (
+            "mpc_nonce_accumulation_window_ms".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        ),
+    ]);
+    let legacy = Committee::with_config(members.clone(), setup.epoch(), legacy_config);
+    let (nodes, t, f) = build_reduced_nodes(&legacy, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    assert_eq!((nodes.total_weight(), t, f), (100, 35, 34));
+
+    let fresh = Committee::new(members, setup.epoch(), 100, 3333, 0);
+    let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
+    assert_eq!((nodes.total_weight(), t, f), (103, 36, 34));
+}
+
+#[test]
+fn derived_threshold_rejects_max_faulty_at_or_above_a_third() {
+    for f_bps in [3334u16, 4000, 5000, 10000] {
+        let setup = TestSetup::new(4);
+        let members: Vec<_> = setup
+            .committee()
+            .members()
+            .iter()
+            .map(|m| {
+                CommitteeMember::new(
+                    m.validator_address(),
+                    m.public_key().clone(),
+                    m.encryption_public_key().clone(),
+                    2500,
+                )
+            })
+            .collect();
+        let committee = Committee::new(
+            members,
+            setup.epoch(),
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            f_bps,
+            0,
+        );
+        let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
+        assert!(
+            matches!(err, MpcError::CryptoError(ref m) if m.contains("must exceed max_faulty")),
+            "unexpected error for f_bps={f_bps}: {err:?}"
+        );
     }
 }
 

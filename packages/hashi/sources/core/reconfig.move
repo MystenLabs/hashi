@@ -66,6 +66,7 @@ entry fun start_reconfig(
     assert!(!self.committee_set().is_reconfiguring());
     assert_genesis_launch_authorized(self);
     hashi::mpc_config::seed_absent_defaults(self.config_mut());
+    hashi::mpc_config::repair_out_of_range(self.config_mut());
     // Pin the current MPC parameters so they stay fixed for the new epoch even
     // if governance changes them mid-epoch.
     let config = hashi::mpc_config::pin(self.config());

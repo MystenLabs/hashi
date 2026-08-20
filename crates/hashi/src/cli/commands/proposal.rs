@@ -483,10 +483,11 @@ pub async fn create_update_mpc_config_proposal(
     tx_opts: &TxOptions,
 ) -> Result<()> {
     const MAX_BPS: u64 = 10_000;
+    const MAX_FAULTY_BPS: u64 = 3_333;
     if let Some(f) = max_faulty_bps {
         anyhow::ensure!(
-            f <= MAX_BPS,
-            "--max-faulty-bps must be in 0..={MAX_BPS}, got {f}"
+            (1..=MAX_FAULTY_BPS).contains(&f),
+            "--max-faulty-bps must be in 1..={MAX_FAULTY_BPS}, got {f}"
         );
     }
     if let Some(d) = weight_reduction_allowed_delta {

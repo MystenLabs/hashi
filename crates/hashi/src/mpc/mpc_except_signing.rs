@@ -256,13 +256,8 @@ impl MpcManager {
             .get(&epoch)
             .ok_or_else(|| MpcError::InvalidConfig(format!("no committee for epoch {epoch}")))?
             .clone();
-        let (nodes, threshold, max_faulty) = build_reduced_nodes(
-            &committee,
-            committee.mpc_max_faulty_in_basis_points(),
-            committee.mpc_weight_reduction_allowed_delta(),
-            weight_divisor,
-            chain_id,
-        )?;
+        let (nodes, threshold, max_faulty) =
+            build_reduced_nodes(&committee, weight_divisor, chain_id)?;
         let total_weight = nodes.total_weight();
         let nonce_generation_protocol =
             NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
@@ -322,14 +317,19 @@ impl MpcManager {
             previous_reconfig_output_max_faulty,
         ) = match previous_committee.as_ref() {
             Some(prev_committee) => {
-                let (nodes, threshold, prev_max_faulty) = build_reduced_nodes(
-                    prev_committee,
-                    prev_committee.mpc_max_faulty_in_basis_points(),
-                    prev_committee.mpc_weight_reduction_allowed_delta(),
-                    weight_divisor,
-                    chain_id,
-                )?;
-                (Some(nodes), Some(threshold), Some(prev_max_faulty))
+                match build_reduced_nodes(prev_committee, weight_divisor, chain_id) {
+                    Ok((nodes, threshold, prev_max_faulty)) => {
+                        (Some(nodes), Some(threshold), Some(prev_max_faulty))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            epoch = prev_committee.epoch(),
+                            error = %e,
+                            "cannot derive parameters for the previous committee; reconstruction of its output is unavailable"
+                        );
+                        (None, None, None)
+                    }
+                }
             }
             None => (None, None, None),
         };
@@ -337,17 +337,18 @@ impl MpcManager {
             .committees()
             .range(..previous_epoch)
             .next_back()
-            .map(|(_, input_committee)| -> MpcResult<u16> {
-                let (_, threshold, _) = build_reduced_nodes(
-                    input_committee,
-                    input_committee.mpc_max_faulty_in_basis_points(),
-                    input_committee.mpc_weight_reduction_allowed_delta(),
-                    weight_divisor,
-                    chain_id,
-                )?;
-                Ok(threshold)
-            })
-            .transpose()?;
+            .and_then(|(_, input_committee)| {
+                build_reduced_nodes(input_committee, weight_divisor, chain_id)
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            epoch = input_committee.epoch(),
+                            error = %e,
+                            "cannot derive parameters for the reconfig input committee"
+                        );
+                    })
+                    .ok()
+                    .map(|(_, threshold, _)| threshold)
+            });
         let mut manager = Self {
             party_id,
             address,
@@ -6705,11 +6706,12 @@ fn process_avss_message(
 
 fn build_reduced_nodes(
     committee: &Committee,
-    max_faulty_in_basis_points: u16,
-    weight_reduction_allowed_delta_in_basis_points: u16,
     test_weight_divisor: u16,
     chain_id: &str,
 ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
+    let max_faulty_in_basis_points = committee.mpc_max_faulty_in_basis_points();
+    let weight_reduction_allowed_delta_in_basis_points =
+        committee.mpc_weight_reduction_allowed_delta();
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
         .iter()
@@ -6721,31 +6723,64 @@ fn build_reduced_nodes(
         })
         .collect();
     let total_weight: u16 = nodes_vec.iter().map(|n| n.weight).sum();
-    let max_faulty =
-        (total_weight as u32 * max_faulty_in_basis_points as u32 / MAX_BASIS_POINTS).max(1);
-    let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
-    if threshold <= max_faulty {
-        return Err(MpcError::CryptoError(format!(
-            "threshold {threshold} must exceed max_faulty {max_faulty}: \
-             max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
-        )));
-    }
-    let (threshold, max_faulty) = (threshold as u16, max_faulty as u16);
-    let weight_reduction_allowed_delta = (total_weight as u32
-        * weight_reduction_allowed_delta_in_basis_points as u32
-        / MAX_BASIS_POINTS)
-        .min(total_weight as u32) as u16;
+    let legacy_threshold_in_basis_points = committee
+        .config()
+        .legacy_pinned_mpc_threshold()
+        .map(|value| -> MpcResult<u16> {
+            match value {
+                hashi_types::move_types::ConfigValue::U64(bps) => {
+                    u16::try_from(*bps).map_err(|_| {
+                        MpcError::CryptoError(format!(
+                            "pinned mpc_threshold_in_basis_points {bps} exceeds u16::MAX"
+                        ))
+                    })
+                }
+                other => Err(MpcError::CryptoError(format!(
+                    "pinned mpc_threshold_in_basis_points is not a u64: {other:?}"
+                ))),
+            }
+        })
+        .transpose()?;
+    let (threshold, max_faulty, weight_reduction_allowed_delta) =
+        match legacy_threshold_in_basis_points {
+            Some(threshold_in_basis_points) => (
+                (total_weight as u32 * threshold_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS)
+                    as u16,
+                (total_weight as u32 * max_faulty_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS)
+                    as u16,
+                weight_reduction_allowed_delta_in_basis_points,
+            ),
+            None => {
+                let max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
+                    / MAX_BASIS_POINTS)
+                    .max(1);
+                let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
+                if threshold <= max_faulty {
+                    return Err(MpcError::CryptoError(format!(
+                        "threshold {threshold} must exceed max_faulty {max_faulty}: \
+                         max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
+                    )));
+                }
+                let delta = (total_weight as u32
+                    * weight_reduction_allowed_delta_in_basis_points as u32
+                    / MAX_BASIS_POINTS)
+                    .min(total_weight as u32) as u16;
+                (threshold as u16, max_faulty as u16, delta)
+            }
+        };
     let lower_bound = if is_production_sui_chain(chain_id) {
         MIN_TOTAL_WEIGHT_AFTER_REDUCTION
     } else {
         MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight)
     };
     tracing::info!(
+        committee_epoch = committee.epoch(),
         pre_reduction_total_weight = total_weight,
         threshold,
         max_faulty,
         weight_reduction_allowed_delta,
         lower_bound,
+        legacy_pinned = legacy_threshold_in_basis_points.is_some(),
         "build_reduced_nodes: pre-reduction parameters"
     );
     Nodes::prop_reduce(

@@ -2537,24 +2537,39 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_onchain_config(
+                "mpc_max_faulty_in_basis_points",
+                hashi_types::move_types::ConfigValue::U64(2500),
+            )
+            .build()
+            .await?;
+
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+        }
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
 
         let nodes = test_networks.hashi_network().nodes();
-        let mpc_key_futures: Vec<_> = nodes
-            .iter()
-            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
-            .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
-        }
-
         let epoch = nodes[0].hashi().onchain_state().epoch();
 
+        wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
         let signing_manager = nodes[0]
             .hashi()
             .signing_manager_for(epoch)
-            .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
+            .expect("just waited for it");
         let pool_size = signing_manager.initial_presig_count();
         assert_pool_derivation(pool_size, &nodes[0]);
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
@@ -2782,7 +2797,7 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = build_avid_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        let test_networks = build_avid_networks(avid_fault_tolerant_builder()).await?;
         let nodes = test_networks.hashi_network().nodes();
         let epoch = nodes[0].hashi().onchain_state().epoch();
 

@@ -267,6 +267,8 @@ fun test_propose_vote_execute_through_quorum() {
 }
 
 const MAX_BPS: u64 = 10000;
+const MAX_FAULTY_BPS: u64 = 3333;
+const DEFAULT_MAX_FAULTY_BPS: u64 = 3333;
 const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
 
 fun reject_single(key: std::string::String, value: config_value::Value) {
@@ -294,7 +296,7 @@ fun reject_single(key: std::string::String, value: config_value::Value) {
 #[test]
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
 fun test_reject_max_faulty_above_max() {
-    reject_single(mpc_max_faulty_key(), config_value::new_u64(MAX_BPS + 1));
+    reject_single(mpc_max_faulty_key(), config_value::new_u64(MAX_FAULTY_BPS + 1));
 }
 
 #[test]
@@ -319,7 +321,8 @@ fun test_reject_nonce_window_above_max() {
 }
 
 #[test]
-fun test_accept_max_faulty_zero() {
+#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
+fun test_reject_max_faulty_zero() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let voters = vector[VOTER1];
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
@@ -337,8 +340,6 @@ fun test_accept_max_faulty_zero() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 0);
-
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
@@ -351,7 +352,7 @@ fun test_accept_upper_boundary_values() {
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(MAX_BPS));
+    entries.insert(mpc_max_faulty_key(), config_value::new_u64(MAX_FAULTY_BPS));
     entries.insert(mpc_allowed_delta_key(), config_value::new_u64(MAX_BPS));
     let proposal_id = update_config::propose(
         &mut hashi,
@@ -363,7 +364,7 @@ fun test_accept_upper_boundary_values() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_BPS);
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_FAULTY_BPS);
     assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == MAX_BPS);
 
     clock::destroy_for_testing(clock);
@@ -418,5 +419,28 @@ fun test_reject_removed_threshold_key_even_when_present() {
     update_config::execute(&mut hashi, proposal_id, &clock);
 
     clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_out_of_range_max_faulty_is_repaired_in_place_at_reconfig() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(5000));
+    mpc_config::repair_out_of_range(hashi.config_mut());
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_FAULTY_BPS);
+    let pinned = mpc_config::pin(hashi.config());
+    assert!(mpc_config::max_faulty_in_basis_points(&pinned) == MAX_FAULTY_BPS);
+
+    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(0));
+    mpc_config::repair_out_of_range(hashi.config_mut());
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == DEFAULT_MAX_FAULTY_BPS);
+
+    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(2000));
+    mpc_config::repair_out_of_range(hashi.config_mut());
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
+
     std::unit_test::destroy(hashi);
 }

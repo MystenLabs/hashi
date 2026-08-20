@@ -819,7 +819,7 @@ Create proposals:
 
 ```bash
 hashi proposal create update-config <key> <value> [-m key=value]
-hashi proposal create update-mpc-config [--threshold-bps <N>] [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
+hashi proposal create update-mpc-config [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
 hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
@@ -896,7 +896,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | Type | Threshold | Purpose | Parameters |
 |------|-----------|---------|-----------|
 | **UpdateConfig** | 2/3 | Change protocol parameters | `key` and type-prefixed `value` |
-| **UpdateMpcConfig** | 2/3 | Change MPC threshold/faulty/delta | `--threshold-bps`, `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
+| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
 | **Upgrade** | 2/3 | Publish a new package version | `--package-path` or `--digest` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
