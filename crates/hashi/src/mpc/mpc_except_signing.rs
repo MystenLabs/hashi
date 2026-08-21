@@ -6779,21 +6779,33 @@ fn build_reduced_nodes(
                 weight_reduction_allowed_delta_in_basis_points,
             ),
             None => {
-                let max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
+                let nominal_max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
                     / MAX_BASIS_POINTS)
                     .max(1);
-                let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
-                if threshold <= max_faulty {
+                let threshold = (total_weight as u32).saturating_sub(2 * nominal_max_faulty);
+                if threshold <= nominal_max_faulty {
                     return Err(MpcError::CryptoError(format!(
-                        "threshold {threshold} must exceed max_faulty {max_faulty}: \
+                        "threshold {threshold} must exceed max_faulty {nominal_max_faulty}: \
                          max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
                     )));
                 }
                 let delta = (total_weight as u32
                     * weight_reduction_allowed_delta_in_basis_points as u32
                     / MAX_BASIS_POINTS)
-                    .min(total_weight as u32) as u16;
-                (threshold as u16, max_faulty as u16, delta)
+                    .min(total_weight as u32);
+                let max_faulty = nominal_max_faulty
+                    .checked_sub(delta.div_ceil(2))
+                    .filter(|used| *used >= 1)
+                    .ok_or_else(|| {
+                        MpcError::CryptoError(format!(
+                            "max_faulty {nominal_max_faulty} does not exceed half the reduction \
+                             budget {delta}: weight_reduction_allowed_delta_in_basis_points \
+                             {weight_reduction_allowed_delta_in_basis_points} is too large \
+                             relative to max_faulty_in_basis_points {max_faulty_in_basis_points} \
+                             at W={total_weight}"
+                        ))
+                    })?;
+                (threshold as u16, max_faulty as u16, delta as u16)
             }
         };
     let lower_bound = if is_production_sui_chain(chain_id) {
