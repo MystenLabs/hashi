@@ -1087,7 +1087,7 @@ mod tests {
         assert_eq!(cert.signers(), &BTreeSet::from([0u16, 1, 2]));
         assert_eq!(cert.payload().common_message_hash.digest, h_v);
         assert!(cert.verify().is_ok());
-        assert!(cert.into_verified().is_ok());
+        assert!(cert.to_verified().is_ok());
 
         let (other, _) = test_committee(3, epoch);
         let bad = AvidCertificate::confirm(signed, Arc::new(other)).unwrap();
@@ -1111,7 +1111,7 @@ mod tests {
 
         let cert = AvidCertificate::vote(good, avid_vote.clone(), committee.clone()).unwrap();
         assert!(cert.verify().is_ok());
-        assert!(cert.into_verified().is_ok());
+        assert!(cert.to_verified().is_ok());
         assert_eq!(
             bcs::to_bytes(cert.payload()).unwrap(),
             bcs::to_bytes(&avid_vote).unwrap(),
