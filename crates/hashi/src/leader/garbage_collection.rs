@@ -4,6 +4,8 @@
 //! Garbage collection for expired on-chain data.
 
 use super::LeaderService;
+use crate::onchain::TobKey;
+use crate::onchain::TobPruneTarget;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
@@ -11,6 +13,7 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::sui_tx_executor::SuiTxExecutor;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -36,6 +39,29 @@ const MAX_PROPOSAL_DELETIONS_PER_GC: usize = 500;
 // drains over successive checkpoints. Mirrors the two caps above.
 const MAX_UTXO_CLEANUPS_PER_GC: usize = 500;
 
+// Cap how many TOB cert buckets one prune sweep destroys. Lower than the
+// caps above because each destroyed bucket is much heavier than one deleted
+// record: it drains a whole LinkedTable (~80 object deletions on a full
+// committee), so the per-transaction chunk in
+// `execute_destroy_tob_certs` is small and a sweep is several transactions.
+// A larger backlog drains over successive sweeps, oldest epochs first.
+const MAX_TOB_PRUNES_PER_GC: usize = 200;
+
+/// Mirror of the Move floors in `cert_submission.move`. The Move asserts are
+/// authoritative — drift here only produces aborting GC transactions, never
+/// an unsafe delete. Key-generation buckets are retained longer than the
+/// `tob::destroy_all` minimum because break-glass key recovery pairs them
+/// with the local DB's dealer/rotation messages (kept for the trailing 7
+/// epochs).
+const KEY_GEN_CERT_RETENTION_EPOCHS: u64 = 8;
+/// Nonce buckets are only ever read during their own epoch; +2 mirrors
+/// `tob::destroy_all`'s backstop.
+const NONCE_CERT_MIN_AGE_EPOCHS: u64 = 2;
+
+/// The destroy entries are v2-introduced; hold the prune job off until the
+/// active on-chain version carries them.
+const TOB_PRUNE_MIN_PACKAGE_VERSION: u64 = 2;
+
 /// Failure kind for the UTXO cleanup GC. `max_retries` is unbounded: this is
 /// a singleton maintenance task that must never permanently give up (a
 /// drained gas wallet can heal by top-up), so it backs off to `max_delay_ms`
@@ -57,6 +83,41 @@ impl crate::leader::retry::RetryPolicy for UtxoCleanupErrorKind {
     fn max_retries(self) -> u32 {
         u32::MAX
     }
+}
+
+/// Failure kind for the TOB cert prune GC. Same unbounded-retry rationale as
+/// [`UtxoCleanupErrorKind`]: singleton maintenance that must never
+/// permanently give up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TobPruneErrorKind {
+    Failed,
+}
+
+impl crate::leader::retry::RetryPolicy for TobPruneErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        5_000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        5 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        u32::MAX
+    }
+}
+
+/// Result of one TOB prune sweep, consumed by the leader loop's reap arm.
+#[derive(Debug)]
+pub(super) struct TobPruneOutcome {
+    /// The hashi epoch captured when the sweep was spawned; advances the
+    /// once-per-epoch gate. Captured at spawn so an epoch flip mid-sweep
+    /// cannot mask the new epoch's work.
+    pub(super) swept_epoch: u64,
+    /// Whether the sweep selected fewer buckets than its cap — i.e. the
+    /// backlog is fully drained and the gate may close until the epoch
+    /// advances.
+    pub(super) drained: bool,
 }
 
 impl LeaderService {
@@ -353,6 +414,95 @@ impl LeaderService {
         );
         Ok(())
     }
+
+    /// If the hashi epoch has advanced since the last fully-drained sweep
+    /// and no task is in-flight, spawn a background task that lists the TOB
+    /// bag and destroys every dead cert bucket. Epoch-gated rather than
+    /// timestamp-gated because eligibility only changes at epoch boundaries
+    /// and candidate discovery is a live RPC bag listing, not a mirror read;
+    /// the gate is only advanced by a sweep that drained the backlog, so a
+    /// cap-limited sweep re-runs on the next leader checkpoint.
+    pub(super) fn check_prune_tob_certs(&mut self, checkpoint_timestamp_ms: u64) {
+        if self.tob_prune_task.is_some() {
+            debug!("TOB prune task already in-flight, skipping");
+            return;
+        }
+
+        // The destroy entries are v2-introduced. Gating on the ACTIVE version
+        // (not merely the latest published) also keeps the sweep off a chain
+        // whose semantics this binary does not implement.
+        let Some(active) = self.inner.onchain_state().active_package_version() else {
+            return;
+        };
+        if active < TOB_PRUNE_MIN_PACKAGE_VERSION {
+            return;
+        }
+
+        let current_epoch = self.inner.onchain_state().epoch();
+        if self.last_tob_prune_epoch == Some(current_epoch) {
+            return;
+        }
+
+        if self.tob_prune_retry.should_skip(checkpoint_timestamp_ms) {
+            debug!("TOB prune GC in backoff, skipping");
+            return;
+        }
+
+        let inner = self.inner.clone();
+        self.tob_prune_task = Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
+            Self::prune_tob_certs(inner, current_epoch).await
+        })));
+    }
+
+    /// List the TOB bag, select dead buckets, and destroy them on-chain.
+    ///
+    /// Freshness: the listing is a live RPC read; the committee epochs and
+    /// current epoch come from the mirror, which can only lag the chain. A
+    /// lagging epoch shrinks both floors and a missing recent committee only
+    /// disables key-generation selections, so staleness is strictly
+    /// conservative — and the Move floors re-check against the authoritative
+    /// on-chain epoch at execution regardless. Races with another pruner are
+    /// absorbed by the entries' missing-bucket idempotency.
+    async fn prune_tob_certs(
+        inner: Arc<crate::Hashi>,
+        swept_epoch: u64,
+    ) -> anyhow::Result<TobPruneOutcome> {
+        let keys = inner.onchain_state().list_tob_keys().await?;
+        let (committee_epochs, current_epoch) = {
+            let state = inner.onchain_state().state();
+            let committees = &state.hashi().committees;
+            (
+                committees.committees().keys().copied().collect(),
+                committees.epoch(),
+            )
+        };
+        let targets = find_tob_buckets_to_prune(&keys, &committee_epochs, current_epoch);
+        if targets.is_empty() {
+            debug!("No TOB cert buckets eligible for pruning");
+            return Ok(TobPruneOutcome {
+                swept_epoch,
+                drained: true,
+            });
+        }
+
+        // Whether more work may remain past the cap, decided before the
+        // destroy so a partially-failed batch also re-runs via the retry path.
+        let drained = targets.len() < MAX_TOB_PRUNES_PER_GC;
+        info!(
+            bucket_count = targets.len(),
+            drained, "Destroying dead TOB cert bucket(s)"
+        );
+        let mut executor = SuiTxExecutor::from_hashi(inner)?;
+        executor.execute_destroy_tob_certs(&targets).await?;
+        info!(
+            bucket_count = targets.len(),
+            "Successfully destroyed dead TOB cert buckets"
+        );
+        Ok(TobPruneOutcome {
+            swept_epoch,
+            drained,
+        })
+    }
 }
 
 fn deposit_request_expiration_timestamp_ms(request: &DepositRequest) -> u64 {
@@ -402,6 +552,94 @@ fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>)
         .map(|(id, _)| *id)
         .take(MAX_UTXO_CLEANUPS_PER_GC)
         .collect()
+}
+
+/// Select the TOB cert buckets that are safe to destroy, mirroring the Move
+/// floors (which remain authoritative):
+///
+/// - Nonce buckets: `current_epoch >= epoch + 2`; only ever read during
+///   their own epoch.
+/// - Key-generation buckets: `current_epoch >= epoch + 8` (break-glass
+///   retention) AND a committee epoch strictly between the bucket's and now.
+///   Committee epochs are Sui epochs and can gap, and the previous
+///   committee's certs seed the next rotation, so an age floor alone cannot
+///   identify the previous committee's bucket. A pending committee's epoch
+///   sits above `current_epoch` and is excluded by the exclusive range
+///   bound.
+/// - Any other key shape is left alone: never destroy what we don't
+///   understand.
+///
+/// Output order: epochs ascending (oldest first); within an epoch the
+/// key-generation target first, then nonce batches DESCENDING by index, so
+/// truncation at [`MAX_TOB_PRUNES_PER_GC`] always leaves a partially-drained
+/// epoch's surviving batches as a contiguous `0..m` prefix (in-epoch presig
+/// recovery walks batches from 0 and stops at the first hole; dead epochs no
+/// longer need that, but the discipline costs nothing).
+///
+/// Pure-data core, extracted for unit testing like
+/// [`find_spent_utxos_pending_cleanup`].
+fn find_tob_buckets_to_prune(
+    keys: &[TobKey],
+    committee_epochs: &BTreeSet<u64>,
+    current_epoch: u64,
+) -> Vec<TobPruneTarget> {
+    use hashi_types::move_types::ProtocolType;
+
+    // Saturating arithmetic throughout: key epochs come from on-chain field
+    // names anyone can shape, and an overflow panic here would kill the
+    // leader's prune task.
+    let mut keygen_epochs: BTreeSet<u64> = BTreeSet::new();
+    let mut nonce_batches: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
+    for key in keys {
+        match (key.protocol_type, key.batch_index) {
+            (ProtocolType::Dkg | ProtocolType::KeyRotation, None) => {
+                // The bound check both encodes "strictly between" and keeps
+                // `range` from panicking on start > end for absurd epochs.
+                let lower = key.epoch.saturating_add(1);
+                let strictly_between = lower < current_epoch
+                    && committee_epochs
+                        .range(lower..current_epoch)
+                        .next()
+                        .is_some();
+                if current_epoch >= key.epoch.saturating_add(KEY_GEN_CERT_RETENTION_EPOCHS)
+                    && strictly_between
+                {
+                    keygen_epochs.insert(key.epoch);
+                }
+            }
+            (ProtocolType::NonceGeneration, Some(batch_index))
+                if current_epoch >= key.epoch.saturating_add(NONCE_CERT_MIN_AGE_EPOCHS) =>
+            {
+                nonce_batches
+                    .entry(key.epoch)
+                    .or_default()
+                    .insert(batch_index);
+            }
+            _ => {}
+        }
+    }
+
+    let epochs: BTreeSet<u64> = keygen_epochs
+        .iter()
+        .chain(nonce_batches.keys())
+        .copied()
+        .collect();
+    let mut targets = Vec::new();
+    for epoch in epochs {
+        if keygen_epochs.contains(&epoch) {
+            targets.push(TobPruneTarget::KeyGen { epoch });
+        }
+        if let Some(batches) = nonce_batches.get(&epoch) {
+            targets.extend(
+                batches
+                    .iter()
+                    .rev()
+                    .map(|&batch_index| TobPruneTarget::NonceBatch { epoch, batch_index }),
+            );
+        }
+    }
+    targets.truncate(MAX_TOB_PRUNES_PER_GC);
+    targets
 }
 
 #[cfg(test)]
@@ -547,5 +785,214 @@ mod tests {
 
         let result = find_spent_utxos_pending_cleanup(&utxo_records);
         assert_eq!(result.len(), MAX_UTXO_CLEANUPS_PER_GC);
+    }
+
+    // ~~~~~~~ find_tob_buckets_to_prune ~~~~~~~
+
+    use hashi_types::move_types::ProtocolType;
+
+    fn nonce_key(epoch: u64, batch_index: u32) -> TobKey {
+        TobKey {
+            epoch,
+            batch_index: Some(batch_index),
+            protocol_type: ProtocolType::NonceGeneration,
+        }
+    }
+
+    fn keygen_key(epoch: u64, protocol_type: ProtocolType) -> TobKey {
+        TobKey {
+            epoch,
+            batch_index: None,
+            protocol_type,
+        }
+    }
+
+    fn epochs(list: &[u64]) -> BTreeSet<u64> {
+        list.iter().copied().collect()
+    }
+
+    #[test]
+    fn nonce_floor_is_exactly_two_epochs() {
+        let keys = [nonce_key(8, 0), nonce_key(9, 0)];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[2, 10]), 10);
+        assert_eq!(
+            targets,
+            vec![TobPruneTarget::NonceBatch {
+                epoch: 8,
+                batch_index: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn keygen_within_retention_kept() {
+        // current-7 clears the committee guard (committee at 5 strictly
+        // between) but sits inside the break-glass retention window.
+        let keys = [keygen_key(3, ProtocolType::KeyRotation)];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[3, 5, 10]), 10);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn keygen_requires_committee_strictly_between() {
+        // Gap scenario: committees {2, 10} — the bucket at 2 belongs to the
+        // PREVIOUS committee even though it clears the age floor, so it must
+        // be kept. With a committee at 0 below it, the bucket at 0 goes.
+        let keys = [keygen_key(2, ProtocolType::KeyRotation)];
+        assert!(find_tob_buckets_to_prune(&keys, &epochs(&[2, 10]), 10).is_empty());
+
+        let keys = [
+            keygen_key(0, ProtocolType::Dkg),
+            keygen_key(2, ProtocolType::KeyRotation),
+        ];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10]), 10);
+        assert_eq!(targets, vec![TobPruneTarget::KeyGen { epoch: 0 }]);
+    }
+
+    #[test]
+    fn keygen_selected_at_exact_retention_boundary() {
+        // current == epoch + KEY_GEN_CERT_RETENTION_EPOCHS is the first
+        // eligible epoch; one below is not.
+        let keys = [keygen_key(2, ProtocolType::KeyRotation)];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[2, 5, 10]), 10);
+        assert_eq!(targets, vec![TobPruneTarget::KeyGen { epoch: 2 }]);
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[2, 5, 9]), 9);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn keygen_committee_at_exactly_epoch_plus_one_satisfies_guard() {
+        // Pins the inclusive lower bound of the strictly-between range: a
+        // committee at bucket_epoch + 1 is enough.
+        let keys = [keygen_key(2, ProtocolType::KeyRotation)];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[3, 10]), 10);
+        assert_eq!(targets, vec![TobPruneTarget::KeyGen { epoch: 2 }]);
+    }
+
+    #[test]
+    fn keygen_pending_committee_does_not_satisfy_guard() {
+        // A pending committee (epoch 12 > current 10) is in the committee
+        // set but must not stand in for "strictly between".
+        let keys = [keygen_key(2, ProtocolType::KeyRotation)];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[2, 10, 12]), 10);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn current_and_pending_epoch_buckets_never_selected() {
+        let keys = [
+            nonce_key(10, 0),
+            nonce_key(12, 0),
+            keygen_key(10, ProtocolType::KeyRotation),
+            keygen_key(12, ProtocolType::KeyRotation),
+        ];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10, 12]), 10);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn ordering_oldest_epoch_first_nonce_batches_descending() {
+        let keys = [
+            nonce_key(3, 0),
+            nonce_key(3, 1),
+            nonce_key(0, 2),
+            nonce_key(0, 0),
+            nonce_key(0, 1),
+            keygen_key(0, ProtocolType::Dkg),
+        ];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10]), 10);
+        assert_eq!(
+            targets,
+            vec![
+                TobPruneTarget::KeyGen { epoch: 0 },
+                TobPruneTarget::NonceBatch {
+                    epoch: 0,
+                    batch_index: 2
+                },
+                TobPruneTarget::NonceBatch {
+                    epoch: 0,
+                    batch_index: 1
+                },
+                TobPruneTarget::NonceBatch {
+                    epoch: 0,
+                    batch_index: 0
+                },
+                TobPruneTarget::NonceBatch {
+                    epoch: 3,
+                    batch_index: 1
+                },
+                TobPruneTarget::NonceBatch {
+                    epoch: 3,
+                    batch_index: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cap_truncation_leaves_contiguous_prefix() {
+        // One epoch with more batches than the cap: the selected batches are
+        // the HIGHEST indices, so the survivors are exactly 0..m.
+        let keys: Vec<TobKey> = (0..MAX_TOB_PRUNES_PER_GC as u32 + 7)
+            .map(|i| nonce_key(1, i))
+            .collect();
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[1, 10]), 10);
+        assert_eq!(targets.len(), MAX_TOB_PRUNES_PER_GC);
+        let selected: BTreeSet<u32> = targets
+            .iter()
+            .map(|t| match t {
+                TobPruneTarget::NonceBatch { batch_index, .. } => *batch_index,
+                other => panic!("unexpected target {other:?}"),
+            })
+            .collect();
+        let expected: BTreeSet<u32> = (7..MAX_TOB_PRUNES_PER_GC as u32 + 7).collect();
+        assert_eq!(selected, expected);
+    }
+
+    #[test]
+    fn dkg_and_rotation_same_epoch_dedupe_to_one_keygen_target() {
+        let keys = [
+            keygen_key(0, ProtocolType::Dkg),
+            keygen_key(0, ProtocolType::KeyRotation),
+        ];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10]), 10);
+        assert_eq!(targets, vec![TobPruneTarget::KeyGen { epoch: 0 }]);
+    }
+
+    #[test]
+    fn malformed_key_shapes_skipped() {
+        // Nonce without a batch index, keygen with one: shapes the writers
+        // never produce. Never destroy what we don't understand.
+        let keys = [
+            TobKey {
+                epoch: 0,
+                batch_index: None,
+                protocol_type: ProtocolType::NonceGeneration,
+            },
+            TobKey {
+                epoch: 0,
+                batch_index: Some(1),
+                protocol_type: ProtocolType::Dkg,
+            },
+            TobKey {
+                epoch: 0,
+                batch_index: Some(1),
+                protocol_type: ProtocolType::KeyRotation,
+            },
+        ];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10]), 10);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn absurd_epochs_do_not_panic() {
+        // Field names are attacker-shapeable; saturating arithmetic must
+        // hold at the extremes.
+        let keys = [
+            nonce_key(u64::MAX, 0),
+            keygen_key(u64::MAX, ProtocolType::Dkg),
+        ];
+        let targets = find_tob_buckets_to_prune(&keys, &epochs(&[0, 2, 10]), 10);
+        assert!(targets.is_empty());
     }
 }
