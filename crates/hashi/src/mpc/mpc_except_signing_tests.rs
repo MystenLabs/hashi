@@ -16753,15 +16753,15 @@ fn reduced_weights_are_stable_for_a_fixed_committee() {
     );
     assert_eq!(nodes.total_weight(), 242, "W moved");
     assert_eq!(threshold, 82, "t moved");
-    assert_eq!(max_faulty, 70, "f moved");
+    assert_eq!(max_faulty, 82, "f moved");
     assert!(
         u32::from(threshold) + u32::from(max_faulty) <= u32::from(nodes.total_weight()),
         "t + f must stay within W or no certificate can ever be formed"
     );
     assert!(
-        u32::from(threshold) + 2 * u32::from(max_faulty) <= u32::from(nodes.total_weight()),
-        "using f - ceil(delta/2) as the bound leaves room for reduction's rounding, so \
-         t + 2f survives it"
+        u32::from(threshold) + 2 * u32::from(max_faulty) > u32::from(nodes.total_weight()),
+        "reduction ceils t and f while flooring weights, so t + 2f = W does not survive it; \
+         this records that, it is not an endorsement"
     );
 }
 
@@ -16938,7 +16938,7 @@ fn a_legacy_pinned_committee_keeps_the_unscaled_delta() {
 
     let fresh = Committee::new(members, setup.epoch(), 100, 3333, 0);
     let (nodes, t, f) = build_reduced_nodes(&fresh, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-    assert_eq!((nodes.total_weight(), t, f), (207, 71, 67));
+    assert_eq!((nodes.total_weight(), t, f), (103, 36, 34));
 }
 
 #[test]
@@ -16990,7 +16990,7 @@ fn derived_threshold_rejects_a_faulty_bound_too_small_to_form_a_certificate() {
     let committee = Committee::new(members, setup.epoch(), ALLOWED_DELTA, 100, 0);
     let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
     assert!(
-        matches!(err, MpcError::CryptoError(ref m) if m.contains("half the reduction budget")),
+        matches!(err, MpcError::CryptoError(ref m) if m.contains("no dealer certificate can ever form")),
         "unexpected error: {err:?}"
     );
 }

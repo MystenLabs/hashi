@@ -329,7 +329,8 @@ impl MpcManager {
                         tracing::warn!(
                             epoch = prev_committee.epoch(),
                             error = %e,
-                            "cannot derive parameters for the previous committee; treating this node as not a member of it"
+                            "cannot derive parameters for the previous committee; this node starts but \
+                             cannot participate in key rotation for this epoch"
                         );
                         (None, None, None, None)
                     }
@@ -5379,7 +5380,7 @@ impl MpcManager {
         let input_threshold = self.previous_reconfig_input_threshold.ok_or_else(|| {
             MpcError::InvalidConfig(
                 "Rotation reconstruction requires previous reconfig's input threshold \
-                 (no committee found at previous_epoch - 1)"
+                 (no committee at previous_epoch - 1, or its parameters were underivable)"
                     .into(),
             )
         })?;
@@ -6779,33 +6780,21 @@ fn build_reduced_nodes(
                 weight_reduction_allowed_delta_in_basis_points,
             ),
             None => {
-                let nominal_max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
+                let max_faulty = (total_weight as u32 * max_faulty_in_basis_points as u32
                     / MAX_BASIS_POINTS)
                     .max(1);
-                let threshold = (total_weight as u32).saturating_sub(2 * nominal_max_faulty);
-                if threshold <= nominal_max_faulty {
+                let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
+                if threshold <= max_faulty {
                     return Err(MpcError::CryptoError(format!(
-                        "threshold {threshold} must exceed max_faulty {nominal_max_faulty}: \
+                        "threshold {threshold} must exceed max_faulty {max_faulty}: \
                          max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
                     )));
                 }
                 let delta = (total_weight as u32
                     * weight_reduction_allowed_delta_in_basis_points as u32
                     / MAX_BASIS_POINTS)
-                    .min(total_weight as u32);
-                let max_faulty = nominal_max_faulty
-                    .checked_sub(delta.div_ceil(2))
-                    .filter(|used| *used >= 1)
-                    .ok_or_else(|| {
-                        MpcError::CryptoError(format!(
-                            "max_faulty {nominal_max_faulty} does not exceed half the reduction \
-                             budget {delta}: weight_reduction_allowed_delta_in_basis_points \
-                             {weight_reduction_allowed_delta_in_basis_points} is too large \
-                             relative to max_faulty_in_basis_points {max_faulty_in_basis_points} \
-                             at W={total_weight}"
-                        ))
-                    })?;
-                (threshold as u16, max_faulty as u16, delta as u16)
+                    .min(total_weight as u32) as u16;
+                (threshold as u16, max_faulty as u16, delta)
             }
         };
     let lower_bound = if is_production_sui_chain(chain_id) {

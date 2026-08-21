@@ -496,6 +496,14 @@ pub async fn create_update_mpc_config_proposal(
             "--weight-reduction-allowed-delta must be in 0..={MAX_BPS}, got {d}"
         );
     }
+    if let (Some(f), Some(d)) = (max_faulty_bps, weight_reduction_allowed_delta) {
+        anyhow::ensure!(
+            d < f,
+            "--weight-reduction-allowed-delta must be below --max-faulty-bps ({f}), got {d}; \
+             pinning would silently clamp it to {}",
+            f - 1
+        );
+    }
     if let Some(p) = nonce_generation_protocol {
         anyhow::ensure!(
             p <= 1,
