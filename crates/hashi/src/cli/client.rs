@@ -978,6 +978,45 @@ fn build_metadata(
     map
 }
 
+impl HashiClient {
+    /// Build a `validator::resign` transaction. The entry function is
+    /// introduced by v2, so the call targets the latest package, and the
+    /// shared inputs are fully resolved (see
+    /// `build_create_proposal_transaction`).
+    pub fn build_resign_transaction(&self) -> anyhow::Result<TransactionBuilder> {
+        self.build_validator_lifecycle_transaction("resign")
+    }
+
+    /// Build a `validator::withdraw_resignation` transaction.
+    pub fn build_withdraw_resignation_transaction(&self) -> anyhow::Result<TransactionBuilder> {
+        self.build_validator_lifecycle_transaction("withdraw_resignation")
+    }
+
+    fn build_validator_lifecycle_transaction(
+        &self,
+        function: &'static str,
+    ) -> anyhow::Result<TransactionBuilder> {
+        let validator_address = self.resolve_validator_address()?;
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let validator_arg = builder.pure(&validator_address);
+        builder.move_call(
+            Function::new(
+                self.latest_package_id()?,
+                Identifier::from_static("validator"),
+                Identifier::from_static(function),
+            ),
+            vec![hashi_arg, validator_arg],
+        );
+        Ok(builder)
+    }
+}
+
 /// Build a `proposal::vote<T>` transaction as a standalone. Reusable outside
 /// `HashiClient` — e2e test infra needs to build vote PTBs for every
 /// committee member.

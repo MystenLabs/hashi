@@ -452,7 +452,7 @@ fun test_abort_reconfig_proposal_fails_for_stale_epoch_at_execute() {
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
     proposal::vote<AbortReconfig>(&mut hashi, VOTER3, proposal_id, &clock, ctx3);
 
-    let _ = hashi.committee_set_mut().abort_reconfig(ctx1);
+    let (_, _) = hashi.committee_set_mut().abort_reconfig(ctx1);
     add_pending_committee_for_testing(&mut hashi, 2);
 
     hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx1);

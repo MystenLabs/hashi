@@ -24,6 +24,18 @@ public struct ValidatorUpdated has copy, drop {
     validator: address,
 }
 
+public struct ValidatorResigned has copy, drop {
+    validator: address,
+}
+
+public struct ValidatorResignationWithdrawn has copy, drop {
+    validator: address,
+}
+
+public struct ValidatorDeregistered has copy, drop {
+    validator: address,
+}
+
 // ~~~~~~~ Entry Functions ~~~~~~~
 
 /// Registration and key/metadata updates (below) are deliberately NOT gated
@@ -99,6 +111,34 @@ entry fun update_tls_public_key(
     event::emit(ValidatorUpdated { validator });
 }
 
+/// Voluntarily resign from the committee, authorized for the validator's
+/// own key or its delegated operator key.
+///
+/// Takes effect at the next committee formation: the member keeps serving
+/// the current epoch (and a pending epoch mid-reconfiguration), and the
+/// registration is removed at the epoch transition that stops including
+/// them — after which re-joining requires a full re-registration. Members
+/// with no epoch duties are removed immediately. Revocable via
+/// `withdraw_resignation` until consumed.
+entry fun resign(self: &mut Hashi, validator: address, ctx: &mut TxContext) {
+    self.versioning().assert_version_enabled();
+    let removed = self.committee_set_mut().request_resignation(validator, ctx);
+    if (removed) {
+        event::emit(ValidatorDeregistered { validator });
+    } else {
+        event::emit(ValidatorResigned { validator });
+    }
+}
+
+/// Withdraw a pending resignation. If the next committee already formed
+/// without the member, they keep their registration but sit out that one
+/// epoch.
+entry fun withdraw_resignation(self: &mut Hashi, validator: address, ctx: &mut TxContext) {
+    self.versioning().assert_version_enabled();
+    self.committee_set_mut().clear_resignation(validator, ctx);
+    event::emit(ValidatorResignationWithdrawn { validator });
+}
+
 entry fun update_next_epoch_encryption_public_key(
     self: &mut Hashi,
     validator: address,
@@ -111,4 +151,32 @@ entry fun update_next_epoch_encryption_public_key(
         .set_next_epoch_encryption_public_key(validator, next_epoch_encryption_public_key, ctx);
 
     event::emit(ValidatorUpdated { validator });
+}
+
+// ~~~~~~~ Package Functions ~~~~~~~
+
+/// Emit `ValidatorDeregistered` on behalf of the reconfiguration paths
+/// (`end_reconfig` finalization and `abort_reconfig`'s pending sweep) —
+/// Sui only lets a module emit its own event types.
+public(package) fun emit_deregistered(validator: address) {
+    event::emit(ValidatorDeregistered { validator });
+}
+
+// ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+/// Forwards to `resign` so it can be exercised from `hashi::resignation_tests`
+/// (non-public entry functions are not callable from other modules).
+public fun resign_for_testing(self: &mut Hashi, validator: address, ctx: &mut TxContext) {
+    resign(self, validator, ctx)
+}
+
+#[test_only]
+/// Forwards to `withdraw_resignation` for `hashi::resignation_tests`.
+public fun withdraw_resignation_for_testing(
+    self: &mut Hashi,
+    validator: address,
+    ctx: &mut TxContext,
+) {
+    withdraw_resignation(self, validator, ctx)
 }
