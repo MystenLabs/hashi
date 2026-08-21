@@ -386,14 +386,39 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
 /// and verifies that its `PACKAGE_VERSION` constant is exactly +1 of the
 /// currently published version (pre-flight check) before submitting the
 /// proposal. The `--digest` path skips that check and is retained only for
-/// callers with a pre-built package.
+/// callers with a pre-built package; combined with an exclusive upgrade it is
+/// refused unless `allow_unverified_exclusive` acknowledges the skipped check.
 pub struct CreateUpgradeProposalArgs<'a> {
     pub digest: Option<&'a str>,
     pub package_path: Option<&'a std::path::Path>,
     pub sui_binary: &'a std::path::Path,
     pub sui_client_config: Option<&'a std::path::Path>,
     pub upgrade_v2_exclusive: Option<bool>,
+    pub allow_unverified_exclusive: bool,
     pub metadata: Vec<(String, String)>,
+}
+
+/// Refuse the brick-capable flag combination: an exclusive upgrade proposed
+/// from a pre-built `--digest`, whose `PACKAGE_VERSION` constant was therefore
+/// never checked against the chain, unless the operator explicitly
+/// acknowledged the bypass.
+fn check_exclusive_digest_acknowledged(
+    digest: Option<&str>,
+    upgrade_v2_exclusive: Option<bool>,
+    allow_unverified_exclusive: bool,
+) -> Result<()> {
+    if digest.is_some() && upgrade_v2_exclusive == Some(true) && !allow_unverified_exclusive {
+        anyhow::bail!(
+            "--digest skips the PACKAGE_VERSION pre-flight, and an exclusive upgrade \
+             publishing a package whose PACKAGE_VERSION does not match the new \
+             on-chain version permanently bricks the contract with no on-chain \
+             recovery. Use --package-path so the constant is verified, or pass \
+             --allow-unverified-exclusive after manually verifying that the \
+             pre-built package declares PACKAGE_VERSION = current on-chain \
+             version + 1."
+        );
+    }
+    Ok(())
 }
 
 pub async fn create_upgrade_proposal(
@@ -407,8 +432,10 @@ pub async fn create_upgrade_proposal(
         sui_binary,
         sui_client_config,
         upgrade_v2_exclusive,
+        allow_unverified_exclusive,
         metadata,
     } = args;
+    check_exclusive_digest_acknowledged(digest, upgrade_v2_exclusive, allow_unverified_exclusive)?;
     let mut client = HashiClient::new(config).await?;
 
     let digest_bytes = match (digest, package_path) {
@@ -858,4 +885,33 @@ async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
     let mut input = String::new();
     reader.read_line(&mut input).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_digest_is_refused_without_acknowledgement() {
+        let err = check_exclusive_digest_acknowledged(Some("ab"), Some(true), false).unwrap_err();
+        // Pin both remedies the message offers: the verified path and the
+        // explicit acknowledgement.
+        assert!(err.to_string().contains("--package-path"));
+        assert!(err.to_string().contains("--allow-unverified-exclusive"));
+    }
+
+    #[test]
+    fn exclusive_digest_is_allowed_with_acknowledgement() {
+        check_exclusive_digest_acknowledged(Some("ab"), Some(true), true).unwrap();
+    }
+
+    #[test]
+    fn other_flag_combinations_are_unaffected() {
+        // Legacy upgrade proposals carry no exclusivity policy.
+        check_exclusive_digest_acknowledged(Some("ab"), None, false).unwrap();
+        // A non-exclusive upgrade_v2 digest stays recoverable on-chain.
+        check_exclusive_digest_acknowledged(Some("ab"), Some(false), false).unwrap();
+        // --package-path runs the pre-flight, so nothing needs acknowledging.
+        check_exclusive_digest_acknowledged(None, Some(true), false).unwrap();
+    }
 }

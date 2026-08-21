@@ -229,6 +229,14 @@ pub enum CreateProposalCommands {
         #[clap(long, action = clap::ArgAction::Set, required = true)]
         exclusive: bool,
 
+        /// Allow `--digest` together with `--exclusive true`. A pre-built
+        /// digest cannot be pre-flight checked, and an exclusive upgrade
+        /// publishing a package whose `PACKAGE_VERSION` constant does not
+        /// match the new on-chain version bricks the contract with no on-chain
+        /// recovery, so skipping the check must be an explicit choice.
+        #[clap(long, requires = "digest", conflicts_with = "package_path")]
+        allow_unverified_exclusive: bool,
+
         #[clap(flatten)]
         metadata: MetadataArgs,
     },
@@ -938,6 +946,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                             sui_binary: &sui_binary,
                             sui_client_config: sui_client_config.as_deref(),
                             upgrade_v2_exclusive: None,
+                            allow_unverified_exclusive: false,
                             metadata: parse_metadata(metadata.metadata),
                         },
                         &tx_opts,
@@ -950,6 +959,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     sui_binary,
                     sui_client_config,
                     exclusive,
+                    allow_unverified_exclusive,
                     metadata,
                 } => {
                     commands::proposal::create_upgrade_proposal(
@@ -960,6 +970,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                             sui_binary: &sui_binary,
                             sui_client_config: sui_client_config.as_deref(),
                             upgrade_v2_exclusive: Some(exclusive),
+                            allow_unverified_exclusive,
                             metadata: parse_metadata(metadata.metadata),
                         },
                         &tx_opts,
