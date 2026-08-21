@@ -211,8 +211,13 @@ files.
 
 ## Configuring hashi
 
-To enable automatic backups using the new PGP public key, add the public cert to
-the node config file under the field `backup-pgp-cert`.
+Every node config must provide the PGP public certificate under the field
+`backup-pgp-cert`. The value can be a certificate file path or inline armored
+text:
+
+```toml
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+```
 
 You can also configure the location where Hashi saves backups with the field
 `backup-dir`.

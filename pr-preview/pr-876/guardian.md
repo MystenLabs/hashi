@@ -97,8 +97,9 @@ sequenceDiagram
     Guardian->>S3: start heartbeat stream from OI onward
 
     Note over KPs,Guardian: Threshold share provisioning
-    KPs->>Guardian: GetGuardianInfo via proxy
-    Guardian-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
+    KPs->>Proxy: GetProvisioningTargetInfo
+    Proxy->>Guardian: GetGuardianInfo
+    Proxy-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Require S3 state to match --do-genesis intent
     KPs->>KPs: Verify PCRs and derive config hash plus optional genesis-state hash
     KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
@@ -173,13 +174,13 @@ sequenceDiagram
 
     Note over Onchain,Guardian: Withdrawal signing
     MPC->>Onchain: Read pending withdrawal transaction
-    MPC->>MPC: Collect committee cert for withdrawal
+    MPC->>MPC: Produce MPC signatures for each Bitcoin input
+    MPC->>Onchain: Store MPC signatures
     MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
     Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
     Guardian->>S3: log(withdraw success or failure)
     Guardian-->>MPC: Guardian BTC signatures
-    MPC->>MPC: Produce MPC signatures and combine witnesses
-    MPC->>Onchain: sign_withdrawal(guardian signatures + MPC signatures)
+    MPC->>Onchain: Finalize withdrawal with Guardian signatures
     MPC->>Bitcoin: Broadcast fully signed transaction
 
     Note over Onchain,Guardian: Committee handoff catch-up

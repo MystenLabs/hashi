@@ -579,8 +579,9 @@ sequenceDiagram
     Guardian->>S3: start heartbeat stream from OI onward
 
     Note over KPs,Guardian: Threshold share provisioning
-    KPs->>Guardian: GetGuardianInfo via proxy
-    Guardian-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
+    KPs->>Proxy: GetProvisioningTargetInfo
+    Proxy->>Guardian: GetGuardianInfo
+    Proxy-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Require S3 state to match --do-genesis intent
     KPs->>KPs: Verify PCRs and derive config hash plus optional genesis-state hash
     KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
@@ -655,13 +656,13 @@ sequenceDiagram
 
     Note over Onchain,Guardian: Withdrawal signing
     MPC->>Onchain: Read pending withdrawal transaction
-    MPC->>MPC: Collect committee cert for withdrawal
+    MPC->>MPC: Produce MPC signatures for each Bitcoin input
+    MPC->>Onchain: Store MPC signatures
     MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
     Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
     Guardian->>S3: log(withdraw success or failure)
     Guardian-->>MPC: Guardian BTC signatures
-    MPC->>MPC: Produce MPC signatures and combine witnesses
-    MPC->>Onchain: sign_withdrawal(guardian signatures + MPC signatures)
+    MPC->>Onchain: Finalize withdrawal with Guardian signatures
     MPC->>Bitcoin: Broadcast fully signed transaction
 
     Note over Onchain,Guardian: Committee handoff catch-up
@@ -1193,8 +1194,7 @@ calling `hashi::reconfig::end_reconfig`:
 entry fun end_reconfig(
     self: &mut Hashi,
     mpc_public_key: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    mpc_cert: CommitteeSignature,
     ctx: &TxContext,
 )
 ```
@@ -1436,7 +1436,7 @@ Source: https://mystenlabs.github.io/hashi/design/withdraw.md
 > How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
 
 A withdrawal allows a user to redeem their `hBTC` on Sui for native BTC,
-sent to a user-specified address on Bitcoin. The process has four phases:
+sent to a user-specified address on Bitcoin. The process has five phases:
 
 ```mermaid
 graph LR
@@ -1654,11 +1654,49 @@ Source: https://mystenlabs.github.io/hashi/design/node-operator-runbook.md
 
 This runbook is for **Sui validators joining the Hashi committee**. It covers prerequisites, configuration, genesis, ongoing operations, and governance.
 
-Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. Committee members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key.
+Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. [Committee](committee.mdx) members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key. The work your node performs is the [deposit](deposit.mdx) and [withdrawal](withdraw.mdx) flows, plus [reconfiguration](reconfiguration.mdx) at every epoch boundary.
 
 This is a **living document**. Hashi launches on Testnet first. This document adds Mainnet parameters to the [Networks](#networks) table below as the team finalizes them. Wherever the runbook shows a network-specific value, use the column for your **target network** (the worked examples use Testnet).
 
 This document assumes familiarity with Sui validator operations, Linux system administration, and basic Bitcoin infrastructure.
+
+## Joining the committee
+
+Onboarding takes 6 steps. The remaining sections cover the detail, the defaults, and the failure modes:
+
+1. **Provision the two external dependencies:** a Bitcoin archival node (`txindex`, `blockfilterindex`, `peerblockfilters`) and a Sui fullnode serving the gRPC v2 API. See [1.2](#12-external-service-dependencies), [1.4](#14-sui-rpc), and [1.5](#15-bitcoin-node).
+2. **Generate keys:** a dedicated TLS key, a fresh operator key funded with at least 2 SUI, and an OpenPGP backup key. See [2.2](#22-tls-key-dedicated), [2.4](#24-operator-key-day-to-day-signing), and [2.5](#25-backup-key-openpgp).
+3. **Write the validator config:** use your target network's column in [Networks](#networks). See [3.1](#31-validator-config).
+4. **Register your validator:** run `hashi register --print-only` and sign the result offline with your Sui validator account key. See [2.3](#23-registration-must-be-signed-by-the-account-key) and [5.3](#53-step-2-register-your-validator).
+5. **Start the node:** run `hashi server` and keep it online, including across epoch boundaries. See [5.4](#54-step-3-start-the-server) and [9](#9-epoch-changes-reconfiguration).
+6. **Monitor the node:** watch the key metrics and push them to the Mysten collection endpoint. See [8](#8-monitoring-and-metrics).
+
+These details trip up most operators:
+
+- Your Sui validator account key must sign the initial registration. The operator key cannot. See [2.3](#23-registration-must-be-signed-by-the-account-key).
+- Hashi defaults `bitcoin-rpc` to port `8332`, the Mainnet port. On Signet you must set `38332` explicitly. See [1.5](#15-bitcoin-node).
+- Fund the operator address with at least 2 SUI. Exactly 1 SUI fails with `InsufficientCoinBalance`. See [2.4](#24-operator-key-day-to-day-signing).
+
+## On this page
+
+| Section | What it covers |
+|---------|----------------|
+| [Networks](#networks) | Per-network chain IDs, endpoints, ports, and package IDs |
+| [1. Prerequisites](#1-prerequisites) | Hardware sizing, the Bitcoin and Sui dependencies, and building the binary |
+| [2. Key management and security](#2-key-management-and-security) | Which keys exist, which you generate, and which one signs what |
+| [3. Configuration](#3-configuration) | Validator config template, CLI config, and environment variables |
+| [4. Network and firewall](#4-network-and-firewall) | Inbound and outbound ports, metrics binding, and TLS |
+| [5. Genesis procedure](#5-genesis-procedure) | Registering, starting the node, and the launch and DKG steps that follow |
+| [6. CLI reference](#6-cli-reference) | Every subcommand, plus the flag placement that causes most CLI errors |
+| [7. Governance participation](#7-governance-participation) | Proposal types, thresholds, and voting |
+| [8. Monitoring and metrics](#8-monitoring-and-metrics) | Prometheus endpoint, metrics push, key metrics, and suggested alerts |
+| [9. Epoch changes (reconfiguration)](#9-epoch-changes-reconfiguration) | What happens each epoch, and what you are responsible for |
+| [10. Backup and restore](#10-backup-and-restore) | Automatic epoch backups and the restore commands |
+| [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
+| [12. Coming soon](#12-coming-soon) | Planned capabilities that are not yet available |
+| [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
+
+For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
 
 ## Networks
 
@@ -1807,13 +1845,13 @@ The corresponding Hashi config pointers (full template in [3.1](#31-validator-co
 bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"  # signet genesis
 bitcoin-rpc = "http://127.0.0.1:38332"            # Hashi's own default is 8332 — you MUST override it
 bitcoin-trusted-peers = ["127.0.0.1:38333"]       # host:port (port is mandatory)
-# bitcoin-start-height = <a height at/below the first relevant Signet deposit>
+# bitcoin-start-height defaults to 300000 on Signet (below the Testnet deployment); override only to change the anchor
 
 [bitcoin-rpc-auth]
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults to `800000` (Mainnet-oriented); set it for Signet so the light client does not skip early deposits.
+> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults per network — `300000` on Signet (below the Testnet deployment, so the light client anchors under the first bridge deposit instead of re-syncing from genesis) and a post-Taproot height on Mainnet; override it only if you need a different anchor.
 
 **Verify your node:**
 
@@ -1836,7 +1874,7 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 | **Operator private key** | Ed25519 | Generate fresh | Signs the node's day-to-day Sui transactions (cert submission, governance, metadata). See [2.4](#24-operator-key-day-to-day-signing). |
 | **BLS12-381 key** | BLS12-381 | Auto-generated at startup | MPC protocol participation. Stored in local DB. |
 | **Encryption key** | ECIES | Auto-generated at startup | Encrypts MPC share exchange between validators. Stored in local DB. |
-| **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Strongly recommended. |
+| **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Required. |
 
 ### 2.2 TLS key (dedicated)
 
@@ -2028,8 +2066,8 @@ bitcoin-rpc = "http://127.0.0.1:38332"
 # Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
 bitcoin-trusted-peers = ["127.0.0.1:38333"]
 
-# Block height the light client begins syncing from (default: 800000, mainnet-oriented)
-# bitcoin-start-height = <height at/below first relevant Signet deposit>
+# Light-client sync start height; defaults to 300000 on Signet, a post-Taproot height on Mainnet (override to change the anchor)
+# bitcoin-start-height = 300000
 
 # ── Storage ───────────────────────────────────────────────────────────
 
@@ -2038,8 +2076,8 @@ db = "/var/lib/hashi/db"
 
 # ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
 
-# Armored OpenPGP public certificate (file path or inline) for encrypted backups
-# backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+# Armored OpenPGP public certificate (file path or inline) for encrypted backups (required)
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 
 # Backup output directory (default: /tmp)
 # backup-dir = "/var/lib/hashi/backups"
@@ -2060,8 +2098,8 @@ db = "/var/lib/hashi/db"
 # Withdrawal batching delay in ms (default: 300000 = 5 min)
 # withdrawal-batching-delay-ms = 300000
 
-# Max withdrawals per Bitcoin transaction (default: 70)
-# withdrawal-max-batch-size = 70
+# Max withdrawals per Bitcoin transaction (default and hard cap: 298)
+# withdrawal-max-batch-size = 298
 
 # Max unconfirmed transaction chain depth (default: 5)
 # max-mempool-chain-depth = 5
@@ -2213,7 +2251,7 @@ hashi register --config /path/to/validator.toml \
 # the sui keytool sign / sui client execute-signed-tx commands
 ```
 
-The registration transaction writes your BLS12-381 public key, Ed25519 TLS public key, ECIES encryption public key, endpoint URL, and operator address to the chain.
+The registration transaction writes your BLS12-381 public key, Ed25519 TLS public key, ECIES encryption public key, endpoint URL, and operator address to the chain. [Committee](committee.mdx#registration-information) explains how the protocol uses each of these fields, and [why the committee is not exactly the set of Sui validators](committee.mdx#why-the-committee-is-not-exactly-the-set-of-sui-validators).
 
 ### 5.4 Step 3: start the server
 
@@ -2305,7 +2343,7 @@ If a command instead fails with `package_id is required. Set it via --package-id
 ### 6.2 Server
 
 ```bash
-hashi server [--config <path>]
+hashi server --config <path>
 ```
 
 Run the Hashi validator daemon. Uses the validator config.
@@ -2404,7 +2442,7 @@ Config values are type-prefixed: `u64:30000`, `bool:true`.
 Backups are **OpenPGP (Sequoia)**: encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar` (format auto-detected on restore).
 
 ```bash
-# Create a backup (cert taken from the node config's backup-pgp-cert, or override inline/by path)
+# Create a backup (uses the required configured cert unless overridden inline/by path)
 hashi backup save <node-config-path> [--backup-pgp-cert <armored-cert-or-path>] [--output-dir .]
 
 # Restore an encrypted .tar.asc — exactly one decryptor is required:
@@ -2437,7 +2475,7 @@ hashi withdraw list [--json]
 hashi balance <sui-address> [--json]
 ```
 
-These are primarily for testing or admin use, not routine operator tasks.
+These are primarily for testing or admin use, not routine operator tasks. For what the protocol does with each request, see the [Deposit](deposit.mdx) flow ([request](deposit.mdx#request), [approve](deposit.mdx#approve), [confirm](deposit.mdx#confirm), and [mint](deposit.mdx#mint)) and the [Withdraw](withdraw.mdx) flow ([request](withdraw.mdx#request), [approve](withdraw.mdx#approve), [build](withdraw.mdx#build-tx), [sign](withdraw.mdx#sign), and [broadcast](withdraw.mdx#broadcast)).
 
 ### 6.9 Publish (admin only)
 
@@ -2475,7 +2513,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 > EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
 
-**Configurable protocol parameters:**
+**Configurable protocol parameters.** The deposit and withdrawal flows read these settings directly: the confirmation threshold and the time delay gate the [deposit confirm step](deposit.mdx#confirm), and the cancellation cooldown gates a user's ability to cancel a [withdrawal request](withdraw.mdx#request):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -2576,7 +2614,7 @@ Notes:
 | `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
 | `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG/rotation duration. |
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
-| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance). `-1` until the first successful sample. |
+| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 
 > **Is `hashi_kyoto_connected_peers = 1` healthy? Yes.** The embedded light client runs in whitelist-only mode and connects **only** to the peers listed in `bitcoin-trusted-peers` (see [1.5](#15-bitcoin-node)), so it never discovers peers through DNS seeds or address gossip. The count therefore cannot exceed the number of trusted peers you configured, and `1` is the expected steady-state value for the common single-self-hosted-node setup. What matters is that the value is **non-zero and stable**: the alert in [8.4](#84-suggested-alerts) fires on `== 0`, not on a low count. If you want redundancy here, add more entries to `bitcoin-trusted-peers` rather than expecting the number to grow on its own.
@@ -2589,6 +2627,8 @@ hashi committee -c hashi-cli.toml view 0x<addr>   # one validator's details
 hashi committee -c hashi-cli.toml epoch           # current epoch info
 ```
 
+See [Committee](committee.mdx) for what membership means and how Hashi derives the member set from the Sui validator set.
+
 > The **CLI is the status of record** for committee membership. This runbook does not link a public explorer view for Hashi committee state, because none is confirmed; do not rely on a third-party dashboard to determine whether your node is in the committee.
 
 ### 8.4 Suggested alerts
@@ -2600,7 +2640,7 @@ hashi committee -c hashi-cli.toml epoch           # current epoch info
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
-| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the operator address. (`-1` means not yet sampled, not empty.) |
+| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
 > **Coming soon:** A metrics **push** service for centralized collection. Details follow once it lands.
@@ -2619,6 +2659,8 @@ On every Sui epoch change, the Hashi committee reconfigures:
 4. Validators exchange BLS signatures; once 2/3 weight signs, `end_reconfig` is submitted.
 5. The new committee generates presignatures.
 6. Normal operations resume.
+
+[Reconfiguration](reconfiguration.mdx) covers the onchain detail behind each step: [start reconfig](reconfiguration.mdx#start-reconfig), [DKG or key rotation](reconfiguration.mdx#dkg-or-key-rotation), [end reconfig](reconfiguration.mdx#end-reconfig), and [abort reconfig](reconfiguration.mdx#abort-reconfig).
 
 ### 9.2 Operator responsibilities
 
@@ -2643,7 +2685,7 @@ After execution, the previous committee resumes; the system can trigger a new re
 
 The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
-When `backup-pgp-cert` is configured, the node automatically writes an encrypted backup every epoch: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. The node writes backups to `backup-dir` (default `/tmp`, so set a persistent path). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. The node writes backups to `backup-dir` (default `/tmp`, so set a persistent path). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 
@@ -2857,11 +2899,15 @@ Lost connectivity to Bitcoin peers after 15 consecutive failures. Restarting Kyo
 
 ---
 
-**Symptom:** the light client syncs normally, but early deposits are never detected.
+**Symptom:** `hashi_kyoto_best_height` sits far below your Bitcoin node's height, restarting from near zero after each light client restart. The log shows:
 
-**Likely cause:** `bitcoin-start-height` defaults to `800000`, a Mainnet-oriented height. On Signet this skips the entire range where your test deposits live.
+```
+Start height 800000 is beyond bitcoind's tip; anchoring Kyoto at genesis
+```
 
-**Fix:** set `bitcoin-start-height` to a height at or below your first relevant deposit, as noted in [1.5](#15-bitcoin-node).
+**Likely cause:** the light client could not read a block at `bitcoin-start-height`, so it anchored at genesis and replays the whole chain on every rebuild. Either the height is past your node's tip, or the node is still syncing. No deposits are missed; genesis is the conservative fallback.
+
+**Fix:** leave `bitcoin-start-height` unset to take the per-network default, or set it at or below your first relevant deposit, as noted in [1.5](#15-bitcoin-node). If your Bitcoin node is still syncing, restart Hashi once it passes that height — the anchor is resolved once at startup.
 
 ---
 
@@ -2883,41 +2929,46 @@ The following capabilities are planned but not yet available.
 
 ---
 
-## 12. Publishing a release (Mysten)
+## 13. Testnet releases
 
-This section is for **Mysten release engineers**; operators can ignore it. A release is cut at a commit sha on `main` and ships on two channels: the container image (Artifact Registry for Mysten-managed deploys, Docker Hub for everyone else) and the deterministic binary (§1.3).
+Testnet releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi testnet <short-sha>` and tagged `testnet-<full-sha>`.
 
-### 12.1 Container image
+### 13.1 Binary
 
-Dispatch `hashi-build-image.yml` in sui-operations at the release commit:
-
-```bash
-gh workflow run hashi-build-image.yml -R MystenLabs/sui-operations --ref main \
-  -f hashi_commit=<sha> \
-  -f push_to_dockerhub=true
-```
-
-A single run builds the image once and pushes both `us-central1-docker.pkg.dev/cryptic-bolt-398315/hashi/hashi:<sha>` and the public `mysten/hashi:<sha>`, and drops the raw binary at `https://storage.googleapis.com/mysten-hashi-binaries/<sha>/hashi` (public). Artifact Registry rejects anonymous pulls — Docker Hub is the operator-facing channel; bare-metal operators use the deterministic binary (§12.2), and the GCS drop is internal. Confirm the tag is live:
+Download `hashi-linux-amd64` and `SHA256SUMS` from the same release into one directory. Verify that the binary's SHA-256 matches the checksum published with the release:
 
 ```bash
-curl -s https://hub.docker.com/v2/repositories/mysten/hashi/tags/<sha> | jq -r .digest
+sha256sum --check SHA256SUMS
 ```
 
-### 12.2 Deterministic binary
-
-Dispatch `deterministic-build.yml` in this repo at the same commit; it builds `out/hashi` on two runner generations and fails on any hash mismatch. Publish the artifacts under the sui-releases convention:
+The command must print `hashi-linux-amd64: OK`. Do not run the binary if the check fails. The computed hash can also be inspected directly and compared with the binary SHA-256 shown in the release notes:
 
 ```bash
-gh workflow run deterministic-build.yml -R MystenLabs/hashi --ref main
-gh run download <run-id> -R MystenLabs/hashi \
-  -n hashi-ubuntu-latest-binary -n hashi-ubuntu-latest-sha256
-aws s3 cp hashi-ubuntu-latest-binary/hashi        s3://sui-releases/<sha>/hashi
-aws s3 cp hashi-ubuntu-latest-sha256/hashi.sha256 s3://sui-releases/<sha>/hashi.sha256
+sha256sum hashi-linux-amd64
 ```
 
-Operators download from `https://sui-releases.s3.us-east-1.amazonaws.com/<sha>/hashi` and can reproduce the checksum themselves (§1.3).
+After the hash matches, verify that GitHub Actions produced the binary and make it executable:
 
-### 12.3 Rolling the Mysten testnet nodes
+```bash
+gh attestation verify hashi-linux-amd64 --repo MystenLabs/hashi
+chmod +x hashi-linux-amd64
+```
+
+### 13.2 Container image
+
+The matching public image uses the same release tag:
+
+```bash
+docker pull mysten/hashi:testnet-<full-sha>
+```
+
+The release notes include the image's immutable OCI digest. Pin that digest when a deployment must remain on the exact image regardless of tags:
+
+```text
+mysten/hashi@sha256:<digest>
+```
+
+### 13.3 Rolling the Mysten Testnet nodes
 
 The six Mysten validators (`mysten1`–`mysten6`) are single-replica Deployments in namespace `hashi-testnet` on `workloads-secondary-use4`, managed by the `mysten/testnet` stack of `pulumi/services/hashi-server` in sui-operations. Each mounts a ReadWriteOnce PVC, which is why the Deployments use the `Recreate` strategy — never switch them back to `RollingUpdate`; a surge pod would double-mount the DB volume.
 
@@ -3155,8 +3206,13 @@ files.
 
 ## Configuring hashi
 
-To enable automatic backups using the new PGP public key, add the public cert to
-the node config file under the field `backup-pgp-cert`.
+Every node config must provide the PGP public certificate under the field
+`backup-pgp-cert`. The value can be a certificate file path or inline armored
+text:
+
+```toml
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+```
 
 You can also configure the location where Hashi saves backups with the field
 `backup-dir`.
@@ -3222,7 +3278,7 @@ const signer = Ed25519Keypair.fromSecretKey(/* … */);
 > URL, required for the [`client.hashi.bitcoin.*`](#bitcoin-rpc-optional) lookups — and
 > `graphqlUrl`, which overrides the Sui GraphQL endpoint used by
 > [`transactionHistory`](#transaction-history) (defaults to
-> `https://fullnode.{network}.sui.io:443/graphql`).
+> `https://graphql.{network}.sui.io/graphql`).
 
 ## Quickstart: Deposit BTC → mint hBTC
 
