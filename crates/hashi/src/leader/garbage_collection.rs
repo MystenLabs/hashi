@@ -259,6 +259,7 @@ impl LeaderService {
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         let hashi_ids = inner.config.hashi_ids();
+        let package_versions = inner.onchain_state().state().package_versions().clone();
 
         let mut builder = TransactionBuilder::new();
 
@@ -279,46 +280,69 @@ impl LeaderService {
         for proposal in &expired_proposals {
             let proposal_id_arg = builder.pure(&proposal.id);
 
+            let Some(package_version) = proposal.proposal_type.package_version() else {
+                error!(
+                    "Cannot delete proposal {:?} with unknown type: {:?}",
+                    proposal.id, proposal.proposal_type
+                );
+                continue;
+            };
+            let Some(type_package_id) = package_versions.get(package_version) else {
+                error!(
+                    "Cannot delete proposal {:?}: defining package version {} for {} is not published",
+                    proposal.id,
+                    package_version,
+                    proposal.proposal_type.as_str()
+                );
+                continue;
+            };
+
             // Get the type argument for the proposal
             let type_arg = match &proposal.proposal_type {
                 ProposalType::UpdateConfig => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("update_config"),
                     Identifier::from_static("UpdateConfig"),
                     vec![],
                 ))),
                 ProposalType::EnableVersion => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("enable_version"),
                     Identifier::from_static("EnableVersion"),
                     vec![],
                 ))),
                 ProposalType::DisableVersion => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("disable_version"),
                     Identifier::from_static("DisableVersion"),
                     vec![],
                 ))),
                 ProposalType::Upgrade => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("upgrade"),
                     Identifier::from_static("Upgrade"),
                     vec![],
                 ))),
+                ProposalType::UpgradeV2 => TypeTag::Struct(Box::new(StructTag::new(
+                    type_package_id,
+                    Identifier::from_static("upgrade_v2"),
+                    Identifier::from_static("Upgrade"),
+                    vec![],
+                ))),
                 ProposalType::EmergencyPause => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("emergency_pause"),
                     Identifier::from_static("EmergencyPause"),
                     vec![],
                 ))),
                 ProposalType::AbortReconfig => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("abort_reconfig"),
                     Identifier::from_static("AbortReconfig"),
                     vec![],
                 ))),
                 ProposalType::UpdateGuardian => TypeTag::Struct(Box::new(StructTag::new(
-                    hashi_ids.package_id,
+                    type_package_id,
                     Identifier::from_static("update_guardian"),
                     Identifier::from_static("UpdateGuardian"),
                     vec![],

@@ -3,8 +3,8 @@
 
 //! Reusable helpers for the package-upgrade governance flow.
 //!
-//! Covers the non-orchestrating pieces that both the CLI (`hashi proposal
-//! create upgrade` + `proposal execute`) and the e2e test harness need:
+//! Covers the non-orchestrating pieces that both the release tooling and the
+//! e2e test harness need after an upgrade proposal has been created:
 //!
 //! - Building an upgrade package via `sui move build`
 //! - Constructing the `execute + publish + finalize` PTB
@@ -208,6 +208,70 @@ pub fn build_upgrade_execution_transaction(
             Identifier::from_static("finalize_upgrade"),
         ),
         vec![hashi_arg2, receipt],
+    );
+
+    builder
+}
+
+/// Build the PTB that executes an `upgrade_v2::Upgrade` proposal:
+/// `upgrade_v2::execute` → `builder.upgrade(...)` →
+/// `upgrade_v2::finalize_upgrade`.
+///
+/// `execute` returns two values. The first is the Sui `UpgradeTicket`; the
+/// second is a hot-potato authorization carrying the committee-approved
+/// `exclusive` setting. Passing both results through the same PTB prevents the
+/// publisher from changing the version policy after voting has completed.
+pub fn build_upgrade_v2_execution_transaction(
+    hashi_ids: HashiIds,
+    current_package_id: Address,
+    proposal_id: Address,
+    compiled: Publish,
+) -> TransactionBuilder {
+    let mut builder = TransactionBuilder::new();
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let proposal_id_arg = builder.pure(&proposal_id);
+    let clock_arg = builder.object(
+        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+
+    let execute_results = builder
+        .move_call(
+            Function::new(
+                current_package_id,
+                Identifier::from_static("upgrade_v2"),
+                Identifier::from_static("execute"),
+            ),
+            vec![hashi_arg, proposal_id_arg, clock_arg],
+        )
+        .to_nested(2);
+    let ticket = execute_results[0];
+    let authorization = execute_results[1];
+
+    let receipt = builder.upgrade(
+        compiled.modules,
+        compiled.dependencies,
+        current_package_id,
+        ticket,
+    );
+
+    let hashi_arg2 = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    builder.move_call(
+        Function::new(
+            current_package_id,
+            Identifier::from_static("upgrade_v2"),
+            Identifier::from_static("finalize_upgrade"),
+        ),
+        vec![hashi_arg2, receipt, authorization],
     );
 
     builder

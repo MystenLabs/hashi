@@ -571,6 +571,7 @@ pub enum ProposalType {
     EnableVersion,
     DisableVersion,
     Upgrade,
+    UpgradeV2,
     EmergencyPause,
     AbortReconfig,
     UpdateGuardian,
@@ -578,12 +579,26 @@ pub enum ProposalType {
 }
 
 impl ProposalType {
+    /// Package version that introduced this proposal payload type.
+    ///
+    /// Move types retain their defining package address across later package
+    /// upgrades, so callers constructing a type argument must resolve this
+    /// version to its published package ID rather than always using v1.
+    pub fn package_version(&self) -> Option<u64> {
+        match self {
+            ProposalType::UpgradeV2 => Some(2),
+            ProposalType::Unknown(_) => None,
+            _ => Some(1),
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             ProposalType::UpdateConfig => "update_config",
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
+            ProposalType::UpgradeV2 => "upgrade_v2",
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
@@ -597,6 +612,7 @@ impl ProposalType {
             "enable_version",
             "disable_version",
             "upgrade",
+            "upgrade_v2",
             "emergency_pause",
             "abort_reconfig",
             "update_guardian",

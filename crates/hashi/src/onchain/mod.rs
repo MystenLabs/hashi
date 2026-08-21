@@ -2128,6 +2128,7 @@ fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposa
         types::ProposalType::EnableVersion => parse::<move_types::EnableVersion>(contents),
         types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
         types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
+        types::ProposalType::UpgradeV2 => parse::<move_types::UpgradeV2>(contents),
         types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
         types::ProposalType::AbortReconfig => parse::<move_types::AbortReconfig>(contents),
         types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
@@ -2163,10 +2164,85 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
+        ("upgrade_v2", "Upgrade") => types::ProposalType::UpgradeV2,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
         ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
+    }
+}
+
+#[cfg(test)]
+mod upgrade_v2_proposal_tests {
+    use super::*;
+
+    fn proposal_tag(module: &str) -> TypeTag {
+        let v1_package = Address::from_static("0x41");
+        let payload_package = if module == "upgrade_v2" {
+            Address::from_static("0x42")
+        } else {
+            v1_package
+        };
+        TypeTag::Struct(Box::new(StructTag::new(
+            v1_package,
+            Identifier::from_static("proposal"),
+            Identifier::from_static("Proposal"),
+            vec![TypeTag::Struct(Box::new(StructTag::new(
+                payload_package,
+                Identifier::new(module).unwrap(),
+                Identifier::from_static("Upgrade"),
+                vec![],
+            )))],
+        )))
+    }
+
+    #[test]
+    fn upgrade_v2_proposal_type_and_layout_decode() {
+        let tag = proposal_tag("upgrade_v2");
+        assert_eq!(parse_proposal_type(&tag), types::ProposalType::UpgradeV2);
+        assert_eq!(types::ProposalType::UpgradeV2.package_version(), Some(2));
+
+        let proposal = move_types::Proposal {
+            id: Address::from_static("0x11"),
+            creator: Address::from_static("0x22"),
+            votes: vec![Address::from_static("0x22")],
+            quorum_threshold_bps: 6667,
+            created_timestamp_ms: 123,
+            executed_timestamp_ms: None,
+            metadata: move_types::VecMap { contents: vec![] },
+            data: move_types::UpgradeV2 {
+                digest: vec![1, 2, 3],
+                exclusive: true,
+            },
+        };
+        let bytes = bcs::to_bytes(&proposal).unwrap();
+        let decoded = decode_proposal(&tag, &bytes).unwrap();
+
+        assert_eq!(decoded.id, proposal.id);
+        assert_eq!(decoded.timestamp_ms, 123);
+        assert_eq!(decoded.proposal_type, types::ProposalType::UpgradeV2);
+    }
+
+    #[test]
+    fn legacy_upgrade_proposal_still_decodes_with_its_original_layout() {
+        let tag = proposal_tag("upgrade");
+        let proposal = move_types::Proposal {
+            id: Address::from_static("0x33"),
+            creator: Address::from_static("0x44"),
+            votes: vec![],
+            quorum_threshold_bps: 6667,
+            created_timestamp_ms: 456,
+            executed_timestamp_ms: None,
+            metadata: move_types::VecMap { contents: vec![] },
+            data: move_types::Upgrade {
+                digest: vec![4, 5, 6],
+            },
+        };
+        let bytes = bcs::to_bytes(&proposal).unwrap();
+        let decoded = decode_proposal(&tag, &bytes).unwrap();
+
+        assert_eq!(decoded.id, proposal.id);
+        assert_eq!(decoded.proposal_type, types::ProposalType::Upgrade);
     }
 }
 

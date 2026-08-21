@@ -36,6 +36,11 @@ pub enum CreateProposalParams {
         digest: Vec<u8>,
         metadata: Vec<(String, String)>,
     },
+    UpgradeV2 {
+        digest: Vec<u8>,
+        exclusive: bool,
+        metadata: Vec<(String, String)>,
+    },
     UpdateConfig {
         key: String,
         value: hashi_types::move_types::ConfigValue,
@@ -357,6 +362,11 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize Upgrade")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::UpgradeV2 => {
+                        let p: move_types::Proposal<move_types::UpgradeV2> =
+                            bcs::from_bytes(value_bytes).context("deserialize UpgradeV2")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::EmergencyPause => {
                         let p: move_types::Proposal<move_types::EmergencyPause> =
                             bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
@@ -542,7 +552,7 @@ impl HashiClient {
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
-            ProposalType::Upgrade => {
+            ProposalType::Upgrade | ProposalType::UpgradeV2 => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
                 );
@@ -575,6 +585,29 @@ impl HashiClient {
         );
 
         Ok(builder)
+    }
+
+    /// Resolve the defining package ID for a proposal payload and construct
+    /// the exact Move type argument used by vote/remove-vote.
+    pub fn proposal_type_arg(
+        &self,
+        proposal_type: &crate::onchain::types::ProposalType,
+    ) -> anyhow::Result<TypeTag> {
+        let package_version = proposal_type.package_version().ok_or_else(|| {
+            anyhow::anyhow!("unknown proposal type has no defining package version")
+        })?;
+        let package_id = self
+            .onchain_state
+            .state()
+            .package_versions()
+            .get(package_version)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "package version {package_version} defining proposal type {} is not published",
+                    proposal_type.as_str()
+                )
+            })?;
+        get_proposal_type_arg(package_id, proposal_type)
     }
 }
 
@@ -615,6 +648,30 @@ pub fn build_create_proposal_transaction(
                     hashi_arg,
                     validator_address_arg,
                     digest_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::UpgradeV2 {
+            digest,
+            exclusive,
+            metadata,
+        } => {
+            let digest_arg = builder.pure(&digest);
+            let exclusive_arg = builder.pure(&exclusive);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    call_package,
+                    Identifier::from_static("upgrade_v2"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    digest_arg,
+                    exclusive_arg,
                     metadata_arg,
                     clock_arg,
                 ],
@@ -949,6 +1006,7 @@ pub fn get_proposal_type_arg(
 
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),
+        ProposalType::UpgradeV2 => ("upgrade_v2", "Upgrade"),
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),

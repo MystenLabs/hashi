@@ -14,6 +14,7 @@ use hashi::cli::client::build_vote_transaction;
 use hashi::cli::upgrade::build_execute_proposal_transaction;
 use hashi::cli::upgrade::build_upgrade_execution_transaction;
 use hashi::cli::upgrade::build_upgrade_package;
+use hashi::cli::upgrade::build_upgrade_v2_execution_transaction;
 use hashi::cli::upgrade::extract_new_package_id_from_response;
 use hashi::cli::upgrade::extract_proposal_id_from_response;
 use hashi::config::HashiIds;
@@ -290,10 +291,36 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Run the full upgrade lifecycle: prepare → build → propose → vote → execute+publish+finalize.
+#[derive(Clone, Copy)]
+enum UpgradeProposal {
+    Legacy,
+    V2 { exclusive: bool },
+}
+
+/// Run the full legacy upgrade lifecycle.
 ///
+/// This is the only path available for the deployed v1 → v2 transition.
 /// Returns the new package ID on success.
 pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address> {
+    execute_full_upgrade_with_proposal(networks, UpgradeProposal::Legacy).await
+}
+
+/// Run the full `upgrade_v2` lifecycle with an explicit version policy.
+///
+/// The chain must already have package v2, which introduced the proposal
+/// payload type. Returns the new package ID on success.
+pub async fn execute_full_upgrade_v2(
+    networks: &mut TestNetworks,
+    exclusive: bool,
+) -> Result<Address> {
+    execute_full_upgrade_with_proposal(networks, UpgradeProposal::V2 { exclusive }).await
+}
+
+/// Run prepare → build → propose → vote → execute+publish+finalize.
+async fn execute_full_upgrade_with_proposal(
+    networks: &mut TestNetworks,
+    proposal: UpgradeProposal,
+) -> Result<Address> {
     // Running nodes only: a pending member (started mid-test by the
     // key-rotation tests) has no Hashi instance to read state from or vote
     // with — and is not a registered committee member yet anyway.
@@ -341,31 +368,54 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         build_upgrade_package_cached(&upgrade_path, client_config, target_version)?;
     tracing::info!("upgrade package built, digest: {digest:?}");
 
-    // 3. Propose the upgrade
+    // 3. Propose the upgrade. Calls execute through the latest package, while
+    // the proposal type argument below retains the package address where that
+    // payload type was first defined.
     tracing::info!("proposing upgrade...");
     let creator = executors[0].sender();
-    let create_tx = build_create_proposal_transaction(
-        hashi_ids,
-        hashi_ids.package_id,
-        creator,
-        CreateProposalParams::Upgrade {
-            digest: digest.clone(),
-            metadata: vec![("reason".to_string(), "upgrade test".to_string())],
-        },
-    );
+    let (proposal_params, proposal_type_package, proposal_module) = match proposal {
+        UpgradeProposal::Legacy => (
+            CreateProposalParams::Upgrade {
+                digest: digest.clone(),
+                metadata: vec![("reason".to_string(), "upgrade test".to_string())],
+            },
+            hashi_ids.package_id,
+            "upgrade",
+        ),
+        UpgradeProposal::V2 { exclusive } => {
+            let type_package = nodes[0]
+                .hashi()
+                .onchain_state()
+                .state()
+                .package_versions()
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("upgrade_v2 requires published package v2"))?;
+            (
+                CreateProposalParams::UpgradeV2 {
+                    digest: digest.clone(),
+                    exclusive,
+                    metadata: vec![("reason".to_string(), "upgrade_v2 test".to_string())],
+                },
+                type_package,
+                "upgrade_v2",
+            )
+        }
+    };
+    let create_tx =
+        build_create_proposal_transaction(hashi_ids, current_package_id, creator, proposal_params);
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "create Upgrade proposal failed"
+        "create {proposal_module} proposal failed"
     );
 
     let proposal_id = extract_proposal_id_from_response(&response)?;
     tracing::info!("upgrade proposal {proposal_id} created");
 
-    // 4. All other nodes vote (upgrade requires 100% quorum)
+    // 4. All other nodes vote.
     let upgrade_type_tag = TypeTag::Struct(Box::new(StructTag::new(
-        hashi_ids.package_id,
-        Identifier::from_static("upgrade"),
+        proposal_type_package,
+        Identifier::new(proposal_module)?,
         Identifier::from_static("Upgrade"),
         vec![],
     )));
@@ -374,7 +424,7 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         let voter = executor.sender();
         let vote_tx = build_vote_transaction(
             hashi_ids,
-            hashi_ids.package_id,
+            current_package_id,
             voter,
             proposal_id,
             upgrade_type_tag.clone(),
@@ -382,15 +432,27 @@ pub async fn execute_full_upgrade(networks: &mut TestNetworks) -> Result<Address
         let vote_resp = executor.execute(vote_tx).await?;
         anyhow::ensure!(
             vote_resp.transaction().effects().status().success(),
-            "vote on Upgrade proposal failed"
+            "vote on {proposal_module} proposal failed"
         );
     }
     tracing::info!("all nodes voted on upgrade proposal");
 
     // 5. Execute upgrade + publish + finalize in one PTB
     tracing::info!("executing upgrade (execute + publish + finalize in one PTB)...");
-    let upgrade_tx =
-        build_upgrade_execution_transaction(hashi_ids, current_package_id, proposal_id, compiled);
+    let upgrade_tx = match proposal {
+        UpgradeProposal::Legacy => build_upgrade_execution_transaction(
+            hashi_ids,
+            current_package_id,
+            proposal_id,
+            compiled,
+        ),
+        UpgradeProposal::V2 { .. } => build_upgrade_v2_execution_transaction(
+            hashi_ids,
+            current_package_id,
+            proposal_id,
+            compiled,
+        ),
+    };
     let upgrade_resp = executors[0].execute(upgrade_tx).await?;
     anyhow::ensure!(
         upgrade_resp.transaction().effects().status().success(),
