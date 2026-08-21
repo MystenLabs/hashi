@@ -135,8 +135,7 @@ calling `hashi::reconfig::end_reconfig`:
 entry fun end_reconfig(
     self: &mut Hashi,
     mpc_public_key: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    mpc_cert: CommitteeSignature,
     ctx: &TxContext,
 )
 ```
