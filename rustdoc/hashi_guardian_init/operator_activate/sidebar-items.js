@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ACTIVATION_HEARTBEAT_WAIT_BUFFER","CURRENT_SESSION_HEARTBEAT_RETRY_WINDOW"],"fn":["run","verify_activated_info","verify_oi_info_matches_provisioned_standby","verify_provisioned_standby_info","wait_for_activation_heartbeat_conditions"],"struct":["StandbyChecks"]};

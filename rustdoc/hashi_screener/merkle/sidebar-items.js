@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RISK_THRESHOLD"],"enum":["TransactionType"],"fn":["query_address_risk_level","query_transaction_risk_level"],"struct":["MerkleScienceRequest","MerkleScienceResponse"]};
