@@ -5,7 +5,7 @@
 > How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
 
 A withdrawal allows a user to redeem their `hBTC` on Sui for native BTC,
-sent to a user-specified address on Bitcoin. The process has four phases:
+sent to a user-specified address on Bitcoin. The process has five phases:
 
 ```mermaid
 graph LR

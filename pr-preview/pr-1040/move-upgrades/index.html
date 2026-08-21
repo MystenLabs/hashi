@@ -13,7 +13,7 @@
 
 <meta name="algolia-site-verification" content="BCA21DA2879818D2">
 <script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1040/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1040/assets/css/styles.b093abbf.css">
-<script src="/hashi/pr-preview/pr-1040/assets/js/runtime~main.208624e1.js" defer="defer"></script>
+<script src="/hashi/pr-preview/pr-1040/assets/js/runtime~main.2aad14d6.js" defer="defer"></script>
 <script src="/hashi/pr-preview/pr-1040/assets/js/main.04f476cf.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
@@ -73,7 +73,12 @@ longer enabled. Updated Hashi nodes detect that they support no enabled package
 version and halt autonomous mutations instead of falling back unsafely.</p>
 <p>Use this sequence for every upgrade:</p>
 <ol>
-<li class="">Build the exact Move package and record its digest in the proposal.</li>
+<li class="">Build the exact Move package and record its digest in the proposal. Create
+exclusive proposals with <code>--package-path</code>, which verifies the package&#x27;s
+<code>PACKAGE_VERSION</code> constant against the chain before proposing; the CLI
+refuses <code>--digest</code> for an exclusive upgrade unless
+<code>--allow-unverified-exclusive</code> explicitly acknowledges that the constant
+was not machine-checked.</li>
 <li class="">Release a node binary that understands both the currently active package and
 the proposed package.</li>
 <li class="">Restart validators one at a time. Each validator verifies healthy operation

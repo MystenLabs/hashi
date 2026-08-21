@@ -420,7 +420,12 @@ version and halt autonomous mutations instead of falling back unsafely.
 
 Use this sequence for every upgrade:
 
-1. Build the exact Move package and record its digest in the proposal.
+1. Build the exact Move package and record its digest in the proposal. Create
+   exclusive proposals with `--package-path`, which verifies the package's
+   `PACKAGE_VERSION` constant against the chain before proposing; the CLI
+   refuses `--digest` for an exclusive upgrade unless
+   `--allow-unverified-exclusive` explicitly acknowledges that the constant
+   was not machine-checked.
 2. Release a node binary that understands both the currently active package and
    the proposed package.
 3. Restart validators one at a time. Each validator verifies healthy operation
@@ -1315,8 +1320,7 @@ calling `hashi::reconfig::end_reconfig`:
 entry fun end_reconfig(
     self: &mut Hashi,
     mpc_public_key: vector<u8>,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    mpc_cert: CommitteeSignature,
     ctx: &TxContext,
 )
 ```
@@ -1558,7 +1562,7 @@ Source: https://mystenlabs.github.io/hashi/design/withdraw.md
 > How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
 
 A withdrawal allows a user to redeem their `hBTC` on Sui for native BTC,
-sent to a user-specified address on Bitcoin. The process has four phases:
+sent to a user-specified address on Bitcoin. The process has five phases:
 
 ```mermaid
 graph LR
@@ -2550,7 +2554,7 @@ Create proposals:
 hashi proposal create update-config <key> <value> [-m key=value]
 hashi proposal create update-mpc-config [--threshold-bps <N>] [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
 hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=value]
-hashi proposal create upgrade-v2 [--package-path <path> | --digest <hex>] --exclusive <true|false> [-m key=value]
+hashi proposal create upgrade-v2 [--package-path <path> | --digest <hex> [--allow-unverified-exclusive]] --exclusive <true|false> [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
 hashi proposal create abort-reconfig [--epoch <N>] [-m key=value]
@@ -2628,7 +2632,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | **UpdateConfig** | 2/3 | Change protocol parameters | `key` and type-prefixed `value` |
 | **UpdateMpcConfig** | 2/3 | Change MPC threshold/faulty/delta | `--threshold-bps`, `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
 | **Upgrade** | 2/3 | Publish a new package version | `--package-path` or `--digest` |
-| **UpgradeV2** | 2/3 | Publish with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value |
+| **UpgradeV2** | 2/3 | Publish with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
 | **AbortReconfig** | 2/3 | Abort a stuck reconfiguration | `--epoch` of pending reconfig |

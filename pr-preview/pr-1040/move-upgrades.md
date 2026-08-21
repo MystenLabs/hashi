@@ -59,7 +59,12 @@ version and halt autonomous mutations instead of falling back unsafely.
 
 Use this sequence for every upgrade:
 
-1. Build the exact Move package and record its digest in the proposal.
+1. Build the exact Move package and record its digest in the proposal. Create
+   exclusive proposals with `--package-path`, which verifies the package's
+   `PACKAGE_VERSION` constant against the chain before proposing; the CLI
+   refuses `--digest` for an exclusive upgrade unless
+   `--allow-unverified-exclusive` explicitly acknowledges that the constant
+   was not machine-checked.
 2. Release a node binary that understands both the currently active package and
    the proposed package.
 3. Restart validators one at a time. Each validator verifies healthy operation
