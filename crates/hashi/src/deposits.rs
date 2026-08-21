@@ -119,8 +119,10 @@ impl Hashi {
                 // Read from the held snapshot; `OnchainState::epoch()` would
                 // reacquire the same state lock.
                 let current_epoch = state.hashi().committees.epoch();
-                if let Some(cert) = &onchain_request.approval_cert
-                    && cert.epoch == current_epoch
+                if onchain_request
+                    .approval_cert
+                    .as_ref()
+                    .is_some_and(|cert| cert.epoch == current_epoch)
                 {
                     return Err(UnapprovedDepositError::AlreadyApprovedThisEpoch);
                 }
@@ -152,18 +154,15 @@ impl Hashi {
         &self,
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
-        let outpoint = bitcoin::OutPoint {
-            txid: deposit_request.utxo.id.txid.into(),
-            vout: deposit_request.utxo.id.vout,
-        };
+        let outpoint = deposit_request.utxo.id.into();
         // Read the threshold live from on-chain state so governance
         // updates take effect for new deposits without a restart.
         let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
-        let confirmation = self
+        let check_result = self
             .btc_monitor()
             .confirm_deposit(outpoint, confirmation_threshold)
             .await;
-        let txout = match confirmation {
+        let txout = match check_result {
             Ok(DepositConfirmation::Confirmed(txout)) => txout,
             Ok(DepositConfirmation::NotFound) => {
                 return Err(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(
@@ -189,6 +188,9 @@ impl Hashi {
             }
             Err(e @ DepositConfirmError::InvalidVout { .. }) => {
                 return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(e)));
+            }
+            Err(e @ DepositConfirmError::TimedOut) => {
+                return Err(UnapprovedDepositError::BitcoinConfirmFailed(anyhow!(e)));
             }
             Err(DepositConfirmError::Other(err)) => {
                 return Err(UnapprovedDepositError::BitcoinConfirmFailed(err));
@@ -476,6 +478,9 @@ pub enum ApprovedDepositError {
 
     #[error("Deposit processing timed out after {0:?}")]
     TimedOut(std::time::Duration),
+
+    #[error("Deposit confirmation checkpoint wait timed out")]
+    CheckpointWaitTimedOut,
 }
 
 impl ApprovedDepositError {
@@ -483,7 +488,7 @@ impl ApprovedDepositError {
         match self {
             Self::ExecutorInitFailed(_) => ApprovedDepositErrorKind::ExecutorInitFailed,
             Self::ConfirmDepositFailed(_) => ApprovedDepositErrorKind::ConfirmDepositFailed,
-            Self::TimedOut(_) => ApprovedDepositErrorKind::TimedOut,
+            Self::TimedOut(_) | Self::CheckpointWaitTimedOut => ApprovedDepositErrorKind::TimedOut,
         }
     }
 }
