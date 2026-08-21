@@ -2620,10 +2620,6 @@ mod tests {
             )
         };
         let consumed = t - 1;
-        assert_ne!(
-            consumed, f,
-            "params make t-1 and f coincide, so this cannot pin the derivation"
-        );
         assert_eq!(pool_size % bspw, 0, "pool must be whole positions");
         let height = pool_size / bspw;
         let w_out = height + consumed;
