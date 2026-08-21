@@ -572,15 +572,11 @@ pub(crate) async fn apply_onchain_config_overrides(
     use sui_sdk_types::StructTag;
     use sui_sdk_types::TypeTag;
 
-    let mut mpc_threshold_bps: Option<u64> = None;
     let mut mpc_max_faulty_bps: Option<u64> = None;
     let mut mpc_weight_reduction_allowed_delta: Option<u64> = None;
     let mut other_overrides: Vec<(String, ConfigValue)> = Vec::new();
     for (key, value) in overrides {
         match (key.as_str(), value) {
-            ("mpc_threshold_in_basis_points", ConfigValue::U64(v)) => {
-                mpc_threshold_bps = Some(*v);
-            }
             ("mpc_max_faulty_in_basis_points", ConfigValue::U64(v)) => {
                 mpc_max_faulty_bps = Some(*v);
             }
@@ -590,9 +586,8 @@ pub(crate) async fn apply_onchain_config_overrides(
             _ => other_overrides.push((key.clone(), value.clone())),
         }
     }
-    let has_mpc_overrides = mpc_threshold_bps.is_some()
-        || mpc_max_faulty_bps.is_some()
-        || mpc_weight_reduction_allowed_delta.is_some();
+    let has_mpc_overrides =
+        mpc_max_faulty_bps.is_some() || mpc_weight_reduction_allowed_delta.is_some();
 
     let nodes = networks.hashi_network.nodes();
 
@@ -633,7 +628,6 @@ pub(crate) async fn apply_onchain_config_overrides(
     if has_mpc_overrides {
         tracing::info!(
             "applying MPC config overrides atomically: \
-             threshold_bps={mpc_threshold_bps:?}, \
              max_faulty_bps={mpc_max_faulty_bps:?}, \
              weight_reduction_allowed_delta={mpc_weight_reduction_allowed_delta:?}"
         );
@@ -642,7 +636,6 @@ pub(crate) async fn apply_onchain_config_overrides(
             execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateMpcConfig {
-                threshold_bps: mpc_threshold_bps,
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
                 nonce_generation_protocol: None,
@@ -2544,24 +2537,39 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_onchain_config(
+                "mpc_max_faulty_in_basis_points",
+                hashi_types::move_types::ConfigValue::U64(2500),
+            )
+            .build()
+            .await?;
+
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+        }
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
 
         let nodes = test_networks.hashi_network().nodes();
-        let mpc_key_futures: Vec<_> = nodes
-            .iter()
-            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
-            .collect();
-        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
-        }
-
         let epoch = nodes[0].hashi().onchain_state().epoch();
 
+        wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
         let signing_manager = nodes[0]
             .hashi()
             .signing_manager_for(epoch)
-            .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
+            .expect("just waited for it");
         let pool_size = signing_manager.initial_presig_count();
         assert_pool_derivation(pool_size, &nodes[0]);
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
@@ -2773,10 +2781,6 @@ mod tests {
         TestNetworksBuilder::new()
             .with_nodes(4)
             .with_onchain_config(
-                "mpc_threshold_in_basis_points",
-                hashi_types::move_types::ConfigValue::U64(5000),
-            )
-            .with_onchain_config(
                 "mpc_max_faulty_in_basis_points",
                 hashi_types::move_types::ConfigValue::U64(2500),
             )
@@ -2793,7 +2797,7 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = build_avid_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        let test_networks = build_avid_networks(avid_fault_tolerant_builder()).await?;
         let nodes = test_networks.hashi_network().nodes();
         let epoch = nodes[0].hashi().onchain_state().epoch();
 

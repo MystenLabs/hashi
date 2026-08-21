@@ -68,7 +68,7 @@ entry fun start_reconfig(
     hashi::mpc_config::seed_absent_defaults(self.config_mut());
     // Pin the current MPC parameters so they stay fixed for the new epoch even
     // if governance changes them mid-epoch.
-    let config = hashi::mpc_config::pin(self.config());
+    let config = hashi::mpc_config::pin(self.config_mut());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(

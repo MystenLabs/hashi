@@ -1518,7 +1518,6 @@ mod test {
         Committee::new(
             vec![CommitteeMember::new(address, bls_pub, enc_pub, 1)],
             epoch,
-            10_000,
             0,
             5_000,
             0,

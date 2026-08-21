@@ -7,8 +7,6 @@ use hashi::{config::{Self, Config}, config_value};
 
 // ~~~~~~~ Constants ~~~~~~~
 
-const DEFAULT_THRESHOLD_IN_BASIS_POINTS: u64 = 3334;
-
 const DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA: u64 = 800;
 
 const DEFAULT_MAX_FAULTY_IN_BASIS_POINTS: u64 = 3333;
@@ -22,7 +20,9 @@ const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
 
 const MAX_BPS: u64 = 10000;
 
-const KEY_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_points";
+const MAX_FAULTY_BPS: u64 = 3333;
+
+const KEY_REMOVED_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_points";
 const KEY_MAX_FAULTY_IN_BASIS_POINTS: vector<u8> = b"mpc_max_faulty_in_basis_points";
 const KEY_WEIGHT_REDUCTION_ALLOWED_DELTA: vector<u8> = b"mpc_weight_reduction_allowed_delta";
 const KEY_NONCE_GENERATION_PROTOCOL: vector<u8> = b"mpc_nonce_generation_protocol";
@@ -33,12 +33,12 @@ const KEY_NONCE_ACCUMULATION_WINDOW_MS: vector<u8> = b"mpc_nonce_accumulation_wi
 #[allow(implicit_const_copy)]
 public(package) fun is_valid_value(key: &std::string::String, value: &config_value::Value): bool {
     let k = key.as_bytes();
-    if (k == &KEY_THRESHOLD_IN_BASIS_POINTS) {
-        value.is_u64() && (*value).as_u64() > 0 && (*value).as_u64() <= MAX_BPS
+    if (k == &KEY_REMOVED_THRESHOLD_IN_BASIS_POINTS) {
+        false
     } else if (k == &KEY_WEIGHT_REDUCTION_ALLOWED_DELTA) {
         value.is_u64() && (*value).as_u64() <= MAX_BPS
     } else if (k == &KEY_MAX_FAULTY_IN_BASIS_POINTS) {
-        value.is_u64() && (*value).as_u64() <= MAX_BPS
+        value.is_u64() && (*value).as_u64() > 0 && (*value).as_u64() <= MAX_FAULTY_BPS
     } else if (k == &KEY_NONCE_GENERATION_PROTOCOL) {
         value.is_u64() && (*value).as_u64() <= 1
     } else if (k == &KEY_NONCE_ACCUMULATION_WINDOW_MS) {
@@ -46,13 +46,6 @@ public(package) fun is_valid_value(key: &std::string::String, value: &config_val
     } else {
         true
     }
-}
-
-public(package) fun threshold_in_basis_points(config: &Config): u64 {
-    config
-        .try_get(KEY_THRESHOLD_IN_BASIS_POINTS)
-        .map!(|v| v.as_u64())
-        .destroy_or!(DEFAULT_THRESHOLD_IN_BASIS_POINTS)
 }
 
 public(package) fun weight_reduction_allowed_delta(config: &Config): u64 {
@@ -84,7 +77,6 @@ public(package) fun nonce_accumulation_window_ms(config: &Config): u64 {
 }
 
 public(package) fun seed_absent_defaults(config: &mut Config) {
-    seed_if_absent(config, KEY_THRESHOLD_IN_BASIS_POINTS, DEFAULT_THRESHOLD_IN_BASIS_POINTS);
     seed_if_absent(
         config,
         KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
@@ -99,17 +91,37 @@ public(package) fun seed_absent_defaults(config: &mut Config) {
     );
 }
 
+fun reset_if_out_of_range(config: &mut Config, key: vector<u8>, lo: u64, hi: u64, default: u64) {
+    config.try_get(key).map!(|v| v.as_u64()).do!(|value| if (value < lo || value > hi) {
+        config.upsert(key, config_value::new_u64(default));
+    });
+}
+
 fun seed_if_absent(config: &mut Config, key: vector<u8>, default: u64) {
     if (!config.contains(key)) {
         config.upsert(key, config_value::new_u64(default));
     };
 }
 
-public(package) fun init_defaults(config: &mut Config) {
-    config.upsert(
-        KEY_THRESHOLD_IN_BASIS_POINTS,
-        config_value::new_u64(DEFAULT_THRESHOLD_IN_BASIS_POINTS),
+fun repair_out_of_range(config: &mut Config) {
+    reset_if_out_of_range(
+        config,
+        KEY_MAX_FAULTY_IN_BASIS_POINTS,
+        1,
+        MAX_FAULTY_BPS,
+        DEFAULT_MAX_FAULTY_IN_BASIS_POINTS,
     );
+    let max_delta = max_faulty_in_basis_points(config) - 1;
+    clamp_at_most(config, KEY_WEIGHT_REDUCTION_ALLOWED_DELTA, max_delta);
+}
+
+fun clamp_at_most(config: &mut Config, key: vector<u8>, hi: u64) {
+    config.try_get(key).map!(|v| v.as_u64()).do!(|value| if (value > hi) {
+        config.upsert(key, config_value::new_u64(hi));
+    });
+}
+
+public(package) fun init_defaults(config: &mut Config) {
     config.upsert(
         KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
         config_value::new_u64(DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA),
@@ -128,18 +140,9 @@ public(package) fun init_defaults(config: &mut Config) {
     );
 }
 
-/// Snapshot the MPC parameters from `config` into a fresh store to pin onto a
-/// `Committee` for the epoch. The full key set is always materialized (using
-/// defaults for absent keys) and inserted in a fixed canonical order, so the
-/// snapshot's BCS encoding is deterministic. The committee is signed, so the
-/// Rust mirror (`move_types::Committee`'s `From`) must build this map in the
-/// same order with the same keys.
-public(package) fun pin(config: &Config): Config {
+public(package) fun pin(config: &mut Config): Config {
+    repair_out_of_range(config);
     let mut mpc = config::empty();
-    mpc.upsert(
-        KEY_THRESHOLD_IN_BASIS_POINTS,
-        config_value::new_u64(threshold_in_basis_points(config)),
-    );
     mpc.upsert(
         KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
         config_value::new_u64(weight_reduction_allowed_delta(config)),
@@ -162,18 +165,13 @@ public(package) fun pin(config: &Config): Config {
 // ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
-/// Build a pinned MPC parameter store directly from explicit values, in the
-/// same canonical key order as `pin`. Used by tests that construct committees
-/// without a full governed config.
 public(package) fun new_for_testing(
-    threshold_in_basis_points: u64,
     weight_reduction_allowed_delta: u64,
     max_faulty_in_basis_points: u64,
     nonce_generation_protocol: u64,
     nonce_accumulation_window_ms: u64,
 ): Config {
     let mut mpc = config::empty();
-    mpc.upsert(KEY_THRESHOLD_IN_BASIS_POINTS, config_value::new_u64(threshold_in_basis_points));
     mpc.upsert(
         KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
         config_value::new_u64(weight_reduction_allowed_delta),

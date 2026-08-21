@@ -616,7 +616,6 @@ pub struct Config {
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 
 pub use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-pub use hashi_types::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 pub use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
 impl Config {
@@ -669,15 +668,6 @@ impl Config {
         match self.config.get("bitcoin_deposit_time_delay_ms") {
             Some(ConfigValue::U64(v)) => *v,
             _ => 0,
-        }
-    }
-
-    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
-        match self.config.get("mpc_threshold_in_basis_points") {
-            Some(ConfigValue::U64(v)) => {
-                u16::try_from(*v).expect("mpc_threshold_in_basis_points exceeds u16::MAX")
-            }
-            _ => DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
         }
     }
 
@@ -937,7 +927,7 @@ mod tests {
     use super::*;
 
     fn empty_committee(epoch: u64) -> Committee {
-        Committee::new(vec![], epoch, 10_000, 0, 5_000, 0)
+        Committee::new(vec![], epoch, 0, 5_000, 0)
     }
 
     fn set_with(epoch: u64, pending: Option<u64>, committee_epochs: &[u64]) -> CommitteeSet {

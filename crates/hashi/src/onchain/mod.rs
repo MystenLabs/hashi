@@ -831,10 +831,6 @@ impl OnchainState {
         self.state().hashi().config.bitcoin_deposit_time_delay_ms()
     }
 
-    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
-        self.state().hashi().config.mpc_threshold_in_basis_points()
-    }
-
     pub fn mpc_nonce_generation_protocol(&self) -> u16 {
         self.state().hashi().config.mpc_nonce_generation_protocol()
     }
