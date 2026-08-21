@@ -19,6 +19,11 @@ pub const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 // stopping the parent terminates its enclaves); a future platform that can
 // resume preserved enclave memory would need an explicit activation-generation
 // fence before serving withdrawals.
+//
+// After withdraw-mode operator initialization, all Guardian log writes are
+// serialized. Each write checks that its complete failure interval ends before
+// the quiet-period boundary, and a heartbeat refreshes that boundary only after
+// its durable write succeeds.
 const _: () = assert!(
     HEARTBEAT_INTERVAL.as_secs() + MAX_S3_WRITE_FAILURE_INTERVAL.as_secs()
         < OTHER_SESSION_QUIET_PERIOD.as_secs()
@@ -28,6 +33,7 @@ pub mod attestation;
 pub mod ceremony_mode;
 pub mod enclave;
 pub mod info;
+mod log_writer;
 pub mod operator_init;
 pub mod rpc;
 pub mod s3_client; // used by the monitor
