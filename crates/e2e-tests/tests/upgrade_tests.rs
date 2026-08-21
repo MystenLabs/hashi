@@ -142,7 +142,12 @@ async fn test_upgrade_via_proposal() -> Result<()> {
         .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
         .collect::<Result<_>>()?;
 
-    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, new_package_id).await?;
+    let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+        &mut networks.sui_network.client.clone(),
+        hashi_ids.hashi_object_id,
+    )
+    .await?;
+    upgrade_flow::disable_version(&mut executors, hashi_ids, hashi_isv, 1, new_package_id).await?;
     info!("version 1 disabled");
 
     let mut builder = TransactionBuilder::new();

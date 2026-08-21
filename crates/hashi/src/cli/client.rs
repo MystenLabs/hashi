@@ -69,6 +69,12 @@ pub enum CreateProposalParams {
         pause: bool,
         metadata: Vec<(String, String)>,
     },
+    IgnoreMember {
+        target_validator_address: Address,
+        /// `true` proposes ignoring the member; `false` proposes re-admitting.
+        ignored: bool,
+        metadata: Vec<(String, String)>,
+    },
 }
 
 /// Live on-chain proposal detail fields not cached by `OnchainState`.
@@ -100,6 +106,11 @@ pub struct HashiClient {
     onchain_state: OnchainState,
     /// Hashi package and object IDs
     hashi_ids: HashiIds,
+    /// The Hashi shared object's initial shared version, fetched once at
+    /// construction. Immutable for the object's lifetime, and needed to
+    /// build fully-resolved shared inputs (see
+    /// [`build_create_proposal_transaction`]).
+    hashi_initial_shared_version: u64,
     /// Optional executor for signing and submitting transactions
     executor: Option<SuiTxExecutor>,
 }
@@ -159,6 +170,10 @@ impl HashiClient {
         .await
         .context("Failed to initialize on-chain state")?;
 
+        let hashi_initial_shared_version =
+            fetch_initial_shared_version(&mut onchain_state.client(), hashi_ids.hashi_object_id)
+                .await?;
+
         // Try to create executor if keypair is available
         let executor = match config.load_keypair()? {
             Some(signer) => {
@@ -178,6 +193,7 @@ impl HashiClient {
         Ok(Self {
             onchain_state,
             hashi_ids,
+            hashi_initial_shared_version,
             executor,
         })
     }
@@ -372,6 +388,11 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize UpdateGuardian")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::IgnoreMember => {
+                        let p: move_types::Proposal<move_types::IgnoreMember> =
+                            bcs::from_bytes(value_bytes).context("deserialize IgnoreMember")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::Unknown(s) => {
                         anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
                     }
@@ -460,6 +481,7 @@ impl HashiClient {
         let validator_address = self.resolve_validator_address()?;
         Ok(build_vote_transaction(
             self.hashi_ids,
+            self.hashi_initial_shared_version,
             self.call_package(),
             validator_address,
             proposal_id,
@@ -479,14 +501,17 @@ impl HashiClient {
 
         let mut builder = TransactionBuilder::new();
 
+        // Fully-resolved shared input: see build_vote_transaction.
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
                 .as_shared()
                 .with_mutable(true),
         );
         let validator_address_arg = builder.pure(&validator_address);
         let proposal_id_arg = builder.pure(&proposal_id);
 
+        // Active package for the same linkage reason as build_vote_transaction.
         builder.move_call(
             Function::new(
                 self.call_package(),
@@ -500,6 +525,16 @@ impl HashiClient {
         Ok(builder)
     }
 
+    /// The full deployed version -> package id history.
+    pub fn package_versions(&self) -> hashi_types::move_types::PackageVersions {
+        self.onchain_state.state().package_versions().clone()
+    }
+
+    /// The scraped on-chain state backing this client.
+    pub fn onchain_state(&self) -> &OnchainState {
+        &self.onchain_state
+    }
+
     /// Build a proposal creation transaction.
     pub fn build_create_proposal_transaction(
         &self,
@@ -508,6 +543,7 @@ impl HashiClient {
         let validator_address = self.resolve_validator_address()?;
         Ok(build_create_proposal_transaction(
             self.hashi_ids,
+            self.hashi_initial_shared_version,
             self.call_package(),
             validator_address,
             params,
@@ -542,6 +578,7 @@ impl HashiClient {
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
+            ProposalType::IgnoreMember => "ignore_member",
             ProposalType::Upgrade => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
@@ -553,14 +590,17 @@ impl HashiClient {
         };
 
         let mut builder = TransactionBuilder::new();
+        // Fully-resolved shared inputs: see build_create_proposal_transaction.
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
                 .as_shared()
                 .with_mutable(true),
         );
         let proposal_id_arg = builder.pure(&proposal_id);
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .with_version(1)
                 .as_shared()
                 .with_mutable(false),
         );
@@ -581,21 +621,33 @@ impl HashiClient {
 /// Build a `TransactionBuilder` for creating a proposal, given `HashiIds` and params.
 ///
 /// This is a standalone function so it can be reused outside `HashiClient` (e.g. in tests).
+///
+/// `call_package` is the active package id. Proposal modules introduced by an
+/// upgrade (such as `ignore_member`) only exist at an upgraded address, and
+/// all governance calls use one package generation consistently.
 pub fn build_create_proposal_transaction(
     hashi_ids: HashiIds,
+    hashi_initial_shared_version: u64,
     call_package: Address,
     validator_address: Address,
     params: CreateProposalParams,
 ) -> TransactionBuilder {
     let mut builder = TransactionBuilder::new();
 
+    // Shared inputs are fully resolved (initial shared version + mutability)
+    // so the fullnode's simulate-time resolver never has to inspect the
+    // called function's signature: that inspection fails with
+    // INVALID_LINKAGE on sui >= 1.76 fullnodes for modules introduced by a
+    // package upgrade (e.g. ignore_member).
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
+            .with_version(hashi_initial_shared_version)
             .as_shared()
             .with_mutable(true),
     );
     let clock_arg = builder.object(
         ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .with_version(1)
             .as_shared()
             .with_mutable(false),
     );
@@ -774,6 +826,31 @@ pub fn build_create_proposal_transaction(
                 ],
             );
         }
+        CreateProposalParams::IgnoreMember {
+            target_validator_address,
+            ignored,
+            metadata,
+        } => {
+            let target_arg = builder.pure(&target_validator_address);
+            let ignored_arg = builder.pure(&ignored);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    // The ignore_member module exists only from v2 on.
+                    call_package,
+                    Identifier::from_static("ignore_member"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    target_arg,
+                    ignored_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
     }
 
     builder
@@ -906,14 +983,20 @@ fn build_metadata(
 /// committee member.
 pub fn build_vote_transaction(
     hashi_ids: HashiIds,
+    hashi_initial_shared_version: u64,
     call_package: Address,
     validator_address: Address,
     proposal_id: Address,
     type_arg: TypeTag,
 ) -> TransactionBuilder {
     let mut builder = TransactionBuilder::new();
+    // Fully-resolved shared inputs: the type arg may name an
+    // upgrade-introduced type, and the fullnode's simulate-time resolver
+    // fails with INVALID_LINKAGE on those when it has to inspect the call
+    // to infer input mutability (sui >= 1.76).
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
+            .with_version(hashi_initial_shared_version)
             .as_shared()
             .with_mutable(true),
     );
@@ -921,10 +1004,16 @@ pub fn build_vote_transaction(
     let proposal_id_arg = builder.pure(&proposal_id);
     let clock_arg = builder.object(
         ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .with_version(1)
             .as_shared()
             .with_mutable(false),
     );
 
+    // Call through the active package: a transaction's linkage cannot call
+    // the original package while a type argument references an
+    // upgrade-introduced type (exact-v1 vs at-least-v2 conflict). Every
+    // module rides along in an upgrade, and v1-era type args unify fine
+    // under a v2 call, so latest is always safe.
     builder.move_call(
         Function::new(
             call_package,
@@ -940,21 +1029,39 @@ pub fn build_vote_transaction(
 
 /// Get the TypeTag for a proposal type (from on-chain type)
 ///
-/// Returns an error if the proposal type is `Unknown`.
+/// A Move type's tag carries its DEFINING package's address forever, so
+/// v1-era proposal types are addressed at `original_package_id` while types
+/// introduced by an upgrade resolve their defining version through
+/// `packages`.
+///
+/// Returns an error if the proposal type is `Unknown`, or defined by a
+/// package version not deployed on this chain.
 pub fn get_proposal_type_arg(
-    package_id: Address,
+    packages: &hashi_types::move_types::PackageVersions,
+    original_package_id: Address,
     proposal_type: &crate::onchain::types::ProposalType,
 ) -> Result<TypeTag> {
     use crate::onchain::types::ProposalType;
+    use hashi_types::move_types::MoveType as _;
 
-    let (module, name) = match proposal_type {
-        ProposalType::Upgrade => ("upgrade", "Upgrade"),
-        ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
-        ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
-        ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
-        ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
-        ProposalType::AbortReconfig => ("abort_reconfig", "AbortReconfig"),
-        ProposalType::UpdateGuardian => ("update_guardian", "UpdateGuardian"),
+    let (package_id, module, name) = match proposal_type {
+        ProposalType::Upgrade => (original_package_id, "upgrade", "Upgrade"),
+        ProposalType::UpdateConfig => (original_package_id, "update_config", "UpdateConfig"),
+        ProposalType::EnableVersion => (original_package_id, "enable_version", "EnableVersion"),
+        ProposalType::DisableVersion => (original_package_id, "disable_version", "DisableVersion"),
+        ProposalType::EmergencyPause => (original_package_id, "emergency_pause", "EmergencyPause"),
+        ProposalType::AbortReconfig => (original_package_id, "abort_reconfig", "AbortReconfig"),
+        ProposalType::UpdateGuardian => (original_package_id, "update_guardian", "UpdateGuardian"),
+        ProposalType::IgnoreMember => (
+            packages
+                .get(hashi_types::move_types::IgnoreMember::PACKAGE_VERSION)
+                .context(
+                    "ignore_member is introduced by package v2, which is not deployed on this \
+                     chain yet",
+                )?,
+            hashi_types::move_types::IgnoreMember::MODULE,
+            hashi_types::move_types::IgnoreMember::NAME,
+        ),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

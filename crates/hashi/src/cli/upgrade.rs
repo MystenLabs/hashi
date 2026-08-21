@@ -225,6 +225,7 @@ pub fn build_upgrade_execution_transaction(
 /// `hashi_ids.package_id`.
 pub fn build_execute_proposal_transaction(
     hashi_ids: HashiIds,
+    hashi_initial_shared_version: u64,
     proposal_id: Address,
     execute_package_id: Address,
     proposal_module: &str,
@@ -233,14 +234,21 @@ pub fn build_execute_proposal_transaction(
         .map_err(|e| anyhow!("invalid proposal module {proposal_module:?}: {e}"))?;
 
     let mut builder = TransactionBuilder::new();
+    // Shared inputs are fully resolved (initial shared version + mutability)
+    // so the fullnode's simulate-time resolver never has to inspect the
+    // called function's signature: that inspection fails with
+    // INVALID_LINKAGE on sui >= 1.76 fullnodes for modules introduced by a
+    // package upgrade (e.g. ignore_member).
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
+            .with_version(hashi_initial_shared_version)
             .as_shared()
             .with_mutable(true),
     );
     let proposal_id_arg = builder.pure(&proposal_id);
     let clock_arg = builder.object(
         ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .with_version(1)
             .as_shared()
             .with_mutable(false),
     );

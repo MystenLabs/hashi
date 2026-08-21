@@ -11,7 +11,7 @@
 #[allow(unused_function, unused_field)]
 module hashi::committee_set;
 
-use hashi::{committee::{Self, Committee}, config::{Self, Config}};
+use hashi::{committee::{Self, Committee}, config::{Self, Config}, config_value};
 use std::string::String;
 use sui::{
     bag::Bag,
@@ -19,6 +19,27 @@ use sui::{
     bls12381::{UncompressedG1, bls12381_min_pk_verify, g1_from_bytes, g1_to_uncompressed_g1},
     group_ops::Element
 };
+
+// ~~~~~~~ Constants ~~~~~~~
+
+/// `MemberInfo.extra_fields` key holding the governance "ignored" flag as a
+/// `Bool` value. An absent key means not ignored, so members registered
+/// before this key existed need no migration.
+///
+/// The flag lives in `extra_fields` only because `MemberInfo`'s layout is
+/// frozen on the deployed network.
+///
+/// TODO(pre-mainnet-wipe): when testnet is wiped and the Move versions are
+/// squashed before mainnet, promote this to a root-level `ignored: bool`
+/// field on `MemberInfo` and delete this key (and its Rust mirror
+/// `MEMBER_IGNORED_KEY` / the `extra_fields` decode in
+/// `convert_move_member_info`).
+const MEMBER_IGNORED_KEY: vector<u8> = b"ignored";
+
+// ~~~~~~~ Errors ~~~~~~~
+
+#[error(code = 0)]
+const EMemberNotRegistered: vector<u8> = b"No member is registered under this validator address";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -89,9 +110,13 @@ public struct MemberInfo has store {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     next_epoch_encryption_public_key: vector<u8>,
-    /// Open-ended per-member extension slot. Empty today; lets future
-    /// upgrades attach new member data (e.g. per-protocol keys) without a
-    /// MemberInfoV2 migration.
+    /// Open-ended per-member extension slot; lets future upgrades attach new
+    /// member data (e.g. per-protocol keys) without a MemberInfoV2 migration.
+    ///
+    /// Carries the governance flags (`MEMBER_IGNORED_KEY`) as typed values
+    /// because MemberInfo's layout is frozen on the deployed network. When
+    /// testnet is wiped before mainnet, promote them to real `bool` fields
+    /// on MemberInfo and delete the keys.
     extra_fields: Config,
 }
 
@@ -230,6 +255,35 @@ public(package) fun set_operator_address(
     let member = self.member_mut(validator_address);
     member.assert_authorized(ctx);
     member.operator_address = operator_address;
+}
+
+/// Set or clear the governance "ignored" flag on a registered member.
+///
+/// Unlike the operator-gated `set_*` functions above, this deliberately has
+/// no `assert_authorized`: it is a governance write reachable only through
+/// the quorum-gated `ignore_member::execute` — `public(package)` visibility
+/// is the gate.
+///
+/// The flag is only read at committee formation (`start_reconfig`), so it
+/// takes effect at the next formation; the current epoch's committee is
+/// never altered.
+public(package) fun set_member_ignored(
+    self: &mut CommitteeSet,
+    validator_address: address,
+    ignored: bool,
+) {
+    assert!(self.has_member(validator_address), EMemberNotRegistered);
+    self
+        .member_mut(validator_address)
+        .extra_fields
+        .upsert(MEMBER_IGNORED_KEY, config_value::new_bool(ignored));
+}
+
+/// Whether the registered member is currently flagged as ignored by
+/// governance. Aborts if no member is registered under this address.
+public(package) fun is_member_ignored(self: &CommitteeSet, validator_address: address): bool {
+    assert!(self.has_member(validator_address), EMemberNotRegistered);
+    self.member(validator_address).is_ignored()
 }
 
 public(package) fun start_reconfig(
@@ -390,8 +444,25 @@ fun new_committee_from_validator_set(
     config: Config,
     ctx: &TxContext,
 ): Committee {
-    let epoch = ctx.epoch();
-    let mut validator_set = sui_system.active_validator_voting_powers();
+    self.new_committee_from_voting_powers(
+        ctx.epoch(),
+        sui_system.active_validator_voting_powers(),
+        config,
+    )
+}
+
+/// Build a committee for `epoch` from a validator -> voting-power map,
+/// keeping only validators that are registered members with usable keys and
+/// that governance has not flagged as ignored.
+///
+/// The iteration order of `validator_set` determines member order, which is
+/// load-bearing: it is the BLS signers-bitmap index and the MPC party id.
+fun new_committee_from_voting_powers(
+    self: &CommitteeSet,
+    epoch: u64,
+    mut validator_set: sui::vec_map::VecMap<address, u64>,
+    config: Config,
+): Committee {
     let g1_identity = g1_to_uncompressed_g1(&sui::bls12381::g1_identity());
 
     let mut committee_members = vector[];
@@ -405,6 +476,13 @@ fun new_committee_from_validator_set(
         };
 
         let member = self.member(validator_address);
+
+        // If governance has flagged the member as ignored, skip them: they
+        // are treated as not part of the committee, and total weight re-sums
+        // without them.
+        if (member.is_ignored()) {
+            continue
+        };
 
         // If the member has not registered a valid bls public key, skip them
         if (sui::group_ops::equal(&member.next_epoch_public_key, &g1_identity)) {
@@ -440,6 +518,12 @@ fun new_committee_from_validator_set(
 fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
     let sender = ctx.sender();
     sender == self.validator_address || sender == self.operator_address
+}
+
+/// Whether governance has flagged this member as ignored. An absent key
+/// means not ignored.
+fun is_ignored(self: &MemberInfo): bool {
+    self.extra_fields.try_get(MEMBER_IGNORED_KEY).map!(|value| value.as_bool()).destroy_or!(false)
 }
 
 fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {
@@ -541,6 +625,19 @@ public fun set_pending_reconfig_for_testing(self: &mut CommitteeSet, committee: 
 #[test_only]
 public fun set_mpc_public_key_for_testing(self: &mut CommitteeSet, mpc_public_key: vector<u8>) {
     self.mpc_public_key = mpc_public_key;
+}
+
+#[test_only]
+/// Exercise committee formation (including the registration/key/ignored skip
+/// branches) without a SuiSystemState by supplying the voting-power map
+/// directly.
+public fun new_committee_from_voting_powers_for_testing(
+    self: &CommitteeSet,
+    epoch: u64,
+    validator_set: sui::vec_map::VecMap<address, u64>,
+    config: Config,
+): Committee {
+    self.new_committee_from_voting_powers(epoch, validator_set, config)
 }
 
 #[test_only]

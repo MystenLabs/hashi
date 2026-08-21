@@ -467,6 +467,11 @@ pub struct MemberInfo {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Option<EncryptionPublicKey>,
+
+    /// Governance "ignored" flag from `extra_fields`: when set, the next
+    /// committee formation skips this member. The current epoch's committee
+    /// is unaffected.
+    pub ignored: bool,
 }
 
 impl fmt::Debug for MemberInfo {
@@ -497,6 +502,7 @@ impl fmt::Debug for MemberInfo {
                     .as_ref()
                     .map(|b| Base64("EncryptionPublicKey", b.as_slice())),
             )
+            .field("ignored", &self.ignored)
             .finish()
     }
 }
@@ -574,6 +580,7 @@ pub enum ProposalType {
     EmergencyPause,
     AbortReconfig,
     UpdateGuardian,
+    IgnoreMember,
     Unknown(String),
 }
 
@@ -587,6 +594,7 @@ impl ProposalType {
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
+            ProposalType::IgnoreMember => "ignore_member",
             ProposalType::Unknown(_) => "unknown",
         }
     }
@@ -600,6 +608,7 @@ impl ProposalType {
             "emergency_pause",
             "abort_reconfig",
             "update_guardian",
+            "ignore_member",
             "unknown",
         ]
     }
