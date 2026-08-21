@@ -136,10 +136,74 @@ COPY --from=core-llvm . /
 COPY --from=core-libffi . /
 COPY --from=core-gcc . /
 COPY --from=user-cpio . /
-COPY --from=kernel /bzImage .
-COPY --from=kernel /kernel.config .
 
-FROM base AS build
+# The enclave workspace is the guardian's real dependency closure — just
+# hashi-guardian and hashi-types under the root manifest — so the on-disk
+# workspace IS what `cargo build -p hashi-guardian` resolves. `-p` does not
+# narrow resolution: cargo resolves every on-disk workspace member,
+# dev-dependencies included, so copying all of crates/ would drag test-only
+# dependencies into this build. Some of those (`move-binary-format`,
+# `move-core-types`) live in the sui repo under paths its root workspace
+# `exclude`s, which this stage's cargo cannot resolve at all (#960) — and none
+# of them is an enclave input.
+#
+# The committed root Cargo.lock is the single source of version provenance.
+# `cargo fetch` re-resolves the narrowed workspace seeded by that lock — pure
+# pruning, never new picks — and the assertion after it proves that: every
+# package in the rewritten lock must appear in the root lock with an identical
+# version, source, and checksum. The build then compiles exactly that with
+# --frozen. There is no separately generated enclave lockfile to keep in sync;
+# CI (guardian-enclave-resolve) runs this stage per PR and per merge.
+#
+# Deliberately ARG-free: `make resolve-check` needs no build args, and the
+# fetch layer caches across commits.
+FROM base AS resolve
+COPY Cargo.toml /Cargo.toml
+COPY Cargo.lock /Cargo.lock
+COPY crates/hashi-guardian /crates/hashi-guardian
+COPY crates/hashi-types /crates/hashi-types
+WORKDIR /
+RUN <<-EOF
+	set -eu
+	cp /Cargo.lock /root-Cargo.lock
+	cargo fetch
+	# One "name|version|source|checksum" line per [[package]] paragraph.
+	# Tuples only, never whole paragraphs: narrowing legitimately rewrites the
+	# dependencies arrays of retained packages (name de-disambiguation once a
+	# duplicate version prunes away, optional edges of dropped members).
+	canon() {
+		in=0; n=; v=; s=; c=
+		while IFS= read -r l; do
+			case "$l" in
+			'[[package]]')
+				[ "$in" = 0 ] || printf '%s|%s|%s|%s\n' "$n" "$v" "$s" "$c"
+				in=1; n=; v=; s=; c= ;;
+			'['*)
+				[ "$in" = 0 ] || printf '%s|%s|%s|%s\n' "$n" "$v" "$s" "$c"
+				in=0 ;;
+			'name = '*) [ "$in" = 0 ] || n="${l#name = }" ;;
+			'version = '*) [ "$in" = 0 ] || v="${l#version = }" ;;
+			'source = '*) [ "$in" = 0 ] || s="${l#source = }" ;;
+			'checksum = '*) [ "$in" = 0 ] || c="${l#checksum = }" ;;
+			esac
+		done < "$1"
+		[ "$in" = 0 ] || printf '%s|%s|%s|%s\n' "$n" "$v" "$s" "$c"
+	}
+	canon /root-Cargo.lock | sort > /root.pkgs
+	canon /Cargo.lock | sort > /slice.pkgs
+	extra="$(grep -Fxv -f /root.pkgs /slice.pkgs || true)"
+	if [ -n "$extra" ]; then
+		echo "ERROR: resolution picked packages the committed root Cargo.lock does not pin:" >&2
+		echo "$extra" >&2
+		echo "The enclave must compile exactly what the root lock records. Update" >&2
+		echo "Cargo.toml and Cargo.lock together (any cargo build rewrites the lock)." >&2
+		exit 1
+	fi
+	echo "enclave lock subset OK: $(wc -l < /slice.pkgs) of $(wc -l < /root.pkgs) root packages"
+	rm /root-Cargo.lock /root.pkgs /slice.pkgs
+EOF
+
+FROM resolve AS build
 ARG BUCKET_NAME
 ARG AWS_REGION=us-east-1
 ARG GIT_REVISION
@@ -153,34 +217,16 @@ ARG FEATURES=""
 ARG CEREMONY_MODE=""
 RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
 ENV GIT_REVISION=${GIT_REVISION}
-COPY crates /crates
-COPY Cargo.toml /Cargo.toml
-# Keep test-only code out of the enclave build. `-p hashi-guardian` does not
-# narrow dependency resolution: cargo resolves every workspace member's
-# dependencies, dev-dependencies included, so the whole workspace has to
-# resolve here. `move-binary-format` and `move-core-types` live in the sui repo
-# under paths its root workspace `exclude`s, and this build's cargo will not
-# resolve a git package excluded that way — it fails with "no matching package
-# named `move-binary-format` found" even though the fetched checkout does
-# contain the manifest. Nothing dropped below is an enclave input: e2e-tests and
-# hashi-monitor are test-only crates (hashi-monitor is here solely because its
-# `path` dev-dependency on e2e-tests must exist on disk to load), and the two
-# deps are used only by crates/hashi's tests, which this build never compiles.
-# Dropping them also keeps the enclave's build inputs minimal.
-RUN rm -rf /crates/e2e-tests /crates/hashi-monitor \
- && sed -i '/^move-binary-format\.workspace/d; /^move-core-types\.workspace/d' /crates/hashi/Cargo.toml
-# Lock for the pruned workspace above, so the build stays `--locked`. It is the
-# root lock minus the entries only those crates needed — same versions, same
-# checksums, nothing re-resolved — so the enclave still compiles exactly what
-# the workspace resolves to. Regenerate with `make enclave-lock` and keep it in
-# sync; CI (guardian-enclave-lock) fails if it drifts.
-COPY docker/hashi-guardian/enclave-Cargo.lock /Cargo.lock
-
-WORKDIR /
 ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
-RUN cargo build --locked --no-default-features --release --target "$TARGET" -p hashi-guardian ${FEATURES:+--features "$FEATURES"}
+RUN --network=none cargo build --frozen --no-default-features --release --target "$TARGET" -p hashi-guardian ${FEATURES:+--features "$FEATURES"}
+
+# The kernel joins only here: the resolve stage (CI's cheap gate) never waits
+# on it, and the cargo build above runs concurrently with the kernel stage
+# instead of behind it. eif_build below reads these two paths.
+COPY --from=kernel /bzImage /bzImage
+COPY --from=kernel /kernel.config /kernel.config
 
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1

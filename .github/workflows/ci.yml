@@ -1,7 +1,12 @@
 name: CI
 
+# The push trigger runs only guardian-enclave-resolve (the other jobs skip it):
+# the enclave EIF is built unattended on hosts from a clone of main, so a merge
+# whose base moved since its last PR run must not land unresolvable there.
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
   schedule: [cron: "40 1 * * *"]
 
@@ -14,6 +19,7 @@ env:
 
 jobs:
   test:
+    if: github.event_name != 'push'
     runs-on: ubuntu-ghcloud
 
     steps:
@@ -85,6 +91,7 @@ jobs:
       - run: make is-dirty
 
   lint:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
 
     steps:
@@ -117,25 +124,25 @@ jobs:
 
       - run: make is-dirty
 
-  # The enclave build resolves a pruned workspace and passes --locked, so its
-  # lock is committed (docker/hashi-guardian/enclave-Cargo.lock). Regenerate it
-  # here and fail if it drifts: otherwise a workspace dependency change lands
-  # green and only breaks later, when someone actually needs to build an EIF.
-  # The full EIF build (guardian-enclave.yml) is workflow_dispatch only and so
-  # gates nothing on merge; this is the cheap check that does.
-  guardian-enclave-lock:
+  # The full EIF build (guardian-enclave.yml) is workflow_dispatch only, so
+  # nothing heavy gates a merge. This runs the EIF build's own `resolve` stage:
+  # the enclave toolchain re-resolves the {hashi-guardian, hashi-types} slice
+  # seeded by the committed root Cargo.lock, then asserts the result is a
+  # strict subset of that lock. ~2 minutes, and it fails on both ways the
+  # enclave build can rot: a dependency its cargo cannot resolve (#960), or a
+  # resolution that no longer matches the root lock's pins.
+  guardian-enclave-resolve:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Regenerate the enclave lock
-        run: make -C docker/hashi-guardian enclave-lock
-
-      - run: make is-dirty
+      - name: Resolve the enclave workspace against the root lock
+        run: make -C docker/hashi-guardian resolve-check
 
   docs:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
 
     steps:

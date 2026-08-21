@@ -14,7 +14,7 @@ default: out/nitro.eif
 out:
 	mkdir -p out
 
-out/nitro.eif: $(shell git ls-files ../../crates/hashi-guardian ../../crates/hashi-types) | out
+out/nitro.eif: $(shell git ls-files ../../Cargo.toml ../../Cargo.lock ../../crates/hashi-guardian ../../crates/hashi-types .) | out
 	docker build \
 		--pull \
 		--tag $(REGISTRY)/guardian-enclave \
@@ -48,11 +48,18 @@ run-debug: out/nitro.eif
 		--debug-mode \
 		--attach-console
 
-# Regenerate the pruned lock the enclave build uses (see the Containerfile).
-# Run this whenever a workspace dependency changes, and commit the result.
-.PHONY: enclave-lock
-enclave-lock:
-	./scripts/gen-enclave-lock.sh
+# Reproduce the resolution + root-lock subset assertion the EIF build performs,
+# in the EIF build's own toolchain, without building the EIF. CI runs this per
+# PR and per merge (guardian-enclave-resolve).
+.PHONY: resolve-check
+resolve-check:
+	docker build \
+		--pull \
+		--progress=plain \
+		--platform linux/amd64 \
+		--target resolve \
+		-f Containerfile \
+		../..
 
 .PHONY: clean
 clean:
