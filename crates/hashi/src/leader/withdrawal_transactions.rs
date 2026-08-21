@@ -1085,7 +1085,10 @@ impl LeaderService {
     pub(super) fn process_signed_withdrawal_txns(&mut self) {
         debug!("Entering process_signed_withdrawal_txns");
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.is_fully_signed());
+        // A confirmed txn lingers in the hot bag until the archival GC moves
+        // it; it is fully signed, so without the second clause it would be
+        // re-picked for broadcast/confirm every checkpoint forever.
+        withdrawal_txns.retain(|p| p.is_fully_signed() && !p.is_confirmed());
         withdrawal_txns.sort_by_key(|p| p.created_timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -1153,7 +1156,7 @@ impl LeaderService {
     /// Drains the BTC-block-triggered withdrawal check queue into its separate bounded task pool.
     fn process_pending_btc_block_withdrawal_checks(&mut self) {
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.is_fully_signed());
+        withdrawal_txns.retain(|p| p.is_fully_signed() && !p.is_confirmed());
         withdrawal_txns.sort_by_key(|p| p.created_timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -1258,6 +1261,12 @@ impl LeaderService {
                 // until the next confirm.
                 self.utxo_cleanup_scan_needed = true;
                 self.utxo_cleanup_scan_target = self.utxo_cleanup_scan_target.max(checkpoint);
+                // Same protocol for the deferred archival: the confirm left
+                // the txn (and its requests) in the hot containers with only
+                // the confirmed timestamp distinguishing them.
+                self.withdrawal_archive_scan_needed = true;
+                self.withdrawal_archive_scan_target =
+                    self.withdrawal_archive_scan_target.max(checkpoint);
             }
             Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock) => {
                 self.withdrawal_broadcast_retry_tracker

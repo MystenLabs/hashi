@@ -18,6 +18,7 @@ use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::cli::types::display;
+use crate::onchain::types::WithdrawalStatus;
 use crate::onchain::types::WithdrawalTransaction;
 
 pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
@@ -199,12 +200,27 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
             "No sender available: pass --sender (the refund recipient) or configure a keypair",
         )?;
 
-    let builder = crate::sui_tx_executor::build_cancel_withdrawal(
+    // Resolve the active version's package so the cancel runs the bytecode
+    // generation whose committed-request gate matches the chain's state
+    // (v1's bag-membership gate misses v2 in-place-committed requests).
+    let call_package = crate::onchain::OnchainState::new_reader(
+        &config.sui_rpc_url,
         hashi_ids,
-        hashi_ids.package_id,
-        &req_addr,
-        sender,
-    );
+        None,
+        crate::onchain::ScrapeScope::GovernanceOnly,
+    )
+    .await
+    .ok()
+    .and_then(|state| {
+        let guard = state.state();
+        let version = guard
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()?;
+        guard.package_versions().get(version)
+    })
+    .unwrap_or(hashi_ids.package_id);
+    let builder =
+        crate::sui_tx_executor::build_cancel_withdrawal(hashi_ids, call_package, &req_addr, sender);
 
     match tx_opts.mode() {
         TxMode::SerializeUnsigned => print_info("Building unsigned withdrawal cancellation..."),
@@ -244,7 +260,10 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     println!("\n{}", "Withdrawal Status".bold());
     println!("{}", "━".repeat(60).dimmed());
 
-    // Check pending request queue first
+    // Check the mirrored request map first. With deferred archival a request
+    // stays here for its whole live lifecycle — Requested/Approved, then
+    // Processing/Signed once committed into a withdrawal txn, then Confirmed
+    // until the archival GC moves it to the processed archive.
     if let Some(wr) = withdrawal_requests.iter().find(|w| w.id == req_addr) {
         println!(
             "  {} {}",
@@ -267,99 +286,85 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
             "Requested:".bold(),
             display::format_timestamp(wr.created_timestamp_ms)
         );
-        println!();
 
-        let status_label = if wr.status.is_approved() {
-            "Approved".green()
-        } else {
-            "Requested".yellow()
-        };
+        match wr.status {
+            WithdrawalStatus::Requested | WithdrawalStatus::Approved => {
+                println!();
+                let status_label = if wr.status.is_approved() {
+                    "Approved".green()
+                } else {
+                    "Requested".yellow()
+                };
 
-        let step = if wr.status.is_approved() { 2 } else { 1 };
-        println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
-        println!(
-            "    {} Requested",
-            if step >= 1 {
-                "[done]".green()
-            } else {
-                "[    ]".dimmed()
+                let step = if wr.status.is_approved() { 2 } else { 1 };
+                println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
+                println!(
+                    "    {} Requested",
+                    if step >= 1 {
+                        "[done]".green()
+                    } else {
+                        "[    ]".dimmed()
+                    }
+                );
+                println!(
+                    "    {} Approved",
+                    if step >= 2 {
+                        "[done]".green()
+                    } else {
+                        "[    ]".dimmed()
+                    }
+                );
+                println!("    {} Committed", "[    ]".dimmed());
+                println!("    {} Signed", "[    ]".dimmed());
+                println!("    {} Broadcast", "[    ]".dimmed());
+                println!("    {} Confirmed", "[    ]".dimmed());
             }
-        );
-        println!(
-            "    {} Approved",
-            if step >= 2 {
-                "[done]".green()
-            } else {
-                "[    ]".dimmed()
+            // Committed into a withdrawal txn (BTC drained): render the txn's
+            // signing progress, looked up by the request's withdrawal_txn_id.
+            WithdrawalStatus::Processing | WithdrawalStatus::Signed => {
+                let txn = wr
+                    .withdrawal_txn_id
+                    .and_then(|id| withdrawal_txns.iter().find(|p| p.id == id));
+                if let Some(pw) = txn {
+                    print_txn_progress(config, pw);
+                } else {
+                    println!();
+                    print_info(&format!(
+                        "Request status is {} but its withdrawal transaction was not \
+                         found in the pending queues.",
+                        wr.status.as_str()
+                    ));
+                }
             }
-        );
-        println!("    {} Committed", "[    ]".dimmed());
-        println!("    {} Signed", "[    ]".dimmed());
-        println!("    {} Broadcast", "[    ]".dimmed());
-        println!("    {} Confirmed", "[    ]".dimmed());
+            // Terminal state: the withdrawal is complete; the request only
+            // lingers on-chain until the archival GC sweeps it.
+            WithdrawalStatus::Confirmed => {
+                println!();
+                println!(
+                    "  {} {} (6/6)",
+                    "Progress:".bold(),
+                    "Confirmed (archival pending)".green()
+                );
+                println!("    {} Requested", "[done]".green());
+                println!("    {} Approved", "[done]".green());
+                println!("    {} Committed", "[done]".green());
+                println!("    {} Signed", "[done]".green());
+                println!("    {} Broadcast", "[done]".green());
+                println!("    {} Confirmed", "[done]".green());
+            }
+        }
     }
     // Check committed/signed withdrawal transactions
     else if let Some(pw) = withdrawal_txns
         .iter()
         .find(|p| p.request_ids.contains(&req_addr))
     {
-        let txid: bitcoin::Txid = pw.txid.into();
-        let is_signed = pw.is_fully_signed();
-        let signed_inputs = pw.signing.signed_count();
-        let num_inputs = pw.signing.num_inputs();
-        let step = if is_signed { 4 } else { 3 };
-        // Distinguish the multi-checkpoint signing window: an in-progress txn
-        // shows "Signing (X/N)" rather than a flat "Committed".
-        let status_label = if is_signed {
-            "Signed".green()
-        } else if signed_inputs > 0 {
-            format!("Signing ({signed_inputs}/{num_inputs})").cyan()
-        } else {
-            "Committed".cyan()
-        };
-
         println!(
             "  {} {}",
             "Request ID:".bold(),
             display::format_address_full(&req_addr)
         );
-        println!("  {} {}", "BTC txid:".bold(), txid);
-        println!();
-        println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
-        println!("    {} Requested", "[done]".green());
-        println!("    {} Approved", "[done]".green());
-        println!("    {} Committed          txid: {}", "[done]".green(), txid);
-        println!(
-            "    {} Signed",
-            if is_signed {
-                "[done]".green()
-            } else {
-                "[    ]".dimmed()
-            }
-        );
-        println!("    {} Broadcast", "[    ]".dimmed());
-        println!("    {} Confirmed", "[    ]".dimmed());
-
-        // BTC context
-        if let Ok(Some(btc_rpc)) = config.btc_rpc_client() {
-            println!();
-            println!("  {}", "BTC Context:".bold());
-            match btc_rpc.get_raw_transaction_verbose(txid) {
-                Ok(info) => {
-                    let confirmations = info.confirmations.unwrap_or(0) as u32;
-                    let tx_status = if confirmations > 0 {
-                        "Confirmed".to_string()
-                    } else {
-                        "In Mempool".to_string()
-                    };
-                    println!("    {} {}", "TX Status:".bold(), tx_status);
-                    println!("    {} {}/6", "Confirmations:".bold(), confirmations);
-                }
-                Err(_) => {
-                    println!("    {}", "(transaction not found on BTC node)".dimmed());
-                }
-            }
-        }
+        print_txn_progress(config, pw);
     } else {
         print_info(
             "Withdrawal request not found in pending queues (may be confirmed or cancelled).",
@@ -370,13 +375,104 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Render the committed-phase progress checklist (steps 3-6) and Bitcoin-side
+/// context for a withdrawal transaction. Shared by the request-map lookup
+/// (Processing/Signed requests point at their txn via `withdrawal_txn_id`)
+/// and the txn-map fallback lookup.
+fn print_txn_progress(config: &CliConfig, pw: &WithdrawalTransaction) {
+    let txid: bitcoin::Txid = pw.txid.into();
+    let is_confirmed = pw.is_confirmed();
+    let is_signed = pw.is_fully_signed();
+    let signed_inputs = pw.signing.signed_count();
+    let num_inputs = pw.signing.num_inputs();
+    let step = if is_confirmed {
+        6
+    } else if is_signed {
+        4
+    } else {
+        3
+    };
+    // Distinguish the multi-checkpoint signing window: an in-progress txn
+    // shows "Signing (X/N)" rather than a flat "Committed". A confirmed txn
+    // lingers in the pending map until the archival GC sweeps it, so it must
+    // render as complete rather than broadcast-ready.
+    let status_label = if is_confirmed {
+        "Confirmed (archival pending)".green()
+    } else if is_signed {
+        "Signed".green()
+    } else if signed_inputs > 0 {
+        format!("Signing ({signed_inputs}/{num_inputs})").cyan()
+    } else {
+        "Committed".cyan()
+    };
+
+    println!("  {} {}", "BTC txid:".bold(), txid);
+    println!();
+    println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
+    println!("    {} Requested", "[done]".green());
+    println!("    {} Approved", "[done]".green());
+    println!("    {} Committed          txid: {}", "[done]".green(), txid);
+    println!(
+        "    {} Signed",
+        if is_signed {
+            "[done]".green()
+        } else {
+            "[    ]".dimmed()
+        }
+    );
+    println!(
+        "    {} Broadcast",
+        if is_confirmed {
+            "[done]".green()
+        } else {
+            "[    ]".dimmed()
+        }
+    );
+    println!(
+        "    {} Confirmed",
+        if is_confirmed {
+            "[done]".green()
+        } else {
+            "[    ]".dimmed()
+        }
+    );
+
+    // BTC context
+    if let Ok(Some(btc_rpc)) = config.btc_rpc_client() {
+        println!();
+        println!("  {}", "BTC Context:".bold());
+        match btc_rpc.get_raw_transaction_verbose(txid) {
+            Ok(info) => {
+                let confirmations = info.confirmations.unwrap_or(0) as u32;
+                let tx_status = if confirmations > 0 {
+                    "Confirmed".to_string()
+                } else {
+                    "In Mempool".to_string()
+                };
+                println!("    {} {}", "TX Status:".bold(), tx_status);
+                println!("    {} {}/6", "Confirmations:".bold(), confirmations);
+            }
+            Err(_) => {
+                println!("    {}", "(transaction not found on BTC node)".dimmed());
+            }
+        }
+    }
+}
+
 async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     let client = HashiClient::new_with_bitcoin_state(config).await?;
 
     let requests = client.fetch_withdrawal_requests()?;
     let pending = client.fetch_withdrawal_txns()?;
-    let signed_count = pending.iter().filter(|pw| pw.is_fully_signed()).count();
-    let committed_count = pending.len() - signed_count;
+    // Confirmed txns linger in the pending map until the archival GC sweeps
+    // them; classify them first so they are never counted as actionable
+    // "signed" (they are also fully signed).
+    let confirmed_count = pending.iter().filter(|pw| pw.is_confirmed()).count();
+    let signed_count = pending
+        .iter()
+        .filter(|pw| !pw.is_confirmed() && pw.is_fully_signed())
+        .count();
+    let committed_count = pending.len() - confirmed_count - signed_count;
 
     match output_format {
         OutputFormat::Json => {
@@ -386,7 +482,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     serde_json::json!({
                         "request_id": wr.id.to_string(),
                         "amount_sats": wr.btc_amount,
-                        "status": if wr.status.is_approved() { "approved" } else { "requested" },
+                        "status": wr.status.as_str(),
                         "caller": wr.sender.to_string(),
                         "requested_ms": wr.created_timestamp_ms,
                     })
@@ -403,6 +499,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     "queued_count": requests.len(),
                     "committed_count": committed_count,
                     "signed_count": signed_count,
+                    "confirmed_count": confirmed_count,
                 }))?
             );
         }
@@ -424,16 +521,11 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         "Requested".bold()
                     );
                     for wr in &requests {
-                        let status = if wr.status.is_approved() {
-                            "Approved"
-                        } else {
-                            "Requested"
-                        };
                         println!(
                             "  {:<20} {:<14} {:<10} {:<20} {}",
                             display::format_address_full(&wr.id),
                             wr.btc_amount,
-                            status,
+                            wr.status.as_str(),
                             display::format_address_full(&wr.sender),
                             display::format_timestamp(wr.created_timestamp_ms)
                         );
@@ -447,7 +539,9 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     println!("  {}", "Pending Broadcast:".bold().underline());
                     for pw in &pending {
                         let txid: bitcoin::Txid = pw.txid.into();
-                        let status = if pw.is_fully_signed() {
+                        let status = if pw.is_confirmed() {
+                            "Confirmed (archival pending)"
+                        } else if pw.is_fully_signed() {
                             "Signed"
                         } else {
                             "Committed"
@@ -462,10 +556,11 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 }
 
                 println!(
-                    "\n  {} queued, {} committed, {} signed",
+                    "\n  {} queued, {} committed, {} signed, {} confirmed awaiting archival",
                     requests.len(),
                     committed_count,
-                    signed_count
+                    signed_count,
+                    confirmed_count
                 );
             }
 
@@ -482,9 +577,19 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
 /// of the `WithdrawalTransaction` and is unrelated to the Bitcoin txid.
 fn withdrawal_txn_row(pw: &WithdrawalTransaction) -> serde_json::Value {
     let txid: bitcoin::Txid = pw.txid.into();
+    // A confirmed txn is also fully signed, so check confirmation first: it
+    // lingers only until the archival GC sweeps it and must not be reported
+    // as an actionable "signed" txn.
+    let status = if pw.is_confirmed() {
+        "confirmed"
+    } else if pw.is_fully_signed() {
+        "signed"
+    } else {
+        "committed"
+    };
     serde_json::json!({
         "txid": txid.to_string(),
-        "status": if pw.is_fully_signed() { "signed" } else { "committed" },
+        "status": status,
         "request_count": pw.request_ids.len(),
     })
 }
@@ -543,5 +648,15 @@ mod tests {
     fn withdrawal_txn_row_reports_committed_until_fully_signed() {
         let row = withdrawal_txn_row(&withdrawal_txn(false));
         assert_eq!(row["status"], "committed");
+    }
+
+    /// A confirmed txn lingering until the archival GC must classify as
+    /// "confirmed", not fall through to "signed" (it is also fully signed).
+    #[test]
+    fn withdrawal_txn_row_reports_confirmed_over_signed() {
+        let mut txn = withdrawal_txn(true);
+        txn.confirmed_timestamp_ms = Some(2);
+        let row = withdrawal_txn_row(&txn);
+        assert_eq!(row["status"], "confirmed");
     }
 }

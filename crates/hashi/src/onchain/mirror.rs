@@ -461,6 +461,9 @@ fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<apply::E
             apply::Effect::WithdrawalTxnFullySigned(txn) => {
                 withdrawal_txn_fully_signed(state, timestamp_ms, &txn);
             }
+            apply::Effect::WithdrawalTxnConfirmed(txn) => {
+                withdrawal_txn_confirmed(state, timestamp_ms, &txn);
+            }
             apply::Effect::WithdrawalTxnRemoved(txn) => {
                 withdrawal_txn_removed(state, timestamp_ms, &txn);
             }
@@ -540,9 +543,41 @@ fn withdrawal_txn_fully_signed(
     }
 }
 
-/// A withdrawal transaction left the in-flight bag (confirmed and
-/// moved to the historical record, or deleted): observe the
-/// sign-to-confirm and total durations.
+/// A withdrawal transaction was confirmed in place (the v2 deferred
+/// archival: `confirmed_timestamp_ms` set while the txn stays in the
+/// in-flight bag): observe the sign-to-confirm and total durations. The
+/// later archival move skips them (`withdrawal_txn_removed`).
+fn withdrawal_txn_confirmed(
+    state: &OnchainState,
+    timestamp_ms: u64,
+    txn: &types::WithdrawalTransaction,
+) {
+    tracing::info!(withdrawal_txn_id = %txn.id, "Withdrawal confirmed on-chain");
+    let signed_at = state.state_mut().withdrawal_signed_at_ms.remove(&txn.id);
+    let Some(metrics) = state.metrics() else {
+        return;
+    };
+    if let Some(signed_at) = signed_at {
+        let sign_to_confirm = timestamp_ms.saturating_sub(signed_at);
+        metrics
+            .withdrawal_duration_seconds
+            .with_label_values(&["sign_to_confirm"])
+            .observe(Duration::from_millis(sign_to_confirm).as_secs_f64());
+    }
+    let total = timestamp_ms.saturating_sub(txn.created_timestamp_ms);
+    metrics
+        .withdrawal_duration_seconds
+        .with_label_values(&["total"])
+        .observe(Duration::from_millis(total).as_secs_f64());
+}
+
+/// A withdrawal transaction left the in-flight bag. Under v1 bytecode
+/// the confirm itself archives it, so the sign-to-confirm and total
+/// durations are observed here. Under v2 the confirm wrote
+/// `confirmed_timestamp_ms` in place and the durations were already
+/// observed then (`withdrawal_txn_confirmed`); observing again at the
+/// archival move would fold GC latency into the histograms, so an
+/// already-confirmed txn only clears its bookkeeping.
 fn withdrawal_txn_removed(
     state: &OnchainState,
     timestamp_ms: u64,
@@ -550,6 +585,9 @@ fn withdrawal_txn_removed(
 ) {
     tracing::info!(withdrawal_txn_id = %txn.id, "Withdrawal transaction left the in-flight bag");
     let signed_at = state.state_mut().withdrawal_signed_at_ms.remove(&txn.id);
+    if txn.confirmed_timestamp_ms.is_some() {
+        return;
+    }
     let Some(metrics) = state.metrics() else {
         return;
     };
