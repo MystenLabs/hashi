@@ -5,6 +5,35 @@ module hashi::cert_submission;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi, tob::ProtocolType};
 
+// ~~~~~~~ Constants ~~~~~~~
+
+/// Key-generation cert buckets stay on-chain until their Sui epoch number is
+/// at least 8 below the current one. This matches the node DB's numeric
+/// retention window: dealer/rotation messages at `current - 7` and newer are
+/// retained for break-glass key recovery. This is an epoch-number distance,
+/// not a count of finalized committee generations (committee epochs can gap).
+/// Enforced on-chain because destruction is permissionless.
+const KEY_GEN_CERT_RETENTION_EPOCHS: u64 = 8;
+
+/// Nonce cert buckets are only ever read during their own epoch; +2 mirrors
+/// the `tob::destroy_all` backstop.
+const NONCE_CERT_MIN_AGE_EPOCHS: u64 = 2;
+
+// ~~~~~~~ Errors ~~~~~~~
+
+#[error]
+const ETooEarlyToDestroyNonceCerts: vector<u8> =
+    b"Nonce cert buckets may only be destroyed two epochs after their epoch";
+#[error]
+const ETooEarlyToDestroyKeyGenCerts: vector<u8> =
+    b"Key-generation cert buckets are retained for break-glass key recovery";
+#[error]
+const EKeyGenCertsStillNeeded: vector<u8> =
+    b"Key-generation certs require a later finalized committee before pruning";
+#[error]
+const EUnsupportedCertBucketLayout: vector<u8> =
+    b"TOB cert bucket has a layout this package version cannot prune";
+
 // ~~~~~~~ Entry Functions ~~~~~~~
 
 entry fun submit_dkg_cert(
@@ -49,29 +78,121 @@ entry fun submit_nonce_cert(
     submit_stamped_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
-/// Garbage collection: deliberately NOT gated on pause/reconfig — cert
-/// buckets old enough to destroy (see `tob::destroy_all`) carry no live
-/// state, and GC must stay callable during an emergency pause.
+/// Deprecated compatibility entry. It cannot be removed while the deployed
+/// package uses the compatible-upgrade policy, so keep its ABI but route it
+/// through the protocol-specific floors below. `ProtocolType` has no public
+/// constructors and cannot currently be supplied as a PTB pure argument, but
+/// this routing prevents the legacy `+2` floor from becoming a key-generation
+/// bypass if that restriction ever changes.
 entry fun destroy_all_certs(
     hashi: &mut Hashi,
     epoch: u64,
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) {
-    hashi.versioning().assert_version_enabled();
-    let is_nonce_generation = protocol_type.is_nonce_generation();
-    let key = hashi::tob::tob_key(epoch, batch_index, protocol_type);
-    let current_epoch = hashi.committee_set().epoch();
-    if (is_nonce_generation) {
-        let epoch_certs: hashi::tob::StampedEpochCertsV1 = hashi.tob_mut().remove(key);
-        hashi::tob::destroy_all_stamped(epoch_certs, current_epoch);
+    if (protocol_type.is_nonce_generation()) {
+        destroy_nonce_certs(hashi, epoch, batch_index.destroy_some());
     } else {
-        let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);
-        hashi::tob::destroy_all(epoch_certs, current_epoch);
+        destroy_key_gen_certs(hashi, epoch);
     };
 }
 
+/// Destroy the key-generation (DKG or rotation) cert buckets of `epoch`.
+/// Garbage collection: permissionless and deliberately NOT gated on
+/// pause/reconfig — see `destroy_all_certs`.
+///
+/// A key-generation bucket stays live longer than its certs' epoch: the NEXT
+/// rotation reads the PREVIOUS committee's bucket to seed the handoff, and
+/// committee epochs can gap, so an age floor alone cannot identify the
+/// previous committee's bucket. Both floors are asserted unconditionally
+/// (premature calls abort even when the bucket is absent); an
+/// eligible-but-absent bucket is a no-op so batched GC transactions and
+/// permissionless racers cannot poison each other.
+entry fun destroy_key_gen_certs(hashi: &mut Hashi, epoch: u64) {
+    hashi.versioning().assert_version_enabled();
+    let current_epoch = hashi.committee_set().epoch();
+    assert!(current_epoch >= epoch + KEY_GEN_CERT_RETENTION_EPOCHS, ETooEarlyToDestroyKeyGenCerts);
+    assert!(hashi.committee_set().is_before_previous_committee(epoch), EKeyGenCertsStillNeeded);
+    // One entry covers both key-generation protocols: callers never need to
+    // know whether `epoch` was a genesis (DKG) or rotation epoch.
+    destroy_bare_bucket_if_present(
+        hashi,
+        hashi::tob::tob_key(epoch, option::none(), hashi::tob::protocol_type_dkg()),
+        current_epoch,
+    );
+    destroy_bare_bucket_if_present(
+        hashi,
+        hashi::tob::tob_key(epoch, option::none(), hashi::tob::protocol_type_key_rotation()),
+        current_epoch,
+    );
+}
+
+/// Destroy the nonce-generation cert bucket of `(epoch, batch_index)`.
+/// Garbage collection: permissionless and deliberately NOT gated on
+/// pause/reconfig — see `destroy_all_certs`. Nonce buckets are only ever
+/// read during their own epoch, so no committee-awareness is needed. The
+/// floor is asserted unconditionally; an eligible-but-absent bucket is a
+/// no-op (see `destroy_key_gen_certs`).
+entry fun destroy_nonce_certs(hashi: &mut Hashi, epoch: u64, batch_index: u32) {
+    hashi.versioning().assert_version_enabled();
+    let current_epoch = hashi.committee_set().epoch();
+    assert!(current_epoch >= epoch + NONCE_CERT_MIN_AGE_EPOCHS, ETooEarlyToDestroyNonceCerts);
+    destroy_nonce_bucket_if_present(
+        hashi,
+        hashi::tob::tob_key(
+            epoch,
+            option::some(batch_index),
+            hashi::tob::protocol_type_nonce_generation(),
+        ),
+        current_epoch,
+    );
+}
+
 // ~~~~~~~ Private Functions ~~~~~~~
+
+/// Remove a key-generation bucket only when it has the layout this version
+/// understands. An absent bucket is an idempotent no-op; a present bucket with
+/// an unknown layout aborts loudly so the off-chain sweep cannot report false
+/// success while state keeps accumulating.
+fun destroy_bare_bucket_if_present(hashi: &mut Hashi, key: hashi::tob::TobKey, current_epoch: u64) {
+    let tob = hashi.tob_mut();
+    if (tob.contains_with_type<hashi::tob::TobKey, hashi::tob::EpochCertsV1>(key)) {
+        let epoch_certs: hashi::tob::EpochCertsV1 = tob.remove(key);
+        hashi::tob::destroy_all(epoch_certs, current_epoch);
+    } else {
+        assert!(!tob.contains(key), EUnsupportedCertBucketLayout);
+    }
+}
+
+/// Nonce buckets may use either the legacy bare layout or the stamped layout
+/// introduced in v2. As above, absence is idempotent and an unknown present
+/// layout aborts instead of being silently skipped.
+fun destroy_nonce_bucket_if_present(
+    hashi: &mut Hashi,
+    key: hashi::tob::TobKey,
+    current_epoch: u64,
+) {
+    let tob = hashi.tob_mut();
+    if (tob.contains_with_type<hashi::tob::TobKey, hashi::tob::EpochCertsV1>(key)) {
+        let epoch_certs: hashi::tob::EpochCertsV1 = tob.remove(key);
+        hashi::tob::destroy_all(epoch_certs, current_epoch);
+    } else if (tob.contains_with_type<hashi::tob::TobKey, hashi::tob::StampedEpochCertsV1>(key)) {
+        let epoch_certs: hashi::tob::StampedEpochCertsV1 = tob.remove(key);
+        hashi::tob::destroy_all_stamped(epoch_certs, current_epoch);
+    } else {
+        assert!(!tob.contains(key), EUnsupportedCertBucketLayout);
+    }
+}
+
+#[test_only]
+public fun destroy_all_certs_for_testing(
+    hashi: &mut Hashi,
+    epoch: u64,
+    batch_index: Option<u32>,
+    protocol_type: ProtocolType,
+) {
+    destroy_all_certs(hashi, epoch, batch_index, protocol_type)
+}
 
 fun submit_cert_internal(
     hashi: &mut Hashi,
