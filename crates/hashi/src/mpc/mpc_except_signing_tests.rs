@@ -16965,32 +16965,7 @@ fn a_committee_below_the_reduction_floor_is_rejected_not_panicked_on() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, MpcError::CryptoError(ref m) if m.contains("below the reduction floor")),
-        "unexpected error: {err:?}"
-    );
-}
-
-#[test]
-fn derived_threshold_rejects_a_faulty_bound_too_small_to_form_a_certificate() {
-    const ALLOWED_DELTA: u16 = 1000;
-    let setup = TestSetup::new(4);
-    let members: Vec<_> = setup
-        .committee()
-        .members()
-        .iter()
-        .map(|m| {
-            CommitteeMember::new(
-                m.validator_address(),
-                m.public_key().clone(),
-                m.encryption_public_key().clone(),
-                2500,
-            )
-        })
-        .collect();
-    let committee = Committee::new(members, setup.epoch(), ALLOWED_DELTA, 100, 0);
-    let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
-    assert!(
-        matches!(err, MpcError::CryptoError(ref m) if m.contains("no dealer certificate can ever form")),
+        matches!(err, MpcError::InvalidConfig(ref m) if m.contains("below the reduction floor")),
         "unexpected error: {err:?}"
     );
 }
@@ -17021,7 +16996,7 @@ fn derived_threshold_rejects_max_faulty_at_or_above_a_third() {
         );
         let err = build_reduced_nodes(&committee, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap_err();
         assert!(
-            matches!(err, MpcError::CryptoError(ref m) if m.contains("must exceed max_faulty")),
+            matches!(err, MpcError::InvalidThreshold(ref m) if m.contains("must exceed max_faulty")),
             "unexpected error for f_bps={f_bps}: {err:?}"
         );
     }

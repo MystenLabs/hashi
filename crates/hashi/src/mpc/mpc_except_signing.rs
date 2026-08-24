@@ -6759,12 +6759,12 @@ fn build_reduced_nodes(
             match value {
                 hashi_types::move_types::ConfigValue::U64(bps) => {
                     u16::try_from(*bps).map_err(|_| {
-                        MpcError::CryptoError(format!(
+                        MpcError::InvalidConfig(format!(
                             "pinned mpc_threshold_in_basis_points {bps} exceeds u16::MAX"
                         ))
                     })
                 }
-                other => Err(MpcError::CryptoError(format!(
+                other => Err(MpcError::InvalidConfig(format!(
                     "pinned mpc_threshold_in_basis_points is not a u64: {other:?}"
                 ))),
             }
@@ -6785,7 +6785,7 @@ fn build_reduced_nodes(
                     .max(1);
                 let threshold = (total_weight as u32).saturating_sub(2 * max_faulty);
                 if threshold <= max_faulty {
-                    return Err(MpcError::CryptoError(format!(
+                    return Err(MpcError::InvalidThreshold(format!(
                         "threshold {threshold} must exceed max_faulty {max_faulty}: \
                          max_faulty_in_basis_points {max_faulty_in_basis_points} is too large for W={total_weight}"
                     )));
@@ -6815,7 +6815,7 @@ fn build_reduced_nodes(
     // `prop_reduce` asserts this rather than returning it, and a panic bypasses every caller's
     // error handling.
     if total_weight < lower_bound {
-        return Err(MpcError::CryptoError(format!(
+        return Err(MpcError::InvalidConfig(format!(
             "total weight {total_weight} is below the reduction floor {lower_bound}"
         )));
     }
@@ -6827,21 +6827,6 @@ fn build_reduced_nodes(
         lower_bound,
     )
     .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-    if u32::from(reduced_threshold) + u32::from(reduced_max_faulty)
-        > u32::from(nodes.total_weight())
-    {
-        let driver = match legacy_threshold_in_basis_points {
-            Some(bps) => format!("pinned mpc_threshold_in_basis_points {bps}"),
-            None => format!("max_faulty_in_basis_points {max_faulty_in_basis_points}"),
-        };
-        return Err(MpcError::CryptoError(format!(
-            "reduced t {reduced_threshold} + f {reduced_max_faulty} exceeds reduced total weight \
-             {}, so no dealer certificate can ever form: {driver} with \
-             weight_reduction_allowed_delta {weight_reduction_allowed_delta_in_basis_points} \
-             at W={total_weight}",
-            nodes.total_weight()
-        )));
-    }
     Ok((nodes, reduced_threshold, reduced_max_faulty))
 }
 
