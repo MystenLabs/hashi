@@ -202,6 +202,11 @@ pub struct MpcManager {
     test_corrupt_shares_for: Option<Address>,
 }
 
+pub(crate) struct AdmittedNonceDealers {
+    pub(crate) weight: u32,
+    pub(crate) cutoff_ms: Option<u64>,
+}
+
 pub(crate) struct VerifiedNonceCerts<T>(Vec<(Address, T)>);
 
 impl<T> VerifiedNonceCerts<T> {
@@ -1184,42 +1189,62 @@ impl MpcManager {
         (certified, window)
     }
 
+    pub(crate) fn avid_admitted_nonce_dealers(
+        &self,
+        certs: &VerifiedNonceCerts<CertificateV1>,
+    ) -> AdmittedNonceDealers {
+        let (_, window) = self.certified_nonce_dealers_in_window(
+            certs,
+            self.nonce_collection_window(),
+            self.avid_admission(),
+        );
+        AdmittedNonceDealers {
+            weight: window.weight(),
+            cutoff_ms: window.cutoff_ms(),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn avid_certified_nonce_dealers_from_certs(
         &self,
         certs: &VerifiedNonceCerts<CertificateV1>,
         cutoff_ms: Option<u64>,
     ) -> (HashSet<Address>, u32) {
-        let vote_quorum_weight =
-            Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
         let (certified, window) = self.certified_nonce_dealers_in_window(
             certs,
             NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms),
-            |stamped| {
-                let CertificateV1::NonceGeneration { cert, .. } = stamped else {
-                    return false;
-                };
-                let dealer = &cert.message().dealer_address;
-                let signer_weight = match self.reduced_weight_of_cert(cert) {
-                    Ok(weight) => weight,
-                    Err(e) => {
-                        tracing::info!("Unreadable nonce cert signers for {:?}: {}", dealer, e);
-                        return false;
-                    }
-                };
-                if signer_weight < vote_quorum_weight {
-                    tracing::warn!(
-                        "Excluding AVID nonce cert for dealer {:?} from sizing: \
-                         signer weight {} below the vote quorum {}",
-                        dealer,
-                        signer_weight,
-                        vote_quorum_weight,
-                    );
-                    return false;
-                }
-                true
-            },
+            self.avid_admission(),
         );
         (certified, window.weight())
+    }
+
+    fn avid_admission(&self) -> impl Fn(&CertificateV1) -> bool + '_ {
+        let vote_quorum_weight =
+            Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
+        move |stamped| {
+            let CertificateV1::NonceGeneration { cert, .. } = stamped else {
+                return false;
+            };
+            let dealer = &cert.message().dealer_address;
+            let signer_weight = match self.reduced_weight_of_cert(cert) {
+                Ok(weight) => weight,
+                Err(e) => {
+                    tracing::info!("Unreadable nonce cert signers for {:?}: {}", dealer, e);
+                    return false;
+                }
+            };
+            if signer_weight < vote_quorum_weight {
+                tracing::warn!(
+                    "Excluding AVID nonce cert for dealer {:?} from sizing: \
+                     signer weight {} below the vote quorum {}",
+                    dealer,
+                    signer_weight,
+                    vote_quorum_weight,
+                );
+                return false;
+            }
+            true
+        }
     }
 
     pub(crate) async fn verified_nonce_certs<T>(

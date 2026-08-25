@@ -14754,6 +14754,62 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 }
 
 #[test]
+fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
+    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.nonce_accumulation_window_ms = 700;
+    let batch_index = 3u32;
+    let vote_quorum =
+        MpcManager::avid_vote_quorum(&mgr.mpc_config.nodes, mgr.mpc_config.max_faulty);
+
+    let make_cert =
+        |dealer_idx: usize, signers: &[usize], timestamp_ms: u64| -> (Address, CertificateV1) {
+            let dealer_address = setup.address(dealer_idx);
+            let message = DealerMessagesHash {
+                dealer_address,
+                messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
+            };
+            let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+            for &s in signers {
+                let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+                aggregator.add_signature(sig).unwrap();
+            }
+            (
+                dealer_address,
+                CertificateV1::NonceGeneration {
+                    batch_index,
+                    cert: aggregator.finish().unwrap(),
+                    timestamp_ms,
+                },
+            )
+        };
+
+    let sub_quorum = [0usize, 2];
+    let all = [0usize, 1, 2, 3];
+    let weight_of = |signers: &[usize]| -> u32 {
+        signers
+            .iter()
+            .map(|&s| mgr.mpc_config.nodes.weight_of(s as u16).unwrap() as u32)
+            .sum()
+    };
+    assert!(weight_of(&sub_quorum) < vote_quorum);
+    assert!(weight_of(&all) >= vote_quorum);
+
+    let certs = VerifiedNonceCerts(vec![
+        make_cert(0, &all, 1_000),
+        make_cert(1, &sub_quorum, 1_100),
+        make_cert(2, &all, 1_200),
+        make_cert(3, &all, 1_300),
+    ]);
+
+    assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), Some(1_800));
+
+    let admitted = mgr.avid_admitted_nonce_dealers(&certs);
+    assert_eq!(admitted.cutoff_ms, Some(2_000));
+    assert_eq!(admitted.weight, mgr.required_nonce_weight());
+}
+
+#[test]
 fn test_avid_sizing_counts_past_the_floor() {
     let setup = TestSetup::with_weights_avid(&[3, 3, 3, 1]);
     let mgr = setup.create_manager(0);

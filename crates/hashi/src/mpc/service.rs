@@ -615,10 +615,6 @@ impl MpcService {
         )
         .await?;
         drop(cert_wait_timer);
-        let cutoff_ms = {
-            let mgr = mpc_manager.read().unwrap();
-            mgr.nonce_collection_cutoff_ms(&final_certs)
-        };
         let canonical = final_certs.filter_map(|dealer, stamped| {
             let cert = stamped.to_dealer_certificate(epoch).ok()?;
             Some((
@@ -630,14 +626,16 @@ impl MpcService {
                 },
             ))
         });
-        let served_weight = {
+        let (cutoff_ms, served_weight) = {
             let mgr = mpc_manager.read().unwrap();
             match mgr.mpc_config.nonce_generation_protocol {
-                NonceGenerationProtocol::Avid => Some(
-                    mgr.avid_certified_nonce_dealers_from_certs(&canonical, cutoff_ms)
-                        .1,
-                ),
-                NonceGenerationProtocol::Vanilla => None,
+                NonceGenerationProtocol::Avid => {
+                    let admitted = mgr.avid_admitted_nonce_dealers(&canonical);
+                    (admitted.cutoff_ms, Some(admitted.weight))
+                }
+                NonceGenerationProtocol::Vanilla => {
+                    (mgr.nonce_collection_cutoff_ms(&final_certs), None)
+                }
             }
         };
         let mut party_channel = PrefetchedTobChannel::new(canonical.into_inner())
@@ -987,11 +985,11 @@ impl MpcService {
                     &self.inner.metrics,
                 )
                 .await;
-                let cutoff_ms = {
-                    let mgr = mpc_manager.read().unwrap();
-                    mgr.nonce_collection_cutoff_ms(&certs)
-                };
-                avid_certified_nonce_weight(mpc_manager, &certs, cutoff_ms)
+                mpc_manager
+                    .read()
+                    .unwrap()
+                    .avid_admitted_nonce_dealers(&certs)
+                    .weight
             }
         };
         if weight < floor {
@@ -1481,26 +1479,23 @@ impl MpcService {
                 (outputs, Some(expected_size))
             }
             NonceGenerationProtocol::Avid => {
-                let avid_certs: Vec<(sui_sdk_types::Address, CertificateV1)> = certs
-                    .as_slice()
-                    .iter()
-                    .filter_map(|(dealer, stamped)| {
-                        let cert = stamped.to_dealer_certificate(epoch).ok()?;
-                        Some((
-                            *dealer,
-                            CertificateV1::NonceGeneration {
-                                batch_index,
-                                cert,
-                                timestamp_ms: stamped.timestamp_ms,
-                            },
-                        ))
-                    })
-                    .collect();
-                let cutoff_ms = {
-                    let mgr = mpc_manager.read().unwrap();
-                    mgr.nonce_collection_cutoff_ms(&certs)
-                };
-                let mut prefetched = PrefetchedTobChannel::new(avid_certs)
+                let avid_certs = certs.filter_map(|dealer, stamped| {
+                    let cert = stamped.to_dealer_certificate(epoch).ok()?;
+                    Some((
+                        *dealer,
+                        CertificateV1::NonceGeneration {
+                            batch_index,
+                            cert,
+                            timestamp_ms: stamped.timestamp_ms,
+                        },
+                    ))
+                });
+                let cutoff_ms = mpc_manager
+                    .read()
+                    .unwrap()
+                    .avid_admitted_nonce_dealers(&avid_certs)
+                    .cutoff_ms;
+                let mut prefetched = PrefetchedTobChannel::new(avid_certs.into_inner())
                     .with_supersede_check(onchain_state.clone(), epoch);
                 let outcome = MpcManager::run_nonce_party_phase(
                     mpc_manager,
@@ -2208,18 +2203,6 @@ fn certified_nonce_weight<T: NonceCertTimestamp>(
         .window_certified_nonce_dealers(certs)
         .1
         .weight()
-}
-
-fn avid_certified_nonce_weight(
-    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &VerifiedNonceCerts<CertificateV1>,
-    cutoff_ms: Option<u64>,
-) -> u32 {
-    mpc_manager
-        .read()
-        .unwrap()
-        .avid_certified_nonce_dealers_from_certs(certs, cutoff_ms)
-        .1
 }
 
 enum ReconfigSubmissionErrorKind {
