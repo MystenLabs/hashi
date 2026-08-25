@@ -2007,7 +2007,6 @@ mod tests {
         use crate::committee::Bls12381PrivateKey;
         use crate::committee::BlsSignatureAggregator;
         use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-        use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
         use crate::committee::EncryptionPublicKey;
         use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
@@ -2022,7 +2021,6 @@ mod tests {
         let outgoing = HashiCommittee::new(
             vec![member.clone()],
             5,
-            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
@@ -2030,7 +2028,6 @@ mod tests {
         let new_committee = HashiCommittee::new(
             vec![member],
             6,
-            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,

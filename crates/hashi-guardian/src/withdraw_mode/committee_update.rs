@@ -131,7 +131,6 @@ mod tests {
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-    use hashi_types::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
     use hashi_types::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
     use hashi_types::guardian::HashiCommitteeMember;
@@ -162,7 +161,6 @@ mod tests {
         HashiCommittee::new(
             vec![member],
             epoch,
-            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,

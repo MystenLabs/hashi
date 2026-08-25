@@ -30,7 +30,6 @@ use crate::move_types::Config;
 // Re-exported for callers that referenced these via `committee`; the single
 // source of truth is `crate::move_types`.
 pub use crate::move_types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-pub use crate::move_types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
@@ -183,7 +182,6 @@ impl Committee {
     pub fn new(
         members: Vec<CommitteeMember>,
         epoch: u64,
-        mpc_threshold_in_basis_points: u16,
         mpc_weight_reduction_allowed_delta: u16,
         mpc_max_faulty_in_basis_points: u16,
         mpc_nonce_generation_protocol: u16,
@@ -192,7 +190,6 @@ impl Committee {
             members,
             epoch,
             Config::from_mpc_params(
-                mpc_threshold_in_basis_points,
                 mpc_weight_reduction_allowed_delta,
                 mpc_max_faulty_in_basis_points,
                 mpc_nonce_generation_protocol,
@@ -238,10 +235,6 @@ impl Committee {
     /// representation.
     pub fn config(&self) -> &Config {
         &self.config
-    }
-
-    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
-        self.config.mpc_threshold_in_basis_points()
     }
 
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
@@ -880,7 +873,6 @@ mod test {
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto_tbls::nodes::Node;
 
-    const TEST_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
     const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
     const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
     use test_strategy::proptest;
@@ -943,7 +935,6 @@ mod test {
         let committee = Committee::new(
             members,
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1053,7 +1044,6 @@ mod test {
         let committee = Committee::new(
             members,
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1098,8 +1088,7 @@ mod test {
                     weight: 1,
                 })
                 .collect(),
-            999, // Different epoch
-            TEST_THRESHOLD_IN_BASIS_POINTS,
+            999,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1184,7 +1173,6 @@ mod test {
         let committee = Committee::new(
             members,
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1305,7 +1293,6 @@ mod test {
         let committee = Committee::new(
             members,
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
@@ -1360,7 +1347,6 @@ mod test {
         let committee = Committee::new(
             members,
             epoch,
-            TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,

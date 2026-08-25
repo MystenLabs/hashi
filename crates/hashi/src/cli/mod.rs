@@ -217,12 +217,9 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose updating MPC parameters (`t`, `f`, `allowed_delta`,
+    /// Propose updating MPC parameters (`f`, `allowed_delta`,
     /// `nonce_generation_protocol`) in one transaction.
     UpdateMpcConfig {
-        #[clap(long)]
-        threshold_bps: Option<u64>,
-
         #[clap(long)]
         max_faulty_bps: Option<u64>,
 
@@ -922,7 +919,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     .await?;
                 }
                 CreateProposalCommands::UpdateMpcConfig {
-                    threshold_bps,
                     max_faulty_bps,
                     weight_reduction_allowed_delta,
                     nonce_generation_protocol,
@@ -930,7 +926,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 } => {
                     commands::proposal::create_update_mpc_config_proposal(
                         &config,
-                        threshold_bps,
                         max_faulty_bps,
                         weight_reduction_allowed_delta,
                         nonce_generation_protocol,
