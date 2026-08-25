@@ -2826,7 +2826,7 @@ impl MpcManager {
                     held_vote,
                     Arc::new(self.committee.clone()),
                 )?
-                .into_verified()
+                .to_verified()
                 .map_err(|e| MpcError::CryptoError(e.to_string()))?;
                 receiver
                     .handle_avid_complaint(
@@ -3552,7 +3552,7 @@ impl MpcManager {
                 avid_vote,
                 Arc::new(mgr.committee.clone()),
             )?
-            .into_verified()
+            .to_verified()
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
             let mut verified_echoes = Vec::new();
             for (addr, bundle) in &bundles {
@@ -6812,21 +6812,44 @@ fn build_reduced_nodes(
         legacy_pinned = legacy_threshold_in_basis_points.is_some(),
         "build_reduced_nodes: pre-reduction parameters"
     );
-    // `prop_reduce` asserts this rather than returning it, and a panic bypasses every caller's
-    // error handling.
     if total_weight < lower_bound {
         return Err(MpcError::InvalidConfig(format!(
             "total weight {total_weight} is below the reduction floor {lower_bound}"
         )));
     }
-    let (nodes, reduced_threshold, reduced_max_faulty) = Nodes::prop_reduce(
-        nodes_vec,
-        threshold,
-        max_faulty,
-        weight_reduction_allowed_delta,
-        lower_bound,
-    )
-    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+    let (reducer, reduced) = if legacy_threshold_in_basis_points.is_some() {
+        (
+            "prop_reduce",
+            Nodes::prop_reduce(
+                nodes_vec,
+                threshold,
+                max_faulty,
+                weight_reduction_allowed_delta,
+                lower_bound,
+            ),
+        )
+    } else {
+        (
+            "knapsack_reduce",
+            Nodes::knapsack_reduce(
+                nodes_vec,
+                threshold,
+                max_faulty,
+                weight_reduction_allowed_delta,
+                lower_bound,
+            ),
+        )
+    };
+    let (nodes, reduced_threshold, reduced_max_faulty) =
+        reduced.map_err(|e| MpcError::CryptoError(e.to_string()))?;
+    tracing::info!(
+        committee_epoch = committee.epoch(),
+        reducer,
+        reduced_total_weight = nodes.total_weight(),
+        reduced_threshold,
+        reduced_max_faulty,
+        "build_reduced_nodes: post-reduction parameters"
+    );
     Ok((nodes, reduced_threshold, reduced_max_faulty))
 }
 
