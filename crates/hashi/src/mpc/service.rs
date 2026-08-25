@@ -38,7 +38,6 @@ use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
-use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
@@ -667,13 +666,7 @@ impl MpcService {
             .set(outcome.outputs.len() as i64);
         let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
-            (
-                mgr.batch_size_per_weight,
-                Parameters {
-                    t: mgr.mpc_config.threshold,
-                    f: mgr.mpc_config.max_faulty,
-                },
-            )
+            (mgr.batch_size_per_weight, mgr.params())
         };
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
@@ -809,10 +802,7 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
-                Parameters {
-                    t: mgr.mpc_config.threshold,
-                    f: mgr.mpc_config.max_faulty,
-                },
+                mgr.params(),
                 mgr.mpc_config.nonce_generation_protocol,
                 mgr.required_nonce_weight(),
             )
@@ -2186,9 +2176,7 @@ pub(crate) async fn verify_fetched_certificates(
     certs: Vec<CertificateV1>,
     metrics: &Metrics,
 ) -> Vec<VerifiedCertificateV1> {
-    let mgr = Arc::clone(mpc_manager);
-    let (verified, rejected) = spawn_blocking(move || {
-        let mgr = mgr.read().unwrap();
+    let (verified, rejected) = MpcManager::with_manager_blocking(mpc_manager, move |mgr| {
         let mut verified = Vec::with_capacity(certs.len());
         let mut rejected: Vec<(&'static str, &'static str)> = Vec::new();
         for cert in certs {
