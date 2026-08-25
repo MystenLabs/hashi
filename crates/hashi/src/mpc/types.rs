@@ -894,8 +894,15 @@ pub enum DealerOutputsKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ComplaintsToProcessKey {
     Dkg(Address),
-    Rotation(Address, ShareIndex),
-    NonceGeneration { batch_index: u32, dealer: Address },
+    Rotation {
+        epoch: u64,
+        dealer: Address,
+        share_index: ShareIndex,
+    },
+    NonceGeneration {
+        batch_index: u32,
+        dealer: Address,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
