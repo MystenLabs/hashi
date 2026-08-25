@@ -50,7 +50,6 @@ const TXOUT_BASE_WEIGHT: Weight = Weight::from_wu(36);
 /// Minimum value (sat) for a P2PKH or P2SH output to be above the dust
 /// relay threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
 /// This is the legacy dust limit and the highest of the three thresholds.
-#[allow(dead_code)]
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 
 /// Minimum value (sat) for a P2TR (or P2WSH) output to be above the dust
@@ -493,19 +492,17 @@ pub struct CoinSelectionResult {
     /// `selected_requests`.
     pub withdrawal_outputs: Vec<WithdrawalOutput>,
 
-    /// Change output amount in satoshis, or `None` if the residual value
-    /// after outputs and fees falls below the dust threshold. When `Some`,
-    /// the change is sent to the `change_address` passed to [`select_coins`].
+    /// Change output amount in satoshis, or `None` when the selected inputs
+    /// exactly match the requested amount. When `Some`, the change is sent to
+    /// the `change_address` passed to [`select_coins`].
     pub change: Option<u64>,
 
     /// Total miner fee in satoshis:
     /// `sum(inputs.amount) − sum(withdrawal_outputs.amount) − change.unwrap_or(0)`.
     ///
-    /// Computed as `floor(total_weight_fee / N) × N`, where `total_weight_fee`
-    /// is the fee at `fee_rate` for the final transaction weight and N is the
-    /// number of selected requests. The `total_weight_fee % N` remainder is
-    /// implicitly donated to the miner and is included here (it is captured in
-    /// the conservation identity but not charged to any individual request).
+    /// Computed as `ceil(required_fee / N) × N`, where `required_fee` is the
+    /// transaction fee plus any CPFP deficit and N is the number of selected
+    /// requests.
     pub fee: u64,
 
     /// The withdrawal requests included in this transaction, in the same
@@ -538,8 +535,8 @@ pub enum CoinSelectionError {
         "per-request deduction {fee_per_request} sat exceeds the configured cap \
          {max_fee_per_request} sat (total deduction {total_deduction} sat across \
          {n_requests} requests: transaction fee {transaction_fee} sat, CPFP deficit \
-         {cpfp_deficit} sat, dust padding {dust_padding} sat; {selected_inputs} inputs, \
-         {pending_inputs} pending, {unconfirmed_ancestors} unique unconfirmed ancestors)"
+         {cpfp_deficit} sat; {selected_inputs} inputs, {pending_inputs} pending, \
+         {unconfirmed_ancestors} unique unconfirmed ancestors)"
     )]
     FeeExceedsCap {
         /// `ceil(total_deduction / N)` — the equal share charged to each
@@ -547,8 +544,7 @@ pub enum CoinSelectionError {
         fee_per_request: u64,
         /// The configured per-request fee cap (`params.max_fee_per_request`).
         max_fee_per_request: u64,
-        /// Total deduction in satoshis (miner fee + CPFP deficit + dust
-        /// padding).
+        /// Total deduction in satoshis (miner fee + CPFP deficit).
         total_deduction: u64,
         /// Number of selected requests (N).
         n_requests: usize,
@@ -557,14 +553,22 @@ pub enum CoinSelectionError {
         /// Extra fee required to bring unconfirmed ancestors up to the target
         /// package fee rate.
         cpfp_deficit: u64,
-        /// Extra deduction required to avoid creating a dust change output.
-        dust_padding: u64,
         /// Number of selected transaction inputs.
         selected_inputs: usize,
         /// Number of selected inputs created by pending transactions.
         pending_inputs: usize,
         /// Number of unique unconfirmed ancestor transactions.
         unconfirmed_ancestors: usize,
+    },
+
+    /// The selected inputs would create a non-zero change output below the
+    /// dust relay threshold.
+    #[error("change output {change} sat is below the dust threshold {dust_threshold} sat")]
+    SubDustChange {
+        /// Exact excess of selected input value over requested output value.
+        change: u64,
+        /// Dust relay threshold for the configured change address.
+        dust_threshold: u64,
     },
 
     /// The total available UTXO value is insufficient to cover the total
@@ -653,6 +657,7 @@ impl CoinSelectionError {
             Self::EmptyPool => "empty_pool",
             Self::NoRequests => "no_requests",
             Self::FeeExceedsCap { .. } => "fee_exceeds_cap",
+            Self::SubDustChange { .. } => "sub_dust_change",
             Self::InsufficientFunds { .. } => "insufficient_funds",
             Self::ExceedsMaxWeight { .. } => "exceeds_max_weight",
             Self::ExceedsMaxAncestorPackageWeight { .. } => "exceeds_max_ancestor_package_weight",
@@ -692,11 +697,13 @@ fn output_weight_for_script(script: &bitcoin::Script) -> Weight {
 /// Uses the standard script lengths to identify the output type:
 /// - 22 bytes → P2WPKH (294 sat at 3 sat/vByte min relay fee)
 /// - 34 bytes → P2TR / P2WSH (330 sat)
-/// - anything else → conservative P2TR value (330 sat)
+/// - 23 or 25 bytes → P2SH / P2PKH (546 sat)
+/// - anything else → conservative legacy value (546 sat)
 fn dust_threshold_for_change(script: &bitcoin::Script) -> u64 {
     match script.len() {
         22 => WPKH_DUST_RELAY_MIN_VALUE,
-        _ => TR_DUST_RELAY_MIN_VALUE,
+        34 => TR_DUST_RELAY_MIN_VALUE,
+        _ => DUST_RELAY_MIN_VALUE,
     }
 }
 
@@ -736,10 +743,10 @@ fn fee_for_weight(fee_rate: FeeRate, weight: Weight) -> u64 {
 ///      `input_budget × N / 2` extras.
 ///    - At or above high threshold: no consolidation.
 ///
-/// 4. **Fee allocation** — `finalize_fees` computes the total deduction
-///    (own fee + CPFP deficit + dust padding), checks it against the
-///    per-request cap, verifies each output stays above dust, assigns
-///    net amounts, and derives the actual miner fee from conservation.
+/// 4. **Fee allocation** — `finalize_fees` rejects sub-dust change, computes
+///    the total deduction (own fee + CPFP deficit), checks it against the
+///    per-request cap, verifies each output stays above dust, assigns net
+///    amounts, and derives the actual miner fee from conservation.
 ///
 /// # Preconditions
 ///
@@ -888,11 +895,8 @@ pub fn select_coins(
 
             // If adding this input pushed fees or weight over the
             // limit, undo it and stop consolidating. This is a
-            // greedy heuristic: inputs are sorted smallest-first so
-            // weight increases monotonically, but a larger input
-            // could theoretically eliminate dust padding and lower
-            // total_deduction enough to pass. We accept this
-            // approximation for simplicity.
+            // greedy heuristic: inputs are sorted smallest-first and
+            // transaction weight increases monotonically.
             if builder.check_fees().is_err() || builder.exceeds_any_weight_limit() {
                 builder.inputs.pop();
                 builder.compute_raw_change();
@@ -904,9 +908,8 @@ pub fn select_coins(
     // ── Step 4: Fee allocation ──────────────────────────────────────────
     //
     // Recompute raw_change (consolidation may have added inputs),
-    // then finalize: check fee caps, assign net output amounts,
-    // compute final change (with dust padding), and derive the
-    // actual miner fee from conservation.
+    // then finalize: reject sub-dust change, check fee caps, assign net
+    // output amounts, and derive the actual miner fee from conservation.
     builder.compute_raw_change();
     let miner_fee = builder.finalize_fees()?;
 
@@ -935,8 +938,8 @@ struct TransactionBuilder<'a> {
     // Values that are built up
     inputs: Vec<&'a UtxoCandidate>,
     outputs: Vec<PendingOutput<'a>>,
-    /// The raw excess of input value over requested value, before any
-    /// dust padding. `None` means not yet computed; `Some(0)` means
+    /// The raw excess of input value over requested value. `None` means
+    /// not yet computed; `Some(0)` means
     /// exact match (no change output); `Some(n)` means `n` sats of
     /// change.
     raw_change: Option<u64>,
@@ -1026,7 +1029,7 @@ impl<'a> TransactionBuilder<'a> {
 
     /// Compute and set the raw change amount based on the current
     /// inputs and requested outputs. Raw change is the excess of input
-    /// value over the total requested amount, before any dust padding.
+    /// value over the total requested amount.
     ///
     /// - `Some(0)` means exact match (no change output).
     /// - `Some(n)` where `n > 0` means `n` sats of raw change.
@@ -1114,28 +1117,6 @@ impl<'a> TransactionBuilder<'a> {
         Ok(())
     }
 
-    /// The total amount deducted from requests: the transaction's own
-    /// fee, any CPFP deficit for underpaying ancestors, and any dust
-    /// padding needed to bring a sub-dust change output up to the
-    /// relay threshold.
-    fn total_deduction(&self) -> u64 {
-        self.required_fee() + self.dust_padding()
-    }
-
-    /// The amount of dust padding needed for the change output. If
-    /// the raw change is positive but below the dust threshold, it
-    /// must be padded up — and that padding cost comes from the
-    /// requests. Returns 0 if there is no change or the change is
-    /// already above dust.
-    fn dust_padding(&self) -> u64 {
-        match self.raw_change {
-            Some(v) if v > 0 && v < self.change_dust_threshold() => {
-                self.change_dust_threshold() - v
-            }
-            _ => 0,
-        }
-    }
-
     /// Compute the CPFP deficit: the extra fee this transaction must
     /// pay to ensure that the unconfirmed ancestor transactions
     /// effectively pay the target `fee_rate`.
@@ -1208,8 +1189,7 @@ impl<'a> TransactionBuilder<'a> {
 
         let transaction_fee = fee_for_weight(self.fee_rate, self.weight());
         let cpfp_deficit = self.cpfp_deficit();
-        let dust_padding = self.dust_padding();
-        let total_deduction = transaction_fee + cpfp_deficit + dust_padding;
+        let total_deduction = transaction_fee + cpfp_deficit;
         let deduction_per_request = total_deduction.div_ceil(n);
 
         if deduction_per_request > self.params.max_fee_per_request {
@@ -1220,7 +1200,6 @@ impl<'a> TransactionBuilder<'a> {
                 n_requests: n as usize,
                 transaction_fee,
                 cpfp_deficit,
-                dust_padding,
                 selected_inputs: self.inputs.len(),
                 pending_inputs: self.pending_input_count(),
                 unconfirmed_ancestors: self.unconfirmed_ancestors().len(),
@@ -1240,9 +1219,8 @@ impl<'a> TransactionBuilder<'a> {
         Ok(())
     }
 
-    /// Perform final fee checks, assign net output amounts, compute
-    /// final change (with dust padding), and return the actual miner
-    /// fee.
+    /// Reject sub-dust change, perform final fee checks, assign net output
+    /// amounts, compute final change, and return the actual miner fee.
     ///
     /// Requires `compute_raw_change` to have been called first.
     /// Returns the miner fee derived from the conservation identity:
@@ -1252,23 +1230,27 @@ impl<'a> TransactionBuilder<'a> {
             .raw_change
             .expect("finalize_fees called before compute_raw_change");
 
+        let dust_threshold = self.change_dust_threshold();
+        if raw_change > 0 && raw_change < dust_threshold {
+            return Err(CoinSelectionError::SubDustChange {
+                change: raw_change,
+                dust_threshold,
+            });
+        }
+
         // Run the fee checks.
         self.check_fees()?;
 
         // Assign net amounts using ceiling division so the miner
         // always receives at least the required fee.
         let n = self.outputs.len() as u64;
-        let deduction_per_request = self.total_deduction().div_ceil(n);
+        let deduction_per_request = self.required_fee().div_ceil(n);
         for output in &mut self.outputs {
             output.net_amount = output.request.amount - deduction_per_request;
         }
 
-        // Compute final change (padded to dust threshold if needed).
-        self.final_change = if raw_change > 0 {
-            Some(raw_change.max(self.change_dust_threshold()))
-        } else {
-            None
-        };
+        // Return the exact input surplus as change.
+        self.final_change = (raw_change > 0).then_some(raw_change);
 
         // Derive the actual miner fee from the conservation identity:
         //   input_total = sum(net_amounts) + final_change + miner_fee
