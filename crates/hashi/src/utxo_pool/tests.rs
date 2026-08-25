@@ -25,6 +25,17 @@ fn make_p2wpkh_change_address() -> BitcoinAddress {
     BitcoinAddress::from_script(&script, bitcoin::Network::Bitcoin).unwrap()
 }
 
+fn make_p2pkh_change_address() -> BitcoinAddress {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend([0x04; 20]);
+    script.extend([0x88, 0xac]);
+    BitcoinAddress::from_script(
+        &bitcoin::ScriptBuf::from_bytes(script),
+        bitcoin::Network::Bitcoin,
+    )
+    .unwrap()
+}
+
 fn make_utxo_id(n: u8) -> UtxoId {
     UtxoId {
         txid: Address::new([n; 32]).into(),
@@ -159,6 +170,25 @@ fn assert_conservation(result: &CoinSelectionResult) {
     );
 }
 
+fn assert_validator_compatible(result: &CoinSelectionResult) {
+    let input_sum: u64 = result.inputs.iter().map(|u| u.amount).sum();
+    let output_sum: u64 = result.withdrawal_outputs.iter().map(|o| o.amount).sum();
+    let miner_fee = input_sum - output_sum - result.change.unwrap_or(0);
+    let per_user_miner_fee = miner_fee / result.selected_requests.len() as u64;
+
+    for (request, output) in result
+        .selected_requests
+        .iter()
+        .zip(&result.withdrawal_outputs)
+    {
+        assert_eq!(
+            output.amount,
+            request.amount - per_user_miner_fee,
+            "withdrawal output does not match validator fee calculation"
+        );
+    }
+}
+
 // ── Error path tests ──────────────────────────────────────────────────────
 
 #[test]
@@ -239,7 +269,6 @@ fn test_fee_exceeds_cap() {
     let Err(CoinSelectionError::FeeExceedsCap {
         transaction_fee,
         cpfp_deficit,
-        dust_padding,
         selected_inputs,
         pending_inputs,
         unconfirmed_ancestors,
@@ -250,7 +279,6 @@ fn test_fee_exceeds_cap() {
     };
     assert!(transaction_fee > 0);
     assert_eq!(cpfp_deficit, 0);
-    assert_eq!(dust_padding, 0);
     assert_eq!(selected_inputs, 1);
     assert_eq!(pending_inputs, 0);
     assert_eq!(unconfirmed_ancestors, 0);
@@ -714,64 +742,46 @@ fn test_max_mempool_chain_depth_zero_excludes_all_pending() {
 // ── Change/dust tests ─────────────────────────────────────────────────────
 
 #[test]
-fn test_sub_dust_change_padded_to_dust_threshold() {
+fn test_sub_dust_change_rejected() {
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
     let requests = vec![make_request(1, 999_700, 0)];
-    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate())
-        .expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), default_fee_rate());
 
-    assert_eq!(
-        result.change,
-        Some(TR_DUST_RELAY_MIN_VALUE),
-        "sub-dust change must be padded to dust threshold"
-    );
-    assert_conservation(&result);
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::SubDustChange {
+            change: 300,
+            dust_threshold: TR_DUST_RELAY_MIN_VALUE,
+        })
+    ));
 }
 
 #[test]
-fn test_one_sat_change_padded_to_dust() {
+fn test_one_sat_change_rejected() {
     let utxos = vec![confirmed_utxo(1, 100_001)];
     let requests = vec![make_request(1, 100_000, 0)];
-    // Use high fee rate to suppress consolidation.
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let result =
-        select_coins(&utxos, &requests, &default_params(), high_fee).expect("should succeed");
+    let result = select_coins(&utxos, &requests, &default_params(), high_fee);
 
-    assert_eq!(
-        result.change,
-        Some(TR_DUST_RELAY_MIN_VALUE),
-        "even 1 sat of change must be padded to dust threshold"
-    );
-    assert_conservation(&result);
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::SubDustChange {
+            change: 1,
+            dust_threshold: TR_DUST_RELAY_MIN_VALUE,
+        })
+    ));
 }
 
 #[test]
-fn test_dust_padding_cost_deducted_from_requests() {
-    // When change is sub-dust, the padding cost should come from
-    // requests (increasing their fee deduction).
-    let utxos = vec![confirmed_utxo(1, 100_001)];
-    let requests = vec![make_request(1, 100_000, 0)];
+fn test_selection_round_trips_validator_fee_formula() {
+    let utxos = vec![confirmed_utxo(1, 1_000_000)];
+    let requests = vec![make_request(1, 100_000, 0), make_request(2, 200_000, 1)];
     let high_fee = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
+    let result = select_coins(&utxos, &requests, &default_params(), high_fee)
+        .expect("selection should succeed");
 
-    let padded_result = select_coins(&utxos, &requests, &default_params(), high_fee)
-        .expect("padded should succeed");
-
-    // Compare with an exact match that has no dust padding.
-    let exact_utxos = vec![confirmed_utxo(1, 100_000)];
-    let exact_result = select_coins(&exact_utxos, &requests, &default_params(), high_fee)
-        .expect("exact should succeed");
-
-    // The padded result's fee should be higher because it includes
-    // dust padding cost (plus the additional weight for the change
-    // output).
-    assert!(
-        padded_result.fee > exact_result.fee,
-        "padded fee {} should be > exact fee {} due to dust padding + change weight",
-        padded_result.fee,
-        exact_result.fee
-    );
-    assert_conservation(&padded_result);
-    assert_conservation(&exact_result);
+    assert_conservation(&result);
+    assert_validator_compatible(&result);
 }
 
 // ── Request ordering tests ────────────────────────────────────────────────
@@ -905,6 +915,7 @@ fn prop_conservation(
             recipient_sum + change + r.fee,
             "conservation violated"
         );
+        assert_validator_compatible(&r);
     }
 }
 
@@ -1109,21 +1120,42 @@ fn test_p2wpkh_change_address_dust_threshold() {
 
     let p2wpkh_result = select_coins(&utxos, &requests, &p2wpkh_params, default_fee_rate())
         .expect("P2WPKH should succeed");
-    let p2tr_result = select_coins(&utxos, &requests, &p2tr_params, default_fee_rate())
-        .expect("P2TR should succeed");
+    let p2tr_result = select_coins(&utxos, &requests, &p2tr_params, default_fee_rate());
 
     assert_eq!(
         p2wpkh_result.change,
         Some(310),
         "310 sat >= P2WPKH dust (294): change emitted at raw value"
     );
-    assert_eq!(
-        p2tr_result.change,
-        Some(330),
-        "310 sat < P2TR dust (330): change padded to dust threshold"
-    );
+    assert!(matches!(
+        p2tr_result,
+        Err(CoinSelectionError::SubDustChange {
+            change: 310,
+            dust_threshold: TR_DUST_RELAY_MIN_VALUE,
+        })
+    ));
     assert_conservation(&p2wpkh_result);
-    assert_conservation(&p2tr_result);
+}
+
+#[test]
+fn test_p2pkh_change_address_uses_legacy_dust_threshold() {
+    let utxos = vec![confirmed_utxo(1, 1_000_000)];
+    let requests = vec![make_request(1, 999_600, 0)];
+    let change_address = make_p2pkh_change_address();
+    let params = CoinSelectionParams {
+        change_address: change_address.clone(),
+        max_fee_per_request: 500_000,
+        ..CoinSelectionParams::new(change_address)
+    };
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
+
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::SubDustChange {
+            change: 400,
+            dust_threshold: DUST_RELAY_MIN_VALUE,
+        })
+    ));
 }
 
 // ── Input selection tests ─────────────────────────────────────────────────
@@ -1548,10 +1580,9 @@ fn test_fee_rate_at_long_term_boundary() {
 }
 
 #[test]
-fn test_dust_padding_reclaimed_by_consolidation() {
-    // Initial raw_change is sub-dust (requires dust padding from requests).
-    // Consolidation adds enough value to push change above dust, eliminating
-    // the padding cost.
+fn test_sub_dust_change_resolved_by_consolidation() {
+    // Initial raw change is sub-dust. Consolidation adds enough value to
+    // produce a valid change output.
     let utxos = vec![
         confirmed_utxo(1, 100_100), // 100 sat raw change (sub-dust)
         confirmed_utxo(2, 5_000),
@@ -1566,40 +1597,30 @@ fn test_dust_padding_reclaimed_by_consolidation() {
     )
     .expect("should succeed");
 
-    if result.inputs.len() > 1 {
-        assert!(
-            result.change.unwrap_or(0) > TR_DUST_RELAY_MIN_VALUE,
-            "consolidation should eliminate dust padding need"
-        );
-    }
+    assert!(result.inputs.len() > 1);
+    assert!(result.change.unwrap_or(0) > TR_DUST_RELAY_MIN_VALUE);
     assert_conservation(&result);
+    assert_validator_compatible(&result);
 }
 
 #[test]
-fn test_exact_match_then_consolidation_creates_sub_dust_change() {
-    // Regression: input_total exactly matches total_requested before
-    // consolidation (no change), then consolidation adds a small UTXO
-    // that creates sub-dust change. The dust padding must be budgeted.
-    let utxos = vec![
-        confirmed_utxo(1, 100_000), // exact match
-        confirmed_utxo(2, 100),     // small consolidation candidate
-    ];
+fn test_sub_dust_change_rejected_after_insufficient_consolidation() {
+    let utxos = vec![confirmed_utxo(1, 100_100), confirmed_utxo(2, 100)];
     let requests = vec![make_request(1, 100_000, 0)];
     let result = select_coins(
         &utxos,
         &requests,
         &default_params(),
-        FeeRate::from_sat_per_vb_unchecked(1), // low fee: consolidation active
-    )
-    .expect("should succeed");
+        FeeRate::from_sat_per_vb_unchecked(1),
+    );
 
-    if result.inputs.len() > 1 {
-        assert!(
-            result.change.unwrap_or(0) >= TR_DUST_RELAY_MIN_VALUE,
-            "sub-dust change from consolidation must be padded"
-        );
-    }
-    assert_conservation(&result);
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::SubDustChange {
+            change: 200,
+            dust_threshold: TR_DUST_RELAY_MIN_VALUE,
+        })
+    ));
 }
 
 // ── Spend path / recipient weight tests ──────────────────────────────────
