@@ -12261,6 +12261,7 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
     assert_eq!(mgr.window_certified_nonce_dealers(&beyond).0.len(), 3);
 }
 
+
 #[test]
 fn test_zero_accumulation_window_is_floor_only() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
@@ -14637,7 +14638,8 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
 #[test]
 fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
-    let mgr = setup.create_manager(0);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.nonce_accumulation_window_ms = 0;
     let batch_index = 3u32;
     let total = mgr.mpc_config.nodes.total_weight() as u32;
     let vote_quorum =
@@ -14649,26 +14651,27 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
             .map(|&s| mgr.mpc_config.nodes.weight_of(s as u16).unwrap() as u32)
             .sum()
     };
-    let make_cert = |dealer_idx: usize, signers: &[usize]| -> (Address, CertificateV1) {
-        let dealer_address = setup.address(dealer_idx);
-        let message = DealerMessagesHash {
-            dealer_address,
-            messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
+    let make_cert =
+        |dealer_idx: usize, signers: &[usize], timestamp_ms: u64| -> (Address, CertificateV1) {
+            let dealer_address = setup.address(dealer_idx);
+            let message = DealerMessagesHash {
+                dealer_address,
+                messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
+            };
+            let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+            for &s in signers {
+                let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+                aggregator.add_signature(sig).unwrap();
+            }
+            (
+                dealer_address,
+                CertificateV1::NonceGeneration {
+                    batch_index,
+                    cert: aggregator.finish().unwrap(),
+                    timestamp_ms,
+                },
+            )
         };
-        let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
-        for &s in signers {
-            let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
-            aggregator.add_signature(sig).unwrap();
-        }
-        (
-            dealer_address,
-            CertificateV1::NonceGeneration {
-                batch_index,
-                cert: aggregator.finish().unwrap(),
-                timestamp_ms: 0,
-            },
-        )
-    };
 
     let just_below_quorum = [0usize, 2];
     let in_band = [0usize, 1];
@@ -14684,10 +14687,10 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     );
 
     let certs = vec![
-        make_cert(3, &just_below_quorum),
-        make_cert(0, &all),
-        make_cert(1, &in_band),
-        make_cert(2, &all),
+        make_cert(3, &just_below_quorum, 1_000),
+        make_cert(0, &all, 1_100),
+        make_cert(1, &in_band, 1_200),
+        make_cert(2, &all, 1_300),
     ];
 
     let (certified, weight) =
@@ -14714,7 +14717,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     let (blind, _) = mgr.window_certified_nonce_dealers(&VerifiedNonceCerts(certs.clone()));
     assert!(blind.contains(&setup.address(3)));
 
-    let (_, foreign_keyed) = make_cert(0, &all);
+    let (_, foreign_keyed) = make_cert(0, &all, 1_000);
     let rekeyed = VerifiedNonceCerts(vec![(setup.address(3), foreign_keyed)]);
     let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed, None);
     assert_eq!(
@@ -14723,8 +14726,8 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         "sizing must key on the signed dealer"
     );
 
-    let (_, dup_a) = make_cert(0, &all);
-    let (_, dup_b) = make_cert(0, &all);
+    let (_, dup_a) = make_cert(0, &all, 1_000);
+    let (_, dup_b) = make_cert(0, &all, 1_100);
     let duplicated = VerifiedNonceCerts(vec![(setup.address(0), dup_a), (setup.address(3), dup_b)]);
     let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated, None);
     assert_eq!(certified, HashSet::from([setup.address(0)]));

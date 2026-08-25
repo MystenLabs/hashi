@@ -1140,13 +1140,14 @@ impl MpcManager {
         &self,
         certs: &VerifiedNonceCerts<T>,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
-        self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window())
+        self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window(), |_| true)
     }
 
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
         &self,
         certs: &VerifiedNonceCerts<T>,
         mut window: NonceCollectionWindow,
+        admit: impl Fn(&T) -> bool,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         let mut certified = HashSet::new();
         for (table_dealer, cert) in certs.as_slice() {
@@ -1167,6 +1168,9 @@ impl MpcManager {
             if certified.contains(&dealer) {
                 continue;
             }
+            if !admit(cert) {
+                continue;
+            }
             let Some(admission) = window.try_admit(cert.nonce_timestamp_ms()) else {
                 break;
             };
@@ -1185,54 +1189,36 @@ impl MpcManager {
         certs: &VerifiedNonceCerts<CertificateV1>,
         cutoff_ms: Option<u64>,
     ) -> (HashSet<Address>, u32) {
-        let mut window =
-            NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms);
         let vote_quorum_weight =
             Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
-        let mut certified = HashSet::new();
-        for (table_dealer, stamped) in certs.as_slice() {
-            let CertificateV1::NonceGeneration { cert, .. } = stamped else {
-                continue;
-            };
-            let dealer = &cert.message().dealer_address;
-            if dealer != table_dealer {
-                tracing::warn!(
-                    "Nonce cert served under table key {:?} but signed for dealer {:?}; \
-                     sizing under the signed dealer",
-                    table_dealer,
-                    dealer
-                );
-            }
-            if certified.contains(dealer) {
-                continue;
-            }
-            let signer_weight = match self.reduced_weight_of_cert(cert) {
-                Ok(weight) => weight,
-                Err(e) => {
-                    tracing::info!("Unreadable nonce cert signers for {:?}: {}", dealer, e);
-                    continue;
+        let (certified, window) = self.certified_nonce_dealers_in_window(
+            certs,
+            NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms),
+            |stamped| {
+                let CertificateV1::NonceGeneration { cert, .. } = stamped else {
+                    return false;
+                };
+                let dealer = &cert.message().dealer_address;
+                let signer_weight = match self.reduced_weight_of_cert(cert) {
+                    Ok(weight) => weight,
+                    Err(e) => {
+                        tracing::info!("Unreadable nonce cert signers for {:?}: {}", dealer, e);
+                        return false;
+                    }
+                };
+                if signer_weight < vote_quorum_weight {
+                    tracing::warn!(
+                        "Excluding AVID nonce cert for dealer {:?} from sizing: \
+                         signer weight {} below the vote quorum {}",
+                        dealer,
+                        signer_weight,
+                        vote_quorum_weight,
+                    );
+                    return false;
                 }
-            };
-            if signer_weight < vote_quorum_weight {
-                tracing::warn!(
-                    "Excluding AVID nonce cert for dealer {:?} from sizing: \
-                     signer weight {} below the vote quorum {}",
-                    dealer,
-                    signer_weight,
-                    vote_quorum_weight,
-                );
-                continue;
-            }
-            let Some(admission) = window.try_admit(stamped.nonce_timestamp_ms()) else {
-                break;
-            };
-            if let Some(party_id) = self.committee.index_of(dealer)
-                && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
-            {
-                window.record(admission, w as u32);
-                certified.insert(*dealer);
-            }
-        }
+                true
+            },
+        );
         (certified, window.weight())
     }
 
