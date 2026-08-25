@@ -14,7 +14,6 @@ use tabled::Tabled;
 use crate::cli::TxOptions;
 use crate::cli::client::CreateProposalParams;
 use crate::cli::client::HashiClient;
-use crate::cli::client::get_proposal_type_arg;
 use crate::cli::config::CliConfig;
 use crate::cli::print_detail;
 use crate::cli::print_info;
@@ -216,7 +215,7 @@ pub async fn vote(
     print_info("Building vote transaction...");
 
     // Infer the type tag from the on-chain proposal type
-    let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
+    let type_arg = client.proposal_type_arg(&proposal.proposal_type)?;
     let tx = client.build_vote_transaction(proposal_addr, type_arg)?;
 
     print_info(&format!(
@@ -239,7 +238,10 @@ pub async fn vote(
     // Upgrade proposals require the dedicated upgrade flow — the generic
     // `<module>::execute` path can't construct an UpgradeTicket.
     use crate::onchain::types::ProposalType;
-    if matches!(proposal.proposal_type, ProposalType::Upgrade) {
+    if matches!(
+        proposal.proposal_type,
+        ProposalType::Upgrade | ProposalType::UpgradeV2
+    ) {
         print_warning(
             "--execute is not supported for Upgrade proposals; run the \
              dedicated upgrade flow once quorum is reached.",
@@ -320,7 +322,7 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     print_info("Building remove_vote transaction...");
 
     // Infer the type tag from the on-chain proposal type
-    let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
+    let type_arg = client.proposal_type_arg(&proposal.proposal_type)?;
     let tx = client.build_remove_vote_transaction(proposal_addr, type_arg)?;
 
     print_info(&format!(
@@ -349,7 +351,10 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     let proposal_type_str = display::format_proposal_type(proposal_type);
 
     use crate::onchain::types::ProposalType;
-    if matches!(proposal_type, ProposalType::Upgrade) {
+    if matches!(
+        proposal_type,
+        ProposalType::Upgrade | ProposalType::UpgradeV2
+    ) {
         anyhow::bail!(
             "Upgrade proposals cannot be executed via the CLI. \
              Use the full upgrade flow (execute + publish + finalize) instead."
@@ -381,16 +386,56 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
 /// and verifies that its `PACKAGE_VERSION` constant is exactly +1 of the
 /// currently published version (pre-flight check) before submitting the
 /// proposal. The `--digest` path skips that check and is retained only for
-/// callers with a pre-built package.
+/// callers with a pre-built package; combined with an exclusive upgrade it is
+/// refused unless `allow_unverified_exclusive` acknowledges the skipped check.
+pub struct CreateUpgradeProposalArgs<'a> {
+    pub digest: Option<&'a str>,
+    pub package_path: Option<&'a std::path::Path>,
+    pub sui_binary: &'a std::path::Path,
+    pub sui_client_config: Option<&'a std::path::Path>,
+    pub upgrade_v2_exclusive: Option<bool>,
+    pub allow_unverified_exclusive: bool,
+    pub metadata: Vec<(String, String)>,
+}
+
+/// Refuse the brick-capable flag combination: an exclusive upgrade proposed
+/// from a pre-built `--digest`, whose `PACKAGE_VERSION` constant was therefore
+/// never checked against the chain, unless the operator explicitly
+/// acknowledged the bypass.
+fn check_exclusive_digest_acknowledged(
+    digest: Option<&str>,
+    upgrade_v2_exclusive: Option<bool>,
+    allow_unverified_exclusive: bool,
+) -> Result<()> {
+    if digest.is_some() && upgrade_v2_exclusive == Some(true) && !allow_unverified_exclusive {
+        anyhow::bail!(
+            "--digest skips the PACKAGE_VERSION pre-flight, and an exclusive upgrade \
+             publishing a package whose PACKAGE_VERSION does not match the new \
+             on-chain version permanently bricks the contract with no on-chain \
+             recovery. Use --package-path so the constant is verified, or pass \
+             --allow-unverified-exclusive after manually verifying that the \
+             pre-built package declares PACKAGE_VERSION = current on-chain \
+             version + 1."
+        );
+    }
+    Ok(())
+}
+
 pub async fn create_upgrade_proposal(
     config: &CliConfig,
-    digest: Option<&str>,
-    package_path: Option<&std::path::Path>,
-    sui_binary: &std::path::Path,
-    sui_client_config: Option<&std::path::Path>,
-    metadata: Vec<(String, String)>,
+    args: CreateUpgradeProposalArgs<'_>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
+    let CreateUpgradeProposalArgs {
+        digest,
+        package_path,
+        sui_binary,
+        sui_client_config,
+        upgrade_v2_exclusive,
+        allow_unverified_exclusive,
+        metadata,
+    } = args;
+    check_exclusive_digest_acknowledged(digest, upgrade_v2_exclusive, allow_unverified_exclusive)?;
     let mut client = HashiClient::new(config).await?;
 
     let digest_bytes = match (digest, package_path) {
@@ -426,18 +471,43 @@ pub async fn create_upgrade_proposal(
         (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
     };
 
-    print_detail(&format!("\n{}", "Creating Upgrade Proposal:".bold()));
+    let proposal_name = if upgrade_v2_exclusive.is_some() {
+        "UpgradeV2"
+    } else {
+        "Upgrade"
+    };
+    print_detail(&format!(
+        "\n{}",
+        format!("Creating {proposal_name} Proposal:").bold()
+    ));
     print_detail(&format!("  Digest: 0x{}", hex::encode(&digest_bytes)));
+    if let Some(exclusive) = upgrade_v2_exclusive {
+        print_detail(&format!("  Exclusive: {exclusive}"));
+    }
     print_metadata(&metadata);
 
     prompt_continue("create this upgrade proposal", tx_opts).await?;
 
-    let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
-        digest: digest_bytes,
-        metadata,
-    })?;
+    let (tx, module) = if let Some(exclusive) = upgrade_v2_exclusive {
+        (
+            client.build_create_proposal_transaction(CreateProposalParams::UpgradeV2 {
+                digest: digest_bytes,
+                exclusive,
+                metadata,
+            })?,
+            "upgrade_v2",
+        )
+    } else {
+        (
+            client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
+                digest: digest_bytes,
+                metadata,
+            })?,
+            "upgrade",
+        )
+    };
 
-    print_info("Transaction: upgrade::propose");
+    print_info(&format!("Transaction: {module}::propose"));
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
     print_created_proposal_id(response.as_ref());
     Ok(())
@@ -815,4 +885,33 @@ async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
     let mut input = String::new();
     reader.read_line(&mut input).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_digest_is_refused_without_acknowledgement() {
+        let err = check_exclusive_digest_acknowledged(Some("ab"), Some(true), false).unwrap_err();
+        // Pin both remedies the message offers: the verified path and the
+        // explicit acknowledgement.
+        assert!(err.to_string().contains("--package-path"));
+        assert!(err.to_string().contains("--allow-unverified-exclusive"));
+    }
+
+    #[test]
+    fn exclusive_digest_is_allowed_with_acknowledgement() {
+        check_exclusive_digest_acknowledged(Some("ab"), Some(true), true).unwrap();
+    }
+
+    #[test]
+    fn other_flag_combinations_are_unaffected() {
+        // Legacy upgrade proposals carry no exclusivity policy.
+        check_exclusive_digest_acknowledged(Some("ab"), None, false).unwrap();
+        // A non-exclusive upgrade_v2 digest stays recoverable on-chain.
+        check_exclusive_digest_acknowledged(Some("ab"), Some(false), false).unwrap();
+        // --package-path runs the pre-flight, so nothing needs acknowledging.
+        check_exclusive_digest_acknowledged(None, Some(true), false).unwrap();
+    }
 }

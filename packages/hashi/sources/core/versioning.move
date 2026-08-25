@@ -89,6 +89,25 @@ public(package) fun commit_upgrade(self: &mut Versioning, receipt: UpgradeReceip
     self.enabled_versions.insert(version);
 }
 
+/// Commit an upgrade and apply the version policy approved with it.
+///
+/// Exclusive upgrades atomically retire every previously enabled package
+/// version as the new version is committed. Non-exclusive upgrades retain the
+/// legacy behavior and add the new version alongside the existing set.
+public(package) fun commit_upgrade_v2(
+    self: &mut Versioning,
+    receipt: UpgradeReceipt,
+    exclusive: bool,
+) {
+    package::commit_upgrade(self.upgrade_cap.borrow_mut(), receipt);
+    let version = self.upgrade_cap.borrow().version();
+    if (exclusive) {
+        self.enabled_versions = vec_set::singleton(version);
+    } else {
+        self.enabled_versions.insert(version);
+    };
+}
+
 public(package) fun set_upgrade_cap(self: &mut Versioning, upgrade_cap: UpgradeCap) {
     self.upgrade_cap.fill(upgrade_cap);
 }

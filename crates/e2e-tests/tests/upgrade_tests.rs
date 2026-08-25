@@ -16,6 +16,7 @@ use e2e_tests::test_helpers::get_hbtc_balance;
 use e2e_tests::test_helpers::init_test_logging;
 use e2e_tests::upgrade_flow;
 use hashi::sui_tx_executor::SuiTxExecutor;
+use std::collections::BTreeSet;
 use std::time::Duration;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
@@ -23,6 +24,67 @@ use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::info;
+
+/// Upgrade v2 binds the committee-approved exclusivity policy to publication.
+///
+/// The default builder first performs the unavoidable legacy v1 → v2 upgrade.
+/// This test then publishes v3 through `upgrade_v2` with `exclusive = true`
+/// and verifies that the same transaction leaves only v3 enabled. Because the
+/// test binary supports v1 and v2, it must halt autonomous writes afterward.
+#[tokio::test]
+async fn test_upgrade_v2_exclusive_via_proposal() -> Result<()> {
+    init_test_logging();
+    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+
+    networks.hashi_network.nodes()[0]
+        .wait_for_mpc_key(Duration::from_secs(120))
+        .await?;
+
+    let (current_version, current_package_id) = {
+        let state = networks.hashi_network.nodes()[0]
+            .hashi()
+            .onchain_state()
+            .state();
+        let versions = state.package_versions();
+        (
+            versions
+                .latest_version()
+                .expect("default builder publishes package v2"),
+            versions
+                .latest_id()
+                .expect("default builder publishes package v2"),
+        )
+    };
+    assert_eq!(current_version, 2, "upgrade_v2 is introduced in package v2");
+
+    let new_package_id = upgrade_flow::execute_full_upgrade_v2(&mut networks, true).await?;
+    assert_ne!(new_package_id, current_package_id);
+    upgrade_flow::wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30))
+        .await?;
+
+    let target_version = current_version + 1;
+    for (i, node) in networks.hashi_network.nodes().iter().enumerate() {
+        let onchain = node.hashi().onchain_state();
+        let state = onchain.state();
+        assert_eq!(
+            state.package_versions().latest_version(),
+            Some(target_version)
+        );
+        assert_eq!(state.package_versions().latest_id(), Some(new_package_id));
+        assert_eq!(
+            state.hashi().config.enabled_versions,
+            BTreeSet::from([target_version]),
+            "node {i}: exclusive publication must atomically retire every older version"
+        );
+        assert!(
+            onchain.version_support().must_halt(),
+            "node {i}: a v1+v2 binary must halt after exclusive v3 publication"
+        );
+    }
+
+    info!("=== UPGRADE V2 EXCLUSIVE TEST PASSED ===");
+    Ok(())
+}
 
 /// Explicit upgrade via governance proposal, exercising real cascading effects.
 ///

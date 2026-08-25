@@ -199,6 +199,48 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
+    /// Propose a package upgrade with an explicit version-retirement policy
+    ///
+    /// This proposal type is available starting with package v2.
+    /// `--exclusive true` atomically disables every previous package version;
+    /// `--exclusive false` deliberately leaves them callable.
+    UpgradeV2 {
+        /// The digest of a pre-built package (hex encoded). Skips pre-flight
+        /// checks — prefer `--package-path`.
+        #[clap(long, conflicts_with = "package_path")]
+        digest: Option<String>,
+
+        /// Path to the upgrade package source. The CLI will run `sui move
+        /// build` and verify the `PACKAGE_VERSION` constant before submitting.
+        #[clap(long, value_name = "PATH")]
+        package_path: Option<std::path::PathBuf>,
+
+        /// Path to the `sui` CLI binary. Only used with `--package-path`.
+        #[clap(long, env = "SUI_BINARY", default_value = "sui")]
+        sui_binary: std::path::PathBuf,
+
+        /// Optional path to a sui `client.yaml` for dependency resolution.
+        /// Only used with `--package-path`.
+        #[clap(long)]
+        sui_client_config: Option<std::path::PathBuf>,
+
+        /// Whether to atomically disable every previous package version when
+        /// publishing. Required so every upgrade is explicitly classified.
+        #[clap(long, action = clap::ArgAction::Set, required = true)]
+        exclusive: bool,
+
+        /// Allow `--digest` together with `--exclusive true`. A pre-built
+        /// digest cannot be pre-flight checked, and an exclusive upgrade
+        /// publishing a package whose `PACKAGE_VERSION` constant does not
+        /// match the new on-chain version bricks the contract with no on-chain
+        /// recovery, so skipping the check must be an explicit choice.
+        #[clap(long, requires = "digest", conflicts_with = "package_path")]
+        allow_unverified_exclusive: bool,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
     /// Propose updating a configuration value
     ///
     /// Known config keys and their expected value types:
@@ -895,11 +937,39 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 } => {
                     commands::proposal::create_upgrade_proposal(
                         &config,
-                        digest.as_deref(),
-                        package_path.as_deref(),
-                        &sui_binary,
-                        sui_client_config.as_deref(),
-                        parse_metadata(metadata.metadata),
+                        commands::proposal::CreateUpgradeProposalArgs {
+                            digest: digest.as_deref(),
+                            package_path: package_path.as_deref(),
+                            sui_binary: &sui_binary,
+                            sui_client_config: sui_client_config.as_deref(),
+                            upgrade_v2_exclusive: None,
+                            allow_unverified_exclusive: false,
+                            metadata: parse_metadata(metadata.metadata),
+                        },
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::UpgradeV2 {
+                    digest,
+                    package_path,
+                    sui_binary,
+                    sui_client_config,
+                    exclusive,
+                    allow_unverified_exclusive,
+                    metadata,
+                } => {
+                    commands::proposal::create_upgrade_proposal(
+                        &config,
+                        commands::proposal::CreateUpgradeProposalArgs {
+                            digest: digest.as_deref(),
+                            package_path: package_path.as_deref(),
+                            sui_binary: &sui_binary,
+                            sui_client_config: sui_client_config.as_deref(),
+                            upgrade_v2_exclusive: Some(exclusive),
+                            allow_unverified_exclusive,
+                            metadata: parse_metadata(metadata.metadata),
+                        },
                         &tx_opts,
                     )
                     .await?;

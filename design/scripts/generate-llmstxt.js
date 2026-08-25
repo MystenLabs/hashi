@@ -35,6 +35,7 @@ const SECTIONS = [
     items: [
       "committee",
       "governance-actions",
+      "move-upgrades",
       "sanctions",
       "service",
       "mpc-protocol",
