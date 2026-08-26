@@ -544,7 +544,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     if !queued.is_empty() {
                         println!();
                     }
-                    println!("  {}", "Pending Broadcast:".bold().underline());
+                    println!("  {}", "Withdrawal Transactions:".bold().underline());
                     for pw in &pending {
                         let txid: bitcoin::Txid = pw.txid.into();
                         let status = if pw.is_confirmed() {
