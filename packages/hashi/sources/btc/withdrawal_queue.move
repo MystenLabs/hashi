@@ -685,12 +685,19 @@ public(package) fun archive_withdrawal_requests(
     request_ids.do_ref!(|id| self.archive_request(withdrawal_id, *id));
 }
 
-/// Finish a chunked archival: move the txn to `confirmed_txns` once none of
-/// its requests remain in `requests`. Silently no-ops while any request is
-/// still unarchived (or if the txn is already archived), so batched GC calls
-/// survive races with in-flight chunk transactions; the caller re-arms and
-/// retries from mirror state. The completeness walk costs only a `contains`
-/// probe per request, so it stays cheap even at the largest batch sizes.
+/// Finish a chunked archival: move the txn to `confirmed_txns` once every
+/// one of its requests has been archived — absent from the hot `requests`
+/// bag and, when resident in `processed`, flipped to `Confirmed`. Bag
+/// location alone is not completion: `processed` also holds requests
+/// committed before the v2 upgrade, still `Processing`/`Signed` until
+/// `archive_request` confirms them in place, so a location-only probe would
+/// let the permissionless finisher retire the txn immediately after
+/// confirmation and strand those requests with stale statuses. Silently
+/// no-ops while any request is still unarchived (or if the txn is already
+/// archived), so batched GC calls survive races with in-flight chunk
+/// transactions; the caller re-arms and retries from mirror state. The walk
+/// costs a `contains` probe per request plus a status read for `processed`
+/// residents, so it stays cheap even at the largest batch sizes.
 public(package) fun finish_archive_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -704,7 +711,12 @@ public(package) fun finish_archive_withdrawal_txn(
     let mut i = 0;
     let n = request_ids.length();
     while (i < n) {
-        if (self.requests.contains(request_ids[i])) return;
+        let id = request_ids[i];
+        if (self.requests.contains(id)) return;
+        if (self.processed.contains(id)) {
+            let request: &WithdrawalRequest = self.processed.borrow(id);
+            if (request.status != WithdrawalStatus::Confirmed) return;
+        };
         i = i + 1;
     };
     let txn: WithdrawalTransaction = self.withdrawal_txns.remove(withdrawal_id);

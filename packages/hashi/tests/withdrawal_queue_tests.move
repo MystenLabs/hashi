@@ -1274,3 +1274,47 @@ fun test_chunked_archive_unconfirmed_txn_aborts() {
     queue.archive_withdrawal_requests(txn_id, &vector[]);
     abort 0
 }
+
+#[test]
+/// Regression: `processed` residency is not archival. A request committed
+/// before the v2 upgrade lives in `processed` while still `Signed`, so an
+/// adversarial early finish right after confirmation must no-op instead of
+/// retiring the txn and stranding the request with a stale status; archiving
+/// the request (Confirmed in place) then lets the finish complete.
+fun test_finish_archive_waits_for_v1_committed_requests() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    // v1-committed (pre-upgrade): request lives in `processed`.
+    let id = setup_request(&mut queue, &clock, 60_000, ctx);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    let txn = make_test_txn(vector[id], @0xF00D, &clock, ctx);
+    let txn_id = txn.withdrawal_txn_id();
+    let btc = queue.commit_requests_v1_style_for_testing(&txn);
+    btc.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.update_requests_signed(&vector[id]);
+    queue.mark_txn_confirmed(txn_id, &clock);
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_signed());
+
+    // Adversarial early finish before any archive_request ran: must no-op.
+    queue.finish_archive_withdrawal_txn(txn_id);
+    assert!(queue.has_withdrawal_txn(txn_id));
+    assert!(!queue.has_confirmed_txn(txn_id));
+    assert!(queue.request_status_any(id).is_signed());
+
+    // Archive the request (Confirmed in place), then the finish completes.
+    queue.archive_withdrawal_requests(txn_id, &vector[id]);
+    queue.finish_archive_withdrawal_txn(txn_id);
+    assert!(!queue.has_withdrawal_txn(txn_id));
+    assert!(queue.has_confirmed_txn(txn_id));
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_confirmed());
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
