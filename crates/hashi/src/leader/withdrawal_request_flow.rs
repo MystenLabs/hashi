@@ -34,6 +34,26 @@ use tracing::warn;
 const WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE: usize = 200;
 
 impl LeaderService {
+    /// Info-log the withdrawal flow's semantics selection whenever it
+    /// changes (once at boot, then on DisableVersion(1) or an upgrade), so
+    /// operators can see the v1-dormancy gate engage and release. An
+    /// effective version below the active one means dormancy is holding
+    /// the flow at v1 semantics through the bootstrap both-enabled window.
+    pub(super) fn observe_withdrawal_semantics(&mut self) {
+        let effective = self.inner.onchain_state().withdrawal_effective_version();
+        let active = self.inner.onchain_state().active_package_version();
+        if self.last_withdrawal_semantics == Some((effective, active)) {
+            return;
+        }
+        self.last_withdrawal_semantics = Some((effective, active));
+        info!(
+            effective_package_version = ?effective,
+            active_package_version = ?active,
+            dormant = effective < active,
+            "Withdrawal flow semantics selected",
+        );
+    }
+
     // ========================================================================
     // Step 1: Approve unapproved withdrawal requests
     // ========================================================================
@@ -555,7 +575,7 @@ impl LeaderService {
 
         let max_batch = withdrawal_fire_threshold(
             self.inner.config.withdrawal_max_batch_size(),
-            self.inner.onchain_state().active_package_version(),
+            self.inner.onchain_state().withdrawal_effective_version(),
         );
         let delay_ms = self.inner.config.withdrawal_batching_delay_ms();
 
@@ -844,13 +864,13 @@ fn is_still_approvable(request: &hashi_types::move_types::WithdrawalRequest) -> 
 }
 
 /// The batch size at which the scheduler stops holding for more demand.
-/// Capped by the active version's executable request cap: commitment
-/// construction trims the batch to it, so a threshold above the cap can
-/// never be met at that version and only pays the full batching delay
-/// before committing the capped batch anyway.
-fn withdrawal_fire_threshold(config_max: usize, active_package_version: Option<u64>) -> usize {
+/// Capped by the withdrawal-effective version's executable request cap:
+/// commitment construction trims the batch to it, so a threshold above
+/// the cap can never be met at that version and only pays the full
+/// batching delay before committing the capped batch anyway.
+fn withdrawal_fire_threshold(config_max: usize, effective_package_version: Option<u64>) -> usize {
     config_max.min(crate::withdrawals::max_withdrawal_requests(
-        active_package_version,
+        effective_package_version,
     ))
 }
 
@@ -909,5 +929,20 @@ mod fire_threshold_tests {
         // A configured maximum below the cap passes through at any version.
         assert_eq!(withdrawal_fire_threshold(2, None), 2);
         assert_eq!(withdrawal_fire_threshold(2, Some(2)), 2);
+    }
+
+    /// Both-enabled means v1 semantics at this seam too: the threshold is
+    /// fed the withdrawal-effective version, which dormancy holds at 1
+    /// while v1 stays in the enabled set even though the active version
+    /// is 2.
+    #[test]
+    fn fire_threshold_stays_legacy_while_v1_is_enabled() {
+        let both_enabled = [1u64, 2].into_iter().collect();
+        let effective = crate::withdrawals::withdrawal_effective_version(2, &both_enabled);
+        assert_eq!(withdrawal_fire_threshold(447, Some(effective)), 298);
+
+        let v1_disabled = [2u64].into_iter().collect();
+        let effective = crate::withdrawals::withdrawal_effective_version(2, &v1_disabled);
+        assert_eq!(withdrawal_fire_threshold(447, Some(effective)), 447);
     }
 }

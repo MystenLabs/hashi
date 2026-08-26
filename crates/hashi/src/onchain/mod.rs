@@ -317,6 +317,40 @@ impl OnchainState {
         Some((id, version))
     }
 
+    /// The package version the withdrawal flow operates at:
+    /// [`Self::active_package_version`] held down to v1 while the bootstrap
+    /// window keeps v1 in the enabled set (see
+    /// [`crate::withdrawals::withdrawal_effective_version`]). Resolved from a
+    /// single read guard: pairing the active version with an enabled set from
+    /// a different snapshot could open the dormancy gate early.
+    pub fn withdrawal_effective_version(&self) -> Option<u64> {
+        let state = self.state();
+        let active = state
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()?;
+        Some(crate::withdrawals::withdrawal_effective_version(
+            active,
+            &state.hashi().config.enabled_versions,
+        ))
+    }
+
+    /// The package the withdrawal flow's entry calls route through, paired
+    /// with its version: [`Self::active_package`] under the
+    /// [`Self::withdrawal_effective_version`] gate, from one read guard for
+    /// the same torn-read reason.
+    pub fn withdrawal_package(&self) -> Option<(Address, u64)> {
+        let state = self.state();
+        let active = state
+            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
+            .active_version()?;
+        let version = crate::withdrawals::withdrawal_effective_version(
+            active,
+            &state.hashi().config.enabled_versions,
+        );
+        let id = state.package_versions.get(version)?;
+        Some((id, version))
+    }
+
     /// Reason autonomous on-chain work must halt (governance pause, or an
     /// unsupported on-chain version), or `None` to proceed. Reads state once so
     /// callers get a single consistent snapshot. Mirrors — and subsumes — the

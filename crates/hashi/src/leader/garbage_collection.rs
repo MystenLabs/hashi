@@ -290,18 +290,20 @@ impl LeaderService {
     /// Kick the deferred-archival GC for confirmed withdrawals. Shape and
     /// arming protocol mirror [`Self::check_cleanup_spent_utxos`]; the extra
     /// version gate exists because the archival entry only exists in v2
-    /// bytecode (and gating on the ACTIVE version also keeps the task off a
-    /// chain whose semantics this binary does not implement).
+    /// bytecode. It gates on the withdrawal-EFFECTIVE version (the active
+    /// version, held at v1 while the bootstrap window keeps v1 enabled): a
+    /// dormant flow confirms through v1 bytecode, which archives inline and
+    /// leaves nothing for this GC.
     pub(super) fn check_archive_confirmed_withdrawals(&mut self, checkpoint_timestamp_ms: u64) {
         if self.withdrawal_archive_gc_task.is_some() {
             debug!("Withdrawal archival GC task already in-flight, skipping");
             return;
         }
 
-        let Some(active) = self.inner.onchain_state().active_package_version() else {
+        let Some(effective) = self.inner.onchain_state().withdrawal_effective_version() else {
             return;
         };
-        if active < WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION {
+        if effective < WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION {
             return;
         }
 

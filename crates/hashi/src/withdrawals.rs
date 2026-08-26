@@ -131,14 +131,35 @@ pub(crate) const LEGACY_MAX_WITHDRAWAL_REQUESTS: usize = 298;
 /// the archival GC gate and the batch-cap switch.
 pub(crate) const DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION: u64 = 2;
 
-/// The request cap for the active package version. The larger v2 cap is
-/// only safe once the chain executes v2 bytecode (in-place commit) AND the
-/// fleet runs binaries that accept it — the same rollout discipline the
-/// upgrade train already requires: binaries first, then the upgrade tx.
-/// Gating on the resolved active version makes the flip atomic with the
-/// upgrade checkpoint on every node.
-pub(crate) fn max_withdrawal_requests(active_package_version: Option<u64>) -> usize {
-    if active_package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
+/// The package version the withdrawal flow operates at: v1 while package
+/// version 1 is still in the on-chain enabled set, otherwise the active
+/// version.
+///
+/// The bootstrap v1 -> v2 legacy upgrade leaves both versions enabled
+/// until a separate DisableVersion(1) governance action, and during that
+/// window a direct v1 entry call can corrupt the v2 in-place commit
+/// layout (v1's cancel/approve guards predate it). Holding the whole
+/// withdrawal flow at v1 semantics until v1 leaves the enabled set closes
+/// that window. Every later upgrade uses the exclusive mechanism, where
+/// the predecessor leaves the enabled set atomically with publication, so
+/// this gate is inert outside the bootstrap window.
+///
+/// TODO(pre-mainnet-wipe): dies at the mainnet squash; a squashed chain
+/// never has the both-enabled v1 window.
+pub fn withdrawal_effective_version(active: u64, enabled: &BTreeSet<u64>) -> u64 {
+    if enabled.contains(&1) { 1 } else { active }
+}
+
+/// The request cap for the package version the withdrawal flow operates
+/// at (callers resolve it via
+/// [`crate::onchain::OnchainState::withdrawal_effective_version`]). The
+/// larger v2 cap is only safe once the withdrawal flow executes v2
+/// bytecode (in-place commit) AND the fleet runs binaries that accept it,
+/// the same rollout discipline the upgrade train already requires:
+/// binaries first, then the upgrade tx. Gating on the resolved version
+/// makes the flip atomic with the gating checkpoint on every node.
+pub(crate) fn max_withdrawal_requests(package_version: Option<u64>) -> usize {
+    if package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
         CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
     } else {
         LEGACY_MAX_WITHDRAWAL_REQUESTS
@@ -254,21 +275,22 @@ fn runtime_object_input_budget(
     input_objects / objects_per_input
 }
 
-/// Per-request commit cost for the version the chain executes: v1 bytecode
-/// moves each request between bags (3 objects), v2 mutates in place (2).
-fn commit_objects_per_request(active_package_version: Option<u64>) -> usize {
-    if active_package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
+/// Per-request commit cost for the version the withdrawal flow executes:
+/// v1 bytecode moves each request between bags (3 objects), v2 mutates in
+/// place (2).
+fn commit_objects_per_request(package_version: Option<u64>) -> usize {
+    if package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
         WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST
     } else {
         LEGACY_COMMIT_RUNTIME_OBJECTS_PER_REQUEST
     }
 }
 
-/// Per-request confirm cost for the version the chain executes: v1 bytecode
-/// borrows every request to set its status (2 objects), v2 defers the
-/// status writes to the archival GC (0).
-fn confirm_objects_per_request(active_package_version: Option<u64>) -> usize {
-    if active_package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
+/// Per-request confirm cost for the version the withdrawal flow executes:
+/// v1 bytecode borrows every request to set its status (2 objects), v2
+/// defers the status writes to the archival GC (0).
+fn confirm_objects_per_request(package_version: Option<u64>) -> usize {
+    if package_version.is_some_and(|v| v >= DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION) {
         WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST
     } else {
         LEGACY_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST
@@ -278,11 +300,11 @@ fn confirm_objects_per_request(active_package_version: Option<u64>) -> usize {
 fn safe_withdrawal_commit_max_inputs(
     request_count: usize,
     configured_max_inputs: usize,
-    active_package_version: Option<u64>,
+    package_version: Option<u64>,
 ) -> usize {
     configured_max_inputs.min(runtime_object_input_budget(
         WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS,
-        commit_objects_per_request(active_package_version),
+        commit_objects_per_request(package_version),
         WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT,
         request_count,
     ))
@@ -291,11 +313,11 @@ fn safe_withdrawal_commit_max_inputs(
 fn safe_withdrawal_confirm_max_inputs(
     request_count: usize,
     configured_max_inputs: usize,
-    active_package_version: Option<u64>,
+    package_version: Option<u64>,
 ) -> usize {
     configured_max_inputs.min(runtime_object_input_budget(
         WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS,
-        confirm_objects_per_request(active_package_version),
+        confirm_objects_per_request(package_version),
         WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT,
         request_count,
     ))
@@ -303,12 +325,12 @@ fn safe_withdrawal_confirm_max_inputs(
 
 /// The input cap for the whole withdrawal flow at a given request count:
 /// the configured cap, the per-request consolidation budget, and the
-/// runtime-object budgets of both the commit and confirm transactions —
-/// each priced for the bytecode the active package version executes.
+/// runtime-object budgets of both the commit and confirm transactions,
+/// each priced for the bytecode the effective package version executes.
 fn safe_withdrawal_flow_max_inputs(
     request_count: usize,
     configured_max_inputs: usize,
-    active_package_version: Option<u64>,
+    package_version: Option<u64>,
 ) -> usize {
     let request_input_budget =
         request_count.saturating_mul(CoinSelectionParams::DEFAULT_INPUT_BUDGET);
@@ -317,12 +339,12 @@ fn safe_withdrawal_flow_max_inputs(
         .min(safe_withdrawal_commit_max_inputs(
             request_count,
             configured_max_inputs,
-            active_package_version,
+            package_version,
         ))
         .min(safe_withdrawal_confirm_max_inputs(
             request_count,
             configured_max_inputs,
-            active_package_version,
+            package_version,
         ))
 }
 
@@ -358,10 +380,10 @@ const _: () = assert!(
 fn withdrawal_batch_request_cap(
     pending_requests: usize,
     available_utxos: usize,
-    active_package_version: Option<u64>,
+    package_version: Option<u64>,
 ) -> usize {
     if pending_requests > available_utxos {
-        max_withdrawal_requests(active_package_version)
+        max_withdrawal_requests(package_version)
     } else {
         CONSOLIDATION_MODE_MAX_REQUESTS
     }
@@ -400,9 +422,9 @@ fn validate_commitment_shape(
     request_count: usize,
     input_count: usize,
     outputs: &[OutputUtxo],
-    active_package_version: Option<u64>,
+    package_version: Option<u64>,
 ) -> anyhow::Result<()> {
-    let max_requests = max_withdrawal_requests(active_package_version);
+    let max_requests = max_withdrawal_requests(package_version);
     anyhow::ensure!(
         request_count <= max_requests,
         "Commitment has {request_count} requests, exceeding the batch cap of {max_requests}",
@@ -411,7 +433,7 @@ fn validate_commitment_shape(
     let max_inputs = safe_withdrawal_flow_max_inputs(
         request_count,
         CoinSelectionParams::DEFAULT_MAX_INPUTS,
-        active_package_version,
+        package_version,
     );
     anyhow::ensure!(
         input_count <= max_inputs,
@@ -573,11 +595,14 @@ impl Hashi {
             "Duplicate UTXO IDs"
         );
 
+        // The effective (dormancy-gated) version, not the active one: the
+        // leader sizes batches by the same resolution below, so leader and
+        // validators must agree on the cap through the bootstrap window.
         validate_commitment_shape(
             approval.request_ids.len(),
             approval.selected_utxos.len(),
             &approval.outputs,
-            self.onchain_state().active_package_version(),
+            self.onchain_state().withdrawal_effective_version(),
         )?;
 
         // 1. Verify each request_id exists and is approved
@@ -1473,12 +1498,17 @@ impl Hashi {
         // Drain versus consolidate: size the batch cap by comparing the
         // queue depth to the available pool. `candidates` counts every
         // unlocked UTXO — the same set coin selection draws from. The cap
-        // (and the input models below) follow the active package version,
-        // so the leader proposes only shapes the executing bytecode can
-        // afford and every validator generation will certify.
-        let active_package_version = self.onchain_state().active_package_version();
-        let batch_request_cap =
-            withdrawal_batch_request_cap(requests.len(), candidates.len(), active_package_version);
+        // (and the input models below) follow the withdrawal-effective
+        // package version (the active version, held at v1 through the
+        // bootstrap both-enabled window), so the leader proposes only
+        // shapes the executing bytecode can afford and every validator
+        // generation will certify.
+        let effective_package_version = self.onchain_state().withdrawal_effective_version();
+        let batch_request_cap = withdrawal_batch_request_cap(
+            requests.len(),
+            candidates.len(),
+            effective_package_version,
+        );
         let configured_max_requests = self
             .config
             .withdrawal_max_batch_size()
@@ -1488,7 +1518,7 @@ impl Hashi {
             pending_requests = requests.len(),
             available_utxos = candidates.len(),
             batch_request_cap,
-            active_package_version,
+            effective_package_version,
             configured_max_requests,
             "Sized the withdrawal batch cap from queue depth versus pool size",
         );
@@ -1514,7 +1544,7 @@ impl Hashi {
             let max_inputs = safe_withdrawal_flow_max_inputs(
                 request_count,
                 configured_max_inputs,
-                active_package_version,
+                effective_package_version,
             );
             if max_inputs == 0 {
                 continue;
@@ -2335,10 +2365,55 @@ mod tests {
         }
     }
 
-    /// Active-version shorthand for the model tests: the deferred-archival
-    /// package and the legacy chain.
+    /// Effective-version shorthand for the model tests: the
+    /// deferred-archival package and the legacy chain.
     const V2: Option<u64> = Some(DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION);
     const V1: Option<u64> = Some(1);
+
+    fn enabled(versions: &[u64]) -> BTreeSet<u64> {
+        versions.iter().copied().collect()
+    }
+
+    /// The dormancy truth table: the effective version is held at 1 while
+    /// v1 is in the enabled set, regardless of the active version, and is
+    /// the active version otherwise.
+    #[test]
+    fn effective_version_holds_v1_while_v1_is_enabled() {
+        // The bootstrap window: legacy upgrade left both enabled.
+        assert_eq!(withdrawal_effective_version(2, &enabled(&[1, 2])), 1);
+        // Pre-upgrade steady state.
+        assert_eq!(withdrawal_effective_version(1, &enabled(&[1])), 1);
+        // Post-DisableVersion(1) steady state: the gate is open.
+        assert_eq!(withdrawal_effective_version(2, &enabled(&[2])), 2);
+        // Exclusive upgrades retire the predecessor atomically, so the
+        // gate is inert on every post-bootstrap chain.
+        assert_eq!(withdrawal_effective_version(3, &enabled(&[3])), 3);
+        assert_eq!(withdrawal_effective_version(3, &enabled(&[2, 3])), 3);
+        // A re-enabled v1 (break-glass) re-engages dormancy at any height.
+        assert_eq!(withdrawal_effective_version(3, &enabled(&[1, 3])), 1);
+    }
+
+    /// Both-enabled means v1 semantics at the capacity seam: the cap the
+    /// leader sizes batches by (and validators enforce) resolves to the
+    /// legacy 298 while v1 is enabled, even with active version 2.
+    #[test]
+    fn effective_version_resolves_legacy_cap_while_v1_is_enabled() {
+        let both = Some(withdrawal_effective_version(2, &enabled(&[1, 2])));
+        assert_eq!(
+            max_withdrawal_requests(both),
+            LEGACY_MAX_WITHDRAWAL_REQUESTS
+        );
+        assert_eq!(commit_objects_per_request(both), 3);
+        assert_eq!(confirm_objects_per_request(both), 2);
+
+        let open = Some(withdrawal_effective_version(2, &enabled(&[2])));
+        assert_eq!(
+            max_withdrawal_requests(open),
+            CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        );
+        assert_eq!(commit_objects_per_request(open), 2);
+        assert_eq!(confirm_objects_per_request(open), 0);
+    }
 
     #[test]
     fn batch_cap_drains_when_queue_outnumbers_pool() {

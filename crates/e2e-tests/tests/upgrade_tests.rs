@@ -38,14 +38,20 @@ const SUI_FRAMEWORK_ADDRESS: Address = Address::from_static("0x2");
 
 /// Upgrade v2 binds the committee-approved exclusivity policy to publication.
 ///
-/// The default builder first performs the unavoidable legacy v1 → v2 upgrade.
-/// This test then publishes v3 through `upgrade_v2` with `exclusive = true`
-/// and verifies that the same transaction leaves only v3 enabled. Because the
-/// test binary supports v1 and v2, it must halt autonomous writes afterward.
+/// The builder first performs the unavoidable legacy v1 → v2 upgrade, with
+/// `keep_v1_enabled` so BOTH versions stay enabled (the raw legacy-upgrade
+/// outcome). This test then publishes v3 through `upgrade_v2` with
+/// `exclusive = true` and verifies that the same transaction leaves only v3
+/// enabled, retiring {1, 2} atomically. Because the test binary supports v1
+/// and v2, it must halt autonomous writes afterward.
 #[tokio::test]
 async fn test_upgrade_v2_exclusive_via_proposal() -> Result<()> {
     init_test_logging();
-    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .keep_v1_enabled()
+        .build()
+        .await?;
 
     networks.hashi_network.nodes()[0]
         .wait_for_mpc_key(Duration::from_secs(120))
@@ -106,10 +112,18 @@ async fn test_upgrade_v2_exclusive_via_proposal() -> Result<()> {
 /// 1. Watcher picks up new package — PackageUpgraded updates OnchainState
 /// 2. Validators confirm deposits post-upgrade — leader routes calls correctly
 /// 3. Package ID routing — OnchainState.package_id() returns the new package
+///
+/// `keep_v1_enabled`: this test drives DisableVersion(1) itself after its
+/// own vN -> vN+1 upgrade (a second disable would abort on-chain), and the
+/// v1-rejection assertion needs v1 to still be enabled until that move.
 #[tokio::test]
 async fn test_upgrade_via_proposal() -> Result<()> {
     init_test_logging();
-    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .keep_v1_enabled()
+        .build()
+        .await?;
 
     let hashi_ids = networks.hashi_network.ids();
     info!("original package ID: {}", hashi_ids.package_id);
@@ -401,10 +415,12 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
 }
 
 /// A withdrawal committed and fully signed under the deployed **v1 bytecode**
-/// must complete after the governance upgrade to the current source:
-/// confirmation runs through the v2 `confirm_withdrawal` (which defers
-/// archival), and the leader's archival GC — armed by the confirm and
-/// version-gated on active >= 2 — then drains it.
+/// must complete after the governance upgrade to the current source AND the
+/// DisableVersion(1) that closes the bootstrap window: with v1 still enabled
+/// the withdrawal flow stays dormant at v1 semantics, so the disable is what
+/// activates v2. Confirmation then runs through the v2 `confirm_withdrawal`
+/// (which defers archival), and the leader's archival GC (armed by the
+/// confirm, gated on the withdrawal-effective version >= 2) then drains it.
 ///
 /// This is the mid-flight rollout window the deferred-archival change has to
 /// survive: v1's commit moved the requests into the unmirrored `processed`
@@ -503,6 +519,27 @@ async fn test_withdrawal_committed_under_v1_completes_after_upgrade() -> Result<
     upgrade_flow::wait_for_package_convergence(&networks, new_package_id, Duration::from_secs(30))
         .await?;
     info!("upgraded mid-withdrawal: new package {new_package_id}");
+
+    // ── DisableVersion(1): open the withdrawal dormancy gate ────────────
+    //
+    // The legacy upgrade leaves both versions enabled, and with v1 enabled
+    // the flow stays dormant at v1 semantics: confirm would route the v1
+    // bytecode (which archives inline) and the archival GC would never
+    // arm, so the v2 path this test exists to exercise would go untested.
+    let mut executors: Vec<SuiTxExecutor> = networks
+        .hashi_network
+        .nodes()
+        .iter()
+        .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
+        .collect::<Result<_>>()?;
+    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, new_package_id).await?;
+    upgrade_flow::wait_for_version_disabled(&networks, 1, Duration::from_secs(30)).await?;
+    assert_eq!(
+        node0.onchain_state().withdrawal_effective_version(),
+        Some(2),
+        "the withdrawal dormancy gate must be open before the v2 completion is asserted"
+    );
+    info!("version 1 disabled mid-withdrawal; v2 withdrawal semantics active");
 
     // ── Complete the flow under v2: confirm, then archival GC ───────────
     //
@@ -618,13 +655,25 @@ fn assert_version_gate_abort<T>(result: Result<T>, v1_package_id: Address, what:
 ///   verification) aborts EVersionDisabled
 /// - the request is untouched afterwards, and the normal v2 flow then
 ///   confirms and archives it on every node.
+///
+/// Ordering note: DisableVersion(1) runs BEFORE the withdrawal is created.
+/// The node-side flow is dormant at v1 semantics while v1 is enabled, so a
+/// commit inside the both-enabled window would be a v1 bag-move commit and
+/// the "v2-committed request" premise would be false. The direct-v1-call
+/// assertions only need v1 disabled at call time, which this order
+/// preserves.
 #[tokio::test]
 async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
     init_test_logging();
 
-    // Standard boot: the deployed-v1 snapshot auto-upgraded to the current
-    // source. Both versions stay enabled — disabling v1 is this test's move.
-    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+    // Boot with `keep_v1_enabled`: the deployed-v1 snapshot auto-upgraded to
+    // the current source with both versions left enabled; running
+    // DisableVersion(1) is this test's move.
+    let mut networks = TestNetworksBuilder::new()
+        .with_nodes(4)
+        .keep_v1_enabled()
+        .build()
+        .await?;
     let hashi_ids = networks.hashi_network.ids();
 
     networks.hashi_network.nodes()[0]
@@ -642,7 +691,7 @@ async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
         );
         assert!(
             state.hashi().config.enabled_versions.contains(&1),
-            "the boot upgrade must leave v1 enabled; disabling it is this test's move"
+            "the keep_v1_enabled boot must leave v1 enabled; disabling it is this test's move"
         );
         (
             versions.get(1).expect("v1 must be in the version map"),
@@ -655,11 +704,35 @@ async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
     );
     assert_ne!(v1_package_id, active_package_id);
 
-    // ── Deposit, then drive a withdrawal to committed-under-v2 ──────────
+    // ── Deposit under the both-enabled window ───────────────────────────
     let deposit_sats = 100_000u64;
     let withdrawal_sats = 30_000u64;
     let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_sats).await?;
 
+    // ── DisableVersion(1) via governance, BEFORE any withdrawal ─────────
+    //
+    // With v1 enabled the withdrawal flow is dormant at v1 semantics; the
+    // disable is what makes the upcoming commit a v2 in-place commit.
+    let mut executors: Vec<SuiTxExecutor> = networks
+        .hashi_network
+        .nodes()
+        .iter()
+        .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
+        .collect::<Result<_>>()?;
+    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, active_package_id).await?;
+
+    // Every watcher must converge on v1-disabled; the proposal execution is
+    // checkpointed, so the fullnode state the direct v1 calls run against
+    // already has it.
+    upgrade_flow::wait_for_version_disabled(&networks, 1, Duration::from_secs(30)).await?;
+    assert_eq!(
+        node0.onchain_state().withdrawal_effective_version(),
+        Some(2),
+        "the withdrawal dormancy gate must be open before the v2 commit is driven"
+    );
+    info!("version 1 disabled; v2 withdrawal semantics active");
+
+    // ── Drive a withdrawal to committed-under-v2 ────────────────────────
     let user_key = networks.sui_network.user_keys.first().unwrap().clone();
     let btc_destination = networks.bitcoin_node.get_new_address()?;
     let destination_bytes = extract_witness_program(&btc_destination)?;
@@ -700,36 +773,6 @@ async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
         "a committed request must reference its withdrawal transaction"
     );
     info!("withdrawal committed under v2 (Processing, balance drained, still in `requests`)");
-
-    // ── DisableVersion(1) via governance ────────────────────────────────
-    let mut executors: Vec<SuiTxExecutor> = networks
-        .hashi_network
-        .nodes()
-        .iter()
-        .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
-        .collect::<Result<_>>()?;
-    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, active_package_id).await?;
-
-    // Every watcher must converge on v1-disabled; the proposal execution is
-    // checkpointed, so the fullnode state the direct v1 calls run against
-    // already has it.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let converged = networks.hashi_network.nodes().iter().all(|node| {
-            let state = node.hashi().onchain_state().state();
-            !state.hashi().config.enabled_versions.contains(&1)
-        });
-        if converged {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(anyhow!(
-                "timed out waiting for the watchers to reflect DisableVersion(1)"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    info!("version 1 disabled");
 
     // ── Direct v1 `withdraw::cancel_withdrawal` on the committed id ─────
     //

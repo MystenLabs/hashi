@@ -465,6 +465,52 @@ async fn execute_full_upgrade_with_proposal(
     Ok(new_package_id)
 }
 
+/// Poll until every running node's mirror shows `version` out of the
+/// enabled set (the DisableVersion execution reaching each watcher).
+/// Prints per-node diagnostics before failing on timeout.
+pub async fn wait_for_version_disabled(
+    networks: &TestNetworks,
+    version: u64,
+    max_wait: std::time::Duration,
+) -> Result<()> {
+    let wait_start = std::time::Instant::now();
+    loop {
+        let all_disabled = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .filter(|node| node.is_running())
+            .all(|node| {
+                let state = node.hashi().onchain_state().state();
+                !state.hashi().config.enabled_versions.contains(&version)
+            });
+        if all_disabled {
+            return Ok(());
+        }
+        if wait_start.elapsed() > max_wait {
+            for (i, node) in networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .filter(|node| node.is_running())
+                .enumerate()
+            {
+                let enabled = node
+                    .hashi()
+                    .onchain_state()
+                    .state()
+                    .hashi()
+                    .config
+                    .enabled_versions
+                    .clone();
+                tracing::info!("node {i}: enabled_versions={enabled:?}");
+            }
+            anyhow::bail!("timeout: not all nodes' mirrors show version {version} disabled");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 /// Propose + vote + execute a DisableVersion governance action.
 ///
 /// `execute_package_id` is the package whose `disable_version::execute` is called.

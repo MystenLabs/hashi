@@ -89,10 +89,11 @@ async fn request(
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
     // `request_withdrawal` gates on `assert_version_enabled`, so the call
-    // must target the active version's package: a v1-targeted creation
-    // aborts once v1 is disabled. The resolved state also routes the batch
-    // executor below.
-    let (onchain, call_package) = super::resolve_active_call_package(config, hashi_ids).await?;
+    // must target the withdrawal-effective version's package: v1 while the
+    // bootstrap window keeps v1 enabled (matching the flow's dormancy), the
+    // active version after, where a v1-targeted creation would abort. The
+    // resolved state also routes the batch executor below.
+    let (onchain, call_package) = super::resolve_withdrawal_call_package(config, hashi_ids).await?;
 
     let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
 
@@ -144,8 +145,8 @@ async fn request(
     );
 
     // Execute mode guarantees a signer (rejected above otherwise). The
-    // attached reader state makes the executor route its calls through the
-    // active version's package.
+    // attached reader state makes the executor route its withdrawal calls
+    // through the withdrawal-effective version's package.
     let signer = signer.expect("execute mode requires a signer");
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids)
         .with_onchain_state(&onchain);
@@ -210,13 +211,16 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
             "No sender available: pass --sender (the refund recipient) or configure a keypair",
         )?;
 
-    // Resolve the active version's package so the cancel runs the bytecode
-    // generation whose committed-request gate matches the chain's state
-    // (v1's bag-membership gate misses v2 in-place-committed requests). A
-    // resolution failure must abort the command, not fall back: a v1-routed
-    // cancel aimed at a v2-committed request would destroy a request its
-    // live withdrawal txn still references.
-    let (_onchain, call_package) = super::resolve_active_call_package(config, hashi_ids).await?;
+    // Resolve the withdrawal-effective version's package so the cancel runs
+    // the bytecode generation whose committed-request gate matches the shape
+    // the flow is committing (v1's bag-membership gate misses v2
+    // in-place-committed requests, and vice versa; dormancy keeps the flow
+    // at v1 shapes exactly while v1 is still enabled). A resolution failure
+    // must abort the command, not fall back: a v1-routed cancel aimed at a
+    // v2-committed request would destroy a request its live withdrawal txn
+    // still references.
+    let (_onchain, call_package) =
+        super::resolve_withdrawal_call_package(config, hashi_ids).await?;
     let builder =
         crate::sui_tx_executor::build_cancel_withdrawal(hashi_ids, call_package, &req_addr, sender);
 

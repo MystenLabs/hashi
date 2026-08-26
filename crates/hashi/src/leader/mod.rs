@@ -146,6 +146,11 @@ pub(crate) struct LeaderService {
     // we only kick a new task when the chain advances (not every checkpoint).
     // `None` triggers an initial reconcile on the first leader tick.
     last_guardian_reconcile_epoch: Option<u64>,
+
+    // Last observed (effective, active) withdrawal package version pair, so
+    // the semantics-selection log fires only on change. `None` logs the
+    // initial selection on the first tick.
+    last_withdrawal_semantics: Option<(Option<u64>, Option<u64>)>,
 }
 
 impl LeaderService {
@@ -187,6 +192,7 @@ impl LeaderService {
             withdrawal_archive_scan_target: 0,
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
+            last_withdrawal_semantics: None,
         }
     }
 
@@ -265,6 +271,10 @@ impl LeaderService {
                     };
 
                     let is_leader = self.is_current_leader(checkpoint_height);
+                    // Before the non-leader `continue`, like the heartbeat:
+                    // every node reports its withdrawal semantics selection,
+                    // not just the current leader.
+                    self.observe_withdrawal_semantics();
                     // Heartbeat before the non-leader `continue` so followers
                     // report liveness too.
                     self.inner.metrics.task_heartbeat("leader_loop");

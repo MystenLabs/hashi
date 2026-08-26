@@ -512,6 +512,16 @@ mod tests {
         );
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+
+        // The archival assertion below is v2 behavior; a dormant flow (v1
+        // still enabled) would run v1 semantics and time it out. Pin that
+        // the default boot's DisableVersion(1) actually opened the gate.
+        assert_eq!(
+            hashi.onchain_state().withdrawal_effective_version(),
+            Some(2),
+            "the withdrawal dormancy gate must be open under the default boot"
+        );
+
         let user_key = networks.sui_network.user_keys.first().unwrap();
         let withdrawal_amount_sats = 30_000u64;
         let btc_destination = networks.bitcoin_node.get_new_address()?;
@@ -670,28 +680,9 @@ mod tests {
         )
         .await?;
         rotate_into_avid(&mut networks).await?;
-        {
-            let hashi_ids = networks.hashi_network.ids();
-            let stamped_package = networks.hashi_network.nodes()[0]
-                .hashi()
-                .onchain_state()
-                .active_package()
-                .expect("an active package after upgrade")
-                .0;
-            let mut executors: Vec<hashi::sui_tx_executor::SuiTxExecutor> = networks
-                .hashi_network
-                .nodes()
-                .iter()
-                .map(|node| {
-                    hashi::sui_tx_executor::SuiTxExecutor::from_config(
-                        &node.hashi().config,
-                        node.hashi().onchain_state(),
-                    )
-                })
-                .collect::<Result<_>>()?;
-            crate::upgrade_flow::disable_version(&mut executors, hashi_ids, 1, stamped_package)
-                .await?;
-        }
+        // No in-test DisableVersion(1): the default builder boot already
+        // disables v1 (a second disable would abort on-chain). The
+        // assertion below still pins the layout precondition.
         {
             let hashi = networks.hashi_network.nodes()[0].hashi();
             let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
@@ -2653,6 +2644,17 @@ mod tests {
         rotate_into_avid(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+
+        // The drain-mode cap this test fills is the v2 cap; a dormant flow
+        // (v1 still enabled) would trim the batch to 298 and never fire at
+        // the configured capacity. Pin that the default boot's
+        // DisableVersion(1) actually opened the gate.
+        assert_eq!(
+            hashi.onchain_state().withdrawal_effective_version(),
+            Some(2),
+            "the withdrawal dormancy gate must be open under the default boot"
+        );
+
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let hbtc_recipient = user_key.public_key().derive_address();
 
