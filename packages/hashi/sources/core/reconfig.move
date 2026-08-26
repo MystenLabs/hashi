@@ -114,11 +114,6 @@ entry fun end_reconfig(
                 committee_handoff_cert.destroy_some(),
             );
     };
-    // Remove resigned ex-members' registrations atomically with the
-    // transition that stopped including them (assert-free: must never block
-    // end_reconfig).
-    let removed = self.committee_set_mut().finalize_resignations(from_epoch);
-    removed.do!(|validator| hashi::validator::emit_deregistered(validator));
     sui::event::emit(ReconfigEnded { from_epoch, epoch, mpc_public_key });
 }
 

@@ -114,20 +114,36 @@ entry fun update_tls_public_key(
 /// Voluntarily resign from the committee, authorized for the validator's
 /// own key or its delegated operator key.
 ///
-/// Takes effect at the next committee formation: the member keeps serving
-/// the current epoch (and a pending epoch mid-reconfiguration), and the
-/// registration is removed at the epoch transition that stops including
-/// them — after which re-joining requires a full re-registration. Members
-/// with no epoch duties are removed immediately. Revocable via
-/// `withdraw_resignation` until consumed.
+/// Only sets the resignation flag: the member keeps serving the current
+/// epoch (and a pending epoch mid-reconfiguration), the next committee
+/// formation skips them, and the registration is deleted separately by the
+/// permissionless `remove_inactive_member` once they hold no epoch duties —
+/// after which re-joining requires a full re-registration. Revocable via
+/// `withdraw_resignation` until the registration is removed.
 entry fun resign(self: &mut Hashi, validator: address, ctx: &mut TxContext) {
     self.versioning().assert_version_enabled();
-    let removed = self.committee_set_mut().request_resignation(validator, ctx);
-    if (removed) {
-        event::emit(ValidatorDeregistered { validator });
-    } else {
-        event::emit(ValidatorResigned { validator });
-    }
+    self.committee_set_mut().request_resignation(validator, ctx);
+    event::emit(ValidatorResigned { validator });
+}
+
+/// Permissionless registry cleanup: delete the registration of a member
+/// with no epoch duties (not in the current committee, nor in a pending one
+/// mid-reconfiguration) who either voluntarily resigned or is no longer in
+/// Sui's active validator set. Deliberately independent of the
+/// reconfiguration flow, which never touches the registry.
+///
+/// Governance-ignored members are not removable — deleting the registration
+/// would delete the flag with it, letting them shed the exclusion by simply
+/// re-registering.
+entry fun remove_inactive_member(
+    self: &mut Hashi,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    validator: address,
+) {
+    self.versioning().assert_version_enabled();
+    let is_active_sui_validator = sui_system.active_validator_addresses_ref().contains(&validator);
+    self.committee_set_mut().remove_inactive_member(validator, is_active_sui_validator);
+    event::emit(ValidatorDeregistered { validator });
 }
 
 /// Withdraw a pending resignation. If the next committee already formed
@@ -153,15 +169,6 @@ entry fun update_next_epoch_encryption_public_key(
     event::emit(ValidatorUpdated { validator });
 }
 
-// ~~~~~~~ Package Functions ~~~~~~~
-
-/// Emit `ValidatorDeregistered` on behalf of the reconfiguration paths
-/// (`end_reconfig` finalization and `abort_reconfig`'s pending sweep) —
-/// Sui only lets a module emit its own event types.
-public(package) fun emit_deregistered(validator: address) {
-    event::emit(ValidatorDeregistered { validator });
-}
-
 // ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
@@ -179,4 +186,17 @@ public fun withdraw_resignation_for_testing(
     ctx: &mut TxContext,
 ) {
     withdraw_resignation(self, validator, ctx)
+}
+
+#[test_only]
+/// `remove_inactive_member` with an explicit Sui-validator-set answer, since
+/// unit tests cannot construct a `SuiSystemState`.
+public fun remove_inactive_member_for_testing(
+    self: &mut Hashi,
+    validator: address,
+    is_active_sui_validator: bool,
+) {
+    self.versioning().assert_version_enabled();
+    self.committee_set_mut().remove_inactive_member(validator, is_active_sui_validator);
+    event::emit(ValidatorDeregistered { validator });
 }

@@ -38,8 +38,9 @@ const MEMBER_IGNORED_KEY: vector<u8> = b"ignored";
 
 /// `MemberInfo.extra_fields` key holding the voluntary "resigned" flag as a
 /// `Bool` value. Set by `request_resignation`, cleared by
-/// `clear_resignation`, consumed by committee formation (skip) and by
-/// `finalize_resignations` (registry removal at the epoch transition).
+/// `clear_resignation`, honored by committee formation (skip); the
+/// registration itself is deleted by the permissionless
+/// `remove_inactive_member` once the member holds no epoch duties.
 ///
 /// TODO(pre-mainnet-wipe): promote to a root-level `resigned: bool` field on
 /// `MemberInfo` together with `MEMBER_IGNORED_KEY` above.
@@ -53,6 +54,14 @@ const EMemberNotRegistered: vector<u8> = b"No member is registered under this va
 const EAlreadyResigned: vector<u8> = b"Member has already requested resignation";
 #[error(code = 2)]
 const ENotResigned: vector<u8> = b"Member has no pending resignation to withdraw";
+#[error(code = 4)]
+const EMemberStillActive: vector<u8> = b"Member is in the current or pending committee";
+#[error(code = 5)]
+const ECannotRemoveIgnoredMember: vector<u8> =
+    b"Governance-ignored members stay registered until un-ignored";
+#[error(code = 6)]
+const EMemberNotRemovable: vector<u8> =
+    b"Member is neither resigned nor gone from the Sui validator set";
 #[error(code = 3)]
 const ELastActiveMember: vector<u8> =
     b"Cannot resign as the last active committee member; the committee would be unable to form";
@@ -312,21 +321,17 @@ public(package) fun is_member_resigned(self: &CommitteeSet, validator_address: a
 /// Request resignation from the committee, authorized for the validator's
 /// own key or its delegated operator key.
 ///
-/// Members serving the current epoch — or included in a pending committee
-/// mid-reconfiguration — keep their registration and all current-epoch
-/// duties: only a flag is set, which the next committee formation skips and
-/// `finalize_resignations` consumes at the epoch transition. Revocable via
-/// `clear_resignation` until consumed.
-///
-/// Members with no epoch duties (registered but never included, skipped at
-/// formation, or pre-genesis) are removed immediately — for them, removal
-/// now is equivalent to consumption at a boundary. Returns true when the
-/// member was removed immediately.
+/// Only sets a flag: the member keeps their registration and any epoch
+/// duties, the next committee formation skips them, and the registration is
+/// deleted by the separate permissionless `remove_inactive_member` once
+/// they hold no duties. The reconfiguration flow itself never touches the
+/// registry. Revocable via `clear_resignation` until the registration is
+/// removed.
 public(package) fun request_resignation(
     self: &mut CommitteeSet,
     validator_address: address,
     ctx: &TxContext,
-): bool {
+) {
     assert!(self.has_member(validator_address), EMemberNotRegistered);
     let member = self.member(validator_address);
     member.assert_authorized(ctx);
@@ -334,15 +339,33 @@ public(package) fun request_resignation(
 
     if (self.in_current_or_pending_committee(validator_address)) {
         self.assert_not_last_active_member(validator_address);
-        self
-            .member_mut(validator_address)
-            .extra_fields
-            .upsert(MEMBER_RESIGNED_KEY, config_value::new_bool(true));
-        false
-    } else {
-        self.remove_member(validator_address);
-        true
-    }
+    };
+    self
+        .member_mut(validator_address)
+        .extra_fields
+        .upsert(MEMBER_RESIGNED_KEY, config_value::new_bool(true));
+}
+
+/// Permissionless registry cleanup: delete the registration of a member who
+/// holds no epoch duties (not in the current committee, nor in a pending
+/// one mid-reconfiguration) and either voluntarily resigned or is no longer
+/// in Sui's active validator set.
+///
+/// A governance-ignored member is deliberately NOT removable: deleting the
+/// registration would delete the flag with it, letting the member shed the
+/// exclusion by simply re-registering. Their registration stays until
+/// governance lifts the ignore.
+public(package) fun remove_inactive_member(
+    self: &mut CommitteeSet,
+    validator_address: address,
+    is_active_sui_validator: bool,
+) {
+    assert!(self.has_member(validator_address), EMemberNotRegistered);
+    assert!(!self.in_current_or_pending_committee(validator_address), EMemberStillActive);
+    let member = self.member(validator_address);
+    assert!(!member.is_ignored(), ECannotRemoveIgnoredMember);
+    assert!(member.is_resigned() || !is_active_sui_validator, EMemberNotRemovable);
+    self.remove_member(validator_address);
 }
 
 /// Withdraw a pending resignation. If the next committee has already been
@@ -361,49 +384,6 @@ public(package) fun clear_resignation(
         .member_mut(validator_address)
         .extra_fields
         .upsert(MEMBER_RESIGNED_KEY, config_value::new_bool(false));
-}
-
-/// Remove resigned ex-members' registrations, atomically with the epoch
-/// transition that stopped including them. Called from
-/// `reconfig::end_reconfig` AFTER the new epoch is active; enumerates the
-/// OUTGOING committee (`from_epoch`) — every member with epoch duties is in
-/// some committee, and duty-free members were already removed inline by
-/// `request_resignation` — and removes those absent from the new committee
-/// whose resignation flag is set. Returns the removed addresses so the
-/// caller can emit deregistration events.
-///
-/// Deliberately assert-free: this must never be able to block
-/// `end_reconfig`.
-public(package) fun finalize_resignations(
-    self: &mut CommitteeSet,
-    from_epoch: u64,
-): vector<address> {
-    let mut removed = vector[];
-    // Genesis: no outgoing committee to enumerate.
-    if (!self.has_committee(from_epoch)) return removed;
-
-    // Two-phase for borrows: collect candidates from the outgoing committee
-    // first, then mutate the registry.
-    let mut candidates = vector[];
-    {
-        let outgoing = self.get_committee(from_epoch);
-        let current = self.current_committee();
-        let n = outgoing.n_members();
-        n.do!(|i| {
-            let addr = outgoing.get_idx(i).validator_address();
-            if (!current.has_member(&addr)) {
-                candidates.push_back(addr);
-            };
-        });
-    };
-
-    candidates.do!(|addr| {
-        if (self.has_member(addr) && self.member(addr).is_resigned()) {
-            self.remove_member(addr);
-            removed.push_back(addr);
-        };
-    });
-    removed
 }
 
 public(package) fun start_reconfig(
@@ -474,10 +454,7 @@ public(package) fun end_reconfig(
     (next_epoch, committee_handoff_cert)
 }
 
-public(package) fun abort_reconfig(
-    self: &mut CommitteeSet,
-    _ctx: &TxContext,
-): (u64, vector<address>) {
+public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
         .pending_epoch_change
@@ -488,35 +465,8 @@ public(package) fun abort_reconfig(
         committee_handoff_cert.destroy_none();
     };
 
-    // Sweep pending-only resigned members before the pending committee is
-    // destroyed: a member included ONLY in the aborted pending committee
-    // (a new joiner mid-reconfig) who resigned would otherwise never be
-    // enumerated by finalize_resignations — every later formation skips
-    // them, so their registration would leak forever. They hold no live
-    // shares (the pending epoch never activated), so removal is safe.
-    let mut removed = vector[];
-    let mut candidates = vector[];
-    {
-        let pending = self.get_committee(next_epoch);
-        let has_current = self.has_committee(self.epoch());
-        let n = pending.n_members();
-        n.do!(|i| {
-            let addr = pending.get_idx(i).validator_address();
-            let in_current = has_current && self.current_committee().has_member(&addr);
-            if (!in_current) {
-                candidates.push_back(addr);
-            };
-        });
-    };
-    candidates.do!(|addr| {
-        if (self.has_member(addr) && self.member(addr).is_resigned()) {
-            self.remove_member(addr);
-            removed.push_back(addr);
-        };
-    });
-
     self.remove_committee(next_epoch);
-    (next_epoch, removed)
+    next_epoch
 }
 
 public(package) fun insert_committee_handoff(
@@ -639,9 +589,9 @@ fun new_committee_from_voting_powers(
             continue
         };
 
-        // If the member has requested resignation, skip them; their
-        // registration is removed by finalize_resignations at the epoch
-        // transition.
+        // If the member has requested resignation, skip them; once they hold
+        // no epoch duties, the permissionless `remove_inactive_member`
+        // deletes the registration.
         if (member.is_resigned()) {
             continue
         };

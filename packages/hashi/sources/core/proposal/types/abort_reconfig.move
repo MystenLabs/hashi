@@ -66,7 +66,6 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &TxCo
         hashi.committee_set().pending_epoch_change().destroy_some() == epoch,
         EWrongReconfigEpoch,
     );
-    let (aborted_epoch, deregistered) = hashi.committee_set_mut().abort_reconfig(ctx);
+    let aborted_epoch = hashi.committee_set_mut().abort_reconfig(ctx);
     assert!(aborted_epoch == epoch, EWrongReconfigEpoch);
-    deregistered.do!(|validator| hashi::validator::emit_deregistered(validator));
 }

@@ -108,9 +108,10 @@ fun test_resign_sets_flag_and_formation_skips() {
 }
 
 #[test]
-/// A duty-free member (registered but in no committee) is removed
-/// immediately on resign.
-fun test_resign_without_duties_removes_immediately() {
+/// A duty-free member (registered but in no committee) resigning is still
+/// flag-only; the permissionless removal entry then deletes the
+/// registration (resigned ⇒ removable even while in Sui's validator set).
+fun test_resign_without_duties_flags_then_removal_succeeds() {
     let ctx = &mut test_utils::new_tx_context(VOTER3, 0);
     let mut hashi = test_utils::create_hashi_with_committee_and_registry(
         vector[VOTER1, VOTER2],
@@ -119,14 +120,19 @@ fun test_resign_without_duties_removes_immediately() {
     );
 
     validator::resign_for_testing(&mut hashi, VOTER3, ctx);
+    assert!(hashi.committee_set().has_member(VOTER3));
+    assert!(hashi.committee_set().is_member_resigned(VOTER3));
 
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
     assert!(!hashi.committee_set().has_member(VOTER3));
+
     std::unit_test::destroy(hashi);
 }
 
 #[test]
-/// Pre-genesis (no committee exists yet): resign is immediate removal.
-fun test_resign_pre_genesis_removes_immediately() {
+/// Pre-genesis (no committee exists yet): resign is flag-only there too,
+/// and the member is immediately removable (no epoch duties to wait out).
+fun test_resign_pre_genesis_flags_then_removal_succeeds() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let sk = test_utils::bls_sk_for_testing();
     let pub_key = bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk));
@@ -137,9 +143,11 @@ fun test_resign_pre_genesis_removes_immediately() {
         ctx,
     );
 
-    let removed = committee_set.request_resignation(VOTER1, ctx);
+    committee_set.request_resignation(VOTER1, ctx);
+    assert!(committee_set.has_member(VOTER1));
+    assert!(committee_set.is_member_resigned(VOTER1));
 
-    assert!(removed);
+    committee_set.remove_inactive_member(VOTER1, true);
     assert!(!committee_set.has_member(VOTER1));
     assert!(committee_set.has_member(VOTER2));
     hashi::committee_set::destroy_for_testing(committee_set);
@@ -263,12 +271,13 @@ fun test_last_active_member_cannot_resign() {
     std::unit_test::destroy(hashi);
 }
 
-// ======== Finalization at the epoch transition ========
+// ======== Removal after the epoch boundary ========
 
 #[test]
-/// The canonical flow: resign while serving, epoch transition excludes the
-/// member, finalize removes the registration atomically with end_reconfig.
-fun test_finalize_removes_resigned_member_at_end_reconfig() {
+/// The canonical flow: resign while serving, the epoch transition excludes
+/// the member but leaves the registration (and flag) intact, and the
+/// permissionless removal entry then deletes it.
+fun test_resigned_member_removable_after_epoch_boundary() {
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx3);
@@ -278,7 +287,13 @@ fun test_finalize_removes_resigned_member_at_end_reconfig() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     run_epoch_transition(&mut hashi, 1, vector[VOTER1, VOTER2], ctx);
 
+    // The boundary never touches the registry: still registered, flag intact.
     assert!(hashi.committee_set().epoch() == 1);
+    assert!(hashi.committee_set().has_member(VOTER3));
+    assert!(hashi.committee_set().is_member_resigned(VOTER3));
+
+    // Out of the committee now, so the removal entry succeeds.
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
     assert!(!hashi.committee_set().has_member(VOTER3));
     assert!(hashi.committee_set().has_member(VOTER1));
     assert!(hashi.committee_set().has_member(VOTER2));
@@ -287,9 +302,23 @@ fun test_finalize_removes_resigned_member_at_end_reconfig() {
 }
 
 #[test]
+#[expected_failure(abort_code = hashi::committee_set::EMemberStillActive)]
+/// Before the boundary the resigned member still serves the current epoch
+/// and cannot be removed.
+fun test_remove_aborts_for_current_committee_member() {
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx3);
+
+    validator::resign_for_testing(&mut hashi, VOTER3, ctx3);
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 /// Resigning mid-reconfig while included in the PENDING committee: the
-/// member survives this boundary (they hold the new epoch's shares) and is
-/// removed at the following one.
+/// member survives that boundary (they hold the new epoch's shares) and
+/// becomes removable only after the following one.
 fun test_resign_mid_reconfig_survives_one_boundary() {
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
     let voters = vector[VOTER1, VOTER2, VOTER3];
@@ -304,7 +333,7 @@ fun test_resign_mid_reconfig_survives_one_boundary() {
     assert!(hashi.committee_set().has_member(VOTER3));
 
     // Complete the in-flight transition: VOTER3 is in the NEW committee, so
-    // finalize must NOT remove them — they serve epoch 1.
+    // they serve epoch 1, registration and flag intact.
     let mpc_public_key = vector[1, 2, 3];
     hashi.committee_set_mut().set_mpc_public_key_for_testing(mpc_public_key);
     let mpc_message = reconfig::reconfig_completion_message_for_testing(1, mpc_public_key);
@@ -328,9 +357,12 @@ fun test_resign_mid_reconfig_survives_one_boundary() {
     assert!(hashi.committee_set().has_member(VOTER3));
     assert!(hashi.committee_set().is_member_resigned(VOTER3));
 
-    // The FOLLOWING transition (epoch 2, formed without them) removes them.
+    // After the FOLLOWING transition (epoch 2, formed without them) they
+    // hold no duties and the removal entry succeeds.
     run_epoch_transition(&mut hashi, 2, vector[VOTER1, VOTER2], ctx);
     assert!(hashi.committee_set().epoch() == 2);
+    assert!(hashi.committee_set().has_member(VOTER3));
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
     assert!(!hashi.committee_set().has_member(VOTER3));
 
     std::unit_test::destroy(hashi);
@@ -338,8 +370,9 @@ fun test_resign_mid_reconfig_survives_one_boundary() {
 
 #[test]
 /// A pending-only member (new joiner mid-reconfig) who resigns and then
-/// sees abort_reconfig is removed by the abort sweep — no registry leak.
-fun test_abort_reconfig_sweeps_pending_only_resigned_member() {
+/// sees abort_reconfig stays registered — the abort never touches the
+/// registry — and becomes removable once the pending committee is gone.
+fun test_abort_reconfig_leaves_pending_only_resigned_member_registered() {
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
     let mut hashi = test_utils::create_hashi_with_committee_and_registry(
         vector[VOTER1, VOTER2],
@@ -351,13 +384,20 @@ fun test_abort_reconfig_sweeps_pending_only_resigned_member() {
     let next_committee = committee_for_testing(1, vector[VOTER1, VOTER2, VOTER3]);
     hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
 
-    // Resign: pending-only membership → flag, not immediate removal.
+    // Resign: flag only, regardless of committee membership.
     validator::resign_for_testing(&mut hashi, VOTER3, ctx3);
     assert!(hashi.committee_set().has_member(VOTER3));
 
-    let (aborted_epoch, removed) = hashi.committee_set_mut().abort_reconfig(ctx3);
+    let aborted_epoch = hashi.committee_set_mut().abort_reconfig(ctx3);
     assert!(aborted_epoch == 1);
-    assert!(removed == vector[VOTER3]);
+
+    // No sweep: registration and flag survive the abort...
+    assert!(hashi.committee_set().has_member(VOTER3));
+    assert!(hashi.committee_set().is_member_resigned(VOTER3));
+
+    // ...and with the pending committee gone they hold no duties, so the
+    // removal entry succeeds.
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
     assert!(!hashi.committee_set().has_member(VOTER3));
 
     std::unit_test::destroy(hashi);
@@ -376,22 +416,89 @@ fun test_abort_reconfig_retains_current_member() {
 
     validator::resign_for_testing(&mut hashi, VOTER2, ctx2);
 
-    let (aborted_epoch, removed) = hashi.committee_set_mut().abort_reconfig(ctx2);
+    let aborted_epoch = hashi.committee_set_mut().abort_reconfig(ctx2);
     assert!(aborted_epoch == 1);
-    assert!(removed.is_empty());
     assert!(hashi.committee_set().has_member(VOTER2));
     assert!(hashi.committee_set().is_member_resigned(VOTER2));
 
     std::unit_test::destroy(hashi);
 }
 
+// ======== Removal entry guards ========
+
+#[test]
+#[expected_failure(abort_code = hashi::committee_set::EMemberStillActive)]
+/// A member only in the PENDING committee of an in-flight reconfig holds
+/// next-epoch duties and cannot be removed, even resigned.
+fun test_remove_aborts_for_pending_committee_member() {
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2],
+        vector[VOTER1, VOTER2, VOTER3],
+        ctx3,
+    );
+
+    let next_committee = committee_for_testing(1, vector[VOTER1, VOTER2, VOTER3]);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
+
+    validator::resign_for_testing(&mut hashi, VOTER3, ctx3);
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// An UNRESIGNED duty-free member who left Sui's validator set is removable.
+fun test_remove_unresigned_member_gone_from_sui_set_succeeds() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2],
+        vector[VOTER1, VOTER2, VOTER3],
+        ctx,
+    );
+
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, false);
+    assert!(!hashi.committee_set().has_member(VOTER3));
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::committee_set::EMemberNotRemovable)]
+/// An unresigned duty-free member still in Sui's validator set is NOT
+/// removable — registrations awaiting their first committee are protected.
+fun test_remove_active_unresigned_member_aborts() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2],
+        vector[VOTER1, VOTER2, VOTER3],
+        ctx,
+    );
+
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::committee_set::EMemberNotRegistered)]
+/// Removing an address with no registration aborts.
+fun test_remove_unregistered_aborts() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    validator::remove_inactive_member_for_testing(&mut hashi, STRANGER, true);
+    std::unit_test::destroy(hashi);
+}
+
 // ======== Interaction with ignore + governance ========
 
 #[test]
-/// Resigned AND ignored coexist; removal keys off resigned only — an
-/// ignored-but-not-resigned member keeps their registration through the
-/// transition.
-fun test_resigned_and_ignored_coexist() {
+#[expected_failure(abort_code = hashi::committee_set::ECannotRemoveIgnoredMember)]
+/// Resigned AND ignored coexist through the boundary — both members keep
+/// their registrations — but an ignored member is not removable even when
+/// duty-free, resigned, and gone from the Sui set (removal would delete the
+/// ignore flag with the record).
+fun test_ignored_member_not_removable_even_when_resigned() {
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx2);
@@ -404,17 +511,23 @@ fun test_resigned_and_ignored_coexist() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     run_epoch_transition(&mut hashi, 1, vector[VOTER1], ctx);
 
-    // Resigned member removed; ignored-only member retained (reversible).
-    assert!(!hashi.committee_set().has_member(VOTER2));
+    // Both keep their registrations through the boundary.
+    assert!(hashi.committee_set().has_member(VOTER2));
+    assert!(hashi.committee_set().is_member_resigned(VOTER2));
+    assert!(hashi.committee_set().is_member_ignored(VOTER2));
     assert!(hashi.committee_set().has_member(VOTER3));
     assert!(hashi.committee_set().is_member_ignored(VOTER3));
 
+    // Duty-free, resigned, and even gone from the Sui set: still blocked by
+    // the ignore flag.
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER2, false);
     std::unit_test::destroy(hashi);
 }
 
 #[test]
 #[expected_failure(abort_code = proposal::EUnauthorizedCaller)]
-/// After finalization, the ex-member can no longer vote on proposals.
+/// After deregistration via the removal entry, the ex-member can no longer
+/// vote on proposals.
 fun test_ex_member_cannot_vote() {
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
     let voters = vector[VOTER1, VOTER2, VOTER3];
@@ -424,6 +537,7 @@ fun test_ex_member_cannot_vote() {
     validator::resign_for_testing(&mut hashi, VOTER3, ctx3);
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     run_epoch_transition(&mut hashi, 1, vector[VOTER1, VOTER2], ctx);
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
     assert!(!hashi.committee_set().has_member(VOTER3));
 
     let proposal_id = test_utils::create_ignore_member_proposal(
@@ -449,8 +563,9 @@ fun test_ex_member_cannot_vote() {
 
 #[test]
 #[expected_failure(abort_code = hashi::committee_set::EMemberNotRegistered)]
-/// An approved ignore proposal whose target resigned and was removed aborts
-/// at execute (the setter re-asserts registration).
+/// An approved ignore proposal whose target resigned and was deregistered
+/// via the removal entry aborts at execute (the setter re-asserts
+/// registration).
 fun test_ignore_execute_aborts_after_target_deregistered() {
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
     let voters = vector[VOTER1, VOTER2, VOTER3];
@@ -484,10 +599,12 @@ fun test_ignore_execute_aborts_after_target_deregistered() {
         ctx3b,
     );
 
-    // Target resigns and is removed at the transition.
+    // Target resigns, sits out the new epoch, and is deregistered via the
+    // removal entry after the boundary.
     validator::resign_for_testing(&mut hashi, VOTER3, ctx3);
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     run_epoch_transition(&mut hashi, 1, vector[VOTER1, VOTER2], ctx);
+    validator::remove_inactive_member_for_testing(&mut hashi, VOTER3, true);
     assert!(!hashi.committee_set().has_member(VOTER3));
 
     // Executing the approved proposal now aborts.
