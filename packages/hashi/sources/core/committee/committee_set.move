@@ -438,6 +438,10 @@ fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
     self.committees.remove(epoch)
 }
 
+/// Thin wrapper extracting the epoch and voting powers from the system
+/// object. Split from `new_committee_from_voting_powers` because unit tests
+/// cannot construct a `SuiSystemState`: the pure inner function is what lets
+/// formation (including the ignore filtering) be unit-tested at all.
 fun new_committee_from_validator_set(
     self: &CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
