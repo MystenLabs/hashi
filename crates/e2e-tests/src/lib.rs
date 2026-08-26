@@ -1627,7 +1627,15 @@ mod tests {
                 .unwrap()
                 .to_string(),
         );
-        super::hashi_network::update_tls_public_key(client, &updated_config)
+        // Route the call through the chain's LATEST package (the default boot
+        // upgrades and disables v1; the original id aborts at
+        // `versioning::assert_version_enabled`).
+        let call_package_id = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .onchain_state()
+            .package_id()
+            .unwrap_or(ids.package_id);
+        super::hashi_network::update_tls_public_key(client, &updated_config, call_package_id)
             .await
             .unwrap();
 

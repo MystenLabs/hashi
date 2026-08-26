@@ -1613,10 +1613,18 @@ mod tests {
         use hashi::cli::client::CreateProposalParams;
         use hashi::cli::client::build_create_proposal_transaction;
 
+        // Calls route through the chain's LATEST package: the default boot
+        // upgrades to the current source and disables v1, so a call built
+        // against the original id aborts at `versioning::assert_version_enabled`.
+        let execute_package_id = hashi
+            .onchain_state()
+            .package_id()
+            .unwrap_or(hashi_ids.package_id);
+
         let validator_address = executor.sender();
         let builder = build_create_proposal_transaction(
             hashi_ids,
-            hashi_ids.package_id,
+            execute_package_id,
             validator_address,
             CreateProposalParams::UpdateConfig {
                 key: "bitcoin_deposit_minimum".to_string(),
@@ -1712,12 +1720,19 @@ mod tests {
         let hashi_ids = networks.hashi_network.ids();
         let mut executor = SuiTxExecutor::from_config(&healthy.config, healthy.onchain_state())?;
         let creator = executor.sender();
+        // Calls route through the chain's LATEST package: the default boot
+        // disables v1, so the original id would abort at
+        // `versioning::assert_version_enabled`.
+        let execute_package_id = healthy
+            .onchain_state()
+            .package_id()
+            .unwrap_or(hashi_ids.package_id);
         let mut proposal_ids = Vec::new();
         let mut last_checkpoint = 0u64;
         for i in 0..3u64 {
             let builder = build_create_proposal_transaction(
                 hashi_ids,
-                hashi_ids.package_id,
+                execute_package_id,
                 creator,
                 CreateProposalParams::UpdateConfig {
                     // Never voted on or executed, so the values are inert.
