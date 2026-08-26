@@ -234,13 +234,25 @@ mod tests {
         }
     }
 
-    fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
-        let onchain_state = networks.hashi_network.nodes()[0].hashi().onchain_state();
-        let deposit_request = onchain_state
-            .deposit_requests()
-            .into_iter()
-            .find(|request| request.id == request_id)
-            .unwrap_or_else(|| panic!("deposit request {request_id} not found"));
+    async fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
+        // The mirror observes the create transaction a checkpoint later, so
+        // wait for visibility before asserting the property itself.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deposit_request = loop {
+            let found = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state()
+                .deposit_requests()
+                .into_iter()
+                .find(|request| request.id == request_id);
+            if let Some(request) = found {
+                break request;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("deposit request {request_id} never appeared in the mirror");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
         assert!(
             deposit_request.approval_cert.is_none(),
             "brand-new deposit should not be approved by epoch-change stale-cert processing"
@@ -433,7 +445,7 @@ mod tests {
                 Some(hbtc_recipient),
             )
             .await?;
-        assert_deposit_request_unapproved(&networks, unapproved_request_id);
+        assert_deposit_request_unapproved(&networks, unapproved_request_id).await;
 
         let initial_epoch = networks.hashi_network.nodes()[0]
             .current_epoch()
@@ -460,7 +472,7 @@ mod tests {
             Duration::from_secs(180),
         )
         .await?;
-        assert_deposit_request_unapproved(&networks, unapproved_request_id);
+        assert_deposit_request_unapproved(&networks, unapproved_request_id).await;
 
         let hbtc_balance = get_hbtc_balance(
             &mut networks.sui_network.client,
