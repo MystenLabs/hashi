@@ -696,8 +696,9 @@ public(package) fun archive_withdrawal_requests(
 /// no-ops while any request is still unarchived (or if the txn is already
 /// archived), so batched GC calls survive races with in-flight chunk
 /// transactions; the caller re-arms and retries from mirror state. The walk
-/// costs a `contains` probe per request plus a status read for `processed`
-/// residents, so it stays cheap even at the largest batch sizes.
+/// costs two runtime objects per request (the `processed` field wrapper and
+/// the borrowed child), which fits Sui's object budget at the largest batch
+/// size — see the probe comment in the body.
 public(package) fun finish_archive_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -712,11 +713,15 @@ public(package) fun finish_archive_withdrawal_txn(
     let n = request_ids.length();
     while (i < n) {
         let id = request_ids[i];
-        if (self.requests.contains(id)) return;
-        if (self.processed.contains(id)) {
-            let request: &WithdrawalRequest = self.processed.borrow(id);
-            if (request.status != WithdrawalStatus::Confirmed) return;
-        };
+        // A committed request lives in exactly one bag and archival only
+        // ever adds to `processed`, so probing `processed` alone suffices: a
+        // request still in `requests` is simply not there yet. Skipping the
+        // `requests` probe keeps the walk at two runtime objects per request
+        // (field wrapper + child), inside Sui's object budget even at the
+        // largest batch size; a third probe per request would blow it.
+        if (!self.processed.contains(id)) return;
+        let request: &WithdrawalRequest = self.processed.borrow(id);
+        if (request.status != WithdrawalStatus::Confirmed) return;
         i = i + 1;
     };
     let txn: WithdrawalTransaction = self.withdrawal_txns.remove(withdrawal_id);
