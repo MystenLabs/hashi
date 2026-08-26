@@ -3758,7 +3758,7 @@ pub struct GetPartialSignaturesResponse {
         ::sui_rpc::proto::sui::rpc::v2::Bcs,
     >,
     /// The BIP-340 signing nonce each partial was computed against, keyed by signing_id.
-    /// An absent or wrong-length entry means unverifiable, not disagreement.
+    /// Include an entry for every id in partial_sigs, or omit the map entirely.
     #[prost(map = "string, message", tag = "2")]
     pub signing_nonces: ::std::collections::HashMap<
         ::prost::alloc::string::String,

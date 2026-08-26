@@ -216,6 +216,6 @@ message GetPartialSignaturesResponse {
   map<string, sui.rpc.v2.Bcs> partial_sigs = 1;
 
   // The BIP-340 signing nonce each partial was computed against, keyed by signing_id.
-  // An absent or wrong-length entry means unverifiable, not disagreement.
+  // Include an entry for every id in partial_sigs, or omit the map entirely.
   map<string, sui.rpc.v2.Bcs> signing_nonces = 2;
 }

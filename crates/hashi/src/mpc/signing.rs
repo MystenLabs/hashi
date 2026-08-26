@@ -1064,22 +1064,30 @@ impl SigningManager {
             };
             match result {
                 Ok(response) => {
-                    // A concurrent signing task may have blamed this peer
-                    // after the poll launched; its partials are not welcome.
                     if self.bad_share_peers.is_blamed(&peer, Instant::now()) {
                         continue;
                     }
                     self.peer_cooldowns.record_success(&peer);
                     let mut nonce_mismatches = 0u64;
+                    let mut unusable_reports = 0u64;
+                    let peer_reports_nonces = !response.signing_nonces.is_empty();
                     for (signing_id, sigs) in response.partial_sigs {
                         if let Some(&i) = index.get(&signing_id)
                             && pending[i].peers_remaining.remove(&peer)
                         {
                             let st = &mut pending[i];
-                            let reported = response
-                                .signing_nonces
-                                .get(&signing_id)
-                                .filter(|n| n.len() == POINT_SIZE_IN_BYTES);
+                            let reported = match response.signing_nonces.get(&signing_id) {
+                                Some(n) if n.len() == POINT_SIZE_IN_BYTES => Some(n),
+                                Some(_) => {
+                                    unusable_reports += 1;
+                                    continue;
+                                }
+                                None if peer_reports_nonces => {
+                                    unusable_reports += 1;
+                                    continue;
+                                }
+                                None => None,
+                            };
                             if let Some(nonce) = reported
                                 && nonce[..] != st.signing_nonce_bytes[..]
                             {
@@ -1113,6 +1121,13 @@ impl SigningManager {
                                 progressed = true;
                             }
                         }
+                    }
+                    if unusable_reports > 0 {
+                        tracing::warn!(
+                            "Dropped partials from {peer} for {unusable_reports} input(s): it \
+                             reports signing nonces but the entry was missing or wrong-length, \
+                             which no correct peer produces"
+                        );
                     }
                     if nonce_mismatches > 0 {
                         metrics
@@ -1405,6 +1420,7 @@ mod tests {
         responses: HashMap<Address, ChannelResult<Vec<Eval<S>>>>,
         nonces: HashMap<Address, G>,
         nonce_overrides: HashMap<(Address, Address), Vec<u8>>,
+        nonce_omissions: HashSet<(Address, Address)>,
     }
 
     #[async_trait::async_trait]
@@ -1454,6 +1470,9 @@ mod tests {
                         .signing_ids
                         .iter()
                         .filter_map(|id| {
+                            if self.nonce_omissions.contains(&(*party, *id)) {
+                                return None;
+                            }
                             self.nonce_overrides
                                 .get(&(*party, *id))
                                 .cloned()
@@ -2184,7 +2203,7 @@ mod tests {
 
         let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
-                signing_ids: vec![req_id],
+                signing_ids: vec![req_id, Address::new([0xDD; 32])],
             })
             .unwrap();
         assert!(resp.partial_sigs.contains_key(&req_id));
@@ -2200,6 +2219,16 @@ mod tests {
             resp.signing_nonces.get(&req_id).map(Vec::as_slice),
             Some(signing_nonce_bytes(&cached, &beacon).as_slice()),
             "must report the nonce the returned partials were derived against"
+        );
+        assert_eq!(
+            resp.partial_sigs.keys().collect::<Vec<_>>(),
+            vec![&req_id],
+            "an id with no local output is absent from both maps, not present in one"
+        );
+        assert_eq!(
+            resp.partial_sigs.keys().collect::<Vec<_>>(),
+            resp.signing_nonces.keys().collect::<Vec<_>>(),
+            "the merge side rejects a partially filled map, so the key sets must match"
         );
         assert_ne!(
             resp.signing_nonces.get(&req_id).map(Vec::as_slice),
@@ -3057,7 +3086,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_an_unusable_reported_nonce_is_silence_not_disagreement() {
+    async fn test_a_peer_that_reports_some_nonces_may_not_omit_others() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let mut rng = StdRng::seed_from_u64(4714);
+        let peer = test_address(1);
+        let reported = test_request_id();
+        let omitted = Address::new([0xCC; 32]);
+
+        let responses = HashMap::from([(peer, Ok(vec![eval_at(2, S::rand(&mut rng))]))]);
+        let nonces = HashMap::from([(peer, G::generator())]);
+        let nonce_omissions = HashSet::from([(peer, omitted)]);
+        let p2p = CannedP2PChannel {
+            responses,
+            nonces,
+            nonce_omissions,
+            ..Default::default()
+        };
+
+        let mut pending = vec![
+            test_input_state(reported, vec![eval_at(1, S::zero())], vec![peer]),
+            test_input_state(omitted, vec![eval_at(1, S::zero())], vec![peer]),
+        ];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let merged: Vec<u16> = pending[0].partials.iter().map(|e| e.index.get()).collect();
+        assert!(
+            merged.contains(&2),
+            "the input it did report for is unaffected"
+        );
+        let dropped: Vec<u16> = pending[1].partials.iter().map(|e| e.index.get()).collect();
+        assert_eq!(
+            dropped,
+            vec![1],
+            "a peer that reports nonces cannot selectively omit one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_malformed_reported_nonce_is_rejected() {
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
         let metrics = test_metrics();
@@ -3095,8 +3165,8 @@ mod tests {
         indices.sort_unstable();
         assert_eq!(
             indices,
-            vec![1, 2, 3],
-            "an unusable nonce is not a mismatch"
+            vec![1],
+            "a wrong-length nonce is not producible honestly, so its partials are dropped"
         );
         for p in [peer, short] {
             assert_eq!(
@@ -3141,6 +3211,7 @@ mod tests {
             responses,
             nonces,
             nonce_overrides,
+            ..Default::default()
         };
 
         let peers = vec![test_address(1), test_address(2)];
