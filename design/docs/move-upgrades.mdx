@@ -126,21 +126,30 @@ withdrawal queue does not need to drain first.
 
 1. Create and fully vote the pause, v2 upgrade, and `DisableVersion(1)`
    proposals while v1 is active. Proposal creation permits targeting the
-   current version; only execution rejects disabling it. Do not pre-vote the
-   unpause: proposal execution checks only quorum, not the caller, so a
-   quorum-complete unpause is executable by any account, and an adversary
-   could unpause and commit through v2 in one transaction inside the window.
-2. Execute the pause. Governance entries are not pause-gated, so the remaining
-   steps execute while paused.
-3. Execute, publish, and finalize v2 through the legacy v1 upgrade path.
+   current version; only execution rejects disabling it.
+2. Execute the pause once the remaining proposals are near quorum. Governance
+   entries are not pause-gated, so the remaining steps execute while paused.
+3. Verify the bridge is still paused, then execute, publish, and finalize v2
+   through the legacy v1 upgrade path.
 4. Wait for that transaction to succeed and obtain the newly published v2
    package ID.
 5. Immediately execute the already-approved disable-v1 proposal through the v2
-   package.
+   package. Pre-build this transaction so only the package ID needs filling.
 6. Verify that v1 calls fail with `EVersionDisabled` and that validators route
    ordinary work through v2.
-7. Only then create, vote, and execute the unpause proposal. The bridge stays
-   paused through the unpause vote; we accept that for this one migration.
+7. Create, vote, and execute the unpause.
+
+Proposal execution checks only quorum, not the caller, so any quorum-complete
+proposal is executable by any account. The strict ordering therefore votes the
+unpause only after `DisableVersion(1)` is verified: a pre-voted unpause would
+let an adversary unpause and commit through v2 in one transaction inside the
+window. On testnet we relax this and pre-vote the unpause alongside the other
+proposals, accepting the theoretical window: nothing of value is at stake, the
+window is seconds wide, and every proposal executed to date has been executed
+by the proposing operators. Any future migration that carries real value must
+use the strict ordering; on mainnet the question should not arise at all,
+because exclusive upgrades replace the enabled set atomically and leave no
+window to protect.
 
 The upgrade and disable are necessarily two transactions. They must not be
 submitted concurrently because shared-object ordering is not guaranteed;
