@@ -230,7 +230,7 @@ const MOVE_STDLIB_ADDRESS: Address = Address::from_static("0x1");
 
 /// Well-known Sui Clock object address (0x6)
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
-const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
+pub const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
 const SUI_RANDOM_OBJECT_ID: Address = Address::from_static("0x8");
 
 /// How a built transaction should be finalized.

@@ -1054,6 +1054,42 @@ impl HashiClient {
         self.build_validator_lifecycle_transaction("withdraw_resignation")
     }
 
+    /// Build a `validator::remove_inactive_member` transaction — the
+    /// permissionless registry cleanup for a member with no epoch duties who
+    /// resigned or left the Sui validator set.
+    pub fn build_remove_inactive_member_transaction(
+        &self,
+        validator: Address,
+    ) -> anyhow::Result<TransactionBuilder> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
+                .as_shared()
+                .with_mutable(true),
+        );
+        // Genesis-created system object: its initial shared version is 1 on
+        // every Sui chain. Pre-resolved like the Hashi input because the
+        // entry is upgrade-introduced surface (unresolved shared inputs fail
+        // simulation with INVALID_LINKAGE on sui >= 1.76 fullnodes).
+        let sui_system_arg = builder.object(
+            ObjectInput::new(crate::sui_tx_executor::SUI_SYSTEM_STATE_OBJECT_ID)
+                .with_version(1)
+                .as_shared()
+                .with_mutable(false),
+        );
+        let validator_arg = builder.pure(&validator);
+        builder.move_call(
+            Function::new(
+                self.latest_package_id()?,
+                Identifier::from_static("validator"),
+                Identifier::from_static("remove_inactive_member"),
+            ),
+            vec![hashi_arg, sui_system_arg, validator_arg],
+        );
+        Ok(builder)
+    }
+
     fn build_validator_lifecycle_transaction(
         &self,
         function: &'static str,

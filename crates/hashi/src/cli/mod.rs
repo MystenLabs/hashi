@@ -371,15 +371,24 @@ pub enum ValidatorCommands {
     /// Voluntarily resign from the committee.
     ///
     /// Takes effect at the next committee formation: the node keeps serving
-    /// the current epoch (keep it RUNNING until then), and the registration
-    /// is removed at the epoch transition that stops including it. After
-    /// removal, re-joining requires a full re-registration (`hashi
-    /// register`). Revocable with `withdraw-resignation` until consumed. The
-    /// node suppresses its own auto-registration while the resignation is
+    /// the current epoch (keep it RUNNING until then), and once it holds no
+    /// epoch duties the registration can be removed by anyone via
+    /// `remove-inactive`. After removal, re-joining requires a full
+    /// re-registration (`hashi register`). Revocable with
+    /// `withdraw-resignation` until the registration is removed. The node
+    /// suppresses its own auto-registration while the resignation is
     /// pending.
     Resign,
     /// Withdraw a pending resignation.
     WithdrawResignation,
+    /// Permissionlessly remove an inactive member's registration: not in the
+    /// current or pending committee, and either resigned or no longer in
+    /// Sui's active validator set. Governance-ignored members cannot be
+    /// removed.
+    RemoveInactive {
+        /// The member's validator address (hex).
+        validator: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1156,6 +1165,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             ValidatorCommands::WithdrawResignation => {
                 commands::validator::withdraw_resignation(&config, &tx_opts).await?;
+            }
+            ValidatorCommands::RemoveInactive { validator } => {
+                commands::validator::remove_inactive(&config, &validator, &tx_opts).await?;
             }
         },
         CliCommand::Committee { action } => match action {

@@ -25,8 +25,8 @@ pub async fn resign(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
              the pending committee, the resignation takes effect one epoch later",
         )),
         None => print_detail(
-            "  Effect: at the next committee formation; the registration is removed at the \
-             epoch transition that stops including this node",
+            "  Effect: at the next committee formation, which will exclude this node; the \
+             registration can then be removed by anyone via `validator remove-inactive`",
         ),
     }
     print_detail(
@@ -60,6 +60,36 @@ pub async fn withdraw_resignation(config: &CliConfig, tx_opts: &TxOptions) -> Re
 
     let tx = client.build_withdraw_resignation_transaction()?;
     print_info("Transaction: validator::withdraw_resignation");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    Ok(())
+}
+
+/// Permissionlessly remove an inactive member's registration.
+pub async fn remove_inactive(
+    config: &CliConfig,
+    validator: &str,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    use anyhow::Context as _;
+    let validator = sui_sdk_types::Address::from_hex(validator)
+        .with_context(|| format!("invalid validator address: {validator}"))?;
+    let mut client = HashiClient::new(config).await?;
+
+    print_detail(&format!(
+        "\n{}",
+        "Removing an inactive member's registration:".bold()
+    ));
+    print_detail(&format!("  Member: {validator}"));
+    print_detail(
+        "  Eligibility (checked on-chain): not in the current or pending \
+         committee, not governance-ignored, and either resigned or no longer \
+         in Sui's active validator set.",
+    );
+
+    prompt_continue("remove this member's registration", tx_opts).await?;
+
+    let tx = client.build_remove_inactive_member_transaction(validator)?;
+    print_info("Transaction: validator::remove_inactive_member");
     execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }

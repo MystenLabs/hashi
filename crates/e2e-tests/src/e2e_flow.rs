@@ -1335,15 +1335,18 @@ mod tests {
     }
 
     /// A voluntary resignation takes effect at the epoch boundary: the
-    /// member serves the current epoch, the next formation excludes them,
-    /// and the transition removes their registration. Crucially, the
-    /// resigned node KEEPS RUNNING throughout and across a second epoch
-    /// boundary without re-registering itself — the node-side resignation
-    /// latch suppresses its epoch-triggered auto-registration, which would
-    /// otherwise reverse the exit within seconds. Explicit re-registration
-    /// afterwards works and re-admits the member at the following formation.
+    /// member serves the current epoch and the next formation excludes them,
+    /// but the transition itself never touches the registry — the flagged
+    /// registration is then deleted through the permissionless
+    /// `validator::remove_inactive_member`, submitted here by ANOTHER node.
+    /// Crucially, the resigned node KEEPS RUNNING throughout and across a
+    /// second epoch boundary without re-registering itself — the node-side
+    /// resignation latch suppresses its epoch-triggered auto-registration,
+    /// which would otherwise reverse the exit within seconds. Explicit
+    /// re-registration afterwards works and re-admits the member at the
+    /// following formation.
     #[tokio::test]
-    async fn test_resigned_member_removed_at_epoch_boundary() -> Result<()> {
+    async fn test_resigned_member_excluded_then_removed_permissionlessly() -> Result<()> {
         init_test_logging();
 
         let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
@@ -1399,8 +1402,8 @@ mod tests {
         };
         info!(?target, "resignation submitted; closing the epoch");
 
-        // First boundary: formation skips the resigned member and the
-        // transition removes the registration.
+        // First boundary: formation skips the resigned member; the
+        // registration survives the transition untouched.
         networks.sui_network.force_close_epoch().await?;
         let target_epoch = initial_epoch + 1;
         let futs: Vec<_> = networks
@@ -1426,14 +1429,75 @@ mod tests {
                 .ok_or_else(|| anyhow!("no committee after epoch change"))?;
             assert_eq!(committee.members().len(), 3);
             assert!(committee.index_of(&target).is_none());
+            let member = nodes[0]
+                .hashi()
+                .onchain_state()
+                .committee_member(&target)
+                .expect("the transition must not remove the registration");
             assert!(
-                nodes[0]
+                member.resigned,
+                "resignation flag must survive the boundary"
+            );
+        }
+
+        // The registration is now duty-free: remove it through the
+        // permissionless entry, submitted by a DIFFERENT node's executor.
+        {
+            let nodes = networks.hashi_network.nodes();
+            let remover = nodes[0].hashi().clone();
+            let mut executor =
+                SuiTxExecutor::from_config(&remover.config, remover.onchain_state())?;
+
+            let mut b = sui_transaction_builder::TransactionBuilder::new();
+            let hashi_arg = b.object(
+                sui_transaction_builder::ObjectInput::new(hashi_ids.hashi_object_id)
+                    .with_version(hashi_isv)
+                    .as_shared()
+                    .with_mutable(true),
+            );
+            // Genesis-created system object: initial shared version 1.
+            let sui_system_arg = b.object(
+                sui_transaction_builder::ObjectInput::new(sui_sdk_types::Address::from_static(
+                    "0x5",
+                ))
+                .with_version(1)
+                .as_shared()
+                .with_mutable(false),
+            );
+            let validator_arg = b.pure(&target);
+            b.move_call(
+                sui_transaction_builder::Function::new(
+                    latest_package_id,
+                    sui_sdk_types::Identifier::from_static("validator"),
+                    sui_sdk_types::Identifier::from_static("remove_inactive_member"),
+                ),
+                vec![hashi_arg, sui_system_arg, validator_arg],
+            );
+            let resp = executor.execute(b).await?;
+            anyhow::ensure!(
+                resp.transaction().effects().status().success(),
+                "remove_inactive_member transaction failed"
+            );
+        }
+
+        // Wait for the mirror to observe the removal.
+        {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                let gone = networks.hashi_network.nodes()[0]
                     .hashi()
                     .onchain_state()
                     .committee_member(&target)
-                    .is_none(),
-                "registration should be removed at the transition"
-            );
+                    .is_none();
+                if gone {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "mirror never observed the registration removal"
+                );
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
         }
 
         // Second boundary with the ex-member's node STILL RUNNING: the
