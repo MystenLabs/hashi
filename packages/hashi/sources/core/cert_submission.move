@@ -8,11 +8,17 @@ use hashi::{committee::CommitteeSignature, hashi::Hashi, tob::ProtocolType};
 // ~~~~~~~ Constants ~~~~~~~
 
 /// Key-generation cert buckets stay on-chain until their Sui epoch number is
-/// at least 8 below the current one. This matches the node DB's numeric
-/// retention window: dealer/rotation messages at `current - 7` and newer are
-/// retained for break-glass key recovery. This is an epoch-number distance,
-/// not a count of finalized committee generations (committee epochs can gap).
-/// Enforced on-chain because destruction is permissionless.
+/// at least 8 below the current one. This strictly exceeds the node DB's
+/// retention window (`RETENTION_EXTRA_EPOCHS = 7` in `db.rs`, anchored to the
+/// same committee-epoch counter): buckets hold only committee certificates
+/// over dealer-message hashes — the dealt payloads live exclusively in node
+/// DBs — so a bucket is only useful alongside DB material, and every epoch
+/// whose payloads may still exist under that window keeps its bucket. The
+/// previous committee's bucket is protected separately and at any age by
+/// `is_before_previous_committee`, mirroring the DB pruner's previous-epoch
+/// exemption. This is an epoch-number distance, not a count of finalized
+/// committee generations (committee epochs can gap). Enforced on-chain
+/// because destruction is permissionless.
 const KEY_GEN_CERT_RETENTION_EPOCHS: u64 = 8;
 
 /// Nonce cert buckets are only ever read during their own epoch; +2 mirrors
@@ -29,7 +35,7 @@ const ETooEarlyToDestroyKeyGenCerts: vector<u8> =
     b"Key-generation cert buckets are retained for break-glass key recovery";
 #[error]
 const EKeyGenCertsStillNeeded: vector<u8> =
-    b"Key-generation certs require a later finalized committee before pruning";
+    b"Key-generation cert buckets must be strictly older than the previous committee, whose bucket seeds the next rotation";
 #[error]
 const EUnsupportedCertBucketLayout: vector<u8> =
     b"TOB cert bucket has a layout this package version cannot prune";
@@ -78,12 +84,13 @@ entry fun submit_nonce_cert(
     submit_stamped_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
-/// Deprecated compatibility entry. It cannot be removed while the deployed
-/// package uses the compatible-upgrade policy, so keep its ABI but route it
-/// through the protocol-specific floors below. `ProtocolType` has no public
-/// constructors and cannot currently be supplied as a PTB pure argument, but
-/// this routing prevents the legacy `+2` floor from becoming a key-generation
-/// bypass if that restriction ever changes.
+/// Deprecated entry, retained as defense in depth. Non-public `entry`
+/// functions are not linkage-checked, so the upgrade policy would permit
+/// deleting this; it is kept so any historical caller path routes through
+/// the protocol-specific floors below instead of the legacy `+2` rule.
+/// `ProtocolType` has no public constructors and cannot currently be
+/// supplied as a PTB pure argument, so this entry is unreachable today;
+/// the routing guards against that restriction ever loosening.
 entry fun destroy_all_certs(
     hashi: &mut Hashi,
     epoch: u64,
