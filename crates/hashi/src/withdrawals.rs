@@ -213,9 +213,11 @@ pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN: usize = 3;
 pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET: usize = WITHDRAWAL_RUNTIME_OBJECT_BUDGET;
 
-/// Cost of `finish_archive_withdrawal_txn`'s completeness walk: one
-/// `contains` probe per request, on top of the txn borrow.
-pub(crate) const WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST: usize = 1;
+/// Cost of `finish_archive_withdrawal_txn`'s completeness walk: the walk
+/// probes only the `processed` bag, and its per-request ObjectBag borrow
+/// touches two runtime objects (the `Field` wrapper plus the child
+/// request), on top of the txn borrow.
+pub(crate) const WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
 
 // A txn whose requests exceed one GC transaction archives through the
 // chunked entries (`archive_withdrawal_requests` + finish); the packer only

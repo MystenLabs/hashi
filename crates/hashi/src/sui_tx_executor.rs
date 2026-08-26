@@ -431,10 +431,12 @@ pub struct SuiTxExecutor {
     /// Present for node-internal executors (built via [`SuiTxExecutor::from_config`]
     /// / [`SuiTxExecutor::from_hashi`]). Supplies both the call target and the
     /// ABI shape (see [`Self::call_target`]), and refuses to submit when this
-    /// binary supports no live on-chain package version. `None` for CLI/ad-hoc
-    /// executors built via [`SuiTxExecutor::new`]: they are not version-gated
-    /// and call `hashi_ids.package_id`, the *original* package, so on an
-    /// upgraded chain they run v1 bytecode.
+    /// binary supports no live on-chain package version. CLI executors attach
+    /// a one-shot governance reader via [`SuiTxExecutor::with_onchain_state`]
+    /// for the same routing. `None` for ad-hoc executors built via
+    /// [`SuiTxExecutor::new`] that never attach one: those are not
+    /// version-gated and call `hashi_ids.package_id`, the *original* package,
+    /// so on an upgraded chain they run v1 bytecode.
     onchain_state: Option<OnchainState>,
 }
 
@@ -2077,6 +2079,38 @@ mod archive_planning_tests {
     }
 
     #[test]
+    fn two_max_size_victims_finish_in_separate_calls() {
+        // Each finish walk costs 3 + 2 * 447 = 897 runtime objects, so two
+        // max-size victims must not share one Finish call (1794 would blow
+        // the 910-object budget on-chain).
+        let victims = [
+            victim(1, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS),
+            victim(2, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS),
+        ];
+        let calls = plan_archive_calls(&victims);
+        let finishes: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                ArchiveCall::Finish(ids) => Some(ids.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finishes, [vec![addr(1)], vec![addr(2)]]);
+        // Each finish must come after every chunk of the txn it completes.
+        let position = |pred: &dyn Fn(&ArchiveCall) -> bool| {
+            calls.iter().rposition(pred).expect("call must be present")
+        };
+        for byte in [1u8, 2u8] {
+            let last_chunk = position(
+                &|c| matches!(c, ArchiveCall::Requests { txn_id, .. } if *txn_id == addr(byte)),
+            );
+            let finish =
+                position(&|c| matches!(c, ArchiveCall::Finish(ids) if ids == &vec![addr(byte)]));
+            assert!(last_chunk < finish);
+        }
+    }
+
+    #[test]
     fn mixed_sizes_route_by_cost() {
         let victims = [
             victim(1, 5),
@@ -2098,10 +2132,6 @@ mod archive_planning_tests {
         assert!(matches!(calls.last(), Some(ArchiveCall::Finish(ids)) if ids == &vec![addr(2)]));
     }
 }
-
-// TODO: the builders below take the call target, but `cli/commands/{deposit,
-// withdraw}.rs` still pass the original package id, so those commands abort once
-// v1 is disabled. They need an `OnchainState` to resolve one.
 
 /// Build the PTB for a single deposit request. Pure (no signer / no network),
 /// so it can be signed/executed by [`SuiTxExecutor::execute`] or serialized

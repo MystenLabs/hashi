@@ -18,6 +18,7 @@ use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::cli::types::display;
+use crate::onchain::types::WithdrawalRequest;
 use crate::onchain::types::WithdrawalStatus;
 use crate::onchain::types::WithdrawalTransaction;
 
@@ -87,6 +88,12 @@ async fn request(
         .context("Withdrawal address does not match the configured Bitcoin network")?;
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
+    // `request_withdrawal` gates on `assert_version_enabled`, so the call
+    // must target the active version's package: a v1-targeted creation
+    // aborts once v1 is disabled. The resolved state also routes the batch
+    // executor below.
+    let (onchain, call_package) = super::resolve_active_call_package(config, hashi_ids).await?;
+
     let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
 
     // A single request supports all tx modes (execute / dry-run /
@@ -97,7 +104,7 @@ async fn request(
 
         let builder = crate::sui_tx_executor::build_create_withdrawal_request(
             hashi_ids,
-            hashi_ids.package_id,
+            call_package,
             amount,
             destination_bytes,
         );
@@ -136,9 +143,12 @@ async fn request(
          and --dry-run apply to a single withdrawal request"
     );
 
-    // Execute mode guarantees a signer (rejected above otherwise).
+    // Execute mode guarantees a signer (rejected above otherwise). The
+    // attached reader state makes the executor route its calls through the
+    // active version's package.
     let signer = signer.expect("execute mode requires a signer");
-    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids)
+        .with_onchain_state(&onchain);
 
     // ~3 PTB commands per request (split + call) vs the 1024 command cap.
     const CHUNK_SIZE: usize = 250;
@@ -202,23 +212,11 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
 
     // Resolve the active version's package so the cancel runs the bytecode
     // generation whose committed-request gate matches the chain's state
-    // (v1's bag-membership gate misses v2 in-place-committed requests).
-    let call_package = crate::onchain::OnchainState::new_reader(
-        &config.sui_rpc_url,
-        hashi_ids,
-        None,
-        crate::onchain::ScrapeScope::GovernanceOnly,
-    )
-    .await
-    .ok()
-    .and_then(|state| {
-        let guard = state.state();
-        let version = guard
-            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
-            .active_version()?;
-        guard.package_versions().get(version)
-    })
-    .unwrap_or(hashi_ids.package_id);
+    // (v1's bag-membership gate misses v2 in-place-committed requests). A
+    // resolution failure must abort the command, not fall back: a v1-routed
+    // cancel aimed at a v2-committed request would destroy a request its
+    // live withdrawal txn still references.
+    let (_onchain, call_package) = super::resolve_active_call_package(config, hashi_ids).await?;
     let builder =
         crate::sui_tx_executor::build_cancel_withdrawal(hashi_ids, call_package, &req_addr, sender);
 
@@ -464,6 +462,11 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
 
     let requests = client.fetch_withdrawal_requests()?;
     let pending = client.fetch_withdrawal_txns()?;
+    // The v2 flow commits requests in place, so the mirrored map holds both
+    // the actionable queue and requests already committed into a withdrawal
+    // txn (those linger until the archival GC sweeps them and are counted
+    // through their txn's request_count).
+    let (queued, committed_in_place) = partition_queued(&requests);
     // Confirmed txns linger in the pending map until the archival GC sweeps
     // them; classify them first so they are never counted as actionable
     // "signed" (they are also fully signed).
@@ -476,7 +479,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
 
     match output_format {
         OutputFormat::Json => {
-            let queued: Vec<_> = requests
+            let queued_rows: Vec<_> = queued
                 .iter()
                 .map(|wr| {
                     serde_json::json!({
@@ -494,9 +497,10 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "queued": queued,
+                    "queued": queued_rows,
                     "withdrawal_txns": withdrawal_txns,
-                    "queued_count": requests.len(),
+                    "queued_count": queued.len(),
+                    "committed_in_place_count": committed_in_place.len(),
                     "committed_count": committed_count,
                     "signed_count": signed_count,
                     "confirmed_count": confirmed_count,
@@ -510,7 +514,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
             if requests.is_empty() && pending.is_empty() {
                 print_info("No withdrawal requests found.");
             } else {
-                if !requests.is_empty() {
+                if !queued.is_empty() {
                     println!("  {}", "Queued:".bold().underline());
                     println!(
                         "  {:<20} {:<14} {:<10} {:<20} {}",
@@ -520,7 +524,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         "Caller".bold(),
                         "Requested".bold()
                     );
-                    for wr in &requests {
+                    for wr in &queued {
                         println!(
                             "  {:<20} {:<14} {:<10} {:<20} {}",
                             display::format_address_full(&wr.id),
@@ -533,7 +537,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 }
 
                 if !pending.is_empty() {
-                    if !requests.is_empty() {
+                    if !queued.is_empty() {
                         println!();
                     }
                     println!("  {}", "Pending Broadcast:".bold().underline());
@@ -556,8 +560,10 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 }
 
                 println!(
-                    "\n  {} queued, {} committed, {} signed, {} confirmed awaiting archival",
-                    requests.len(),
+                    "\n  {} queued, {} committed in place; txns: {} committed, {} signed, \
+                     {} confirmed awaiting archival",
+                    queued.len(),
+                    committed_in_place.len(),
                     committed_count,
                     signed_count,
                     confirmed_count
@@ -569,6 +575,17 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Split the mirrored request map into the actionable queue
+/// (Requested/Approved) and the requests the v2 flow committed in place
+/// (Processing/Signed, plus the defensively handled Confirmed). The latter
+/// must not report as queued backlog: their BTC is already drained into a
+/// withdrawal txn, which the txn view counts.
+fn partition_queued(
+    requests: &[WithdrawalRequest],
+) -> (Vec<&WithdrawalRequest>, Vec<&WithdrawalRequest>) {
+    requests.iter().partition(|wr| wr.status.is_active())
 }
 
 /// The JSON row for one in-flight withdrawal transaction.
@@ -658,5 +675,51 @@ mod tests {
         txn.confirmed_timestamp_ms = Some(2);
         let row = withdrawal_txn_row(&txn);
         assert_eq!(row["status"], "confirmed");
+    }
+
+    fn request_with_status(status: WithdrawalStatus) -> WithdrawalRequest {
+        WithdrawalRequest {
+            id: sui_sdk_types::Address::new([1; 32]),
+            sender: sui_sdk_types::Address::new([2; 32]),
+            btc_amount: 1,
+            bitcoin_address: vec![0; 20],
+            created_timestamp_ms: 0,
+            status,
+            approval_cert: None,
+            approved_timestamp_ms: None,
+            withdrawal_txn_id: None,
+            sui_tx_digest: sui_sdk_types::Digest::new([0; 32]),
+            btc: 1,
+        }
+    }
+
+    /// Requests the v2 flow committed in place linger in the mirrored map
+    /// until the archival GC sweeps them; the queued view must exclude them
+    /// (they are already counted through their withdrawal txn).
+    #[test]
+    fn queued_view_excludes_committed_in_place_requests() {
+        let requests: Vec<_> = [
+            WithdrawalStatus::Requested,
+            WithdrawalStatus::Approved,
+            WithdrawalStatus::Processing,
+            WithdrawalStatus::Signed,
+            WithdrawalStatus::Confirmed,
+        ]
+        .into_iter()
+        .map(request_with_status)
+        .collect();
+
+        let (queued, committed_in_place) = partition_queued(&requests);
+        let statuses = |group: &[&WithdrawalRequest]| {
+            group
+                .iter()
+                .map(|wr| wr.status.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(statuses(&queued), ["requested", "approved"]);
+        assert_eq!(
+            statuses(&committed_in_place),
+            ["processing", "signed", "confirmed"]
+        );
     }
 }

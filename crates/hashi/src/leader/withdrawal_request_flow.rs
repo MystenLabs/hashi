@@ -553,7 +553,10 @@ impl LeaderService {
             (approved, false)
         };
 
-        let max_batch = self.inner.config.withdrawal_max_batch_size();
+        let max_batch = withdrawal_fire_threshold(
+            self.inner.config.withdrawal_max_batch_size(),
+            self.inner.onchain_state().active_package_version(),
+        );
         let delay_ms = self.inner.config.withdrawal_batching_delay_ms();
 
         let batch_is_full = batch.len() >= max_batch;
@@ -840,6 +843,17 @@ fn is_still_approvable(request: &hashi_types::move_types::WithdrawalRequest) -> 
     request.status.is_requested()
 }
 
+/// The batch size at which the scheduler stops holding for more demand.
+/// Capped by the active version's executable request cap: commitment
+/// construction trims the batch to it, so a threshold above the cap can
+/// never be met at that version and only pays the full batching delay
+/// before committing the capped batch anyway.
+fn withdrawal_fire_threshold(config_max: usize, active_package_version: Option<u64>) -> usize {
+    config_max.min(crate::withdrawals::max_withdrawal_requests(
+        active_package_version,
+    ))
+}
+
 #[cfg(test)]
 mod approvable_tests {
     use super::*;
@@ -874,5 +888,26 @@ mod approvable_tests {
         ] {
             assert!(!is_still_approvable(&request_with_status(status)));
         }
+    }
+}
+
+#[cfg(test)]
+mod fire_threshold_tests {
+    use super::*;
+
+    /// The scheduler's fire threshold must track the version-resolved
+    /// executable cap that commitment construction enforces (298 at v1 or
+    /// unresolved, 447 at v2): a threshold the builder trims below can
+    /// never fire and only pays the full batching delay. A literal
+    /// 298-request e2e is impractical (each request needs a funded
+    /// deposit), so pin the threshold seam the builder shares instead.
+    #[test]
+    fn fire_threshold_tracks_the_version_resolved_cap() {
+        assert_eq!(withdrawal_fire_threshold(447, None), 298);
+        assert_eq!(withdrawal_fire_threshold(447, Some(1)), 298);
+        assert_eq!(withdrawal_fire_threshold(447, Some(2)), 447);
+        // A configured maximum below the cap passes through at any version.
+        assert_eq!(withdrawal_fire_threshold(2, None), 2);
+        assert_eq!(withdrawal_fire_threshold(2, Some(2)), 2);
     }
 }

@@ -188,9 +188,14 @@ async fn request(
     let parsed_txid: bitcoin::Txid = txid.parse().context("Invalid txid")?;
     let txid_address = sui_sdk_types::Address::new(parsed_txid.to_byte_array());
 
+    // `deposit` gates on `assert_version_enabled`, so the call must target
+    // the active version's package: a v1-targeted creation aborts once v1
+    // is disabled.
+    let (_onchain, call_package) = super::resolve_active_call_package(config, hashi_ids).await?;
+
     let builder = crate::sui_tx_executor::build_create_deposit_request(
         hashi_ids,
-        hashi_ids.package_id,
+        call_package,
         txid_address,
         vout,
         amount,
@@ -340,8 +345,13 @@ async fn request_all(
     // 3 dynamic-field ops per deposit × 1000 object-runtime cap = 333/PTB.
     const CHUNK_SIZE: usize = 333;
 
+    // The attached reader state makes the executor route its calls through
+    // the active version's package (a v1-targeted creation aborts once v1
+    // is disabled).
+    let (onchain, _call_package) = super::resolve_active_call_package(config, hashi_ids).await?;
     let sui_client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
-    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(sui_client, signer, hashi_ids);
+    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(sui_client, signer, hashi_ids)
+        .with_onchain_state(&onchain);
 
     let txid_address =
         sui_sdk_types::Address::new(bitcoin::hashes::Hash::to_byte_array(parsed_txid));

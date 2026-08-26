@@ -588,6 +588,13 @@ impl WithdrawalStatus {
         matches!(self, Self::Requested)
     }
 
+    /// Returns true while the request still awaits action in the queue
+    /// (`Requested` or `Approved`); false once committed into a withdrawal
+    /// txn. Mirrors Move's `WithdrawalStatus::is_active`.
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Requested | Self::Approved)
+    }
+
     /// Lowercase status name, for metric labels and CLI rendering.
     pub fn as_str(&self) -> &'static str {
         match self {

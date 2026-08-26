@@ -119,7 +119,10 @@ pub(crate) struct LeaderService {
     utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<usize>>>,
     utxo_cleanup_retry: GlobalRetryTracker<garbage_collection::UtxoCleanupErrorKind>,
     // Arms the cleanup scan: set at boot (crash recovery), when a withdrawal
-    // confirms on Sui, and after a cleanup task that did work or failed.
+    // confirms on Sui, and after a cleanup task that did work or failed. The
+    // check-side mirror probe also arms it while disarmed, since a confirm
+    // submitted by another leader (or one whose local result was lost)
+    // leaves victims visible in the mirror without ever setting the flag.
     utxo_cleanup_scan_needed: bool,
     // Checkpoint the scan's mirror read must cover before deciding: the
     // highest checkpoint a confirm tx landed in (monotonic). A scan from a
