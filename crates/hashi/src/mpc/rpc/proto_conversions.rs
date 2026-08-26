@@ -598,6 +598,18 @@ impl From<&types::GetPartialSignaturesResponse> for proto::GetPartialSignaturesR
                 .iter()
                 .map(|(id, sigs)| (id.to_string(), serialize_bcs(sigs)))
                 .collect(),
+            signing_nonces: value
+                .signing_nonces
+                .iter()
+                .map(|(id, nonce)| {
+                    (
+                        id.to_string(),
+                        Bcs::from(nonce.clone()).with_name(std::any::type_name::<
+                            fastcrypto_tbls::threshold_schnorr::G,
+                        >()),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -615,7 +627,19 @@ impl TryFrom<&proto::GetPartialSignaturesResponse> for types::GetPartialSignatur
                 Ok((id, sigs))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        Ok(Self { partial_sigs })
+        let signing_nonces = value
+            .signing_nonces
+            .iter()
+            .map(|(id, bcs)| {
+                let id = parse_address(id, "signing_nonces key")?;
+                let nonce = bcs.value.clone().unwrap_or_default().to_vec();
+                Ok((id, nonce))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(Self {
+            partial_sigs,
+            signing_nonces,
+        })
     }
 }
 

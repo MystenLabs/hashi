@@ -147,10 +147,13 @@ pub struct Metrics {
     /// Each failure also puts the peer in a short poll cooldown, so this is
     /// the per-validator health signal for the MPC signing path.
     pub mpc_partial_sig_poll_failures_total: IntCounterVec,
+    /// Signing inputs where a peer's signing nonce differs from ours. Counted
+    /// per input before its eval set is inspected, so an empty eval set still
+    /// counts; an input the peer omitted entirely is never reached.
+    pub mpc_partial_sig_nonce_mismatch_total: IntCounterVec,
     /// Provably bad partial signatures by contributing peer, identified by
     /// re-evaluating the RS-recovered polynomial at each contributed share
-    /// index. A blamed peer is excluded from partial-signature polling for
-    /// the rest of the epoch.
+    /// index.
     pub mpc_bad_partial_sigs_total: IntCounterVec,
     /// Reader-side rejections of certificates read from TOB.
     pub mpc_certs_rejected_total: IntCounterVec,
@@ -890,10 +893,18 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            mpc_partial_sig_nonce_mismatch_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_partial_sig_nonce_mismatch_total",
+                "Signing inputs where a peer's signing nonce differs from ours, so whatever \
+                 partials it sent for them are discarded.",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
             mpc_bad_partial_sigs_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_bad_partial_sigs_total",
                 "Provably bad partial signatures by contributing peer (the peer is then \
-                 excluded from polling for the rest of the epoch)",
+                 excluded from polling for one hour)",
                 &["peer"],
                 registry,
             )
@@ -1628,7 +1639,7 @@ const METRICS_ROUTE: &str = "/metrics";
 // an endpoint that prometheus agent can use to poll for the metrics.
 pub fn start_prometheus_server(
     addr: std::net::SocketAddr,
-    registry: prometheus::Registry,
+    registry: Registry,
 ) -> sui_http::ServerHandle {
     let router = axum::Router::new()
         .route(METRICS_ROUTE, axum::routing::get(metrics))
@@ -1638,7 +1649,7 @@ pub fn start_prometheus_server(
 }
 
 async fn metrics(
-    axum::extract::State(registry): axum::extract::State<prometheus::Registry>,
+    axum::extract::State(registry): axum::extract::State<Registry>,
 ) -> (http::StatusCode, String) {
     let metrics_families = registry.gather();
     match prometheus::TextEncoder.encode_to_string(&metrics_families) {

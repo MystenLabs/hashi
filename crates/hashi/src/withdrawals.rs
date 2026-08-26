@@ -1908,9 +1908,10 @@ async fn forward_signing_results(
                     crate::mpc::types::SigningError::Timeout { .. } => "timeout",
                     crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
                     crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
-                        "too_many_invalid"
+                        "not_enough_usable"
                     }
                     crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                    crate::mpc::types::SigningError::RequestChanged { .. } => "request_changed",
                     _ => "other",
                 };
                 metrics

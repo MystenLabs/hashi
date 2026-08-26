@@ -3,14 +3,18 @@
 
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::error::FastCryptoResult;
+use fastcrypto::groups::GroupElement;
+use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::ecies_v1::Ciphertext;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::random_oracle::RandomOracle;
+use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
@@ -927,10 +931,62 @@ pub enum ComplaintResponsesKey {
     },
 }
 
+pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_SIZE_IN_BYTES] {
+    (*public_presig + G::generator() * beacon).to_byte_array()
+}
+
+pub(crate) fn signing_request_digest(
+    message: &[u8],
+    derivation_address: Option<&DerivationAddress>,
+) -> [u8; 32] {
+    let mut h = Blake2b256::default();
+    h.update((message.len() as u64).to_le_bytes());
+    h.update(message);
+    match derivation_address {
+        Some(a) => {
+            h.update([1u8]);
+            h.update(a);
+        }
+        None => h.update([0u8]),
+    }
+    h.finalize().digest
+}
+
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
-    pub public_nonce: G,
+    public_nonce: G,
+    signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
+    request_digest: [u8; 32],
     pub partial_sigs: Vec<Eval<S>>,
+}
+
+impl PartialSigningOutput {
+    pub fn new(
+        public_nonce: G,
+        beacon: &S,
+        message: &[u8],
+        derivation_address: Option<&DerivationAddress>,
+        partial_sigs: Vec<Eval<S>>,
+    ) -> Self {
+        Self {
+            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            request_digest: signing_request_digest(message, derivation_address),
+            public_nonce,
+            partial_sigs,
+        }
+    }
+
+    pub fn public_nonce(&self) -> G {
+        self.public_nonce
+    }
+
+    pub fn signing_nonce_bytes(&self) -> &[u8; POINT_SIZE_IN_BYTES] {
+        &self.signing_nonce_bytes
+    }
+
+    pub fn request_digest(&self) -> &[u8; 32] {
+        &self.request_digest
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -941,6 +997,7 @@ pub struct GetPartialSignaturesRequest {
 #[derive(Clone, Debug)]
 pub struct GetPartialSignaturesResponse {
     pub partial_sigs: BTreeMap<Address, Vec<Eval<S>>>,
+    pub signing_nonces: BTreeMap<Address, Vec<u8>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -958,12 +1015,18 @@ pub enum SigningError {
     Timeout { collected: usize, threshold: u16 },
 
     #[error(
-        "Too many invalid partial signatures to recover: collected {collected}, threshold {threshold}"
+        "Not enough usable partial signatures to recover: collected {collected}, threshold {threshold}"
     )]
     TooManyInvalidSignatures { collected: usize, threshold: u16 },
 
     #[error("Presignature pool exhausted, new batch not yet available")]
     PoolExhausted,
+
+    #[error(
+        "Cached partial signatures for {signing_id} were computed under a different message, \
+         derivation address or beacon"
+    )]
+    RequestChanged { signing_id: Address },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;
