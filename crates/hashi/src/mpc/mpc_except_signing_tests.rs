@@ -7684,7 +7684,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     assert!(
         !mgr.complaints_to_process.keys().any(|k| matches!(
             k,
-            ComplaintsToProcessKey::Rotation(addr, _) if *addr == cheating_dealer_addr
+            ComplaintsToProcessKey::Rotation { dealer, .. } if *dealer == cheating_dealer_addr
         )),
         "Rotation complaints should be removed after recovery"
     );
@@ -8568,9 +8568,13 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint from corrupted share"),
     };
-    // Rotation: complaints keyed by (dealer_addr, share_index)
+    let epoch = receiver_manager.mpc_config.epoch;
     receiver_manager.complaints_to_process.insert(
-        ComplaintsToProcessKey::Rotation(rotation_dealer_addr, share3_index),
+        ComplaintsToProcessKey::Rotation {
+            epoch,
+            dealer: rotation_dealer_addr,
+            share_index: share3_index,
+        },
         ProtocolComplaint::Avss(complaint),
     );
 
@@ -8627,10 +8631,11 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     assert!(
         receiver_manager
             .complaints_to_process
-            .contains_key(&ComplaintsToProcessKey::Rotation(
-                rotation_dealer_addr,
-                share3_index
-            )),
+            .contains_key(&ComplaintsToProcessKey::Rotation {
+                epoch: receiver_manager.mpc_config.epoch,
+                dealer: rotation_dealer_addr,
+                share_index: share3_index,
+            }),
         "Share 3 complaint should still exist"
     );
 
@@ -8732,9 +8737,13 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         _ => panic!("Expected complaint from corrupted share"),
     };
 
-    // Insert the complaint (Rotation: keyed by (dealer_addr, share_index))
+    let epoch = test_manager.mpc_config.epoch;
     test_manager.complaints_to_process.insert(
-        ComplaintsToProcessKey::Rotation(dealer_addr, first_share_index),
+        ComplaintsToProcessKey::Rotation {
+            epoch,
+            dealer: dealer_addr,
+            share_index: first_share_index,
+        },
         ProtocolComplaint::Avss(valid_complaint),
     );
 
@@ -8772,14 +8781,14 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         .map(|&i| rotation_setup.setup.address(i))
         .collect();
 
-    // Verify complaint exists before recovery (Rotation: keyed by (dealer_addr, share_index))
     assert!(
         test_manager
             .complaints_to_process
-            .contains_key(&ComplaintsToProcessKey::Rotation(
-                dealer_addr,
-                first_share_index
-            )),
+            .contains_key(&ComplaintsToProcessKey::Rotation {
+                epoch: test_manager.mpc_config.epoch,
+                dealer: dealer_addr,
+                share_index: first_share_index,
+            }),
         "Should have complaint before recovery"
     );
     assert!(
@@ -8823,13 +8832,121 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         );
         assert!(
             mgr.complaints_to_process
-                .contains_key(&ComplaintsToProcessKey::Rotation(
-                    dealer_addr,
-                    first_share_index
-                )),
+                .contains_key(&ComplaintsToProcessKey::Rotation {
+                    epoch: mgr.mpc_config.epoch,
+                    dealer: dealer_addr,
+                    share_index: first_share_index,
+                }),
             "recover_rotation_shares_via_complaints must leave the complaint for the caller to clear atomically"
         );
     }
+}
+
+#[test]
+fn test_rotation_complaints_are_scoped_to_the_epoch_in_their_key() {
+    let rotation_setup = RotationTestSetup::new();
+    let mut rng = rand::thread_rng();
+
+    let test_party_idx = 2;
+    let (mut test_manager, _test_dkg_output) =
+        rotation_setup.create_receiver_with_memory_store(test_party_idx);
+
+    let dealer_idx = 0;
+    let (_dealer_manager, dealer_dkg_output, valid_rotation_messages) =
+        rotation_setup.create_rotation_dealer_with_memory_store(dealer_idx);
+    let dealer_addr = rotation_setup.setup.address(dealer_idx);
+
+    let valid_rotation_map = match &valid_rotation_messages {
+        Messages::Rotation(map) => map.clone(),
+        Messages::Dkg(_)
+        | Messages::NonceGeneration(_)
+        | Messages::NonceGenerationAvid(_)
+        | Messages::AvidNonceRetrieval(_) => {
+            panic!("Expected rotation messages")
+        }
+    };
+
+    let first_share_index = *valid_rotation_map.keys().next().unwrap();
+    let share_value = dealer_dkg_output
+        .key_shares
+        .shares
+        .iter()
+        .find(|s| s.index == first_share_index)
+        .map(|s| s.value)
+        .unwrap();
+
+    let (_cheating_share_index, cheating_message) = create_cheating_rotation_message(
+        &rotation_setup.setup,
+        &test_manager.current_session_id(),
+        &dealer_addr,
+        share_value,
+        first_share_index,
+        test_party_idx as u16,
+        &mut rng,
+    );
+
+    let session_id = test_manager
+        .current_session_id()
+        .rotation_session_id(&dealer_addr, first_share_index);
+    let receiver = avss::Receiver::new(
+        test_manager.mpc_config.nodes.clone(),
+        test_manager.party_id,
+        Parameters {
+            t: test_manager.mpc_config.threshold,
+            f: test_manager.mpc_config.max_faulty,
+        },
+        session_id.to_vec(),
+        None,
+        test_manager.encryption_key.clone(),
+    )
+    .unwrap();
+    let complaint = match receiver
+        .process_message(&cheating_message, &mut rng)
+        .unwrap()
+    {
+        avss::ProcessedMessage::Complaint(c) => c,
+        _ => panic!("Expected complaint from corrupted share"),
+    };
+
+    let epoch = test_manager.mpc_config.epoch;
+    let previous_epoch = epoch - 1;
+
+    test_manager.complaints_to_process.insert(
+        ComplaintsToProcessKey::Rotation {
+            epoch: previous_epoch,
+            dealer: dealer_addr,
+            share_index: first_share_index,
+        },
+        ProtocolComplaint::Avss(complaint.clone()),
+    );
+
+    let contexts = test_manager
+        .prepare_rotation_complain_requests(&dealer_addr, &valid_rotation_map, epoch)
+        .unwrap();
+    assert!(
+        contexts.is_empty(),
+        "the current epoch must not consume a complaint keyed to the previous epoch"
+    );
+
+    test_manager.complaints_to_process.insert(
+        ComplaintsToProcessKey::Rotation {
+            epoch,
+            dealer: dealer_addr,
+            share_index: first_share_index,
+        },
+        ProtocolComplaint::Avss(complaint),
+    );
+
+    let contexts = test_manager
+        .prepare_rotation_complain_requests(&dealer_addr, &valid_rotation_map, epoch)
+        .unwrap();
+    assert_eq!(
+        contexts.len(),
+        1,
+        "the current epoch must still consume a complaint keyed to it"
+    );
+    assert_eq!(contexts[0].request.epoch, epoch);
+    assert_eq!(contexts[0].request.share_index, Some(first_share_index));
 }
 
 #[test]
@@ -9630,7 +9747,11 @@ fn test_party_restart_uses_stored_rotation_messages() {
     for (dealer_addr, rotation_msgs) in &rotation_messages_map {
         for (share_index, message) in rotation_msgs {
             let output_key = DealerOutputsKey::Rotation(*dealer_addr, *share_index);
-            let complaint_key = ComplaintsToProcessKey::Rotation(*dealer_addr, *share_index);
+            let complaint_key = ComplaintsToProcessKey::Rotation {
+                epoch: party_manager.mpc_config.epoch,
+                dealer: *dealer_addr,
+                share_index: *share_index,
+            };
             if party_manager.dealer_outputs.contains_key(&output_key) {
                 continue;
             }

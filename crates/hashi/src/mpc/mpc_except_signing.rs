@@ -1797,9 +1797,13 @@ impl MpcManager {
                     if share_indices.iter().any(|idx| {
                         !mgr.dealer_outputs
                             .contains_key(&DealerOutputsKey::Rotation(dealer, *idx))
-                            && !mgr
-                                .complaints_to_process
-                                .contains_key(&ComplaintsToProcessKey::Rotation(dealer, *idx))
+                            && !mgr.complaints_to_process.contains_key(
+                                &ComplaintsToProcessKey::Rotation {
+                                    epoch: mgr.mpc_config.epoch,
+                                    dealer,
+                                    share_index: *idx,
+                                },
+                            )
                     }) {
                         mgr.process_certified_rotation_message(&dealer, &previous, &share_indices)?;
                     }
@@ -1844,7 +1848,11 @@ impl MpcManager {
                     mgr.dealer_outputs
                         .insert(DealerOutputsKey::Rotation(dealer, share_index), output);
                     mgr.complaints_to_process
-                        .remove(&ComplaintsToProcessKey::Rotation(dealer, share_index));
+                        .remove(&ComplaintsToProcessKey::Rotation {
+                            epoch,
+                            dealer,
+                            share_index,
+                        });
                 }
             }
             drop(_timer);
@@ -4106,7 +4114,11 @@ impl MpcManager {
                 continue;
             }
             let output_key = DealerOutputsKey::Rotation(*dealer, share_index);
-            let complaint_key = ComplaintsToProcessKey::Rotation(*dealer, share_index);
+            let complaint_key = ComplaintsToProcessKey::Rotation {
+                epoch: self.mpc_config.epoch,
+                dealer: *dealer,
+                share_index,
+            };
             if self.dealer_outputs.contains_key(&output_key)
                 || self.complaints_to_process.contains_key(&complaint_key)
             {
@@ -4784,8 +4796,8 @@ impl MpcManager {
                     }
                 }
                 Err(MpcError::ProtocolFailed(format!(
-                    "Not enough valid complaint responses for dealer {:?} share {}",
-                    dealer, share_index
+                    "Not enough valid complaint responses for dealer {:?} share {} at epoch {}",
+                    dealer, share_index, epoch
                 )))
             }
         });
@@ -4826,9 +4838,11 @@ impl MpcManager {
             .complaints_to_process
             .iter()
             .filter_map(|(key, complaint)| match key {
-                ComplaintsToProcessKey::Rotation(d, share_index) if d == dealer => {
-                    Some((*share_index, complaint.clone()))
-                }
+                ComplaintsToProcessKey::Rotation {
+                    epoch: key_epoch,
+                    dealer: d,
+                    share_index,
+                } if *key_epoch == epoch && d == dealer => Some((*share_index, complaint.clone())),
                 _ => None,
             })
             .collect();
@@ -4844,8 +4858,8 @@ impl MpcManager {
                     .get(&share_index)
                     .ok_or_else(|| {
                         MpcError::ProtocolFailed(format!(
-                            "No rotation message for share index {}",
-                            share_index
+                            "No rotation message for dealer {:?} share index {} at epoch {}",
+                            dealer, share_index, epoch
                         ))
                     })?
                     .clone();
@@ -4856,7 +4870,7 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key.clone(),
+                    self.encryption_key_for_epoch(epoch)?.clone(),
                 )?;
                 Ok(RotationComplainContext {
                     request: ComplainRequest {
@@ -5803,10 +5817,11 @@ impl MpcManager {
                     let signers = {
                         let mut mgr = mpc_manager.write().unwrap();
                         mgr.complaints_to_process.insert(
-                            ComplaintsToProcessKey::Rotation(
-                                dealer_address,
-                                complained_share_index,
-                            ),
+                            ComplaintsToProcessKey::Rotation {
+                                epoch: previous_epoch,
+                                dealer: dealer_address,
+                                share_index: complained_share_index,
+                            },
                             ProtocolComplaint::Avss(complaint),
                         );
                         Self::collect_signers_for_dealer(
@@ -5840,10 +5855,11 @@ impl MpcManager {
                             output,
                         );
                         mgr.complaints_to_process
-                            .remove(&ComplaintsToProcessKey::Rotation(
-                                dealer_address,
+                            .remove(&ComplaintsToProcessKey::Rotation {
+                                epoch: previous_epoch,
+                                dealer: dealer_address,
                                 share_index,
-                            ));
+                            });
                     }
                 }
             }
