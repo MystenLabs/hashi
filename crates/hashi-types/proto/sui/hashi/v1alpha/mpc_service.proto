@@ -214,4 +214,8 @@ message GetPartialSignaturesResponse {
   // Only ids for which the peer has already computed its local partial are present;
   // an absent id means "not ready yet", not an error.
   map<string, sui.rpc.v2.Bcs> partial_sigs = 1;
+
+  // The BIP-340 signing nonce each partial was computed against, keyed by signing_id.
+  // An absent or wrong-length entry means unverifiable, not disagreement.
+  map<string, sui.rpc.v2.Bcs> signing_nonces = 2;
 }

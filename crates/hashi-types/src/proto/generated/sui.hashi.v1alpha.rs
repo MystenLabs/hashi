@@ -3757,6 +3757,13 @@ pub struct GetPartialSignaturesResponse {
         ::prost::alloc::string::String,
         ::sui_rpc::proto::sui::rpc::v2::Bcs,
     >,
+    /// The BIP-340 signing nonce each partial was computed against, keyed by signing_id.
+    /// An absent or wrong-length entry means unverifiable, not disagreement.
+    #[prost(map = "string, message", tag = "2")]
+    pub signing_nonces: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::sui_rpc::proto::sui::rpc::v2::Bcs,
+    >,
 }
 /// The type of MPC protocol phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use fastcrypto::error::FastCryptoError;
+use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
@@ -17,6 +18,7 @@ use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Committee;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -37,6 +39,8 @@ use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
+use crate::mpc::types::signing_nonce_bytes;
+use crate::mpc::types::signing_request_digest;
 
 const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100);
 const PARTIAL_SIGS_COLLECTION_MAX_BACKOFF: Duration = Duration::from_secs(2);
@@ -495,17 +499,18 @@ impl SigningManager {
         request: &GetPartialSignaturesRequest,
     ) -> SigningResult<GetPartialSignaturesResponse> {
         let state = self.state.read().unwrap();
-        let partial_sigs = request
-            .signing_ids
-            .iter()
-            .filter_map(|id| {
-                state
-                    .partial_signing_outputs
-                    .get(id)
-                    .map(|output| (*id, output.partial_sigs.clone()))
-            })
-            .collect();
-        Ok(GetPartialSignaturesResponse { partial_sigs })
+        let mut partial_sigs = BTreeMap::new();
+        let mut signing_nonces = BTreeMap::new();
+        for id in &request.signing_ids {
+            if let Some(output) = state.partial_signing_outputs.get(id) {
+                partial_sigs.insert(*id, output.partial_sigs.clone());
+                signing_nonces.insert(*id, output.signing_nonce_bytes().to_vec());
+            }
+        }
+        Ok(GetPartialSignaturesResponse {
+            partial_sigs,
+            signing_nonces,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -538,6 +543,7 @@ impl SigningManager {
             .collect();
         let deadline = Instant::now() + timeout;
         let mut pending: Vec<InputSigningState> = Vec::with_capacity(inputs.len());
+        let mut request_changed: Vec<Address> = Vec::new();
         for input in inputs {
             match self
                 .prepare_local_partial_signatures(
@@ -550,19 +556,31 @@ impl SigningManager {
                 )
                 .await
             {
-                Ok((public_nonce, partials)) => pending.push(InputSigningState {
-                    signing_id: input.signing_id,
-                    message: input.message,
+                Ok((public_nonce, partials)) => pending.push(InputSigningState::new(
+                    input.signing_id,
+                    input.message,
                     public_nonce,
-                    derivation_address: input.derivation_address,
+                    beacon_value,
+                    input.derivation_address,
                     partials,
-                    required: threshold as usize,
-                    peers_remaining: all_peers.clone(),
-                }),
+                    threshold as usize,
+                    all_peers.clone(),
+                )),
                 Err(e) => {
+                    if matches!(e, SigningError::RequestChanged { .. }) {
+                        request_changed.push(input.signing_id);
+                    }
                     let _ = result_tx.send((input.signing_id, Err(e)));
                 }
             }
+        }
+        if !request_changed.is_empty() {
+            tracing::error!(
+                "Refused {} input(s) whose cached partials were computed under a \
+                 different message, derivation address or beacon: {:?}",
+                request_changed.len(),
+                &request_changed[..request_changed.len().min(8)],
+            );
         }
         let _collection_timer = metrics
             .mpc_sign_collection_duration_seconds
@@ -572,22 +590,20 @@ impl SigningManager {
         while !pending.is_empty() {
             let mut i = 0;
             while i < pending.len() {
-                let st = &pending[i];
-                let peers_exhausted = st.peers_remaining.is_empty();
-                if st.partials.len() < threshold as usize && !peers_exhausted {
+                let peers_exhausted = pending[i].peers_remaining.is_empty();
+                if pending[i].partials.len() < threshold as usize && !peers_exhausted {
                     i += 1;
                     continue;
                 }
-                let params = AggregationParams {
-                    message: &st.message,
-                    public_nonce: &st.public_nonce,
-                    beacon_value,
+                let outcome = try_finalize_signature(
+                    &pending[i],
                     threshold,
-                    verifying_key: &verifying_key,
-                    derivation_address: st.derivation_address.as_ref(),
-                };
-                match try_finalize_signature(&params, &st.partials, peers_exhausted, metrics).await
-                {
+                    &verifying_key,
+                    peers_exhausted,
+                    metrics,
+                )
+                .await;
+                match outcome {
                     FinalizeOutcome::NeedMore => {
                         // The attempt failed with the shares in hand; demand
                         // at least one more before the next round may
@@ -663,12 +679,18 @@ impl SigningManager {
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
+                let digest = signing_request_digest(message, derivation_address);
+                let nonce = signing_nonce_bytes(&existing.public_nonce(), beacon_value);
+                if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
+                {
+                    return Err(SigningError::RequestChanged { signing_id });
+                }
                 tracing::info!(
                     "Cache hit for {signing_id} (global_presig_index={global_presig_index}), \
                      reusing cached partial sigs (batch_index={})",
                     state.batches.last().map_or(0, |b| b.batch_index),
                 );
-                CacheOrPresig::Cached(existing.public_nonce, existing.partial_sigs.clone())
+                CacheOrPresig::Cached(existing.public_nonce(), existing.partial_sigs.clone())
             } else {
                 // Find the batch containing this presig index, advancing
                 // into the next batch if needed.
@@ -804,10 +826,13 @@ impl SigningManager {
                 drop(_timer);
                 self.state.write().unwrap().partial_signing_outputs.insert(
                     signing_id,
-                    PartialSigningOutput {
-                        public_nonce: result.0,
-                        partial_sigs: result.1.clone(),
-                    },
+                    PartialSigningOutput::new(
+                        result.0,
+                        beacon_value,
+                        message,
+                        derivation_address,
+                        result.1.clone(),
+                    ),
                 );
                 result
             }
@@ -828,6 +853,8 @@ struct InputSigningState {
     message: Vec<u8>,
     public_nonce: G,
     derivation_address: Option<DerivationAddress>,
+    signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
+    beacon: S,
     partials: Vec<Eval<S>>,
     /// Minimum number of partials before a poll round may early-exit for
     /// this input. Starts at the signing threshold; every failed
@@ -841,6 +868,32 @@ struct InputSigningState {
     peers_remaining: HashSet<Address>,
 }
 
+impl InputSigningState {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        signing_id: Address,
+        message: Vec<u8>,
+        public_nonce: G,
+        beacon: &S,
+        derivation_address: Option<DerivationAddress>,
+        partials: Vec<Eval<S>>,
+        required: usize,
+        peers_remaining: HashSet<Address>,
+    ) -> Self {
+        Self {
+            signing_id,
+            message,
+            public_nonce,
+            derivation_address,
+            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            beacon: *beacon,
+            required,
+            partials,
+            peers_remaining,
+        }
+    }
+}
+
 enum FinalizeOutcome {
     /// Aggregation succeeded. The second field carries the share indices the
     /// RS-recovery path proved bad (empty on the clean path), so the caller
@@ -852,12 +905,13 @@ enum FinalizeOutcome {
 }
 
 async fn try_finalize_signature(
-    params: &AggregationParams<'_>,
-    partials: &[Eval<S>],
+    st: &InputSigningState,
+    threshold: u16,
+    verifying_key: &G,
     peers_exhausted: bool,
     metrics: &Metrics,
 ) -> FinalizeOutcome {
-    let threshold = params.threshold;
+    let partials = &st.partials;
     let need_more_or_fail = |collected: usize| {
         if peers_exhausted {
             FinalizeOutcome::Failed(SigningError::TooManyInvalidSignatures {
@@ -875,11 +929,11 @@ async fn try_finalize_signature(
         .mpc_sign_aggregation_duration_seconds
         .with_label_values(&[MPC_LABEL_SIGNING])
         .start_timer();
-    let message = params.message.to_vec();
-    let nonce = *params.public_nonce;
-    let beacon = *params.beacon_value;
-    let vk = *params.verifying_key;
-    let deriv = params.derivation_address.copied();
+    let message = st.message.clone();
+    let nonce = st.public_nonce;
+    let beacon = st.beacon;
+    let vk = *verifying_key;
+    let deriv = st.derivation_address;
     let sigs = partials.to_vec();
     let agg = super::spawn_blocking(move || {
         aggregate_signatures(
@@ -901,11 +955,11 @@ async fn try_finalize_signature(
     if partials.len().saturating_sub(threshold as usize) / 2 < 1 {
         return need_more_or_fail(partials.len());
     }
-    let message = params.message.to_vec();
-    let nonce = *params.public_nonce;
-    let beacon = *params.beacon_value;
-    let vk = *params.verifying_key;
-    let deriv = params.derivation_address.copied();
+    let message = st.message.clone();
+    let nonce = st.public_nonce;
+    let beacon = st.beacon;
+    let vk = *verifying_key;
+    let deriv = st.derivation_address;
     let sigs = partials.to_vec();
     let recovered = super::spawn_blocking(move || {
         aggregate_signatures_with_recovery(
@@ -1016,11 +1070,22 @@ impl SigningManager {
                         continue;
                     }
                     self.peer_cooldowns.record_success(&peer);
+                    let mut nonce_mismatches = 0u64;
                     for (signing_id, sigs) in response.partial_sigs {
                         if let Some(&i) = index.get(&signing_id)
                             && pending[i].peers_remaining.remove(&peer)
                         {
                             let st = &mut pending[i];
+                            let reported = response
+                                .signing_nonces
+                                .get(&signing_id)
+                                .filter(|n| n.len() == POINT_SIZE_IN_BYTES);
+                            if let Some(nonce) = reported
+                                && nonce[..] != st.signing_nonce_bytes[..]
+                            {
+                                nonce_mismatches += 1;
+                                continue;
+                            }
                             for eval in sigs {
                                 // Only the index's owner may supply its
                                 // value. A peer squatting other peers'
@@ -1048,6 +1113,17 @@ impl SigningManager {
                                 progressed = true;
                             }
                         }
+                    }
+                    if nonce_mismatches > 0 {
+                        metrics
+                            .mpc_partial_sig_nonce_mismatch_total
+                            .with_label_values(&[&peer.to_string()])
+                            .inc_by(nonce_mismatches);
+                        tracing::warn!(
+                            "Signing-nonce disagreement with {peer} on {nonce_mismatches} \
+                             input(s); dropped its partials. Does not establish which side \
+                             diverged"
+                        );
                     }
                     if pending.iter().all(|st| st.partials.len() >= st.required) {
                         break;
@@ -1141,15 +1217,6 @@ impl SigningManager {
             }
         }
     }
-}
-
-struct AggregationParams<'a> {
-    message: &'a [u8],
-    public_nonce: &'a G,
-    beacon_value: &'a S,
-    threshold: u16,
-    verifying_key: &'a G,
-    derivation_address: Option<&'a DerivationAddress>,
 }
 
 /// Recovers the signing scalar from `partial_signatures` via Reed-Solomon
@@ -1333,8 +1400,11 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct CannedP2PChannel {
         responses: HashMap<Address, ChannelResult<Vec<Eval<S>>>>,
+        nonces: HashMap<Address, G>,
+        nonce_overrides: HashMap<(Address, Address), Vec<u8>>,
     }
 
     #[async_trait::async_trait]
@@ -1380,6 +1450,19 @@ mod tests {
                         .iter()
                         .map(|id| (*id, evals.clone()))
                         .collect(),
+                    signing_nonces: request
+                        .signing_ids
+                        .iter()
+                        .filter_map(|id| {
+                            self.nonce_overrides
+                                .get(&(*party, *id))
+                                .cloned()
+                                .or_else(|| {
+                                    self.nonces.get(party).map(|n| n.to_byte_array().to_vec())
+                                })
+                                .map(|n| (*id, n))
+                        })
+                        .collect(),
                 }),
                 Some(Err(_)) => Err(ChannelError::RequestFailed(format!(
                     "canned error for {}",
@@ -1410,7 +1493,10 @@ mod tests {
             };
             responses.insert(test_address(i), Ok(sigs));
         }
-        CannedP2PChannel { responses }
+        CannedP2PChannel {
+            responses,
+            ..Default::default()
+        }
     }
 
     struct HangingP2PChannel {
@@ -1465,6 +1551,7 @@ mod tests {
                         .iter()
                         .map(|id| (*id, evals.clone()))
                         .collect(),
+                    signing_nonces: BTreeMap::new(),
                 })
                 .map(Ok)
                 .unwrap_or_else(|| Err(ChannelError::ClientNotFound(*party)))
@@ -1522,6 +1609,7 @@ mod tests {
             } else {
                 Ok(GetPartialSignaturesResponse {
                     partial_sigs: std::collections::BTreeMap::new(),
+                    signing_nonces: std::collections::BTreeMap::new(),
                 })
             }
         }
@@ -1578,6 +1666,7 @@ mod tests {
                     .iter()
                     .map(|id| (*id, evals.clone()))
                     .collect(),
+                signing_nonces: BTreeMap::new(),
             })
         }
     }
@@ -1739,10 +1828,7 @@ mod tests {
                 .unwrap();
                 mgr.state.write().unwrap().partial_signing_outputs.insert(
                     request_id,
-                    PartialSigningOutput {
-                        public_nonce: pn,
-                        partial_sigs: sigs.clone(),
-                    },
+                    PartialSigningOutput::new(pn, beacon_value, message, None, sigs.clone()),
                 );
                 if public_nonce.is_none() {
                     public_nonce = Some(pn);
@@ -2090,7 +2176,8 @@ mod tests {
     fn test_handle_get_partial_signatures_found() {
         let setup = SigningTestSetup::new(4);
         let message = b"test";
-        let beacon = S::zero();
+        let mut rng = StdRng::seed_from_u64(6501);
+        let beacon = S::rand(&mut rng);
         let req_id = test_request_id();
 
         setup.prepare_all(message, &beacon, req_id, 0, None);
@@ -2101,6 +2188,61 @@ mod tests {
             })
             .unwrap();
         assert!(resp.partial_sigs.contains_key(&req_id));
+        let cached = setup.managers[0]
+            .state
+            .read()
+            .unwrap()
+            .partial_signing_outputs
+            .get(&req_id)
+            .unwrap()
+            .public_nonce();
+        assert_eq!(
+            resp.signing_nonces.get(&req_id).map(Vec::as_slice),
+            Some(signing_nonce_bytes(&cached, &beacon).as_slice()),
+            "must report the nonce the returned partials were derived against"
+        );
+        assert_ne!(
+            resp.signing_nonces.get(&req_id).map(Vec::as_slice),
+            Some(cached.to_byte_array().as_slice()),
+        );
+    }
+
+    #[test]
+    fn test_partial_signatures_response_survives_a_proto_round_trip() {
+        let setup = SigningTestSetup::new(4);
+        let req_id = test_request_id();
+        let mut rng = StdRng::seed_from_u64(6502);
+        let beacon = S::rand(&mut rng);
+        setup.prepare_all(b"test", &beacon, req_id, 0, None);
+
+        let resp = setup.managers[0]
+            .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
+                signing_ids: vec![req_id],
+            })
+            .unwrap();
+        let round_tripped = GetPartialSignaturesResponse::try_from(
+            &hashi_types::proto::GetPartialSignaturesResponse::from(&resp),
+        )
+        .unwrap();
+
+        assert_eq!(round_tripped.signing_nonces, resp.signing_nonces);
+        assert_eq!(
+            round_tripped.signing_nonces.get(&req_id).map(Vec::as_slice),
+            Some(
+                signing_nonce_bytes(
+                    &setup.managers[0]
+                        .state
+                        .read()
+                        .unwrap()
+                        .partial_signing_outputs
+                        .get(&req_id)
+                        .unwrap()
+                        .public_nonce(),
+                    &beacon,
+                )
+                .as_slice()
+            ),
+        );
     }
 
     #[test]
@@ -2112,6 +2254,19 @@ mod tests {
             })
             .unwrap();
         assert!(resp.partial_sigs.is_empty());
+        assert!(
+            resp.signing_nonces.is_empty(),
+            "an id we have no output for is absent from both maps, not present and empty"
+        );
+    }
+
+    #[test]
+    fn test_the_reported_nonce_encoding_is_its_bcs_encoding() {
+        let nonce = G::generator() + G::generator();
+        assert_eq!(
+            bcs::to_bytes(&nonce).unwrap(),
+            nonce.to_byte_array().to_vec()
+        );
     }
 
     #[tokio::test]
@@ -2280,10 +2435,7 @@ mod tests {
             .partial_signing_outputs
             .insert(
                 req_id,
-                PartialSigningOutput {
-                    public_nonce,
-                    partial_sigs: vec![],
-                },
+                PartialSigningOutput::new(public_nonce, &beacon, message, None, vec![]),
             );
 
         let p2p = setup.mock_p2p_for(0);
@@ -2331,10 +2483,7 @@ mod tests {
             .unwrap();
             mgr.state.write().unwrap().partial_signing_outputs.insert(
                 req_id,
-                PartialSigningOutput {
-                    public_nonce: pn,
-                    partial_sigs: sigs,
-                },
+                PartialSigningOutput::new(pn, &beacon, message, None, sigs),
             );
         }
 
@@ -2440,17 +2589,18 @@ mod tests {
         partials: Vec<Eval<S>>,
         peers_remaining: Vec<Address>,
     ) -> InputSigningState {
-        InputSigningState {
+        InputSigningState::new(
             signing_id,
-            message: b"m".to_vec(),
-            public_nonce: G::generator(),
-            derivation_address: None,
+            b"m".to_vec(),
+            G::generator(),
+            &S::zero(),
+            None,
             partials,
             // Helper-driven collect tests exercise full rounds; the
             // early-exit is covered by dedicated tests.
-            required: usize::MAX,
-            peers_remaining: peers_remaining.into_iter().collect(),
-        }
+            usize::MAX,
+            peers_remaining.into_iter().collect(),
+        )
     }
 
     #[tokio::test]
@@ -2541,6 +2691,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_a_dropped_peer_still_leaves_a_verifiable_signature() {
+        let setup = SigningTestSetup::new(7);
+        let message = b"drop-and-aggregate";
+        let mut rng = StdRng::seed_from_u64(6503);
+        let beacon = S::rand(&mut rng);
+        let req_id = test_request_id();
+        let diverged = test_address(6);
+
+        let (public_nonce, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, None);
+        let honest_nonce = public_nonce + G::generator() * beacon;
+
+        let mut responses = HashMap::new();
+        let mut nonces = HashMap::new();
+        for (i, sigs) in all_sigs.iter().enumerate().skip(1) {
+            let peer = test_address(i);
+            responses.insert(peer, Ok(sigs.clone()));
+            nonces.insert(
+                peer,
+                if peer == diverged {
+                    G::generator() + G::generator()
+                } else {
+                    honest_nonce
+                },
+            );
+        }
+        let p2p = CannedP2PChannel {
+            responses,
+            nonces,
+            ..Default::default()
+        };
+
+        let metrics = test_metrics();
+        let mut pending = vec![InputSigningState::new(
+            req_id,
+            message.to_vec(),
+            public_nonce,
+            &beacon,
+            None,
+            all_sigs[0].clone(),
+            usize::MAX,
+            (1..7usize).map(test_address).collect(),
+        )];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        setup.managers[0]
+            .collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let mismatches = |peer: &Address| {
+            metrics
+                .mpc_partial_sig_nonce_mismatch_total
+                .with_label_values(&[&peer.to_string()])
+                .get()
+        };
+        assert_eq!(mismatches(&diverged), 1);
+        for i in 1..6usize {
+            assert_eq!(
+                mismatches(&test_address(i)),
+                0,
+                "a peer reporting our nonce must not be dropped"
+            );
+        }
+
+        let outcome = try_finalize_signature(
+            &pending[0],
+            setup.managers[0].config.threshold,
+            &setup.verifying_key,
+            true,
+            &metrics,
+        )
+        .await;
+        match outcome {
+            FinalizeOutcome::Done(sig, bad_indices) => {
+                assert!(bad_indices.is_empty(), "no share should be provably bad");
+                verify_schnorr(&setup.verifying_key, message, &sig);
+                let reported = G::from_byte_array(&signing_nonce_bytes(&public_nonce, &beacon))
+                    .unwrap()
+                    .x_as_be_bytes()
+                    .unwrap();
+                assert_eq!(
+                    reported, sig.r,
+                    "the nonce we report must be the one fastcrypto signed under"
+                );
+            }
+            _ => panic!("the surviving shares must still aggregate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_cache_hit_under_a_changed_message_is_refused() {
+        let setup = SigningTestSetup::new(7);
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(b"first sighash", &beacon, req_id, 0, None);
+
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            b"second sighash",
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SigningError::RequestChanged { .. })),
+            "expected RequestChanged, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sign_fast_fails_when_every_peer_is_on_a_different_nonce() {
+        let setup = SigningTestSetup::new(4);
+        let message = b"nonce-fast-fail";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let mut rng = StdRng::seed_from_u64(9090);
+        let elsewhere = G::generator() + G::generator();
+        let mut responses = HashMap::new();
+        let mut nonces = HashMap::new();
+        for i in 1..4usize {
+            responses.insert(
+                test_address(i),
+                Ok(vec![eval_at(i as u16 + 1, S::rand(&mut rng))]),
+            );
+            nonces.insert(test_address(i), elsewhere);
+        }
+        let p2p = CannedP2PChannel {
+            responses,
+            nonces,
+            ..Default::default()
+        };
+
+        let started = Instant::now();
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(SigningError::TooManyInvalidSignatures { .. })),
+            "expected fast TooManyInvalidSignatures, got: {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fast-fail should not wait out the deadline: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_collect_skips_blamed_peers() {
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
@@ -2603,21 +2920,22 @@ mod tests {
         ]);
         let p2p = DelayedP2PChannel { responses };
 
-        let mut pending = vec![InputSigningState {
-            signing_id: test_request_id(),
-            message: b"m".to_vec(),
-            public_nonce: G::generator(),
-            derivation_address: None,
-            partials: vec![
+        let mut pending = vec![InputSigningState::new(
+            test_request_id(),
+            b"m".to_vec(),
+            G::generator(),
+            &S::zero(),
+            None,
+            vec![
                 eval_at(1, S::zero()),
                 eval_at(2, S::zero()),
                 eval_at(3, S::zero()),
             ],
             // Threshold (3) shares are in hand but aggregation failed once,
             // so one more share is required before the round may early-exit.
-            required: 4,
-            peers_remaining: [fast_empty, slow_useful].into_iter().collect(),
-        }];
+            4,
+            [fast_empty, slow_useful].into_iter().collect(),
+        )];
 
         let deadline = Instant::now() + Duration::from_secs(5);
         mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
@@ -2655,7 +2973,10 @@ mod tests {
                 eval_at(9, S::rand(&mut rng)), // nonexistent share
             ]),
         )]);
-        let p2p = CannedP2PChannel { responses };
+        let p2p = CannedP2PChannel {
+            responses,
+            ..Default::default()
+        };
 
         let mut pending = vec![test_input_state(
             test_request_id(),
@@ -2707,7 +3028,10 @@ mod tests {
         responses.insert(test_address(1), Ok(flood));
         responses.insert(test_address(2), Ok(all_sigs[2].clone()));
         responses.insert(test_address(3), Ok(all_sigs[3].clone()));
-        let p2p = CannedP2PChannel { responses };
+        let p2p = CannedP2PChannel {
+            responses,
+            ..Default::default()
+        };
 
         let metrics = test_metrics();
         let sig = SigningManager::sign_one(
@@ -2733,6 +3057,251 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_an_unusable_reported_nonce_is_silence_not_disagreement() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let mut rng = StdRng::seed_from_u64(4713);
+        let peer = test_address(1);
+        let short = test_address(2);
+
+        let responses = HashMap::from([
+            (peer, Ok(vec![eval_at(2, S::rand(&mut rng))])),
+            (short, Ok(vec![eval_at(3, S::rand(&mut rng))])),
+        ]);
+        let nonce_overrides = HashMap::from([
+            ((peer, test_request_id()), Vec::new()),
+            (
+                (short, test_request_id()),
+                vec![0u8; POINT_SIZE_IN_BYTES - 1],
+            ),
+        ]);
+        let p2p = CannedP2PChannel {
+            responses,
+            nonce_overrides,
+            ..Default::default()
+        };
+
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![eval_at(1, S::zero())],
+            vec![peer, short],
+        )];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let mut indices: Vec<u16> = pending[0].partials.iter().map(|e| e.index.get()).collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            vec![1, 2, 3],
+            "an unusable nonce is not a mismatch"
+        );
+        for p in [peer, short] {
+            assert_eq!(
+                metrics
+                    .mpc_partial_sig_nonce_mismatch_total
+                    .with_label_values(&[&p.to_string()])
+                    .get(),
+                0,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_peer_may_diverge_on_one_input_and_not_another() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let mut rng = StdRng::seed_from_u64(4712);
+        let agreed = test_request_id();
+        let disputed = Address::new([0xBB; 32]);
+
+        let responses = HashMap::from([
+            (test_address(1), Ok(vec![eval_at(2, S::rand(&mut rng))])),
+            (test_address(2), Ok(vec![eval_at(3, S::rand(&mut rng))])),
+        ]);
+        let elsewhere = G::generator() + G::generator();
+        let nonces = HashMap::from([
+            (test_address(1), G::generator()),
+            (test_address(2), G::generator()),
+        ]);
+        let nonce_overrides = HashMap::from([
+            (
+                (test_address(1), disputed),
+                elsewhere.to_byte_array().to_vec(),
+            ),
+            (
+                (test_address(2), disputed),
+                elsewhere.to_byte_array().to_vec(),
+            ),
+        ]);
+        let p2p = CannedP2PChannel {
+            responses,
+            nonces,
+            nonce_overrides,
+        };
+
+        let peers = vec![test_address(1), test_address(2)];
+        let mut pending = vec![
+            test_input_state(agreed, vec![eval_at(1, S::zero())], peers.clone()),
+            test_input_state(disputed, vec![eval_at(1, S::zero())], peers),
+        ];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let merged: Vec<u16> = pending[0].partials.iter().map(|e| e.index.get()).collect();
+        assert!(
+            merged.contains(&2),
+            "the agreed input keeps the shares of a peer that diverged elsewhere"
+        );
+        assert_eq!(
+            pending[1]
+                .partials
+                .iter()
+                .map(|e| e.index.get())
+                .collect::<Vec<_>>(),
+            vec![1],
+            "while the disputed input drops them"
+        );
+        assert_eq!(
+            metrics
+                .mpc_partial_sig_nonce_mismatch_total
+                .with_label_values(&[&test_address(1).to_string()])
+                .get(),
+            1,
+            "the disputed input alone is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_keeps_partials_from_a_peer_on_our_nonce() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let peer = test_address(1);
+        let mut rng = StdRng::seed_from_u64(4242);
+
+        let responses = HashMap::from([(peer, Ok(vec![eval_at(2, S::rand(&mut rng))]))]);
+        let nonces = HashMap::from([(peer, G::generator())]);
+        let p2p = CannedP2PChannel {
+            responses,
+            nonces,
+            ..Default::default()
+        };
+
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![eval_at(1, S::zero())],
+            vec![peer],
+        )];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let st = &pending[0];
+        let mut indices: Vec<u16> = st.partials.iter().map(|e| e.index.get()).collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            vec![1, 2],
+            "an agreeing peer's shares must be used"
+        );
+        assert_eq!(
+            metrics
+                .mpc_partial_sig_nonce_mismatch_total
+                .with_label_values(&[&peer.to_string()])
+                .get(),
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_drops_partials_from_a_peer_on_a_different_nonce() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let diverged = test_address(1);
+        let mut rng = StdRng::seed_from_u64(90210);
+
+        let responses = HashMap::from([(diverged, Ok(vec![eval_at(2, S::rand(&mut rng))]))]);
+        let nonces = HashMap::from([(diverged, G::generator() + G::generator())]);
+        let p2p = CannedP2PChannel {
+            responses,
+            nonces,
+            ..Default::default()
+        };
+
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![eval_at(1, S::zero())],
+            vec![diverged],
+        )];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let st = &pending[0];
+        assert_eq!(
+            st.partials
+                .iter()
+                .map(|e| e.index.get())
+                .collect::<Vec<_>>(),
+            vec![1],
+            "only the caller's own share may remain"
+        );
+        assert_eq!(
+            metrics
+                .mpc_partial_sig_nonce_mismatch_total
+                .with_label_values(&[&diverged.to_string()])
+                .get(),
+            1,
+        );
+        assert!(
+            mgr.bad_share_peers.snapshot(Instant::now()).is_empty(),
+            "a nonce mismatch must not blame anyone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_keeps_partials_from_a_peer_reporting_no_nonce() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let old_peer = test_address(1);
+        let mut rng = StdRng::seed_from_u64(31337);
+
+        let responses = HashMap::from([(old_peer, Ok(vec![eval_at(2, S::rand(&mut rng))]))]);
+        let p2p = CannedP2PChannel {
+            responses,
+            ..Default::default()
+        };
+
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![eval_at(1, S::zero())],
+            vec![old_peer],
+        )];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(&p2p, &mut pending, deadline, &metrics)
+            .await;
+
+        let st = &pending[0];
+        let mut indices: Vec<u16> = st.partials.iter().map(|e| e.index.get()).collect();
+        indices.sort_unstable();
+        assert_eq!(indices, vec![1, 2], "an unreported nonce is not a mismatch");
+        assert_eq!(
+            metrics
+                .mpc_partial_sig_nonce_mismatch_total
+                .with_label_values(&[&old_peer.to_string()])
+                .get(),
+            0,
+        );
+    }
+
+    #[tokio::test]
     async fn test_sign_recovers_from_corrupt_local_share_without_blaming_peers() {
         // Corrupt the caller's own cached partial: local shares fill the
         // first aggregation slots, so the clean path always fails and the RS
@@ -2754,10 +3323,7 @@ mod tests {
             .partial_signing_outputs
             .insert(
                 req_id,
-                PartialSigningOutput {
-                    public_nonce,
-                    partial_sigs: corrupted,
-                },
+                PartialSigningOutput::new(public_nonce, &beacon, message, None, corrupted),
             );
 
         let p2p = setup.mock_p2p_for(0);
@@ -2872,7 +3438,10 @@ mod tests {
                 Err(ChannelError::RequestFailed("unavailable".into())),
             );
         }
-        let p2p = CannedP2PChannel { responses };
+        let p2p = CannedP2PChannel {
+            responses,
+            ..Default::default()
+        };
 
         let result = SigningManager::sign_one(
             &setup.managers[0],
