@@ -186,7 +186,8 @@ pub struct Hashi {
     pub versioning: Versioning,
     pub treasury: Treasury,
     pub proposals: Proposals,
-    /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
+    /// TOB certificates by (epoch, batch_index, protocol_type). Values are
+    /// bare `EpochCertsV1` buckets or, for nonce certs, `StampedEpochCertsV1`.
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
     pub num_consumed_presigs: u64,

@@ -111,6 +111,11 @@ const MAINTENANCE_CF_NAME: &str = "maintenance";
 
 const MAINTENANCE_COMPACTION_KEY: &[u8] = b"last_compaction";
 
+/// Epochs of dealer/rotation material kept behind the committee-epoch cutoff
+/// (the previous committee's epoch is additionally exempt from pruning). Must
+/// stay strictly below the on-chain `KEY_GEN_CERT_RETENTION_EPOCHS` (8) in
+/// `cert_submission.move`: every epoch whose payloads may still exist in a
+/// policy-following DB must keep its cert bucket on-chain.
 const RETENTION_EXTRA_EPOCHS: u64 = 7;
 
 /// Outcome of compacting one keyspace, for logging and metrics.
