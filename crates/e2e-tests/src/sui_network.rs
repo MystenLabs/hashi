@@ -394,33 +394,55 @@ impl SuiNetworkHandle {
     }
 
     pub async fn current_sui_epoch(&mut self) -> Result<u64> {
-        let resp = self
-            .client
-            .ledger_client()
-            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
-            .await?;
+        // Bounded: a wedged fullnode must surface as a diagnosable error, not
+        // an unbounded await that outlives the nextest terminate-after and
+        // discards every captured log.
+        let resp = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.client
+                .ledger_client()
+                .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default()),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("get_service_info timed out after 30s (fullnode wedged?)")
+        })??;
         Ok(resp.into_inner().epoch())
     }
 
     pub async fn force_close_epoch(&mut self) -> Result<()> {
         let current_epoch = self.current_sui_epoch().await?;
         let target_epoch = current_epoch + 1;
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
         for port in &self.admin_ports {
             let url = format!(
                 "http://127.0.0.1:{}/force-close-epoch?epoch={}",
                 port, current_epoch
             );
-            client.post(&url).send().await?;
+            let resp = client.post(&url).send().await.map_err(|e| {
+                anyhow::anyhow!("force-close-epoch POST to admin port {port} failed: {e}")
+            })?;
+            anyhow::ensure!(
+                resp.status().is_success(),
+                "force-close-epoch on admin port {port} returned {}",
+                resp.status()
+            );
         }
         for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
-            if self.current_sui_epoch().await? >= target_epoch {
-                return Ok(());
+            match self.current_sui_epoch().await {
+                Ok(epoch) if epoch >= target_epoch => return Ok(()),
+                Ok(_) => {}
+                // Keep polling through transient RPC errors; the loop bound
+                // converts a persistent one into the diagnosable bail below.
+                Err(e) => tracing::warn!("epoch poll failed while awaiting close: {e:#}"),
             }
             sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
         }
         bail!(
-            "Epoch did not advance within {}s after force-close-epoch",
+            "Sui epoch did not advance {current_epoch} -> {target_epoch} within {}s of \
+             force-close-epoch (validator admin endpoints all acknowledged)",
             NETWORK_STARTUP_TIMEOUT_SECS
         )
     }
