@@ -20,14 +20,21 @@ use e2e_tests::test_helpers::init_test_logging;
 use e2e_tests::test_helpers::subscribe_withdrawal_confirmations;
 use e2e_tests::upgrade_flow;
 use hashi::sui_tx_executor::SuiTxExecutor;
+use hashi_types::move_types::WithdrawalStatus;
 use std::collections::BTreeSet;
 use std::time::Duration;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
+use sui_sdk_types::StructTag;
+use sui_sdk_types::TypeTag;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
 use tracing::info;
+
+/// The Sui framework package (`0x2`), for consuming the `Balance<BTC>` a
+/// direct `cancel_withdrawal` call would return via `coin::from_balance`.
+const SUI_FRAMEWORK_ADDRESS: Address = Address::from_static("0x2");
 
 /// Upgrade v2 binds the committee-approved exclusivity policy to publication.
 ///
@@ -561,5 +568,340 @@ async fn test_withdrawal_committed_under_v1_completes_after_upgrade() -> Result<
     info!("withdrawal_txns and withdrawal_requests empty on every node");
 
     info!("=== V1-COMMITTED WITHDRAWAL COMPLETES AFTER UPGRADE TEST PASSED ===");
+    Ok(())
+}
+
+/// Assert that a direct v1 entry call failed at the v1 version gate — the
+/// `EVersionDisabled` abort raised by `versioning::assert_version_enabled`,
+/// located in the v1 package — and not merely that it failed. The gate is the
+/// first statement of both v1 entries, so the abort provably fires before any
+/// argument-semantic check could.
+fn assert_version_gate_abort<T>(result: Result<T>, v1_package_id: Address, what: &str) {
+    let err = match result {
+        Ok(_) => panic!("{what} against a v2-committed request must abort at the version gate"),
+        Err(err) => err,
+    };
+    let err_msg = err.to_string();
+    info!("{what} rejected: {err_msg}");
+    assert!(
+        err_msg.contains("EVersionDisabled") || err_msg.contains("assert_version_enabled"),
+        "{what}: expected the EVersionDisabled abort from versioning::assert_version_enabled, \
+         got: {err_msg}"
+    );
+    let v1_hex = v1_package_id.to_string();
+    let v1_hex = v1_hex.trim_start_matches("0x");
+    assert!(
+        err_msg.contains(v1_hex),
+        "{what}: the abort must locate in the v1 package {v1_package_id}, got: {err_msg}"
+    );
+}
+
+/// Direct v1 entries against a v2-committed request must abort at the gate.
+///
+/// The deferred-archival commit (v2) flips the request to `Processing` *in
+/// place*: it stays in the hot `requests` bag with its balance drained. The
+/// deployed v1 bytecode predates that layout — its `cancel_withdrawal` guard
+/// (`is_request_processing`, per the bytecode snapshot) only consults the
+/// `processed` bag v1 itself moved requests into at commit time. Aimed at a
+/// v2-committed request the v1 guard passes, and with v1 still enabled the
+/// entry would destroy the request and mint a refund out of a balance the
+/// in-flight WithdrawalTransaction already drained; v1's `approve_request`
+/// (replaying a cert) would similarly reset the committed request to
+/// `Approved` for a second commit. `DisableVersion(1)` is what closes this
+/// hazard: both entries assert the version gate as their first statement.
+///
+/// This test pins that closure by calling the deployed v1 bytecode directly
+/// at its package id, against a live v2-committed withdrawal:
+/// - v1 `withdraw::cancel_withdrawal` (as the requester, return consumed via
+///   `coin::from_balance` at BTC's defining v1 address) aborts EVersionDisabled
+/// - v1 `withdraw::approve_request` (garbage cert; the gate precedes cert
+///   verification) aborts EVersionDisabled
+/// - the request is untouched afterwards, and the normal v2 flow then
+///   confirms and archives it on every node.
+#[tokio::test]
+async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
+    init_test_logging();
+
+    // Standard boot: the deployed-v1 snapshot auto-upgraded to the current
+    // source. Both versions stay enabled — disabling v1 is this test's move.
+    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+    let hashi_ids = networks.hashi_network.ids();
+
+    networks.hashi_network.nodes()[0]
+        .wait_for_mpc_key(Duration::from_secs(120))
+        .await?;
+
+    let node0 = networks.hashi_network.nodes()[0].hashi().clone();
+    let (v1_package_id, active_package_id) = {
+        let state = node0.onchain_state().state();
+        let versions = state.package_versions();
+        assert_eq!(
+            versions.latest_version(),
+            Some(2),
+            "default boot lands the chain at package v2"
+        );
+        assert!(
+            state.hashi().config.enabled_versions.contains(&1),
+            "the boot upgrade must leave v1 enabled; disabling it is this test's move"
+        );
+        (
+            versions.get(1).expect("v1 must be in the version map"),
+            versions.latest_id().expect("v2 must be in the version map"),
+        )
+    };
+    assert_eq!(
+        v1_package_id, hashi_ids.package_id,
+        "v1 is the original package"
+    );
+    assert_ne!(v1_package_id, active_package_id);
+
+    // ── Deposit, then drive a withdrawal to committed-under-v2 ──────────
+    let deposit_sats = 100_000u64;
+    let withdrawal_sats = 30_000u64;
+    let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_sats).await?;
+
+    let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+    let btc_destination = networks.bitcoin_node.get_new_address()?;
+    let destination_bytes = extract_witness_program(&btc_destination)?;
+    let mut user_executor = SuiTxExecutor::from_config(&node0.config, node0.onchain_state())?
+        .with_signer(user_key.into());
+    let requester = user_executor.sender();
+    let withdrawal_request_id = user_executor
+        .execute_create_withdrawal_request(withdrawal_sats, destination_bytes)
+        .await?;
+    info!("withdrawal request created: {withdrawal_request_id}");
+
+    // Committed under v2 = the in-place status flip to Processing with the
+    // balance drained, still in the hot `requests` bag — which is exactly
+    // what the mirror covers (a v1-style commit would instead have moved the
+    // request into the unmirrored `processed` bag).
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    let committed = loop {
+        if let Some(request) = node0
+            .onchain_state()
+            .withdrawal_request(&withdrawal_request_id)
+            && request.status == WithdrawalStatus::Processing
+        {
+            break request;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for the withdrawal to commit under v2"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert_eq!(
+        committed.btc, 0,
+        "the v2 commit must drain the request's balance in place"
+    );
+    assert!(
+        committed.withdrawal_txn_id.is_some(),
+        "a committed request must reference its withdrawal transaction"
+    );
+    info!("withdrawal committed under v2 (Processing, balance drained, still in `requests`)");
+
+    // ── DisableVersion(1) via governance ────────────────────────────────
+    let mut executors: Vec<SuiTxExecutor> = networks
+        .hashi_network
+        .nodes()
+        .iter()
+        .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
+        .collect::<Result<_>>()?;
+    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, active_package_id).await?;
+
+    // Every watcher must converge on v1-disabled; the proposal execution is
+    // checkpointed, so the fullnode state the direct v1 calls run against
+    // already has it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let converged = networks.hashi_network.nodes().iter().all(|node| {
+            let state = node.hashi().onchain_state().state();
+            !state.hashi().config.enabled_versions.contains(&1)
+        });
+        if converged {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "timed out waiting for the watchers to reflect DisableVersion(1)"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    info!("version 1 disabled");
+
+    // ── Direct v1 `withdraw::cancel_withdrawal` on the committed id ─────
+    //
+    // Deployed v1 signature (from the bytecode snapshot):
+    //   public fun cancel_withdrawal(&mut Hashi, address, &Clock, &mut TxContext): Balance<BTC>
+    // A `public fun` return must be consumed, so the PTB wraps it through
+    // `coin::from_balance` and transfers the coin to the sender — with BTC
+    // addressed at its DEFINING package, v1 (type identity survives
+    // upgrades). The version gate aborts in command 0, before any of that.
+    let mut builder = TransactionBuilder::new();
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let request_id_arg = builder.pure(&withdrawal_request_id);
+    let clock_arg = builder.object(
+        ObjectInput::new(hashi::sui_tx_executor::SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+    let refund = builder.move_call(
+        Function::new(
+            v1_package_id,
+            Identifier::from_static("withdraw"),
+            Identifier::from_static("cancel_withdrawal"),
+        ),
+        vec![hashi_arg, request_id_arg, clock_arg],
+    );
+    let btc_type = TypeTag::Struct(Box::new(StructTag::new(
+        v1_package_id,
+        Identifier::from_static("btc"),
+        Identifier::from_static("BTC"),
+        vec![],
+    )));
+    let refund_coin = builder.move_call(
+        Function::new(
+            SUI_FRAMEWORK_ADDRESS,
+            Identifier::from_static("coin"),
+            Identifier::from_static("from_balance"),
+        )
+        .with_type_args(vec![btc_type]),
+        vec![refund],
+    );
+    let recipient_arg = builder.pure(&requester);
+    builder.transfer_objects(vec![refund_coin], recipient_arg);
+
+    let cancel_result = user_executor.execute(builder).await;
+    assert_version_gate_abort(cancel_result, v1_package_id, "v1 cancel_withdrawal");
+
+    // ── Direct v1 `withdraw::approve_request` with a garbage cert ───────
+    //
+    // Deployed v1 signature:
+    //   entry fun approve_request(&mut Hashi, address, CommitteeSignature, &Clock)
+    // The gate is asserted before certificate verification, and v1's
+    // `committee::new_committee_signature` is a bare struct pack (verified in
+    // the disassembly), so dummy contents construct fine and the abort can
+    // only come from the gate.
+    let mut builder = TransactionBuilder::new();
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let request_id_arg = builder.pure(&withdrawal_request_id);
+    let epoch_arg = builder.pure(&0u64);
+    let signature_arg = builder.pure(&vec![0u8; 96]);
+    let bitmap_arg = builder.pure(&vec![0xffu8]);
+    let cert_arg = builder.move_call(
+        Function::new(
+            v1_package_id,
+            Identifier::from_static("committee"),
+            Identifier::from_static("new_committee_signature"),
+        ),
+        vec![epoch_arg, signature_arg, bitmap_arg],
+    );
+    let clock_arg = builder.object(
+        ObjectInput::new(hashi::sui_tx_executor::SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+    builder.move_call(
+        Function::new(
+            v1_package_id,
+            Identifier::from_static("withdraw"),
+            Identifier::from_static("approve_request"),
+        ),
+        vec![hashi_arg, request_id_arg, cert_arg, clock_arg],
+    );
+
+    let approve_result = user_executor.execute(builder).await;
+    assert_version_gate_abort(approve_result, v1_package_id, "v1 approve_request");
+
+    // ── The aborted v1 calls changed nothing ────────────────────────────
+    //
+    // Signing continues in the background, so the status may legitimately
+    // have advanced Processing -> Signed; what the v1 entries would have
+    // left behind — a vanished, refunded request (cancel) or a reset to
+    // Approved (approve) — must not have happened.
+    let after = node0
+        .onchain_state()
+        .withdrawal_request(&withdrawal_request_id)
+        .expect("the v2-committed request must still sit in the `requests` bag");
+    assert_eq!(
+        after.btc, 0,
+        "the drained balance must not have been refunded"
+    );
+    assert!(
+        matches!(
+            after.status,
+            WithdrawalStatus::Processing | WithdrawalStatus::Signed
+        ),
+        "the request must still be committed, got {:?}",
+        after.status
+    );
+    info!(
+        "request intact after the aborted v1 calls (status {:?})",
+        after.status
+    );
+
+    // ── And the normal v2 flow finishes on top of it ────────────────────
+    //
+    // Subscribe before the miner starts so the confirmation event cannot be
+    // missed, then let confirm + the archival GC drain both hot-bag mirrors
+    // on every node — proving the v1 attempts left nothing to wedge on.
+    let confirmations =
+        subscribe_withdrawal_confirmations(&mut networks.sui_network.client).await?;
+    let miner = BackgroundMiner::start(&networks.bitcoin_node);
+    let confirmed = confirmations
+        .wait_for(withdrawal_request_id, Duration::from_secs(300))
+        .await?;
+    drop(miner);
+    info!("withdrawal confirmed under v2: txid={}", confirmed.txid);
+
+    assert_eq!(
+        get_hbtc_balance(
+            &mut networks.sui_network.client,
+            hashi_ids.package_id,
+            hbtc_recipient,
+        )
+        .await?,
+        deposit_sats - withdrawal_sats,
+        "the confirmed withdrawal should burn exactly the withdrawn hBTC"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let laggard =
+            networks
+                .hashi_network
+                .nodes()
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    let state = node.hashi().onchain_state();
+                    let txns = state.withdrawal_txns().len();
+                    let requests = state.withdrawal_requests().len();
+                    (txns > 0 || requests > 0).then_some((index, txns, requests))
+                });
+        let Some((index, txns, requests)) = laggard else {
+            break;
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "node {index}'s mirror still shows {txns} withdrawal txn(s) and {requests} \
+                 request(s) after the archival window"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    info!("withdrawal_txns and withdrawal_requests empty on every node");
+
+    info!("=== V1 ENTRIES ABORT AGAINST V2-COMMITTED REQUEST TEST PASSED ===");
     Ok(())
 }
