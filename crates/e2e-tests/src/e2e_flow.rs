@@ -1419,6 +1419,7 @@ mod tests {
         {
             r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
         }
+        info!("all nodes reached the first boundary");
 
         {
             let nodes = networks.hashi_network.nodes();
@@ -1440,45 +1441,77 @@ mod tests {
             );
         }
 
+        info!("boundary assertions done; submitting permissionless removal");
+
         // The registration is now duty-free: remove it through the
         // permissionless entry, submitted by a DIFFERENT node's executor.
+        // Under CI load the executor's short checkpoint wait can time out on
+        // a transaction that still lands, so treat "mirror shows the member
+        // gone" as the success condition and retry the submission otherwise.
         {
             let nodes = networks.hashi_network.nodes();
             let remover = nodes[0].hashi().clone();
             let mut executor =
                 SuiTxExecutor::from_config(&remover.config, remover.onchain_state())?;
 
-            let mut b = sui_transaction_builder::TransactionBuilder::new();
-            let hashi_arg = b.object(
-                sui_transaction_builder::ObjectInput::new(hashi_ids.hashi_object_id)
-                    .with_version(hashi_isv)
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            loop {
+                let mut b = sui_transaction_builder::TransactionBuilder::new();
+                let hashi_arg = b.object(
+                    sui_transaction_builder::ObjectInput::new(hashi_ids.hashi_object_id)
+                        .with_version(hashi_isv)
+                        .as_shared()
+                        .with_mutable(true),
+                );
+                // Genesis-created system object: initial shared version 1.
+                let sui_system_arg = b.object(
+                    sui_transaction_builder::ObjectInput::new(sui_sdk_types::Address::from_static(
+                        "0x5",
+                    ))
+                    .with_version(1)
                     .as_shared()
-                    .with_mutable(true),
-            );
-            // Genesis-created system object: initial shared version 1.
-            let sui_system_arg = b.object(
-                sui_transaction_builder::ObjectInput::new(sui_sdk_types::Address::from_static(
-                    "0x5",
-                ))
-                .with_version(1)
-                .as_shared()
-                .with_mutable(false),
-            );
-            let validator_arg = b.pure(&target);
-            b.move_call(
-                sui_transaction_builder::Function::new(
-                    latest_package_id,
-                    sui_sdk_types::Identifier::from_static("validator"),
-                    sui_sdk_types::Identifier::from_static("remove_inactive_member"),
-                ),
-                vec![hashi_arg, sui_system_arg, validator_arg],
-            );
-            let resp = executor.execute(b).await?;
-            anyhow::ensure!(
-                resp.transaction().effects().status().success(),
-                "remove_inactive_member transaction failed"
-            );
+                    .with_mutable(false),
+                );
+                let validator_arg = b.pure(&target);
+                b.move_call(
+                    sui_transaction_builder::Function::new(
+                        latest_package_id,
+                        sui_sdk_types::Identifier::from_static("validator"),
+                        sui_sdk_types::Identifier::from_static("remove_inactive_member"),
+                    ),
+                    vec![hashi_arg, sui_system_arg, validator_arg],
+                );
+                match executor.execute(b).await {
+                    Ok(resp) => {
+                        anyhow::ensure!(
+                            resp.transaction().effects().status().success(),
+                            "remove_inactive_member transaction failed"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        // A checkpoint-wait timeout can hide a landed tx; the
+                        // mirror is the source of truth.
+                        let gone = nodes[0]
+                            .hashi()
+                            .onchain_state()
+                            .committee_member(&target)
+                            .is_none();
+                        if gone {
+                            info!("removal landed despite executor error: {e:#}");
+                            break;
+                        }
+                        anyhow::ensure!(
+                            std::time::Instant::now() < deadline,
+                            "remove_inactive_member kept failing: {e:#}"
+                        );
+                        info!("removal submit failed ({e:#}); retrying");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
         }
+        info!("removal submitted; waiting for the mirror to observe it");
 
         // Wait for the mirror to observe the removal.
         {
@@ -1499,6 +1532,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
+        info!("registration removed; closing the second epoch");
 
         // Second boundary with the ex-member's node STILL RUNNING: the
         // resignation latch must keep it from auto-re-registering on the
