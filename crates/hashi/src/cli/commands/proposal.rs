@@ -773,6 +773,73 @@ pub async fn create_emergency_pause_proposal(
     Ok(())
 }
 
+/// Create a proposal to ignore (or re-admit) a registered committee member.
+pub async fn create_ignore_member_proposal(
+    config: &CliConfig,
+    validator: &str,
+    unignore: bool,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let target: Address = validator
+        .parse()
+        .with_context(|| format!("invalid validator address: {validator}"))?;
+    let action = if unignore { "Un-ignore" } else { "Ignore" };
+    let title = format!("Creating {action} Member Proposal:");
+    print_detail(&format!("\n{}", title.bold()));
+    print_detail(&format!("  Target: {}", target));
+    print_metadata(&metadata);
+
+    let client = HashiClient::new(config).await?;
+
+    // The flag is only read at the next committee formation. Tell the
+    // operator when the change will actually bite.
+    match client.onchain_state().pending_epoch_change() {
+        Some(pending) => print_detail(&format!(
+            "  Effect: a reconfiguration to epoch {pending} is already in flight — the change \
+             takes effect one epoch later, at the formation after it completes",
+        )),
+        None => print_detail(
+            "  Effect: at the next committee formation (start of the next reconfiguration)",
+        ),
+    }
+
+    if !unignore {
+        // Warn when the target carries so much weight that excluding it
+        // approaches the BFT bound (see ignore_member.move's module doc).
+        if let Some(committee) = client.onchain_state().current_committee() {
+            let weight = committee.weight_of(&target).unwrap_or(0);
+            let total = committee.total_weight();
+            if total > 0 && weight * 10_000 / total > 2_500 {
+                print_detail(&format!(
+                    "  WARNING: target holds {weight} of {total} committee weight (> 25%). \
+                     Exclusion only works while non-participating weight stays at or below \
+                     1/3 of the committee — beyond that, governance and reconfiguration are \
+                     both blocked."
+                ));
+            }
+        }
+    }
+
+    prompt_continue(
+        &format!("create this {} member proposal", action.to_lowercase()),
+        tx_opts,
+    )
+    .await?;
+
+    let mut client = client;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::IgnoreMember {
+        target_validator_address: target,
+        ignored: !unignore,
+        metadata,
+    })?;
+
+    print_info("Transaction: ignore_member::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
 // ============ Helper Functions ============
 
 fn print_proposal_detailed(

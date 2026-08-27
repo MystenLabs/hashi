@@ -57,6 +57,7 @@ pub mod display {
             ProposalType::EmergencyPause => "EmergencyPause".to_string(),
             ProposalType::AbortReconfig => "AbortReconfig".to_string(),
             ProposalType::UpdateGuardian => "UpdateGuardian".to_string(),
+            ProposalType::IgnoreMember => "IgnoreMember".to_string(),
             ProposalType::Unknown(s) => format!("Unknown({})", s),
         }
     }

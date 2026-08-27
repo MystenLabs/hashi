@@ -332,6 +332,11 @@ async fn execute_full_upgrade_with_proposal(
         .collect();
     anyhow::ensure!(!nodes.is_empty(), "no running nodes to drive the upgrade");
     let hashi_ids = networks.hashi_network.ids();
+    let hashi_initial_shared_version = hashi::cli::client::fetch_initial_shared_version(
+        &mut networks.sui_network.client.clone(),
+        hashi_ids.hashi_object_id,
+    )
+    .await?;
 
     let mut executors: Vec<SuiTxExecutor> = nodes
         .iter()
@@ -401,8 +406,13 @@ async fn execute_full_upgrade_with_proposal(
             )
         }
     };
-    let create_tx =
-        build_create_proposal_transaction(hashi_ids, current_package_id, creator, proposal_params);
+    let create_tx = build_create_proposal_transaction(
+        hashi_ids,
+        hashi_initial_shared_version,
+        current_package_id,
+        creator,
+        proposal_params,
+    );
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
@@ -424,6 +434,7 @@ async fn execute_full_upgrade_with_proposal(
         let voter = executor.sender();
         let vote_tx = build_vote_transaction(
             hashi_ids,
+            hashi_initial_shared_version,
             current_package_id,
             voter,
             proposal_id,
@@ -519,12 +530,14 @@ pub async fn wait_for_version_disabled(
 pub async fn disable_version(
     executors: &mut [SuiTxExecutor],
     hashi_ids: HashiIds,
+    hashi_initial_shared_version: u64,
     version: u64,
     execute_package_id: Address,
 ) -> Result<()> {
     let creator = executors[0].sender();
     let create_tx = build_create_proposal_transaction(
         hashi_ids,
+        hashi_initial_shared_version,
         execute_package_id,
         creator,
         CreateProposalParams::DisableVersion {
@@ -551,6 +564,7 @@ pub async fn disable_version(
         let voter = executor.sender();
         let vote_tx = build_vote_transaction(
             hashi_ids,
+            hashi_initial_shared_version,
             execute_package_id,
             voter,
             proposal_id,
@@ -565,6 +579,7 @@ pub async fn disable_version(
 
     let execute_tx = build_execute_proposal_transaction(
         hashi_ids,
+        hashi_initial_shared_version,
         proposal_id,
         execute_package_id,
         "disable_version",

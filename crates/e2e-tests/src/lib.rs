@@ -507,7 +507,19 @@ impl TestNetworksBuilder {
                         )
                     })
                     .collect::<Result<_>>()?;
-                upgrade_flow::disable_version(&mut executors, hashi_ids, 1, new_package_id).await?;
+                let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                    &mut test_networks.sui_network.client.clone(),
+                    hashi_ids.hashi_object_id,
+                )
+                .await?;
+                upgrade_flow::disable_version(
+                    &mut executors,
+                    hashi_ids,
+                    hashi_isv,
+                    1,
+                    new_package_id,
+                )
+                .await?;
                 upgrade_flow::wait_for_version_disabled(
                     &test_networks,
                     1,
@@ -675,6 +687,11 @@ pub(crate) async fn apply_onchain_config_overrides(
         .onchain_state()
         .package_id()
         .unwrap_or(hashi_ids.package_id);
+    let hashi_initial_shared_version = hashi::cli::client::fetch_initial_shared_version(
+        &mut networks.sui_network.client.clone(),
+        hashi_ids.hashi_object_id,
+    )
+    .await?;
 
     // Build one executor per node, reused across all overrides.
     let mut executors: Vec<SuiTxExecutor> = nodes
@@ -705,6 +722,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         );
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            hashi_initial_shared_version,
             execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateMpcConfig {
@@ -726,6 +744,7 @@ pub(crate) async fn apply_onchain_config_overrides(
         tracing::info!("applying on-chain config override: {key} = {value:?}");
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            hashi_initial_shared_version,
             execute_package_id,
             &mut executors,
             CreateProposalParams::UpdateConfig {
@@ -766,10 +785,12 @@ pub(crate) async fn apply_onchain_config_overrides(
     Ok(())
 }
 
-/// `execute_package_id` must be the chain's latest package: calling the
+/// `execute_package_id` must be the chain's active package: calling the
 /// original id after an upgrade executes the old bytecode.
+#[allow(clippy::too_many_arguments)]
 async fn submit_proposal_through_quorum(
     hashi_ids: hashi::config::HashiIds,
+    hashi_initial_shared_version: u64,
     execute_package_id: sui_sdk_types::Address,
     executors: &mut [hashi::sui_tx_executor::SuiTxExecutor],
     create_params: hashi::cli::client::CreateProposalParams,
@@ -783,8 +804,13 @@ async fn submit_proposal_through_quorum(
     use hashi::cli::upgrade::extract_proposal_id_from_response;
 
     let creator = executors[0].sender();
-    let create_tx =
-        build_create_proposal_transaction(hashi_ids, execute_package_id, creator, create_params);
+    let create_tx = build_create_proposal_transaction(
+        hashi_ids,
+        hashi_initial_shared_version,
+        execute_package_id,
+        creator,
+        create_params,
+    );
     let response = executors[0].execute(create_tx).await?;
     anyhow::ensure!(
         response.transaction().effects().status().success(),
@@ -796,6 +822,7 @@ async fn submit_proposal_through_quorum(
         let voter = executor.sender();
         let vote_tx = build_vote_transaction(
             hashi_ids,
+            hashi_initial_shared_version,
             execute_package_id,
             voter,
             proposal_id,
@@ -809,6 +836,7 @@ async fn submit_proposal_through_quorum(
     }
     let execute_tx = build_execute_proposal_transaction(
         hashi_ids,
+        hashi_initial_shared_version,
         proposal_id,
         execute_package_id,
         module_name,

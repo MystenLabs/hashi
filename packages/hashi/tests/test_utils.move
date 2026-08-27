@@ -14,6 +14,7 @@ use hashi::{
     emergency_pause,
     enable_version,
     hashi::Hashi,
+    ignore_member,
     update_config
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
@@ -265,6 +266,26 @@ public fun create_emergency_pause_proposal(
 ): ID {
     let metadata = vec_map::empty();
     emergency_pause::propose(hashi, validator_address, pause, metadata, clock, ctx)
+}
+
+/// Creates an ignore-member (or un-ignore) proposal and returns its ID
+public fun create_ignore_member_proposal(
+    hashi: &mut Hashi,
+    validator_address: address,
+    target_validator_address: address,
+    ignored: bool,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    ignore_member::propose(
+        hashi,
+        validator_address,
+        target_validator_address,
+        ignored,
+        vec_map::empty(),
+        clock,
+        ctx,
+    )
 }
 
 /// Creates an abort reconfig proposal and returns its ID
