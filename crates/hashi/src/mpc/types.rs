@@ -48,7 +48,7 @@ pub struct NonceMessage {
     pub message: batch_avss::Message,
 }
 
-pub type AvidConfirmCertificate = SignedMessage<DealerMessagesHash>;
+pub type AvidConfirmCertificate = SignedMessage<AvssVoteMessagesHash>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvidNonceMessage {
@@ -435,7 +435,7 @@ pub enum ProtocolComplaint {
     AvidReveal(batch_avss_avid::AvssComplaint),
     AvidBlame {
         complaint: batch_avss_avid::AvidComplaint,
-        vote_cert: DealerCertificate,
+        vote_cert: SignedMessage<AvidVoteMessagesHash>,
     },
 }
 
@@ -502,6 +502,145 @@ impl DealerMessagesHash {
 }
 
 pub type DealerCertificate = SignedMessage<DealerMessagesHash>;
+
+pub(crate) trait NonceCertPayload: hashi_types::intent::IntentMessage {
+    fn dealer_address(&self) -> Address;
+    fn messages_hash(&self) -> MessagesHash;
+}
+
+impl NonceCertPayload for DealerMessagesHash {
+    fn dealer_address(&self) -> Address {
+        self.dealer_address
+    }
+    fn messages_hash(&self) -> MessagesHash {
+        self.messages_hash
+    }
+}
+
+impl NonceCertPayload for AvssVoteMessagesHash {
+    fn dealer_address(&self) -> Address {
+        self.dealer_address
+    }
+    fn messages_hash(&self) -> MessagesHash {
+        self.messages_hash
+    }
+}
+
+impl NonceCertPayload for AvidVoteMessagesHash {
+    fn dealer_address(&self) -> Address {
+        self.dealer_address
+    }
+    fn messages_hash(&self) -> MessagesHash {
+        self.messages_hash
+    }
+}
+
+pub(crate) struct UnclassifiedNonceCert {
+    epoch: u64,
+    dealer_address: Address,
+    messages_hash: MessagesHash,
+    batch_index: u32,
+    signature: Vec<u8>,
+    signers_bitmap: Vec<u8>,
+}
+
+impl UnclassifiedNonceCert {
+    pub(crate) fn from_signed<T: NonceCertPayload>(
+        cert: &SignedMessage<T>,
+        batch_index: u32,
+    ) -> Self {
+        Self::from_signature_parts(
+            cert.message().dealer_address(),
+            cert.message().messages_hash(),
+            batch_index,
+            cert.committee_signature(),
+        )
+    }
+
+    pub(crate) fn from_dealer_certificate(cert: &DealerCertificate, batch_index: u32) -> Self {
+        Self::from_signature_parts(
+            cert.message().dealer_address,
+            cert.message().messages_hash,
+            batch_index,
+            cert.committee_signature(),
+        )
+    }
+
+    pub(crate) fn from_signature_parts(
+        dealer_address: Address,
+        messages_hash: MessagesHash,
+        batch_index: u32,
+        signature: &hashi_types::committee::CommitteeSignature,
+    ) -> Self {
+        Self {
+            epoch: signature.epoch(),
+            dealer_address,
+            messages_hash,
+            batch_index,
+            signature: signature.signature_bytes().to_vec(),
+            signers_bitmap: signature.signers_bitmap_bytes().to_vec(),
+        }
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub(crate) fn as_dealer_messages_hash(&self) -> MpcResult<DealerCertificate> {
+        self.retype(DealerMessagesHash {
+            dealer_address: self.dealer_address,
+            messages_hash: self.messages_hash,
+        })
+    }
+
+    pub(crate) fn as_avss_vote(&self) -> MpcResult<SignedMessage<AvssVoteMessagesHash>> {
+        self.retype(AvssVoteMessagesHash {
+            dealer_address: self.dealer_address,
+            messages_hash: self.messages_hash,
+            batch_index: self.batch_index,
+        })
+    }
+
+    pub(crate) fn as_avid_vote(&self) -> MpcResult<SignedMessage<AvidVoteMessagesHash>> {
+        self.retype(AvidVoteMessagesHash {
+            dealer_address: self.dealer_address,
+            messages_hash: self.messages_hash,
+            batch_index: self.batch_index,
+        })
+    }
+
+    fn retype<T: hashi_types::intent::IntentMessage>(
+        &self,
+        message: T,
+    ) -> MpcResult<SignedMessage<T>> {
+        SignedMessage::new(self.epoch, message, &self.signature, &self.signers_bitmap)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+    }
+}
+
+/// AVID optimistic-path (`CertKind::AvssVote`) signing domain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvssVoteMessagesHash {
+    pub dealer_address: Address,
+    pub messages_hash: MessagesHash,
+    pub batch_index: u32,
+}
+
+impl hashi_types::intent::IntentMessage for AvssVoteMessagesHash {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::AvssVoteMessagesHash;
+}
+
+/// AVID pessimistic-path (`CertKind::AvidVote`) signing domain.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvidVoteMessagesHash {
+    pub dealer_address: Address,
+    pub messages_hash: MessagesHash,
+    pub batch_index: u32,
+}
+
+impl hashi_types::intent::IntentMessage for AvidVoteMessagesHash {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::AvidVoteMessagesHash;
+}
 
 pub(crate) trait NonceCertToVerify {
     fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate>;
@@ -700,9 +839,21 @@ pub(crate) fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessagesHash {
     MessagesHash::from(Blake2b256::digest(&bytes).digest)
 }
 
+pub trait AvidLeg {
+    type Domain: hashi_types::intent::IntentMessage;
+}
+
+impl AvidLeg for batch_avss_avid::AvssVote {
+    type Domain = AvssVoteMessagesHash;
+}
+
+impl AvidLeg for batch_avss_avid::AvidVote {
+    type Domain = AvidVoteMessagesHash;
+}
+
 #[derive(Clone)]
-pub struct AvidCertificate<P> {
-    dealer_cert: DealerCertificate,
+pub struct AvidCertificate<P: AvidLeg> {
+    dealer_cert: SignedMessage<P::Domain>,
     payload: P,
     committee: Arc<Committee>,
     signers: BTreeSet<PartyId>,
@@ -711,7 +862,7 @@ pub struct AvidCertificate<P> {
 pub(crate) type VerifiedAvidVoteCert =
     VerifiedCertificate<AvidCertificate<batch_avss_avid::AvidVote>>;
 
-impl<P: Clone> Certificate for AvidCertificate<P> {
+impl<P: Clone + AvidLeg> Certificate for AvidCertificate<P> {
     type Payload = P;
 
     fn signers(&self) -> &BTreeSet<PartyId> {
@@ -732,7 +883,10 @@ impl<P: Clone> Certificate for AvidCertificate<P> {
 }
 
 impl AvidCertificate<batch_avss_avid::AvssVote> {
-    pub fn confirm(dealer_cert: DealerCertificate, committee: Arc<Committee>) -> MpcResult<Self> {
+    pub fn confirm(
+        dealer_cert: SignedMessage<AvssVoteMessagesHash>,
+        committee: Arc<Committee>,
+    ) -> MpcResult<Self> {
         let payload = batch_avss_avid::AvssVote {
             common_message_hash: to_fastcrypto_digest(&dealer_cert.message().messages_hash),
         };
@@ -748,7 +902,7 @@ impl AvidCertificate<batch_avss_avid::AvssVote> {
 
 impl AvidCertificate<batch_avss_avid::AvidVote> {
     pub fn vote(
-        dealer_cert: DealerCertificate,
+        dealer_cert: SignedMessage<AvidVoteMessagesHash>,
         vote: batch_avss_avid::AvidVote,
         committee: Arc<Committee>,
     ) -> MpcResult<Self> {
@@ -771,8 +925,8 @@ fn to_fastcrypto_digest(h: &MessagesHash) -> fastcrypto::hash::Digest<32> {
     fastcrypto::hash::Digest::new(*<MessagesHash as AsRef<[u8; 32]>>::as_ref(h))
 }
 
-fn resolve_signers(
-    dealer_cert: &DealerCertificate,
+fn resolve_signers<T: hashi_types::intent::IntentMessage>(
+    dealer_cert: &SignedMessage<T>,
     committee: &Committee,
 ) -> MpcResult<BTreeSet<PartyId>> {
     dealer_cert
@@ -864,7 +1018,7 @@ pub struct DealerFlowData {
 
 pub(crate) struct AvidDealerFlowData {
     pub(crate) builder: batch_avss_avid::AvssMessageBuilder,
-    pub(crate) confirm_target: DealerMessagesHash,
+    pub(crate) confirm_target: AvssVoteMessagesHash,
     pub(crate) my_signature: MemberSignature,
     /// Per-recipient optimistic messages, excluding the dealer's own.
     pub(crate) recipient_messages: Vec<(Address, Messages)>,
@@ -1034,6 +1188,7 @@ pub type SigningResult<T> = Result<T, SigningError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use fastcrypto_tbls::nodes::Node;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
@@ -1043,6 +1198,37 @@ mod tests {
     use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
     use hashi_types::move_types::DealerMessagesHashV1;
     use std::num::NonZeroU16;
+
+    #[test]
+    fn avid_domains_differ_and_batch_index_changes_the_bcs_body() {
+        use hashi_types::intent::IntentMessage;
+
+        assert_ne!(
+            AvssVoteMessagesHash::INTENT.as_u16(),
+            AvidVoteMessagesHash::INTENT.as_u16()
+        );
+        assert_ne!(
+            DealerMessagesHash::INTENT.as_u16(),
+            AvssVoteMessagesHash::INTENT.as_u16()
+        );
+
+        let dealer_address = Address::new([3u8; 32]);
+        let messages_hash = MessagesHash::from([7u8; 32]);
+        let batch_0 = AvssVoteMessagesHash {
+            dealer_address,
+            messages_hash,
+            batch_index: 0,
+        };
+        let batch_1 = AvssVoteMessagesHash {
+            dealer_address,
+            messages_hash,
+            batch_index: 1,
+        };
+        assert_ne!(
+            bcs::to_bytes(&batch_0).unwrap(),
+            bcs::to_bytes(&batch_1).unwrap()
+        );
+    }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct StubAvssCert {
@@ -1082,17 +1268,53 @@ mod tests {
         (committee, signing_keys)
     }
 
-    fn dealer_cert(
+    fn confirm_cert_over(
         committee: &Committee,
         keys: &[Bls12381PrivateKey],
         signer_indices: &[usize],
         epoch: u64,
         messages_hash: MessagesHash,
-    ) -> DealerCertificate {
-        let message = DealerMessagesHash {
-            dealer_address: Address::new([0u8; 32]),
-            messages_hash,
-        };
+    ) -> SignedMessage<AvssVoteMessagesHash> {
+        cert_over(
+            committee,
+            keys,
+            signer_indices,
+            epoch,
+            AvssVoteMessagesHash {
+                dealer_address: Address::new([0u8; 32]),
+                messages_hash,
+                batch_index: 0,
+            },
+        )
+    }
+
+    fn vote_cert_over(
+        committee: &Committee,
+        keys: &[Bls12381PrivateKey],
+        signer_indices: &[usize],
+        epoch: u64,
+        messages_hash: MessagesHash,
+    ) -> SignedMessage<AvidVoteMessagesHash> {
+        cert_over(
+            committee,
+            keys,
+            signer_indices,
+            epoch,
+            AvidVoteMessagesHash {
+                dealer_address: Address::new([0u8; 32]),
+                messages_hash,
+                batch_index: 0,
+            },
+        )
+    }
+
+    fn cert_over<T: hashi_types::intent::IntentMessage + Clone>(
+        committee: &Committee,
+        keys: &[Bls12381PrivateKey],
+        signer_indices: &[usize],
+        epoch: u64,
+        message: T,
+    ) -> SignedMessage<T> {
         let mut aggregator = BlsSignatureAggregator::new(committee, message.clone());
         for &i in signer_indices {
             let sig = keys[i].sign(epoch, Address::new([i as u8; 32]), &message);
@@ -1149,7 +1371,7 @@ mod tests {
         let epoch = 5;
         let (committee, keys) = test_committee(3, epoch);
         let h_v: [u8; 32] = [42u8; 32];
-        let signed = dealer_cert(&committee, &keys, &[0, 1, 2], epoch, h_v.into());
+        let signed = confirm_cert_over(&committee, &keys, &[0, 1, 2], epoch, h_v.into());
         let committee = Arc::new(committee);
 
         let cert = AvidCertificate::confirm(signed.clone(), committee).unwrap();
@@ -1169,14 +1391,14 @@ mod tests {
         let epoch = 7;
         let avid_vote = mint_avid_vote(&[0, 1, 2, 3, 4, 5, 6, 7]);
         let (committee, keys) = test_committee(3, epoch);
-        let good = dealer_cert(
+        let good = vote_cert_over(
             &committee,
             &keys,
             &[0, 1, 2],
             epoch,
             hash_avid_vote(&avid_vote),
         );
-        let wrong = dealer_cert(&committee, &keys, &[0, 1, 2], epoch, [0u8; 32].into());
+        let wrong = vote_cert_over(&committee, &keys, &[0, 1, 2], epoch, [0u8; 32].into());
         let committee = Arc::new(committee);
 
         let cert = AvidCertificate::vote(good, avid_vote.clone(), committee.clone()).unwrap();
@@ -1223,7 +1445,7 @@ mod tests {
         // A real Confirm cert
         let h_v = MessagesHash::from(own_message.common.hash().digest);
         let confirmers: Vec<usize> = (0..=7).collect();
-        let signed = dealer_cert(&committee, &keys, &confirmers, epoch, h_v);
+        let signed = confirm_cert_over(&committee, &keys, &confirmers, epoch, h_v);
         let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
         assert!(confirm_cert.verify().is_ok());
 
@@ -1248,7 +1470,7 @@ mod tests {
         assert_ne!(hash_avid_vote(&vote_89), hash_avid_vote(&vote_79));
 
         let (committee, keys) = test_committee(3, epoch);
-        let signed = dealer_cert(
+        let signed = vote_cert_over(
             &committee,
             &keys,
             &[0, 1, 2],

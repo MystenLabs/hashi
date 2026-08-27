@@ -30,11 +30,14 @@ fn test_metrics() -> Metrics {
     Metrics::new(&prometheus::Registry::new())
 }
 use crate::mpc::types::AvidRoundState;
+use crate::mpc::types::AvidVoteMessagesHash;
+use crate::mpc::types::AvssVoteMessagesHash;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::RotationMessages;
+use crate::mpc::types::UnclassifiedNonceCert;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::types::MemberInfo;
 use fastcrypto::encoding::Encoding;
@@ -12242,7 +12245,7 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
         cert(3, 1_500),
     ];
 
-    let certs = VerifiedNonceCerts(certs);
+    let certs = VerifiedNonceCerts::unclassified(certs);
 
     mgr.mpc_config.nonce_accumulation_window_ms = 0;
     assert_eq!(mgr.window_certified_nonce_dealers(&certs).0.len(), 3);
@@ -12252,7 +12255,7 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
     assert_eq!(certified.len(), 4);
     assert!(certified.contains(&setup.address(3)));
 
-    let beyond = VerifiedNonceCerts(vec![
+    let beyond = VerifiedNonceCerts::unclassified(vec![
         cert(0, 1_000),
         cert(1, 1_100),
         cert(2, 1_200),
@@ -12261,6 +12264,35 @@ fn test_certified_nonce_dealers_window_extends_past_floor() {
     assert_eq!(mgr.window_certified_nonce_dealers(&beyond).0.len(), 3);
 }
 
+#[test]
+fn test_nonce_window_cut_survives_a_later_append() {
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.max_faulty = 25;
+    mgr.mpc_config.nonce_accumulation_window_ms = 0;
+
+    let appended = (0..4usize).min_by_key(|i| setup.address(*i)).unwrap();
+    let seen_first: Vec<usize> = (0..4usize).filter(|i| *i != appended).collect();
+
+    let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
+    let early: Vec<_> = seen_first.iter().map(|i| cert(*i)).collect();
+    let mut late = early.clone();
+    late.push(cert(appended));
+
+    let early_set = mgr
+        .window_certified_nonce_dealers(&VerifiedNonceCerts::unclassified(early))
+        .0;
+    let late_set = mgr
+        .window_certified_nonce_dealers(&VerifiedNonceCerts::unclassified(late))
+        .0;
+    assert_eq!(
+        early_set.len(),
+        3,
+        "the floor must cut before the appended cert"
+    );
+    assert!(!late_set.contains(&setup.address(appended)));
+    assert_eq!(early_set, late_set);
+}
 
 #[test]
 fn test_zero_accumulation_window_is_floor_only() {
@@ -12270,7 +12302,7 @@ fn test_zero_accumulation_window_is_floor_only() {
     mgr.mpc_config.nonce_accumulation_window_ms = 0;
 
     let cert = |i: usize, timestamp_ms: u64| valid_dealer_submission(&setup, i, timestamp_ms);
-    let certs = VerifiedNonceCerts(vec![
+    let certs = VerifiedNonceCerts::unclassified(vec![
         cert(0, 1_000),
         cert(1, 1_100),
         cert(2, 1_200),
@@ -12288,7 +12320,7 @@ fn test_bare_zero_stamp_certs_force_floor_only_window() {
     mgr.mpc_config.nonce_accumulation_window_ms = 700;
 
     let cert = |i: usize| valid_dealer_submission(&setup, i, 0);
-    let certs = VerifiedNonceCerts(vec![cert(0), cert(1), cert(2), cert(3)]);
+    let certs = VerifiedNonceCerts::unclassified(vec![cert(0), cert(1), cert(2), cert(3)]);
 
     assert_eq!(mgr.window_certified_nonce_dealers(&certs).0.len(), 3);
     assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), None);
@@ -12307,9 +12339,15 @@ async fn test_verified_nonce_certs_drops_unverified() {
     certs[1].1.submission.signature.signature = certs[0].1.submission.signature.signature.clone();
 
     let mgr = Arc::new(RwLock::new(mgr));
-    let verified =
-        MpcManager::verified_nonce_certs(&mgr, epoch, certs, &mut HashMap::new(), &test_metrics())
-            .await;
+    let verified = MpcManager::verified_nonce_certs(
+        &mgr,
+        epoch,
+        certs,
+        0,
+        &mut HashMap::new(),
+        &test_metrics(),
+    )
+    .await;
     assert_eq!(
         verified.as_slice().len(),
         3,
@@ -12358,6 +12396,7 @@ async fn test_verified_nonce_certs_adjudicates_each_dealer_once() {
             &mgr,
             epoch,
             certs.clone(),
+            0,
             &mut adjudicated,
             &metrics,
         )
@@ -12390,14 +12429,17 @@ fn test_reconstruct_presignatures_rejects_below_floor_certs() {
 
     let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
     let Err(MpcError::NotEnoughParticipants { expected, got }) =
-        mgr.reconstruct_presignatures(0, &VerifiedNonceCerts(vec![cert(0), cert(1)]))
+        mgr.reconstruct_presignatures(0, &VerifiedNonceCerts::unclassified(vec![cert(0), cert(1)]))
     else {
         panic!("below-floor certs must be rejected");
     };
     assert_eq!((expected, got), (75, 50));
 
     let outcome = mgr
-        .reconstruct_presignatures(0, &VerifiedNonceCerts(vec![cert(0), cert(1), cert(2)]))
+        .reconstruct_presignatures(
+            0,
+            &VerifiedNonceCerts::unclassified(vec![cert(0), cert(1), cert(2)]),
+        )
         .unwrap();
     assert!(matches!(
         outcome,
@@ -12475,7 +12517,9 @@ async fn test_nonce_window_live_collection_past_floor() {
             let cutoff_ms = test_manager
                 .read()
                 .unwrap()
-                .window_certified_nonce_dealers(&VerifiedNonceCerts(tob_certs.clone()))
+                .window_certified_nonce_dealers(&VerifiedNonceCerts::unclassified(
+                    tob_certs.clone(),
+                ))
                 .1
                 .cutoff_ms();
             let mut tob = crate::communication::PrefetchedTobChannel::new(tob_certs);
@@ -13069,15 +13113,16 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
         .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss_msg)
         .unwrap();
 
-    let confirm_target = DealerMessagesHash {
+    let confirm_target = AvssVoteMessagesHash {
         dealer_address: dealer_addr,
         messages_hash: MessagesHash::from(avss_msg.common.hash().digest),
+        batch_index,
     };
     let member_sig = MemberSignature::new(receiver.mpc_config.epoch, receiver.address, sig);
     let mut aggregator = BlsSignatureAggregator::new(setup.committee(), confirm_target);
     aggregator
         .add_signature(member_sig)
-        .expect("Confirm signature must verify over DealerMessagesHash{dealer, H(v)}");
+        .expect("Confirm signature must verify over AvssVoteMessagesHash{dealer, H(v), batch}");
 
     assert!(
         receiver
@@ -13198,7 +13243,7 @@ struct AvidPessimisticFixture {
     dealer: MpcManager,
     dealer_addr: Address,
     builder: batch_avss_avid::AvssMessageBuilder,
-    confirm_cert: DealerCertificate,
+    confirm_cert: AvidConfirmCertificate,
     common: batch_avss_avid::AvssCommonMessage,
     confirmers: Vec<MpcManager>,
     optimistic: Vec<(Address, Messages)>,
@@ -13231,9 +13276,10 @@ fn avid_pessimistic_fixture(
         confirmers.push(mgr);
     }
     let common = common.expect("at least one confirmer");
-    let confirm_target = DealerMessagesHash {
+    let confirm_target = AvssVoteMessagesHash {
         dealer_address: dealer_addr,
         messages_hash: MessagesHash::from(common.hash().digest),
+        batch_index,
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
     for s in sigs {
@@ -13251,7 +13297,7 @@ fn avid_pessimistic_fixture(
     }
 }
 
-fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, DealerCertificate) {
+fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, AvidConfirmCertificate) {
     match msg {
         Messages::NonceGenerationAvid(AvidNonceMessage {
             kind:
@@ -13328,15 +13374,16 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
         )
         .unwrap();
 
-    // The Vote signs `DealerMessagesHash{dealer, H(AvidVote)}`.
-    let vote_target = DealerMessagesHash {
+    // The Vote signs `AvidVoteMessagesHash{dealer, H(AvidVote), batch}`.
+    let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&avid_vote),
+        batch_index,
     };
     let member_sig = MemberSignature::new(voter.mpc_config.epoch, voter.address, vote);
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     agg.add_signature(member_sig)
-        .expect("Vote verifies over DealerMessagesHash{dealer, H(AvidVote)}");
+        .expect("Vote verifies over AvidVoteMessagesHash{dealer, H(AvidVote), batch}");
 
     // Echoes go to the pending recipient (node 5).
     assert!(!echoes.is_empty());
@@ -13456,9 +13503,10 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let avid_vote = avid_vote.unwrap();
 
     // Form and verify the W−f Vote cert over H(AvidVote).
-    let vote_target = DealerMessagesHash {
+    let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&avid_vote),
+        batch_index,
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     for s in vote_sigs {
@@ -13525,9 +13573,10 @@ fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
         .handle_send_messages_request(fx.dealer_addr, &request)
         .unwrap();
 
-    let confirm_target = DealerMessagesHash {
+    let confirm_target = AvssVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: MessagesHash::from(fx.common.hash().digest),
+        batch_index,
     };
     let member_sig = MemberSignature::new(
         receiver.mpc_config.epoch,
@@ -13633,9 +13682,10 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
         .get(&(batch_index, fx.dealer_addr))
         .expect("echoes held for the round")
         .clone();
-    let vote_target = DealerMessagesHash {
+    let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&held_vote),
+        batch_index,
     };
     let member_sig = MemberSignature::new(
         receiver.mpc_config.epoch,
@@ -13644,7 +13694,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
     );
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     agg.add_signature(member_sig)
-        .expect("Vote verifies over DealerMessagesHash{dealer, H(AvidVote)}");
+        .expect("Vote verifies over AvidVoteMessagesHash{dealer, H(AvidVote), batch}");
     assert!(!echoes.is_empty());
     for (addr, _) in &echoes {
         assert!(
@@ -13771,9 +13821,10 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         mgr5.address,
         sig5,
     ));
-    let confirm_target = DealerMessagesHash {
+    let confirm_target = AvssVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: MessagesHash::from(fx.common.hash().digest),
+        batch_index,
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
     for s in sigs {
@@ -14294,7 +14345,7 @@ fn avid_confirm_signatures(
     dealer_index: usize,
     batch_index: u32,
     rng: &mut impl fastcrypto::traits::AllowedRng,
-) -> (Vec<MemberSignature>, DealerMessagesHash) {
+) -> (Vec<MemberSignature>, AvssVoteMessagesHash) {
     let dealer_addr = setup.address(dealer_index);
     let mut dealer = managers.remove(&dealer_addr).expect("dealer manager");
     let flow = dealer
@@ -14341,14 +14392,17 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
 
-    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature], take: usize| {
+    let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature], take: usize| {
         let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs.iter().take(take) {
             agg.add_signature(sig.clone()).unwrap();
         }
+        let signed = agg.finish().unwrap();
         CertificateV1::NonceGeneration {
             batch_index,
-            cert: agg.finish().unwrap(),
+            cert: UnclassifiedNonceCert::from_signed(&signed, batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
             timestamp_ms: 0,
         }
     };
@@ -14399,7 +14453,7 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 }
 
 #[tokio::test]
-async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() {
+async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_state() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
@@ -14410,21 +14464,24 @@ async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() 
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
-    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature]| {
+    let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
         let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
         CertificateV1::NonceGeneration {
             batch_index,
-            cert: agg.finish().unwrap(),
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
             timestamp_ms: 0,
         }
     };
 
-    let unresolvable_target = DealerMessagesHash {
+    let unresolvable_target = AvssVoteMessagesHash {
         dealer_address: setup.address(4),
         messages_hash: MessagesHash::from([9u8; 32]),
+        batch_index,
     };
     let unresolvable_sigs: Vec<MemberSignature> = (0..6)
         .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
@@ -14456,7 +14513,8 @@ async fn test_run_as_avid_nonce_party_reports_unresolvable_cert_as_local_skip() 
     );
     assert_eq!(
         admission.local_skips, 1,
-        "an unresolvable cert is a node-local skip, not a deterministic one"
+        "a cert this node holds no round state for is a node-local skip, not a \
+         deterministic one"
     );
 }
 
@@ -14470,14 +14528,16 @@ async fn test_avid_below_floor_attribution_distinguishes_cause() {
         .collect();
     let (sigs, confirm_target) =
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
-    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature], ts: u64| {
+    let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature], ts: u64| {
         let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
         CertificateV1::NonceGeneration {
             batch_index,
-            cert: agg.finish().unwrap(),
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
             timestamp_ms: ts,
         }
     };
@@ -14587,14 +14647,16 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
-    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+    let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
         let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
         CertificateV1::NonceGeneration {
             batch_index,
-            cert: agg.finish().unwrap(),
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
             timestamp_ms: 0,
         }
     };
@@ -14694,7 +14756,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     ];
 
     let (certified, weight) =
-        mgr.avid_certified_nonce_dealers_from_certs(&VerifiedNonceCerts(certs.clone()), None);
+        mgr.avid_certified_nonce_dealers_from_certs(&avid_vote_certs(certs.clone()), None);
     assert!(
         !certified.contains(&setup.address(3)),
         "cert one weight below the vote quorum must not be counted by sizing"
@@ -14702,23 +14764,34 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
     assert!(certified.contains(&setup.address(0)));
     assert!(
         certified.contains(&setup.address(1)),
-        "KNOWN GAP, deliberately kept: this cert sits exactly at the vote quorum, so \
-         sizing admits it while the replay gates AvssVote at full W. Mirroring the \
-         replay here was tried and reverted — it needs local AVID round state, and this \
-         same walk sizes restart boundaries that feed uncross-checked start_index \
-         offsets, so a node-dependent size is a safety bug where this disagreement is \
-         only a liveness one. Pinning current behaviour, not asserting it is correct."
+        "an in-band cert classified as AvidVote is gated at the vote quorum, so it counts"
     );
+
+    let mut mixed_kinds: HashMap<Address, CertKind> = certs
+        .iter()
+        .map(|(a, _)| (*a, CertKind::AvidVote))
+        .collect();
+    mixed_kinds.insert(setup.address(1), CertKind::AvssVote);
+    let (certified_mixed, _) = mgr.avid_certified_nonce_dealers_from_certs(
+        &VerifiedNonceCerts::new(certs.clone(), mixed_kinds),
+        None,
+    );
+    assert!(
+        !certified_mixed.contains(&setup.address(1)),
+        "The same in-band cert classified as AvssVote is gated at full reduced \
+         weight and must now be excluded, matching the replay"
+    );
+    assert!(certified_mixed.contains(&setup.address(0)));
     assert!(
         weight >= mgr.required_nonce_weight(),
         "sizing must reach the floor from admissible certs despite the skipped one"
     );
 
-    let (blind, _) = mgr.window_certified_nonce_dealers(&VerifiedNonceCerts(certs.clone()));
+    let (blind, _) = mgr.window_certified_nonce_dealers(&avid_vote_certs(certs.clone()));
     assert!(blind.contains(&setup.address(3)));
 
     let (_, foreign_keyed) = make_cert(0, &all, 1_000);
-    let rekeyed = VerifiedNonceCerts(vec![(setup.address(3), foreign_keyed)]);
+    let rekeyed = avid_vote_certs(vec![(setup.address(3), foreign_keyed)]);
     let (certified, _) = mgr.avid_certified_nonce_dealers_from_certs(&rekeyed, None);
     assert_eq!(
         certified,
@@ -14728,7 +14801,7 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
 
     let (_, dup_a) = make_cert(0, &all, 1_000);
     let (_, dup_b) = make_cert(0, &all, 1_100);
-    let duplicated = VerifiedNonceCerts(vec![(setup.address(0), dup_a), (setup.address(3), dup_b)]);
+    let duplicated = avid_vote_certs(vec![(setup.address(0), dup_a), (setup.address(3), dup_b)]);
     let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(&duplicated, None);
     assert_eq!(certified, HashSet::from([setup.address(0)]));
     assert_eq!(
@@ -14750,6 +14823,301 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         window.weight(),
         weight_of(&[0]),
         "one dealer under two table keys must count once in the generic walk"
+    );
+}
+
+fn avid_certs_of_kind(
+    certs: Vec<(Address, CertificateV1)>,
+    kind: CertKind,
+) -> VerifiedNonceCerts<CertificateV1> {
+    let kinds = certs.iter().map(|(a, _)| (*a, kind)).collect();
+    VerifiedNonceCerts::new(certs, kinds)
+}
+
+fn avid_vote_certs(certs: Vec<(Address, CertificateV1)>) -> VerifiedNonceCerts<CertificateV1> {
+    avid_certs_of_kind(certs, CertKind::AvidVote)
+}
+
+#[tokio::test]
+async fn test_classification_survives_the_carrier_into_sizing() {
+    let setup = TestSetup::with_weights_avid(&[25, 25, 25, 25]);
+    let mgr = setup.create_manager(0);
+    let epoch = mgr.mpc_config.epoch;
+    let batch_index = 4u32;
+    let dealer = setup.address(0);
+    let messages_hash = MessagesHash::from([5u8; 32]);
+
+    let confirm = AvssVoteMessagesHash {
+        dealer_address: dealer,
+        messages_hash,
+        batch_index,
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm.clone());
+    for i in 0..4usize {
+        agg.add_signature(setup.signing_keys[i].sign(epoch, setup.address(i), &confirm))
+            .unwrap();
+    }
+    let transport = UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+        .as_dealer_messages_hash()
+        .unwrap();
+    let certs = vec![(
+        dealer,
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: transport,
+            timestamp_ms: 1_000,
+        },
+    )];
+
+    let mgr = Arc::new(RwLock::new(mgr));
+    let verified = MpcManager::verified_nonce_certs(
+        &mgr,
+        epoch,
+        certs,
+        batch_index,
+        &mut HashMap::new(),
+        &test_metrics(),
+    )
+    .await;
+    assert_eq!(verified.as_slice().len(), 1);
+    assert_eq!(verified.kind_of(&dealer), Some(CertKind::AvssVote));
+
+    let reshaped = verified.filter_map(|addr, cert| Some((*addr, cert.clone())));
+    assert_eq!(
+        reshaped.kind_of(&dealer),
+        Some(CertKind::AvssVote),
+        "filter_map must carry the kind: sizing reaches it through this hop"
+    );
+}
+
+#[test]
+fn test_avid_local_material_sorts_match_absent_and_mismatch() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 3u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let confirmer = &fx.confirmers[1];
+    let certified = MessagesHash::from(fx.common.hash().digest);
+
+    assert_eq!(
+        confirmer
+            .avid_local_material(batch_index, &fx.dealer_addr, CertKind::AvssVote, &certified,),
+        LocalMaterial::Matches
+    );
+
+    assert_eq!(
+        confirmer.avid_local_material(
+            batch_index,
+            &fx.dealer_addr,
+            CertKind::AvssVote,
+            &MessagesHash::from([0xABu8; 32]),
+        ),
+        LocalMaterial::Mismatches
+    );
+
+    assert_eq!(
+        confirmer.avid_local_material(
+            batch_index + 1,
+            &fx.dealer_addr,
+            CertKind::AvssVote,
+            &certified,
+        ),
+        LocalMaterial::Absent
+    );
+}
+
+#[test]
+fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
+    let messages_hash = MessagesHash::from([9u8; 32]);
+
+    let avid = TestSetup::with_weights_avid(&[25, 25, 25, 25]);
+    let avid_mgr = avid.create_manager(0);
+    let dealer = avid.address(0);
+
+    let confirm = AvssVoteMessagesHash {
+        dealer_address: dealer,
+        messages_hash,
+        batch_index: 3,
+    };
+    let mut agg = BlsSignatureAggregator::new(avid.committee(), confirm.clone());
+    for s in 0..4usize {
+        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &confirm))
+            .unwrap();
+    }
+    let signed = agg.finish().unwrap();
+    let unclassified = UnclassifiedNonceCert::from_signature_parts(
+        dealer,
+        messages_hash,
+        3,
+        signed.committee_signature(),
+    );
+    let (kind, weight) = avid_mgr
+        .verify_and_classify_nonce_cert(&unclassified)
+        .unwrap();
+    assert_eq!(kind, Some(CertKind::AvssVote));
+    assert!(weight > 0);
+
+    let vote = AvidVoteMessagesHash {
+        dealer_address: dealer,
+        messages_hash,
+        batch_index: 3,
+    };
+    let mut agg = BlsSignatureAggregator::new(avid.committee(), vote.clone());
+    for s in 0..4usize {
+        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &vote))
+            .unwrap();
+    }
+    let signed = agg.finish().unwrap();
+    let unclassified = UnclassifiedNonceCert::from_signature_parts(
+        dealer,
+        messages_hash,
+        3,
+        signed.committee_signature(),
+    );
+    let (kind, _) = avid_mgr
+        .verify_and_classify_nonce_cert(&unclassified)
+        .unwrap();
+    assert_eq!(kind, Some(CertKind::AvidVote));
+
+    let vote_quorum =
+        MpcManager::avid_vote_quorum(&avid_mgr.mpc_config.nodes, avid_mgr.mpc_config.max_faulty);
+    let lone_weight = avid_mgr.mpc_config.nodes.weight_of(0).unwrap() as u32;
+    assert!(
+        lone_weight < vote_quorum,
+        "one signer must sit under the vote bar or this proves nothing"
+    );
+    let mut agg = BlsSignatureAggregator::new(avid.committee(), vote.clone());
+    agg.add_signature(avid.signing_keys[0].sign(avid.epoch(), avid.address(0), &vote))
+        .unwrap();
+    let signed = agg.finish().unwrap();
+    let unclassified = UnclassifiedNonceCert::from_signature_parts(
+        dealer,
+        messages_hash,
+        3,
+        signed.committee_signature(),
+    );
+    let err = avid_mgr
+        .verify_and_classify_nonce_cert(&unclassified)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("below the AvidVote bar"),
+        "a valid signature under the bar must be rejected on weight, not domain: {err}"
+    );
+
+    let total = avid_mgr.mpc_config.nodes.total_weight() as u32;
+    let three_weight: u32 = (0..3)
+        .map(|i| avid_mgr.mpc_config.nodes.weight_of(i).unwrap() as u32)
+        .sum();
+    assert!(
+        three_weight >= vote_quorum && three_weight < total,
+        "three signers must clear the vote bar but not the confirm bar, or this proves nothing"
+    );
+    let mut agg = BlsSignatureAggregator::new(avid.committee(), confirm.clone());
+    for s in 0..3usize {
+        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &confirm))
+            .unwrap();
+    }
+    let signed = agg.finish().unwrap();
+    let unclassified = UnclassifiedNonceCert::from_signature_parts(
+        dealer,
+        messages_hash,
+        3,
+        signed.committee_signature(),
+    );
+    let err = avid_mgr
+        .verify_and_classify_nonce_cert(&unclassified)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("below the AvssVote bar"),
+        "a Confirm cert over the vote bar but under 100% must be rejected on weight: {err}"
+    );
+
+    let legacy = DealerMessagesHash {
+        dealer_address: dealer,
+        messages_hash,
+    };
+    let unclassified = {
+        let mut agg = BlsSignatureAggregator::new(avid.committee(), legacy.clone());
+        for s in 0..4usize {
+            agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &legacy))
+                .unwrap();
+        }
+        let signed = agg.finish().unwrap();
+        UnclassifiedNonceCert::from_signature_parts(
+            dealer,
+            messages_hash,
+            3,
+            signed.committee_signature(),
+        )
+    };
+    assert!(
+        avid_mgr
+            .verify_and_classify_nonce_cert(&unclassified)
+            .is_err()
+    );
+
+    let vanilla = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let vanilla_mgr = vanilla.create_manager(0);
+    let vanilla_dealer = vanilla.address(0);
+    let legacy = DealerMessagesHash {
+        dealer_address: vanilla_dealer,
+        messages_hash,
+    };
+    let mut agg = BlsSignatureAggregator::new(vanilla.committee(), legacy.clone());
+    for s in 0..4usize {
+        agg.add_signature(vanilla.signing_keys[s].sign(
+            vanilla.epoch(),
+            vanilla.address(s),
+            &legacy,
+        ))
+        .unwrap();
+    }
+    let signed = agg.finish().unwrap();
+    let unclassified = UnclassifiedNonceCert::from_signature_parts(
+        vanilla_dealer,
+        messages_hash,
+        3,
+        signed.committee_signature(),
+    );
+    let (kind, weight) = vanilla_mgr
+        .verify_and_classify_nonce_cert(&unclassified)
+        .unwrap();
+    assert_eq!(kind, None);
+    assert!(weight > 0);
+}
+
+#[test]
+fn test_nonce_cert_does_not_verify_under_another_batch_index() {
+    let avid = TestSetup::with_weights_avid(&[25, 25, 25, 25]);
+    let mgr = avid.create_manager(0);
+    let dealer = avid.address(0);
+    let messages_hash = MessagesHash::from([4u8; 32]);
+
+    let target = AvssVoteMessagesHash {
+        dealer_address: dealer,
+        messages_hash,
+        batch_index: 0,
+    };
+    let mut agg = BlsSignatureAggregator::new(avid.committee(), target.clone());
+    for s in 0..4usize {
+        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &target))
+            .unwrap();
+    }
+    let signed = agg.finish().unwrap();
+    let under = |batch_index: u32| {
+        mgr.verify_and_classify_nonce_cert(&UnclassifiedNonceCert::from_signature_parts(
+            dealer,
+            messages_hash,
+            batch_index,
+            signed.committee_signature(),
+        ))
+    };
+
+    assert_eq!(under(0).unwrap().0, Some(CertKind::AvssVote));
+    assert!(
+        under(1).is_err(),
+        "a cert signed for batch 0 must not verify in batch 1's bucket"
     );
 }
 
@@ -14795,7 +15163,7 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
     assert!(weight_of(&sub_quorum) < vote_quorum);
     assert!(weight_of(&all) >= vote_quorum);
 
-    let certs = VerifiedNonceCerts(vec![
+    let certs = avid_vote_certs(vec![
         make_cert(0, &all, 1_000),
         make_cert(1, &sub_quorum, 1_100),
         make_cert(2, &all, 1_200),
@@ -14841,7 +15209,7 @@ fn test_avid_sizing_counts_past_the_floor() {
         3 + 3 + 3 >= floor && floor > 3 + 3,
         "weights must cross the floor at dealer 2 or this test proves nothing"
     );
-    let certs = VerifiedNonceCerts(vec![
+    let certs = avid_vote_certs(vec![
         make_cert(0, 1_000),
         make_cert(1, 1_000),
         make_cert(2, 1_000),
@@ -15015,14 +15383,16 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
-    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+    let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
         let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
         CertificateV1::NonceGeneration {
             batch_index,
-            cert: agg.finish().unwrap(),
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
             timestamp_ms: 0,
         }
     };
@@ -15089,9 +15459,10 @@ fn test_decoded_shares_match_optimistic_shares() {
         echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
     }
     let avid_vote = avid_vote.unwrap();
-    let vote_target = DealerMessagesHash {
+    let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&avid_vote),
+        batch_index,
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     for s in vote_sigs {
@@ -15201,14 +15572,16 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
-    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+    let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
         let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
         CertificateV1::NonceGeneration {
             batch_index,
-            cert: agg.finish().unwrap(),
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
             timestamp_ms: 0,
         }
     };
@@ -15407,9 +15780,10 @@ fn test_avid_voter_state_survives_restart() {
         .unwrap()
         .clone();
     let echo_before = extract_echo_for(&held_echoes, setup.address(5));
-    let vote_target = DealerMessagesHash {
+    let vote_target = AvidVoteMessagesHash {
         dealer_address: dealer_addr,
         messages_hash: hash_avid_vote(&held_vote),
+        batch_index,
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     for sig in vote_sigs {
@@ -15428,12 +15802,13 @@ fn test_avid_voter_state_survives_restart() {
     assert!(restarted.avid_held_echoes.is_empty());
 
     assert_eq!(
-        restarted.resolve_avid_cert_kind_locally(
+        restarted.avid_local_material(
             batch_index,
             &dealer_addr,
+            CertKind::AvidVote,
             &hash_avid_vote(&held_vote),
         ),
-        Some(CertKind::AvidVote)
+        LocalMaterial::Matches
     );
 
     let request = RetrieveMessagesRequest {
@@ -15591,9 +15966,10 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         .get(&(batch_index, dealer_addr))
         .unwrap()
         .clone();
-    let vote_target = DealerMessagesHash {
+    let vote_target = AvidVoteMessagesHash {
         dealer_address: dealer_addr,
         messages_hash: hash_avid_vote(&held_vote),
+        batch_index,
     };
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     for sig in vote_sigs {
@@ -15675,9 +16051,10 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         .get(&(batch_index, dealer_addr))
         .unwrap()
         .clone();
-    let blame_target = DealerMessagesHash {
+    let blame_target = AvidVoteMessagesHash {
         dealer_address: dealer_addr,
         messages_hash: hash_avid_vote(&blame_vote),
+        batch_index,
     };
     let mut thin = BlsSignatureAggregator::new(setup.committee(), blame_target.clone());
     thin.add_signature(setup.signing_keys[0].sign(setup.epoch(), setup.address(0), &blame_target))
@@ -15700,6 +16077,35 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
     assert!(
         matches!(result, Err(MpcError::InvalidCertificate(_))),
         "a blame complaint carrying a sub-quorum vote cert must be refused: {result:?}"
+    );
+
+    let mut full = BlsSignatureAggregator::new(setup.committee(), blame_target.clone());
+    for i in 0..6usize {
+        full.add_signature(setup.signing_keys[i].sign(
+            setup.epoch(),
+            setup.address(i),
+            &blame_target,
+        ))
+        .unwrap();
+    }
+    let full_blame_request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: full.finish().unwrap(),
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+    let result = confirmers[1].handle_complain_request(victim, &full_blame_request);
+    assert!(
+        !matches!(result, Err(MpcError::InvalidCertificate(_))),
+        "a full-quorum AvidVote cert must clear certificate verification; verifying it \
+         in the legacy domain would reject every blame complaint: {result:?}"
     );
 }
 

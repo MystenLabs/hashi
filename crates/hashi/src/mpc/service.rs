@@ -952,6 +952,7 @@ impl MpcService {
                     mpc_manager,
                     epoch,
                     certs,
+                    batch_index,
                     &mut HashMap::new(),
                     &self.inner.metrics,
                 )
@@ -981,6 +982,7 @@ impl MpcService {
                     mpc_manager,
                     epoch,
                     certs,
+                    batch_index,
                     &mut HashMap::new(),
                     &self.inner.metrics,
                 )
@@ -1327,6 +1329,7 @@ impl MpcService {
                 mpc_manager,
                 epoch,
                 certs,
+                batch_index,
                 &mut adjudicated,
                 metrics,
             )
