@@ -157,6 +157,53 @@ public fun create_hashi_with_weighted_committee(
     )
 }
 
+/// Creates a test Hashi whose CURRENT committee contains `committee_voters`
+/// (weight 1 each) while `registered` (a superset) are registered members —
+/// for exercising registered-but-not-in-committee states.
+public fun create_hashi_with_committee_and_registry(
+    committee_voters: vector<address>,
+    registered: vector<address>,
+    ctx: &mut TxContext,
+): Hashi {
+    let mut members = vector[];
+    committee_voters.do_ref!(|voter| {
+        members.push_back(create_test_committee_member(*voter, 1));
+    });
+    let committee = committee::new_committee(
+        ctx.epoch(),
+        members,
+        hashi::mpc_config::new_for_testing(800, 3333, 0, 0),
+    );
+
+    let sk = bls_sk_for_testing();
+    let pub_key = bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk));
+    let committee_set = hashi::committee_set::create_for_testing(
+        committee,
+        registered,
+        *pub_key.bytes(),
+        sk,
+        ctx,
+    );
+
+    let mut config = hashi::config::create();
+    hashi::btc_config::init_defaults(&mut config);
+    hashi::mpc_config::init_defaults(&mut config);
+    let versioning = hashi::versioning::create();
+    let treasury = hashi::treasury::create(ctx);
+    let proposals = hashi::proposals::create(ctx);
+    let tob = bag::new(ctx);
+
+    hashi::hashi::create_for_testing(
+        committee_set,
+        config,
+        versioning,
+        treasury,
+        proposals,
+        tob,
+        ctx,
+    )
+}
+
 fun create_test_committee_member(validator_address: address, weight: u64): CommitteeMember {
     let sk = bls_sk_for_testing();
     let pub_key = bls12381::g1_to_uncompressed_g1(

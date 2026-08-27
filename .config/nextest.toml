@@ -7,6 +7,14 @@
 filter = 'package(e2e-tests)'
 threads-required = 4
 
+# The resignation-lifecycle e2e forces two epoch boundaries with resharing
+# across four nodes; under a packed scheduler it starves (timers stop firing)
+# and times out despite passing in isolation. An over-sized threads-required
+# is clamped to the thread count, so this runs the test exclusively.
+[[profile.default.overrides]]
+filter = 'test(test_resigned_member_excluded_then_removed_permissionlessly)'
+threads-required = 16
+
 [[profile.default.overrides]]
 filter = 'package(hashi-monitor)'
 threads-required = 4

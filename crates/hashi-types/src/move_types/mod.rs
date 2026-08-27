@@ -959,6 +959,49 @@ impl MoveType for IgnoreMember {
 /// Mirrors `MEMBER_IGNORED_KEY` in `committee_set.move`.
 pub const MEMBER_IGNORED_KEY: &str = "ignored";
 
+/// `MemberInfo.extra_fields` key holding the voluntary "resigned" flag.
+/// Mirrors `MEMBER_RESIGNED_KEY` in `committee_set.move`.
+pub const MEMBER_RESIGNED_KEY: &str = "resigned";
+
+/// Rust version of the Move hashi::validator::ValidatorResigned event.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ValidatorResigned {
+    pub validator: Address,
+}
+
+impl MoveType for ValidatorResigned {
+    /// Introduced by the v2 upgrade.
+    const PACKAGE_VERSION: u64 = 2;
+    const MODULE: &'static str = "validator";
+    const NAME: &'static str = "ValidatorResigned";
+}
+
+/// Rust version of the Move hashi::validator::ValidatorResignationWithdrawn event.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ValidatorResignationWithdrawn {
+    pub validator: Address,
+}
+
+impl MoveType for ValidatorResignationWithdrawn {
+    /// Introduced by the v2 upgrade.
+    const PACKAGE_VERSION: u64 = 2;
+    const MODULE: &'static str = "validator";
+    const NAME: &'static str = "ValidatorResignationWithdrawn";
+}
+
+/// Rust version of the Move hashi::validator::ValidatorDeregistered event.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ValidatorDeregistered {
+    pub validator: Address,
+}
+
+impl MoveType for ValidatorDeregistered {
+    /// Introduced by the v2 upgrade.
+    const PACKAGE_VERSION: u64 = 2;
+    const MODULE: &'static str = "validator";
+    const NAME: &'static str = "ValidatorDeregistered";
+}
+
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {

@@ -37,7 +37,7 @@ fn print_metadata(metadata: &[(String, String)]) {
 /// Returns `Some(response)` when a real transaction was executed, and `None`
 /// for dry-run, serialize-unsigned, or when execution is requested but no
 /// keypair is configured.
-async fn execute_or_simulate(
+pub(crate) async fn execute_or_simulate(
     client: &mut HashiClient,
     tx: sui_transaction_builder::TransactionBuilder,
     tx_opts: &TxOptions,
@@ -934,7 +934,7 @@ fn print_proposal_detailed(
 /// Pause for user acknowledgement before an actual execution. No-op when the
 /// user passed `-y/--yes`, or in dry-run / serialize-unsigned mode — those
 /// change no on-chain state, and serialize mode must keep stdout clean.
-async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
+pub(crate) async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
     use crate::sui_tx_executor::TxMode;
     use tokio::io::AsyncBufReadExt;
     use tokio::io::BufReader;

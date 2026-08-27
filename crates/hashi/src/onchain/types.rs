@@ -472,6 +472,11 @@ pub struct MemberInfo {
     /// committee formation skips this member. The current epoch's committee
     /// is unaffected.
     pub ignored: bool,
+
+    /// Voluntary "resigned" flag from `extra_fields`: when set, the next
+    /// committee formation skips this member and the epoch transition
+    /// removes their registration.
+    pub resigned: bool,
 }
 
 impl fmt::Debug for MemberInfo {
@@ -503,6 +508,7 @@ impl fmt::Debug for MemberInfo {
                     .map(|b| Base64("EncryptionPublicKey", b.as_slice())),
             )
             .field("ignored", &self.ignored)
+            .field("resigned", &self.resigned)
             .finish()
     }
 }

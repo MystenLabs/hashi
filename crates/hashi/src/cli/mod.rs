@@ -365,6 +365,32 @@ pub struct MetadataArgs {
     pub metadata: Vec<String>,
 }
 
+/// Validator lifecycle commands (resign / withdraw a resignation).
+#[derive(Subcommand)]
+pub enum ValidatorCommands {
+    /// Voluntarily resign from the committee.
+    ///
+    /// Takes effect at the next committee formation: the node keeps serving
+    /// the current epoch (keep it RUNNING until then), and once it holds no
+    /// epoch duties the registration can be removed by anyone via
+    /// `remove-inactive`. After removal, re-joining requires a full
+    /// re-registration (`hashi register`). Revocable with
+    /// `withdraw-resignation` until the registration is removed. The node
+    /// suppresses its own auto-registration while the resignation is
+    /// pending.
+    Resign,
+    /// Withdraw a pending resignation.
+    WithdrawResignation,
+    /// Permissionlessly remove an inactive member's registration: not in the
+    /// current or pending committee, and either resigned or no longer in
+    /// Sui's active validator set. Governance-ignored members cannot be
+    /// removed.
+    RemoveInactive {
+        /// The member's validator address (hex).
+        validator: String,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum CommitteeCommands {
     /// List current committee members
@@ -900,6 +926,9 @@ pub enum CliCommand {
     Proposal {
         action: ProposalCommands,
     },
+    Validator {
+        action: ValidatorCommands,
+    },
     Committee {
         action: CommitteeCommands,
     },
@@ -1129,6 +1158,17 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     .await?;
                 }
             },
+        },
+        CliCommand::Validator { action } => match action {
+            ValidatorCommands::Resign => {
+                commands::validator::resign(&config, &tx_opts).await?;
+            }
+            ValidatorCommands::WithdrawResignation => {
+                commands::validator::withdraw_resignation(&config, &tx_opts).await?;
+            }
+            ValidatorCommands::RemoveInactive { validator } => {
+                commands::validator::remove_inactive(&config, &validator, &tx_opts).await?;
+            }
         },
         CliCommand::Committee { action } => match action {
             CommitteeCommands::List { epoch } => {
