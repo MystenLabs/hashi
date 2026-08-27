@@ -20,6 +20,7 @@ use hashi::{
         ERequestNotCancellable,
         EWithdrawalNotConfirmed,
         EWithdrawalAlreadyConfirmed,
+        EMinerFeeNotEvenlySplit,
     }
 };
 use sui::clock;
@@ -602,28 +603,25 @@ fun test_miner_fee_batched_even_split() {
 }
 
 #[test]
-fun test_miner_fee_batched_with_remainder() {
+#[expected_failure(abort_code = EMinerFeeNotEvenlySplit)]
+fun test_miner_fee_batched_with_remainder_aborts() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
     let mut queue = setup_queue(ctx);
     let clock = clock::create_for_testing(ctx);
     let mut config = config::create();
     hashi::btc_config::init_defaults(&mut config);
 
+    // 1_001 sats across 3 requests leaves a remainder of 2, so no per-user
+    // share sums to the miner fee exactly. Charge each user the rounded-up
+    // share, which the bridge previously accepted and must now reject.
     let btc_amount = 40_000u64;
     let request_count = 3u64;
     let miner_fee = 1_001u64;
-    let mut per_user = miner_fee / request_count;
-    if (miner_fee % request_count > 0) {
-        per_user = per_user + 1;
-    };
+    assert!(miner_fee % request_count != 0);
+    let per_user = miner_fee / request_count + 1;
     let user_output = btc_amount - per_user;
-    let total_user_outputs = user_output * request_count;
-    let input_amount = total_user_outputs + miner_fee + 10_000; // 10k change
-    let change = input_amount - total_user_outputs - miner_fee;
-
-    assert!(per_user == 334);
-    assert!(user_output == 39_666);
-    assert!(change == 10_000);
+    let change = 10_000u64;
+    let input_amount = user_output * request_count + miner_fee + change;
 
     let id1 = setup_request(&mut queue, &clock, btc_amount, ctx);
     let id2 = setup_request(&mut queue, &clock, btc_amount, ctx);
@@ -651,10 +649,8 @@ fun test_miner_fee_batched_with_remainder() {
         &clock,
         vector[],
     );
-    let btc_balance = queue.commit_requests(&pending);
-    btc_balance.destroy_for_testing();
-    queue.insert_withdrawal_txn(pending);
 
+    queue.insert_withdrawal_txn(pending);
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
     std::unit_test::destroy(config);
