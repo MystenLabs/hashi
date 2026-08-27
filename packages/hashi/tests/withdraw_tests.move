@@ -269,3 +269,234 @@ fun test_cancel_processing_request() {
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
 }
+
+// ======== Deferred archival (entry-level) tests ========
+
+fun dummy_queue_cert(): hashi::committee::CommitteeSignature {
+    hashi::committee::new_committee_signature(0, vector[], vector[])
+}
+
+/// Create, approve, commit (v2 in-place), fully sign and finalize a
+/// single-request withdrawal whose input UTXO is seeded in the pool.
+/// Returns (request_id, txn_id).
+fun setup_fully_signed_txn(
+    hashi: &mut hashi::hashi::Hashi,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+): (address, address) {
+    let id = setup_withdrawal_request(hashi, clock, 10_000, ctx);
+    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id, dummy_queue_cert(), clock);
+
+    let input_id = utxo::utxo_id(@0xBEEF, 0);
+    let input = utxo::utxo(input_id, 1_000_000, option::none());
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(input);
+
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id],
+        vector[input],
+        vector[withdrawal_queue::output_utxo(1, x"00")],
+        vector[],
+        @0xBEEF,
+        clock,
+        ctx,
+    );
+    let txn_id = txn.withdrawal_txn_id();
+    let btc = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&txn);
+    btc.destroy_for_testing();
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(txn);
+
+    let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], clock);
+    queue.update_requests_signed(&vector[id]);
+    (id, txn_id)
+}
+
+fun confirm_via_entry(hashi: &mut hashi::hashi::Hashi, txn_id: address, clock: &clock::Clock) {
+    let epoch = 0u64;
+    let message = hashi::withdraw::new_withdrawal_confirmation_message(txn_id);
+    let message_bytes = build_cert_message(
+        epoch,
+        hashi::intent::withdrawal_confirmation(),
+        &message,
+    );
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+    hashi::withdraw::confirm_withdrawal(hashi, txn_id, cert, clock);
+}
+
+#[test]
+fun test_confirm_withdrawal_defers_archival() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (id, txn_id) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
+    confirm_via_entry(&mut hashi, txn_id, &clock);
+
+    // Confirm recorded in place: txn stays in the hot bag, request keeps its
+    // Signed status in `requests`; both moves are deferred to archival.
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(queue.has_withdrawal_txn(txn_id));
+    assert!(!queue.has_confirmed_txn(txn_id));
+    assert!(queue.request_in_requests(id));
+    assert!(queue.request_status_any(id).is_signed());
+
+    // The archival GC completes both moves.
+    hashi::withdraw::archive_confirmed_withdrawals(&mut hashi, vector[txn_id]);
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(!queue.has_withdrawal_txn(txn_id));
+    assert!(queue.has_confirmed_txn(txn_id));
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_confirmed());
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::withdrawal_queue::EWithdrawalAlreadyConfirmed)]
+fun test_confirm_withdrawal_replay_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (_id, txn_id) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
+    confirm_via_entry(&mut hashi, txn_id, &clock);
+    // A replayed confirmation cert must abort instead of double-emitting
+    // events and re-running the UTXO spend marking.
+    confirm_via_entry(&mut hashi, txn_id, &clock);
+    abort 0
+}
+
+#[test]
+fun test_archive_entry_batch_mixed() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (_id1, txn_id1) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
+    confirm_via_entry(&mut hashi, txn_id1, &clock);
+    // Archive the first ahead of the batch call: the batch must skip it.
+    hashi::withdraw::archive_confirmed_withdrawals(&mut hashi, vector[txn_id1]);
+
+    let id2 = setup_withdrawal_request(&mut hashi, &clock, 20_000, ctx);
+    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id2, dummy_queue_cert(), &clock);
+    let input2_id = utxo::utxo_id(@0xF00D, 0);
+    let input2 = utxo::utxo(input2_id, 2_000_000, option::none());
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(input2);
+    let txn2 = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id2],
+        vector[input2],
+        vector[withdrawal_queue::output_utxo(1, x"00")],
+        vector[],
+        @0xF00D,
+        &clock,
+        ctx,
+    );
+    let txn_id2 = txn2.withdrawal_txn_id();
+    let btc2 = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&txn2);
+    btc2.destroy_for_testing();
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(txn2);
+    {
+        let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
+        queue.record_input_signatures(txn_id2, vector[0], vector[x"DEADBEEF"]);
+        queue.finalize_withdrawal_txn(txn_id2, vector[x"AAAAAAAA"], &clock);
+        queue.update_requests_signed(&vector[id2]);
+    };
+    confirm_via_entry(&mut hashi, txn_id2, &clock);
+
+    // Batch containing one already-archived and one fresh id succeeds.
+    hashi::withdraw::archive_confirmed_withdrawals(&mut hashi, vector[txn_id1, txn_id2]);
+    let queue = hashi.bitcoin().withdrawal_queue();
+    assert!(queue.has_confirmed_txn(txn_id1));
+    assert!(queue.has_confirmed_txn(txn_id2));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::withdraw::ECannotCancelProcessingWithdrawal)]
+fun test_cancel_pre_upgrade_processed_request() {
+    let epoch = 0u64;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    // Simulate a request committed before the deferred-archival upgrade: it
+    // sits in `processed`, so the cancellation gate must trip via the
+    // fallback bag check rather than the status-first path.
+    let id = setup_withdrawal_request(&mut hashi, &clock, 10_000, ctx);
+    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id, dummy_queue_cert(), &clock);
+    let input = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[id],
+        vector[input],
+        vector[withdrawal_queue::output_utxo(1, x"00")],
+        vector[],
+        @0xBEEF,
+        &clock,
+        ctx,
+    );
+    let btc = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests_v1_style_for_testing(&txn);
+
+    let one_hour_ms = 1000 * 60 * 60;
+    clock.set_for_testing(one_hour_ms);
+    let refund = hashi::withdraw::cancel_withdrawal(&mut hashi, id, &clock, ctx);
+
+    // Cleanup — not reached.
+    refund.destroy_for_testing();
+    btc.destroy_for_testing();
+    std::unit_test::destroy(txn);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_archive_runs_while_paused() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (_id, txn_id) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
+    confirm_via_entry(&mut hashi, txn_id, &clock);
+
+    // Pause the system (proposer + one more vote reaches 2/3), then verify
+    // archival (GC) still runs.
+    let proposal_id = test_utils::create_emergency_pause_proposal(
+        &mut hashi,
+        VOTER1,
+        true,
+        &clock,
+        ctx,
+    );
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    hashi::proposal::vote<hashi::emergency_pause::EmergencyPause>(
+        &mut hashi,
+        VOTER2,
+        proposal_id,
+        &clock,
+        ctx2,
+    );
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    hashi::proposal::vote<hashi::emergency_pause::EmergencyPause>(
+        &mut hashi,
+        VOTER3,
+        proposal_id,
+        &clock,
+        ctx3,
+    );
+    hashi::emergency_pause::execute(&mut hashi, proposal_id, &clock);
+    assert!(hashi.config().paused());
+
+    hashi::withdraw::archive_confirmed_withdrawals(&mut hashi, vector[txn_id]);
+    assert!(hashi.bitcoin().withdrawal_queue().has_confirmed_txn(txn_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}

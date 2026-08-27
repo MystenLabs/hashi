@@ -282,38 +282,89 @@ entry fun confirm_withdrawal(
         EWithdrawalNotFullySigned,
     );
 
-    // Remove the in-flight withdrawal txn from the hot bag so we can do
-    // all the bookkeeping with a direct handle, then re-insert it into the
-    // confirmed bag at the end.
-    let mut txn = hashi.bitcoin_mut().withdrawal_queue_mut().remove_withdrawal_txn(withdrawal_id);
-    txn.mark_confirmed(clock);
-    txn.emit_withdrawal_confirmed();
+    // Copy the input/change data out of a short borrow; the txn itself stays
+    // in the hot bag. Its move to `confirmed_txns` — and the requests' status
+    // flip and move to `processed` — are deferred to
+    // `archive_confirmed_withdrawals`, keeping this transaction's runtime
+    // object count independent of the request count.
+    let (inputs, change_ids) = {
+        let txn = hashi.bitcoin().withdrawal_queue().borrow_withdrawal_txn(withdrawal_id);
+        (*txn.withdrawal_txn_inputs(), txn.change_utxo_ids())
+    };
 
-    // Update request statuses to Confirmed.
-    hashi
-        .bitcoin_mut()
-        .withdrawal_queue_mut()
-        .update_requests_confirmed(txn.withdrawal_txn_request_ids());
+    // Records the confirmation timestamp and emits WithdrawalConfirmed;
+    // aborts on a replayed confirmation cert.
+    hashi.bitcoin_mut().withdrawal_queue_mut().mark_txn_confirmed(withdrawal_id, clock);
 
     let epoch = hashi.committee_set().epoch();
 
     // Mark each input UTXO as spent and emit spent events. The actual record
     // removal from utxo_records is deferred to `cleanup_spent_utxos` so this
     // transaction stays well under Sui's 1000-object runtime cache limit.
-    txn.withdrawal_txn_inputs().do_ref!(|utxo| {
+    inputs.do_ref!(|utxo| {
         hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo.id(), epoch);
     });
 
     // Promote the change UTXOs from unconfirmed to confirmed. If a change UTXO
     // was already locked by a subsequent withdrawal, only `produced_by` is
     // cleared.
-    let change_ids = txn.change_utxo_ids();
     change_ids.do!(|change_id| {
         hashi.bitcoin_mut().utxo_pool_mut().confirm_pending(change_id);
     });
+}
 
-    // Move the txn to the cold (historical) bag.
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_confirmed_txn(txn);
+/// Deferred archival for confirmed withdrawals: move each transaction from
+/// `withdrawal_txns` to `confirmed_txns` and its requests from `requests` to
+/// `processed` (setting status Confirmed). Idempotent per id, so callers may
+/// batch and retry freely.
+///
+/// Carries no committee cert: every write is derivable from already-certified
+/// state (`confirmed_timestamp_ms` is only ever set under a confirmation
+/// cert, the request list was bound by the commitment cert, and no funds
+/// move) — an adversarial caller can only archive earlier than the operator
+/// would, which is a semantic no-op.
+///
+/// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+/// no funds and must stay callable during an emergency pause.
+entry fun archive_confirmed_withdrawals(hashi: &mut Hashi, withdrawal_ids: vector<address>) {
+    hashi.versioning().assert_version_enabled();
+    withdrawal_ids.do!(|withdrawal_id| {
+        hashi.bitcoin_mut().withdrawal_queue_mut().archive_withdrawal_txn(withdrawal_id);
+    });
+}
+
+/// Chunked archival for a withdrawal whose request count exceeds one Sui
+/// transaction's runtime-object budget: archive the listed requests only,
+/// leaving the txn in the hot bag for `finish_archive_withdrawal_txns`.
+/// Every listed request is cross-checked against the withdrawal id, so a
+/// caller can only archive requests the confirmation cert already covers.
+///
+/// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+/// no funds and must stay callable during an emergency pause.
+entry fun archive_withdrawal_requests(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    request_ids: vector<address>,
+) {
+    hashi.versioning().assert_version_enabled();
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .archive_withdrawal_requests(withdrawal_id, &request_ids);
+}
+
+/// Finish chunked archivals: move each listed txn to `confirmed_txns` once
+/// all of its requests are archived. Ids whose archival is incomplete (or
+/// already finished) are silently skipped, so batches survive races with
+/// in-flight chunk transactions.
+///
+/// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+/// no funds and must stay callable during an emergency pause.
+entry fun finish_archive_withdrawal_txns(hashi: &mut Hashi, withdrawal_ids: vector<address>) {
+    hashi.versioning().assert_version_enabled();
+    withdrawal_ids.do!(|withdrawal_id| {
+        hashi.bitcoin_mut().withdrawal_queue_mut().finish_archive_withdrawal_txn(withdrawal_id);
+    });
 }
 
 /// Reassign fresh presignatures to the still-unsigned inputs of a withdrawal

@@ -16,6 +16,10 @@ use hashi::{
         EOutputAmountMismatch,
         EOutputAddressMismatch,
         EMinerFeeExceedsMax,
+        ECannotApproveCommittedRequest,
+        ERequestNotCancellable,
+        EWithdrawalNotConfirmed,
+        EWithdrawalAlreadyConfirmed,
     }
 };
 use sui::clock;
@@ -948,4 +952,369 @@ fun test_miner_fee_exceeds_max_aborts() {
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
     std::unit_test::destroy(config);
+}
+
+// ======== Deferred archival tests ========
+
+#[test]
+fun test_commit_leaves_request_in_requests_with_processing() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (id, _info) = approve_and_commit(&mut queue, &clock, 50_000, ctx);
+
+    assert!(queue.request_in_requests(id));
+    assert!(!queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_processing());
+    // The bag-membership gate must still recognize the request as committed.
+    assert!(queue.is_request_processing(id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+#[expected_failure(abort_code = ECannotApproveCommittedRequest)]
+fun test_approve_committed_request_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (id, _info) = approve_and_commit(&mut queue, &clock, 50_000, ctx);
+    // Replay of an approval cert against the committed request must not
+    // reset Processing back to Approved (it would re-arm commit on a
+    // drained request).
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    abort 0
+}
+
+#[test]
+fun test_update_requests_signed_both_locations() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    // v2-committed: request lives in `requests`.
+    let (v2_id, _info) = approve_and_commit(&mut queue, &clock, 50_000, ctx);
+    queue.update_requests_signed(&vector[v2_id]);
+    assert!(queue.request_in_requests(v2_id));
+    assert!(queue.request_status_any(v2_id).is_signed());
+
+    // v1-committed (pre-upgrade): request lives in `processed`.
+    let v1_id = setup_request(&mut queue, &clock, 60_000, ctx);
+    queue.approve_withdrawal(v1_id, dummy_cert(), &clock);
+    let txn = make_test_txn(vector[v1_id], @0xF00D, &clock, ctx);
+    let btc = queue.commit_requests_v1_style_for_testing(&txn);
+    btc.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    queue.update_requests_signed(&vector[v1_id]);
+    assert!(queue.request_in_processed(v1_id));
+    assert!(queue.request_status_any(v1_id).is_signed());
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_archive_moves_request_and_txn() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let txn_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.mark_txn_confirmed(txn_id, &clock);
+
+    // Confirmed but not yet archived: txn still in the hot bag.
+    assert!(queue.has_withdrawal_txn(txn_id));
+    assert!(!queue.has_confirmed_txn(txn_id));
+
+    queue.archive_withdrawal_txn(txn_id);
+
+    assert!(!queue.has_withdrawal_txn(txn_id));
+    assert!(queue.has_confirmed_txn(txn_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_archive_flips_request_to_confirmed_in_processed() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let id = setup_request(&mut queue, &clock, 50_000, ctx);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    let txn = make_test_txn(vector[id], @0xBEEF, &clock, ctx);
+    let txn_id = txn.withdrawal_txn_id();
+    let btc = queue.commit_requests(&txn);
+    btc.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.update_requests_signed(&vector[id]);
+    queue.mark_txn_confirmed(txn_id, &clock);
+
+    queue.archive_withdrawal_txn(txn_id);
+
+    assert!(!queue.request_in_requests(id));
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_confirmed());
+    assert!(queue.is_request_processing(id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_archive_idempotent() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let txn_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.mark_txn_confirmed(txn_id, &clock);
+
+    queue.archive_withdrawal_txn(txn_id);
+    // Re-run is a no-op, not an abort.
+    queue.archive_withdrawal_txn(txn_id);
+
+    assert!(!queue.has_withdrawal_txn(txn_id));
+    assert!(queue.has_confirmed_txn(txn_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+#[expected_failure(abort_code = EWithdrawalNotConfirmed)]
+fun test_archive_unconfirmed_txn_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let txn_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    queue.archive_withdrawal_txn(txn_id);
+    abort 0
+}
+
+#[test]
+fun test_archive_v1_leftover_stays_in_processed() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    // Simulate a request committed before the upgrade: it already lives in
+    // `processed`, status Processing.
+    let id = setup_request(&mut queue, &clock, 50_000, ctx);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    let txn = make_test_txn(vector[id], @0xBEEF, &clock, ctx);
+    let txn_id = txn.withdrawal_txn_id();
+    let btc = queue.commit_requests_v1_style_for_testing(&txn);
+    btc.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.update_requests_signed(&vector[id]);
+
+    // Confirmed under v2, archived by GC: the request gets its terminal
+    // status in place, no second move.
+    queue.mark_txn_confirmed(txn_id, &clock);
+    queue.archive_withdrawal_txn(txn_id);
+
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_confirmed());
+    assert!(queue.has_confirmed_txn(txn_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+#[expected_failure(abort_code = EWithdrawalAlreadyConfirmed)]
+fun test_mark_txn_confirmed_twice_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let txn_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.mark_txn_confirmed(txn_id, &clock);
+    queue.mark_txn_confirmed(txn_id, &clock);
+    abort 0
+}
+
+#[test]
+#[expected_failure(abort_code = ERequestNotCancellable)]
+fun test_queue_cancel_committed_request_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (id, _info) = approve_and_commit(&mut queue, &clock, 50_000, ctx);
+    // The entry-level is_request_processing gate refuses first in production;
+    // this defensive assert must also hold if the queue fn is reached.
+    let btc = queue.cancel_withdrawal(id);
+    btc.destroy_for_testing();
+    abort 0
+}
+
+// ======== Chunked archival tests ========
+
+/// Three-request txn: approved, committed (v2 in-place), fully signed,
+/// finalized, and confirmed. Returns (ids, txn_id).
+fun setup_confirmed_three_request_txn(
+    queue: &mut withdrawal_queue::WithdrawalRequestQueue,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+): (vector<address>, address) {
+    let id1 = setup_request(queue, clock, 10_000, ctx);
+    let id2 = setup_request(queue, clock, 20_000, ctx);
+    let id3 = setup_request(queue, clock, 30_000, ctx);
+    queue.approve_withdrawal(id1, dummy_cert(), clock);
+    queue.approve_withdrawal(id2, dummy_cert(), clock);
+    queue.approve_withdrawal(id3, dummy_cert(), clock);
+    let txn = make_test_txn(vector[id1, id2, id3], @0xC0FFEE, clock, ctx);
+    let txn_id = txn.withdrawal_txn_id();
+    let btc = queue.commit_requests(&txn);
+    btc.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], clock);
+    queue.update_requests_signed(&vector[id1, id2, id3]);
+    queue.mark_txn_confirmed(txn_id, clock);
+    (vector[id1, id2, id3], txn_id)
+}
+
+#[test]
+fun test_chunked_archive_partial_then_finish() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (ids, txn_id) = setup_confirmed_three_request_txn(&mut queue, &clock, ctx);
+
+    // Archive two of three: those move, the third stays, the txn stays hot.
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[0], ids[1]]);
+    assert!(queue.request_in_processed(ids[0]));
+    assert!(queue.request_status_any(ids[0]).is_confirmed());
+    assert!(queue.request_in_processed(ids[1]));
+    assert!(queue.request_in_requests(ids[2]));
+    assert!(queue.request_status_any(ids[2]).is_signed());
+    assert!(queue.has_withdrawal_txn(txn_id));
+
+    // Finish must no-op while a request remains unarchived.
+    queue.finish_archive_withdrawal_txn(txn_id);
+    assert!(queue.has_withdrawal_txn(txn_id));
+    assert!(!queue.has_confirmed_txn(txn_id));
+
+    // Archive the last request; finish now moves the txn.
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[2]]);
+    queue.finish_archive_withdrawal_txn(txn_id);
+    assert!(!queue.has_withdrawal_txn(txn_id));
+    assert!(queue.has_confirmed_txn(txn_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_chunked_archive_rerun_idempotent() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (ids, txn_id) = setup_confirmed_three_request_txn(&mut queue, &clock, ctx);
+
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[0]]);
+    // Re-running the same chunk is a no-op status re-write, not an abort.
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[0]]);
+    assert!(queue.request_in_processed(ids[0]));
+    assert!(queue.request_status_any(ids[0]).is_confirmed());
+
+    // After the txn is fully archived, chunk calls no-op entirely.
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[1], ids[2]]);
+    queue.finish_archive_withdrawal_txn(txn_id);
+    queue.archive_withdrawal_requests(txn_id, &vector[ids[0]]);
+    assert!(queue.has_confirmed_txn(txn_id));
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+#[expected_failure(abort_code = withdrawal_queue::ERequestTxnMismatch)]
+fun test_chunked_archive_foreign_request_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let (_ids, txn_id) = setup_confirmed_three_request_txn(&mut queue, &clock, ctx);
+    // A request belonging to a different withdrawal must be rejected in the
+    // requests branch (and the processed branch carries the same check).
+    let (foreign_id, _info) = approve_and_commit(&mut queue, &clock, 40_000, ctx);
+    queue.archive_withdrawal_requests(txn_id, &vector[foreign_id]);
+    abort 0
+}
+
+#[test]
+#[expected_failure(abort_code = EWithdrawalNotConfirmed)]
+fun test_chunked_archive_unconfirmed_txn_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let txn_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
+    queue.archive_withdrawal_requests(txn_id, &vector[]);
+    abort 0
+}
+
+#[test]
+/// Regression: `processed` residency is not archival. A request committed
+/// before the v2 upgrade lives in `processed` while still `Signed`, so an
+/// adversarial early finish right after confirmation must no-op instead of
+/// retiring the txn and stranding the request with a stale status; archiving
+/// the request (Confirmed in place) then lets the finish complete.
+fun test_finish_archive_waits_for_v1_committed_requests() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    // v1-committed (pre-upgrade): request lives in `processed`.
+    let id = setup_request(&mut queue, &clock, 60_000, ctx);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
+    let txn = make_test_txn(vector[id], @0xF00D, &clock, ctx);
+    let txn_id = txn.withdrawal_txn_id();
+    let btc = queue.commit_requests_v1_style_for_testing(&txn);
+    btc.destroy_for_testing();
+    queue.insert_withdrawal_txn(txn);
+    queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
+    queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], &clock);
+    queue.update_requests_signed(&vector[id]);
+    queue.mark_txn_confirmed(txn_id, &clock);
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_signed());
+
+    // Adversarial early finish before any archive_request ran: must no-op.
+    queue.finish_archive_withdrawal_txn(txn_id);
+    assert!(queue.has_withdrawal_txn(txn_id));
+    assert!(!queue.has_confirmed_txn(txn_id));
+    assert!(queue.request_status_any(id).is_signed());
+
+    // Archive the request (Confirmed in place), then the finish completes.
+    queue.archive_withdrawal_requests(txn_id, &vector[id]);
+    queue.finish_archive_withdrawal_txn(txn_id);
+    assert!(!queue.has_withdrawal_txn(txn_id));
+    assert!(queue.has_confirmed_txn(txn_id));
+    assert!(queue.request_in_processed(id));
+    assert!(queue.request_status_any(id).is_confirmed());
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
 }
