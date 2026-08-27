@@ -1,6 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// The MPC protocol parameters (`f`, weight-reduction delta, nonce protocol,
+/// nonce accumulation window) and their validation. They live in the
+/// package's EPOCH config: governance edits them through
+/// `update_epoch_config`, and `pin` snapshots the whole epoch config onto the
+/// committee formed at `start_reconfig`, so a committee's parameters never
+/// change under it.
 module hashi::mpc_config;
 
 use hashi::{config::{Self, Config}, config_value};
@@ -30,6 +36,10 @@ const KEY_NONCE_ACCUMULATION_WINDOW_MS: vector<u8> = b"mpc_nonce_accumulation_wi
 
 // ~~~~~~~ Package Functions ~~~~~~~
 
+/// Range-checks a value bound for the epoch config. Keys this module does not
+/// own pass unconditionally; the retired threshold key is rejected outright so
+/// it can never reappear in a pinned config (nodes treat its presence as the
+/// legacy threshold formula).
 #[allow(implicit_const_copy)]
 public(package) fun is_valid_value(key: &std::string::String, value: &config_value::Value): bool {
     let k = key.as_bytes();
@@ -140,26 +150,15 @@ public(package) fun init_defaults(config: &mut Config) {
     );
 }
 
-public(package) fun pin(config: &mut Config): Config {
-    repair_out_of_range(config);
-    let mut mpc = config::empty();
-    mpc.upsert(
-        KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
-        config_value::new_u64(weight_reduction_allowed_delta(config)),
-    );
-    mpc.upsert(
-        KEY_MAX_FAULTY_IN_BASIS_POINTS,
-        config_value::new_u64(max_faulty_in_basis_points(config)),
-    );
-    mpc.upsert(
-        KEY_NONCE_GENERATION_PROTOCOL,
-        config_value::new_u64(nonce_generation_protocol(config)),
-    );
-    mpc.upsert(
-        KEY_NONCE_ACCUMULATION_WINDOW_MS,
-        config_value::new_u64(nonce_accumulation_window_ms(config)),
-    );
-    mpc
+/// Normalize the MPC parameters in the epoch config (seed absent keys, repair
+/// out-of-range values in place) and return the whole store for pinning onto
+/// the committee being formed. Every epoch-scoped key, MPC or
+/// governance-added, is copied wholesale so nodes read one immutable snapshot
+/// per epoch.
+public(package) fun pin(epoch_config: &mut Config): Config {
+    seed_absent_defaults(epoch_config);
+    repair_out_of_range(epoch_config);
+    *epoch_config
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~

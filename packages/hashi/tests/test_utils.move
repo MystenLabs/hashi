@@ -8,6 +8,7 @@ module hashi::test_utils;
 
 use hashi::{
     abort_reconfig,
+    add_config,
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
     disable_version,
@@ -15,7 +16,8 @@ use hashi::{
     enable_version,
     hashi::Hashi,
     ignore_member,
-    update_config
+    update_config,
+    update_epoch_config
 };
 use sui::{bag, bls12381, clock::Clock, vec_map};
 
@@ -129,10 +131,11 @@ public fun create_hashi_with_weighted_committee(
         ctx,
     );
 
-    // Create config with BTC defaults + MPC defaults
+    // Instant config with BTC defaults; epoch config with MPC defaults
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
-    hashi::mpc_config::init_defaults(&mut config);
+    let mut epoch_config = hashi::config::empty();
+    hashi::mpc_config::init_defaults(&mut epoch_config);
 
     // Create versioning (version gating + upgrade cap)
     let versioning = hashi::versioning::create();
@@ -149,6 +152,7 @@ public fun create_hashi_with_weighted_committee(
     hashi::hashi::create_for_testing(
         committee_set,
         config,
+        epoch_config,
         versioning,
         treasury,
         proposals,
@@ -187,7 +191,8 @@ public fun create_hashi_with_committee_and_registry(
 
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
-    hashi::mpc_config::init_defaults(&mut config);
+    let mut epoch_config = hashi::config::empty();
+    hashi::mpc_config::init_defaults(&mut epoch_config);
     let versioning = hashi::versioning::create();
     let treasury = hashi::treasury::create(ctx);
     let proposals = hashi::proposals::create(ctx);
@@ -196,6 +201,7 @@ public fun create_hashi_with_committee_and_registry(
     hashi::hashi::create_for_testing(
         committee_set,
         config,
+        epoch_config,
         versioning,
         treasury,
         proposals,
@@ -279,6 +285,43 @@ public fun create_deposit_minimum_proposal(
         config_value::new_u64(minimum),
     );
     update_config::propose(hashi, validator_address, entries, vec_map::empty(), clock, ctx)
+}
+
+/// Creates an add config proposal for a single `key` in the store selected by
+/// `epoch` and returns its ID
+public fun create_add_config_proposal(
+    hashi: &mut Hashi,
+    validator_address: address,
+    epoch: bool,
+    key: vector<u8>,
+    value: config_value::Value,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    let mut entries = vec_map::empty();
+    entries.insert(key.to_string(), value);
+    add_config::propose(hashi, validator_address, epoch, entries, vec_map::empty(), clock, ctx)
+}
+
+/// Creates an update epoch config proposal for a single `key` and returns its ID
+public fun create_update_epoch_config_proposal(
+    hashi: &mut Hashi,
+    validator_address: address,
+    key: vector<u8>,
+    value: config_value::Value,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    let mut entries = vec_map::empty();
+    entries.insert(key.to_string(), value);
+    update_epoch_config::propose(
+        hashi,
+        validator_address,
+        entries,
+        vec_map::empty(),
+        clock,
+        ctx,
+    )
 }
 
 /// Creates an enable version proposal and returns its ID
