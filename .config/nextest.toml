@@ -1,19 +1,23 @@
 # Nextest configuration for hashi
 # See https://nexte.st/docs/configuration/ for details
 
+[test-groups]
+e2e = { max-threads = 4 }
+
 # Integration tests in e2e-tests are heavy - they spin up Bitcoin regtest,
-# Sui localnet, and multiple Hashi nodes.
+# Sui localnet, and multiple Hashi nodes. Cap their concurrency independently
+# of the runner's CPU count.
 [[profile.default.overrides]]
 filter = 'package(e2e-tests)'
-threads-required = 4
+test-group = 'e2e'
 
 # The resignation-lifecycle e2e forces two epoch boundaries with resharing
 # across four nodes; under a packed scheduler it starves (timers stop firing)
-# and times out despite passing in isolation. An over-sized threads-required
-# is clamped to the thread count, so this runs the test exclusively.
+# and times out despite passing in isolation. Reserve the full global test
+# thread pool so this test runs exclusively on every runner size.
 [[profile.default.overrides]]
 filter = 'test(test_resigned_member_excluded_then_removed_permissionlessly)'
-threads-required = 16
+threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
 filter = 'package(hashi-monitor)'
