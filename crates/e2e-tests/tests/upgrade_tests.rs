@@ -537,7 +537,12 @@ async fn test_withdrawal_committed_under_v1_completes_after_upgrade() -> Result<
         .iter()
         .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
         .collect::<Result<_>>()?;
-    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, new_package_id).await?;
+    let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+        &mut networks.sui_network.client.clone(),
+        hashi_ids.hashi_object_id,
+    )
+    .await?;
+    upgrade_flow::disable_version(&mut executors, hashi_ids, hashi_isv, 1, new_package_id).await?;
     upgrade_flow::wait_for_version_disabled(&networks, 1, Duration::from_secs(30)).await?;
     assert_eq!(
         node0.onchain_state().withdrawal_effective_version(),
@@ -724,7 +729,13 @@ async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
         .iter()
         .map(|node| SuiTxExecutor::from_config(&node.hashi().config, node.hashi().onchain_state()))
         .collect::<Result<_>>()?;
-    upgrade_flow::disable_version(&mut executors, hashi_ids, 1, active_package_id).await?;
+    let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+        &mut networks.sui_network.client.clone(),
+        hashi_ids.hashi_object_id,
+    )
+    .await?;
+    upgrade_flow::disable_version(&mut executors, hashi_ids, hashi_isv, 1, active_package_id)
+        .await?;
 
     // Every watcher must converge on v1-disabled; the proposal execution is
     // checkpointed, so the fullnode state the direct v1 calls run against

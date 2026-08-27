@@ -507,7 +507,19 @@ impl TestNetworksBuilder {
                         )
                     })
                     .collect::<Result<_>>()?;
-                upgrade_flow::disable_version(&mut executors, hashi_ids, 1, new_package_id).await?;
+                let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                    &mut test_networks.sui_network.client.clone(),
+                    hashi_ids.hashi_object_id,
+                )
+                .await?;
+                upgrade_flow::disable_version(
+                    &mut executors,
+                    hashi_ids,
+                    hashi_isv,
+                    1,
+                    new_package_id,
+                )
+                .await?;
                 upgrade_flow::wait_for_version_disabled(
                     &test_networks,
                     1,
