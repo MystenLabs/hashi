@@ -596,11 +596,11 @@ impl ProposalType {
     ///
     /// Move types retain their defining package address across later package
     /// upgrades, so callers constructing a type argument must resolve this
-    /// version to its published package ID rather than always using v1.
+    /// version to its published package ID rather than always using v1. Every
+    /// current type ships in the v1 package of the squashed chain; a type a
+    /// later upgrade adds declares the version that introduced it here.
     pub fn package_version(&self) -> Option<u64> {
         match self {
-            ProposalType::UpgradeV2 => Some(2),
-            ProposalType::IgnoreMember => Some(2),
             ProposalType::Unknown(_) => None,
             _ => Some(1),
         }

@@ -916,33 +916,29 @@ mod fire_threshold_tests {
     use super::*;
 
     /// The scheduler's fire threshold must track the version-resolved
-    /// executable cap that commitment construction enforces (298 at v1 or
-    /// unresolved, 447 at v2): a threshold the builder trims below can
-    /// never fire and only pays the full batching delay. A literal
-    /// 298-request e2e is impractical (each request needs a funded
-    /// deposit), so pin the threshold seam the builder shares instead.
+    /// executable cap that commitment construction enforces (298 while the
+    /// version is unresolved, 447 at any published version of the squashed
+    /// package): a threshold the builder trims below can never fire and
+    /// only pays the full batching delay. A literal 298-request e2e is
+    /// impractical (each request needs a funded deposit), so pin the
+    /// threshold seam the builder shares instead.
     #[test]
     fn fire_threshold_tracks_the_version_resolved_cap() {
         assert_eq!(withdrawal_fire_threshold(447, None), 298);
-        assert_eq!(withdrawal_fire_threshold(447, Some(1)), 298);
+        assert_eq!(withdrawal_fire_threshold(447, Some(1)), 447);
         assert_eq!(withdrawal_fire_threshold(447, Some(2)), 447);
         // A configured maximum below the cap passes through at any version.
         assert_eq!(withdrawal_fire_threshold(2, None), 2);
         assert_eq!(withdrawal_fire_threshold(2, Some(2)), 2);
     }
 
-    /// Both-enabled means v1 semantics at this seam too: the threshold is
-    /// fed the withdrawal-effective version, which dormancy holds at 1
-    /// while v1 stays in the enabled set even though the active version
-    /// is 2.
+    /// The threshold is fed the withdrawal-effective version; on the
+    /// squashed package every published version resolves to the current
+    /// cap, the both-enabled window included.
     #[test]
-    fn fire_threshold_stays_legacy_while_v1_is_enabled() {
+    fn fire_threshold_follows_the_effective_version() {
         let both_enabled = [1u64, 2].into_iter().collect();
         let effective = crate::withdrawals::withdrawal_effective_version(2, &both_enabled);
-        assert_eq!(withdrawal_fire_threshold(447, Some(effective)), 298);
-
-        let v1_disabled = [2u64].into_iter().collect();
-        let effective = crate::withdrawals::withdrawal_effective_version(2, &v1_disabled);
         assert_eq!(withdrawal_fire_threshold(447, Some(effective)), 447);
     }
 }

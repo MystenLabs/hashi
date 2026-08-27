@@ -898,7 +898,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    // The ignore_member module exists only from v2 on.
+                    // Upgrade-introduced modules route through the active package.
                     call_package,
                     Identifier::from_static("ignore_member"),
                     Identifier::from_static("propose"),
@@ -1041,8 +1041,8 @@ fn build_metadata(
 }
 
 impl HashiClient {
-    /// Build a `validator::resign` transaction. The entry function is
-    /// introduced by v2, so the call targets the latest package, and the
+    /// Build a `validator::resign` transaction. The call targets the latest
+    /// package (the rule for every entry an upgrade may introduce), and the
     /// shared inputs are fully resolved (see
     /// `build_create_proposal_transaction`).
     pub fn build_resign_transaction(&self) -> anyhow::Result<TransactionBuilder> {

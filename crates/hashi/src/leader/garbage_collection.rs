@@ -59,9 +59,9 @@ const KEY_GEN_CERT_RETENTION_EPOCHS: u64 = 8;
 /// `tob::destroy_all`'s backstop.
 const NONCE_CERT_MIN_AGE_EPOCHS: u64 = 2;
 
-/// The destroy entries are v2-introduced; hold the prune job off until the
-/// active on-chain version carries them.
-const TOB_PRUNE_MIN_PACKAGE_VERSION: u64 = 2;
+/// The active on-chain version that carries the destroy entries: every
+/// version of the squashed package.
+const TOB_PRUNE_MIN_PACKAGE_VERSION: u64 = 1;
 
 /// Failure kind for the UTXO cleanup GC. `max_retries` is unbounded: this is
 /// a singleton maintenance task that must never permanently give up (a
@@ -90,9 +90,9 @@ impl crate::leader::retry::RetryPolicy for UtxoCleanupErrorKind {
 // drains over successive checkpoints, oldest confirmations first.
 const MAX_WITHDRAWAL_ARCHIVES_PER_GC: usize = 500;
 
-// `archive_confirmed_withdrawals` first exists in the v2 package, and
-// pre-upgrade there is nothing to archive (v1 confirm archives inline).
-const WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION: u64 = 2;
+// `archive_confirmed_withdrawals` ships in every version of the squashed
+// package.
+const WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION: u64 = 1;
 
 /// Failure kind for the withdrawal archival GC. Unbounded retries for the
 /// same reason as [`UtxoCleanupErrorKind`].
@@ -620,9 +620,9 @@ impl LeaderService {
             return;
         }
 
-        // The destroy entries are v2-introduced. Gating on the ACTIVE version
-        // (not merely the latest published) also keeps the sweep off a chain
-        // whose semantics this binary does not implement.
+        // Gating on the ACTIVE version (not merely the latest published)
+        // keeps the sweep off a chain whose semantics this binary does not
+        // implement.
         let Some(active) = self.inner.onchain_state().active_package_version() else {
             return;
         };

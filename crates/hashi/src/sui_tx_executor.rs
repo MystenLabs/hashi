@@ -1906,8 +1906,8 @@ impl SuiTxExecutor {
     /// chunks followed by `finish_archive_withdrawal_txns`. Returns the max
     /// landed checkpoint.
     ///
-    /// The entries only exist in the v2 package; the caller gates on the
-    /// withdrawal-effective version, and the target resolves through it.
+    /// The caller gates on the withdrawal-effective version, and the target
+    /// resolves through it.
     pub(crate) async fn execute_archive_confirmed_withdrawals(
         &mut self,
         victims: &[ArchiveVictim],
@@ -1988,9 +1988,9 @@ impl SuiTxExecutor {
     /// failure propagates, so an over-limit chunk can never permanently
     /// wedge the sweep behind an unbounded identical retry.
     ///
-    /// The entries are v2-introduced, so the calls route to the ACTIVE
-    /// package (they do not exist in the original package) and the Hashi
-    /// shared input is pre-resolved: sui >= 1.76 fullnodes fail simulation
+    /// The calls route to the ACTIVE package (the rule for every entry an
+    /// upgrade may introduce) and the Hashi shared input is pre-resolved:
+    /// sui >= 1.76 fullnodes fail simulation
     /// with INVALID_LINKAGE when inferring an unresolved shared input's
     /// mutability requires inspecting an upgraded package's module (see
     /// `delete_expired_proposals`).

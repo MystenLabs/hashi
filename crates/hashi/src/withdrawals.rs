@@ -128,9 +128,10 @@ const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 pub(crate) const LEGACY_MAX_WITHDRAWAL_REQUESTS: usize = 298;
 
 /// The package version at which the deferred-archival flow (in-place
-/// commit, chunked archival GC) is live; the canonical constant for both
-/// the archival GC gate and the batch-cap switch.
-pub(crate) const DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION: u64 = 2;
+/// commit, chunked archival GC) is live: from the first publish of the
+/// squashed package. The canonical constant for both the archival GC gate
+/// and the batch-cap switch.
+pub(crate) const DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION: u64 = 1;
 
 /// The package version the withdrawal flow operates at: v1 while package
 /// version 1 is still in the on-chain enabled set, otherwise the active
@@ -224,7 +225,7 @@ const _: () = assert!(
 );
 
 /// Runtime-object cost model for the deferred `archive_confirmed_withdrawals`
-/// GC (v2 package): ~3 objects per archived txn (hot-bag `Field` + child
+/// GC: ~3 objects per archived txn (hot-bag `Field` + child
 /// borrow, new cold-bag `Field`; the remove reuses the cache) and ~3 per
 /// request (the `requests` removal `Field` + child + the new `processed`
 /// `Field`; the pre-upgrade-leftover fallback path costs the same bound).
@@ -2582,10 +2583,11 @@ mod tests {
         }
     }
 
-    /// Effective-version shorthand for the model tests: the
-    /// deferred-archival package and the legacy chain.
+    /// Effective-version shorthand for the model tests: any published
+    /// version of the squashed package, and the unresolved fallback that
+    /// keeps the conservative pre-archival envelope.
     const V2: Option<u64> = Some(DEFERRED_ARCHIVAL_MIN_PACKAGE_VERSION);
-    const V1: Option<u64> = Some(1);
+    const UNRESOLVED: Option<u64> = None;
 
     fn enabled(versions: &[u64]) -> BTreeSet<u64> {
         versions.iter().copied().collect()
@@ -2610,26 +2612,26 @@ mod tests {
         assert_eq!(withdrawal_effective_version(3, &enabled(&[1, 3])), 1);
     }
 
-    /// Both-enabled means v1 semantics at the capacity seam: the cap the
-    /// leader sizes batches by (and validators enforce) resolves to the
-    /// legacy 298 while v1 is enabled, even with active version 2.
+    /// The squashed package carries deferred archival from v1, so the
+    /// capacity seam resolves to the current cap for every published
+    /// version, both-enabled windows included; only an unresolved version
+    /// falls back to the conservative envelope.
     #[test]
-    fn effective_version_resolves_legacy_cap_while_v1_is_enabled() {
+    fn effective_version_resolves_the_current_cap_for_any_published_version() {
         let both = Some(withdrawal_effective_version(2, &enabled(&[1, 2])));
         assert_eq!(
             max_withdrawal_requests(both),
-            LEGACY_MAX_WITHDRAWAL_REQUESTS
-        );
-        assert_eq!(commit_objects_per_request(both), 3);
-        assert_eq!(confirm_objects_per_request(both), 2);
-
-        let open = Some(withdrawal_effective_version(2, &enabled(&[2])));
-        assert_eq!(
-            max_withdrawal_requests(open),
             CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
         );
-        assert_eq!(commit_objects_per_request(open), 2);
-        assert_eq!(confirm_objects_per_request(open), 0);
+        assert_eq!(commit_objects_per_request(both), 2);
+        assert_eq!(confirm_objects_per_request(both), 0);
+
+        assert_eq!(
+            max_withdrawal_requests(UNRESOLVED),
+            LEGACY_MAX_WITHDRAWAL_REQUESTS
+        );
+        assert_eq!(commit_objects_per_request(UNRESOLVED), 3);
+        assert_eq!(confirm_objects_per_request(UNRESOLVED), 2);
     }
 
     #[test]
@@ -2639,11 +2641,7 @@ mod tests {
             CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
         );
         assert_eq!(
-            withdrawal_batch_request_cap(5_000, 1_000, V1),
-            LEGACY_MAX_WITHDRAWAL_REQUESTS
-        );
-        assert_eq!(
-            withdrawal_batch_request_cap(5_000, 1_000, None),
+            withdrawal_batch_request_cap(5_000, 1_000, UNRESOLVED),
             LEGACY_MAX_WITHDRAWAL_REQUESTS,
             "an unresolved active version must fall back to the legacy cap",
         );
@@ -2784,10 +2782,10 @@ mod tests {
             safe_withdrawal_commit_max_inputs(
                 LEGACY_MAX_WITHDRAWAL_REQUESTS,
                 CoinSelectionParams::DEFAULT_MAX_INPUTS,
-                V1,
+                UNRESOLVED,
             ),
             WITHDRAWAL_COMMIT_MIN_FUNDING_INPUTS,
-            "at the legacy request cap under v1 coefficients, likewise",
+            "at the legacy request cap under the unresolved-version coefficients, likewise",
         );
         assert_eq!(
             safe_withdrawal_flow_max_inputs(
@@ -2842,10 +2840,10 @@ mod tests {
             validate_commitment_shape(requests, inputs, &p2tr_outputs(requests + 1), V2)
                 .unwrap_or_else(|e| panic!("{requests} requests / {inputs} inputs rejected: {e}"));
         }
-        // A v1-active chain keeps the legacy envelope and refuses the larger one.
-        validate_commitment_shape(298, 16, &p2tr_outputs(299), V1)
-            .expect("legacy cap batch must validate on a v1-active chain");
-        let err = validate_commitment_shape(299, 16, &p2tr_outputs(300), V1).unwrap_err();
+        // An unresolved version keeps the legacy envelope and refuses the larger one.
+        validate_commitment_shape(298, 16, &p2tr_outputs(299), UNRESOLVED)
+            .expect("legacy cap batch must validate with the version unresolved");
+        let err = validate_commitment_shape(299, 16, &p2tr_outputs(300), UNRESOLVED).unwrap_err();
         assert!(err.to_string().contains("exceeding the batch cap"), "{err}");
     }
 
@@ -2923,7 +2921,7 @@ mod tests {
     /// safety net.
     #[test]
     fn withdrawal_confirm_budget_never_binds() {
-        for active in [V1, V2] {
+        for active in [UNRESOLVED, V2] {
             for request_count in 1..=1000 {
                 let configured = CoinSelectionParams::DEFAULT_MAX_INPUTS;
                 let without_confirm = configured

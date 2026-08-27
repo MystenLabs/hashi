@@ -959,8 +959,6 @@ pub struct IgnoreMember {
 }
 
 impl MoveType for IgnoreMember {
-    /// Introduced by the v2 upgrade; the defining address is v2's forever.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "ignore_member";
     const NAME: &'static str = "IgnoreMember";
 }
@@ -980,8 +978,6 @@ pub struct ValidatorResigned {
 }
 
 impl MoveType for ValidatorResigned {
-    /// Introduced by the v2 upgrade.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "validator";
     const NAME: &'static str = "ValidatorResigned";
 }
@@ -993,8 +989,6 @@ pub struct ValidatorResignationWithdrawn {
 }
 
 impl MoveType for ValidatorResignationWithdrawn {
-    /// Introduced by the v2 upgrade.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "validator";
     const NAME: &'static str = "ValidatorResignationWithdrawn";
 }
@@ -1006,8 +1000,6 @@ pub struct ValidatorDeregistered {
 }
 
 impl MoveType for ValidatorDeregistered {
-    /// Introduced by the v2 upgrade.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "validator";
     const NAME: &'static str = "ValidatorDeregistered";
 }
@@ -1040,14 +1032,13 @@ impl MoveType for EpochCertsV1 {
     const NAME: &'static str = "EpochCertsV1";
 }
 
-/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, which the v2
-/// package introduces. Identification only: it is BCS-identical to
+/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, the nonce-cert
+/// bucket layout. Identification only: it is BCS-identical to
 /// `EpochCertsV1`, which is what the bucket is decoded as; the layout it names
 /// selects the linked-table node type.
 pub struct StampedEpochCertsV1;
 
 impl MoveType for StampedEpochCertsV1 {
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "tob";
     const NAME: &'static str = "StampedEpochCertsV1";
 }

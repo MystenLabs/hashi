@@ -813,7 +813,7 @@ fun test_disable_current_version_fails() {
     let proposal_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        2, // current package version
+        1, // current package version
         &clock,
         ctx,
     );
@@ -839,7 +839,7 @@ fun test_enable_already_enabled_version_fails() {
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        2, // already enabled
+        1, // already enabled
         &clock,
         ctx,
     );
@@ -868,7 +868,7 @@ fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
     let clock = clock::create_for_testing(ctx);
 
     hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_v2(ctx));
-    hashi.versioning_mut().enable_version(1);
+    hashi.versioning_mut().enable_version(2);
 
     let proposal_id = upgrade_v2::propose(
         &mut hashi,
@@ -898,7 +898,7 @@ fun test_upgrade_v2_non_exclusive_preserves_enabled_versions() {
     let clock = clock::create_for_testing(ctx);
 
     hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_v2(ctx));
-    hashi.versioning_mut().enable_version(1);
+    hashi.versioning_mut().enable_version(2);
 
     let proposal_id = upgrade_v2::propose(
         &mut hashi,

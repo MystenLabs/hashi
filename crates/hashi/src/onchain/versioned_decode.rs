@@ -113,11 +113,16 @@ mod tests {
                 .unwrap(),
             TobCertLayout::Bare
         );
-        // Introduced by v2, so its defining address is the v2 package.
+        // Both layouts ship in v1 of the squashed package.
         assert_eq!(
-            TobCertLayout::from_struct_tag(&packages(), &addr_tag(0x9, "tob::StampedEpochCertsV1"))
+            TobCertLayout::from_struct_tag(&packages(), &addr_tag(0x7, "tob::StampedEpochCertsV1"))
                 .unwrap(),
             TobCertLayout::Stamped
+        );
+        // A same-name type from another package is not trusted.
+        assert!(
+            TobCertLayout::from_struct_tag(&packages(), &addr_tag(0x9, "tob::StampedEpochCertsV1"))
+                .is_err()
         );
     }
 

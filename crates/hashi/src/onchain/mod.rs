@@ -2461,7 +2461,7 @@ mod upgrade_v2_proposal_tests {
     fn upgrade_v2_proposal_type_and_layout_decode() {
         let tag = proposal_tag("upgrade_v2");
         assert_eq!(parse_proposal_type(&tag), types::ProposalType::UpgradeV2);
-        assert_eq!(types::ProposalType::UpgradeV2.package_version(), Some(2));
+        assert_eq!(types::ProposalType::UpgradeV2.package_version(), Some(1));
 
         let proposal = move_types::Proposal {
             id: Address::from_static("0x11"),
