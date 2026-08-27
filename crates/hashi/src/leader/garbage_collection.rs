@@ -818,9 +818,10 @@ fn find_tob_buckets_to_prune(
 ) -> Vec<TobPruneTarget> {
     use hashi_types::move_types::ProtocolType;
 
-    // Saturating arithmetic throughout: key epochs come from on-chain field
-    // names anyone can shape, and an overflow panic here would kill the
-    // leader's prune task.
+    // Saturating arithmetic throughout: bag writes are committee-gated
+    // (submit entries assert membership and current/pending epoch), but the
+    // pruner treats field-name epochs as untrusted data anyway; an overflow
+    // panic here would kill the leader's prune task.
     let mut keygen_epochs: BTreeSet<u64> = BTreeSet::new();
     let mut nonce_batches: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
     for key in keys {
