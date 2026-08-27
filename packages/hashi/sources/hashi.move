@@ -45,7 +45,8 @@ public struct Hashi has key {
     versioning: Versioning,
     treasury: Treasury,
     proposals: Proposals,
-    /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
+    /// TOB certificates by (epoch, batch_index, protocol_type). Values are
+    /// bare `EpochCertsV1` buckets or, for nonce certs, `StampedEpochCertsV1`.
     tob: Bag,
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
