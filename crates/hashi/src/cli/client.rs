@@ -42,6 +42,19 @@ pub enum CreateProposalParams {
         value: hashi_types::move_types::ConfigValue,
         metadata: Vec<(String, String)>,
     },
+    /// Update an existing key in the epoch config.
+    UpdateEpochConfig {
+        key: String,
+        value: hashi_types::move_types::ConfigValue,
+        metadata: Vec<(String, String)>,
+    },
+    /// Add a new key to the epoch (`epoch: true`) or instant config.
+    AddConfig {
+        epoch: bool,
+        key: String,
+        value: hashi_types::move_types::ConfigValue,
+        metadata: Vec<(String, String)>,
+    },
     UpdateMpcConfig {
         max_faulty_bps: Option<u64>,
         weight_reduction_allowed_delta: Option<u64>,
@@ -366,6 +379,17 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::UpdateEpochConfig => {
+                        let p: move_types::Proposal<move_types::UpdateEpochConfig> =
+                            bcs::from_bytes(value_bytes)
+                                .context("deserialize UpdateEpochConfig")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::AddConfig => {
+                        let p: move_types::Proposal<move_types::AddConfig> =
+                            bcs::from_bytes(value_bytes).context("deserialize AddConfig")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::EnableVersion => {
                         let p: move_types::Proposal<move_types::EnableVersion> =
                             bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
@@ -581,6 +605,8 @@ impl HashiClient {
 
         let module_name = match proposal_type {
             ProposalType::UpdateConfig => "update_config",
+            ProposalType::UpdateEpochConfig => "update_epoch_config",
+            ProposalType::AddConfig => "add_config",
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
@@ -736,6 +762,63 @@ pub fn build_create_proposal_transaction(
                 ],
             );
         }
+        CreateProposalParams::UpdateEpochConfig {
+            key,
+            value,
+            metadata,
+        } => {
+            let entries_arg = build_config_entries(
+                &mut builder,
+                hashi_ids.package_id,
+                call_package,
+                &[(key, value)],
+            );
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    call_package,
+                    Identifier::from_static("update_epoch_config"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    entries_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::AddConfig {
+            epoch,
+            key,
+            value,
+            metadata,
+        } => {
+            let epoch_arg = builder.pure(&epoch);
+            let entries_arg = build_config_entries(
+                &mut builder,
+                hashi_ids.package_id,
+                call_package,
+                &[(key, value)],
+            );
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    call_package,
+                    Identifier::from_static("add_config"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    epoch_arg,
+                    entries_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
         CreateProposalParams::UpdateMpcConfig {
             max_faulty_bps,
             weight_reduction_allowed_delta,
@@ -756,10 +839,11 @@ pub fn build_create_proposal_transaction(
             let entries_arg =
                 build_config_entries(&mut builder, hashi_ids.package_id, call_package, &entries);
             let metadata_arg = build_metadata(&mut builder, &metadata);
+            // The MPC parameters live in the epoch config.
             builder.move_call(
                 Function::new(
                     call_package,
-                    Identifier::from_static("update_config"),
+                    Identifier::from_static("update_epoch_config"),
                     Identifier::from_static("propose"),
                 ),
                 vec![
@@ -1154,6 +1238,8 @@ pub fn get_proposal_type_arg(
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
+        ProposalType::UpdateEpochConfig => ("update_epoch_config", "UpdateEpochConfig"),
+        ProposalType::AddConfig => ("add_config", "AddConfig"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),

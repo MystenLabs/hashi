@@ -2650,6 +2650,12 @@ mod tests {
         use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
+        // Governance-added keys the Move package knows nothing about.
+        const EPOCH_KNOB: &str = "e2e_epoch_knob";
+        const EPOCH_KNOB_VALUE: u64 = 7;
+        const INSTANT_KNOB: &str = "e2e_instant_knob";
+        const INSTANT_KNOB_VALUE: u64 = 9;
+
         // Wait for DKG (epoch 1 committee created with defaults).
         let nodes = networks.hashi_network.nodes();
         let futs: Vec<_> = nodes
@@ -2699,6 +2705,60 @@ mod tests {
             ],
         )
         .await?;
+
+        // Add one key to each store. The epoch key rides the wholesale pin
+        // into the next committee; the instant key applies at once and never
+        // reaches a committee.
+        {
+            use hashi::cli::client::CreateProposalParams;
+            use hashi::sui_tx_executor::SuiTxExecutor;
+            use hashi_types::move_types::ConfigValue;
+
+            let nodes = networks.hashi_network.nodes();
+            let hashi_ids = networks.hashi_network.ids();
+            let latest_package_id = nodes[0]
+                .hashi()
+                .onchain_state()
+                .package_id()
+                .unwrap_or(hashi_ids.package_id);
+            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+                &mut networks.sui_network.client.clone(),
+                hashi_ids.hashi_object_id,
+            )
+            .await?;
+            let mut executors: Vec<SuiTxExecutor> = nodes
+                .iter()
+                .map(|node| {
+                    let hashi = node.hashi();
+                    SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+                })
+                .collect::<Result<_>>()?;
+            let add_config_type_tag = hashi::cli::client::get_proposal_type_arg(
+                latest_package_id,
+                &hashi::onchain::types::ProposalType::AddConfig,
+            )?;
+            for (epoch, key, value) in [
+                (true, EPOCH_KNOB, EPOCH_KNOB_VALUE),
+                (false, INSTANT_KNOB, INSTANT_KNOB_VALUE),
+            ] {
+                crate::submit_proposal_through_quorum(
+                    hashi_ids,
+                    hashi_isv,
+                    latest_package_id,
+                    &mut executors,
+                    CreateProposalParams::AddConfig {
+                        epoch,
+                        key: key.to_string(),
+                        value: ConfigValue::U64(value),
+                        metadata: vec![],
+                    },
+                    add_config_type_tag.clone(),
+                    "add_config",
+                    &format!("AddConfig({key})"),
+                )
+                .await?;
+            }
+        }
 
         // Force key rotation → epoch 2 committee created with new config.
         let target_epoch = initial_epoch + 1;
@@ -2762,6 +2822,41 @@ mod tests {
             new_max_faulty as u16,
             "epoch {target_epoch} committee should have updated max_faulty_basis_points"
         );
+
+        // The governance-added keys landed in exactly their stores.
+        assert_eq!(
+            epoch2.config().get_u64(EPOCH_KNOB, 0),
+            EPOCH_KNOB_VALUE,
+            "epoch {target_epoch} committee should carry the governance-added epoch key"
+        );
+        assert_eq!(
+            epoch1.config().get_u64(EPOCH_KNOB, 0),
+            0,
+            "epoch {initial_epoch} committee predates the epoch key and must not carry it"
+        );
+        assert!(
+            !epoch2
+                .config()
+                .entries()
+                .iter()
+                .any(|(key, _)| key == INSTANT_KNOB),
+            "instant keys never reach a committee"
+        );
+        let (instant, governed_epoch) = {
+            let s = state.state();
+            (
+                s.hashi().config.config.get(INSTANT_KNOB).cloned(),
+                s.hashi().epoch_config.get_u64(EPOCH_KNOB, 0),
+            )
+        };
+        assert_eq!(
+            instant,
+            Some(hashi_types::move_types::ConfigValue::U64(
+                INSTANT_KNOB_VALUE
+            )),
+            "instant key should be readable from the Hashi object right away"
+        );
+        assert_eq!(governed_epoch, EPOCH_KNOB_VALUE);
 
         Ok(())
     }

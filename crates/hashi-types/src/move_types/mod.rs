@@ -182,7 +182,10 @@ pub fn is_dof_wrapper(tag: &StructTag) -> bool {
 pub struct Hashi {
     pub id: Address,
     pub committees: CommitteeSet,
+    /// Governed values that apply the moment a proposal executes.
     pub config: Config,
+    /// Governed values copied wholesale onto each new committee.
+    pub epoch_config: Config,
     pub versioning: Versioning,
     pub treasury: Treasury,
     pub proposals: Proposals,
@@ -942,6 +945,30 @@ pub struct Proposal<T> {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct UpdateConfig {
     pub entries: VecMap<String, ConfigValue>,
+}
+
+/// Rust version of the Move hashi::update_epoch_config::UpdateEpochConfig type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct UpdateEpochConfig {
+    pub entries: VecMap<String, ConfigValue>,
+}
+
+impl MoveType for UpdateEpochConfig {
+    const MODULE: &'static str = "update_epoch_config";
+    const NAME: &'static str = "UpdateEpochConfig";
+}
+
+/// Rust version of the Move hashi::add_config::AddConfig type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct AddConfig {
+    /// `true` targets the epoch config, `false` the instant config.
+    pub epoch: bool,
+    pub entries: VecMap<String, ConfigValue>,
+}
+
+impl MoveType for AddConfig {
+    const MODULE: &'static str = "add_config";
+    const NAME: &'static str = "AddConfig";
 }
 
 /// Rust version of the Move hashi::enable_version::EnableVersion type.

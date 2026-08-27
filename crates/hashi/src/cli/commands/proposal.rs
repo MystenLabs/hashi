@@ -670,6 +670,82 @@ pub async fn create_update_config_proposal(
     Ok(())
 }
 
+/// Create an update epoch config proposal
+pub async fn create_update_epoch_config_proposal(
+    config: &CliConfig,
+    key: &str,
+    value_str: &str,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let value = parse_config_value(value_str)
+        .context("Invalid value format. Use type:value, e.g. u64:1000 or bool:true")?;
+
+    print_detail(&format!(
+        "\n{}",
+        "Creating Update Epoch Config Proposal:".bold()
+    ));
+    print_detail(&format!("  Key:   {}", key));
+    print_detail(&format!("  Value: {}", value_str));
+    print_detail("  Takes effect: next committee formed after execution");
+    print_metadata(&metadata);
+
+    prompt_continue("create this epoch config update proposal", tx_opts).await?;
+
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateEpochConfig {
+        key: key.to_string(),
+        value,
+        metadata,
+    })?;
+
+    print_info("Transaction: update_epoch_config::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
+/// Create an add config proposal
+pub async fn create_add_config_proposal(
+    config: &CliConfig,
+    key: &str,
+    value_str: &str,
+    epoch: bool,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let value = parse_config_value(value_str)
+        .context("Invalid value format. Use type:value, e.g. u64:1000 or bool:true")?;
+
+    print_detail(&format!("\n{}", "Creating Add Config Proposal:".bold()));
+    print_detail(&format!("  Key:   {}", key));
+    print_detail(&format!("  Value: {}", value_str));
+    print_detail(&format!(
+        "  Store: {}",
+        if epoch {
+            "epoch config (copied onto each new committee)"
+        } else {
+            "instant config (applies on execute)"
+        }
+    ));
+    print_metadata(&metadata);
+
+    prompt_continue("create this add config proposal", tx_opts).await?;
+
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::AddConfig {
+        epoch,
+        key: key.to_string(),
+        value,
+        metadata,
+    })?;
+
+    print_info("Transaction: add_config::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
 pub async fn create_update_mpc_config_proposal(
     config: &CliConfig,
     max_faulty_bps: Option<u64>,

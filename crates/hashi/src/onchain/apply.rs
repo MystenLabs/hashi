@@ -390,6 +390,7 @@ fn apply_root(
         id: _,
         committees,
         config,
+        epoch_config,
         versioning,
         treasury: _,
         proposals: _,
@@ -413,6 +414,7 @@ fn apply_root(
         packages.insert(cap.version, cap.package);
     }
     hashi.config = new_config;
+    hashi.epoch_config = epoch_config;
     hashi.num_consumed_presigs = num_consumed_presigs;
 
     let new_pending = committees.pending_epoch_change.as_ref().map(|p| p.epoch);
@@ -1163,6 +1165,7 @@ mod tests {
                     enabled_versions: BTreeSet::new(),
                     upgrade_cap: None,
                 },
+                epoch_config: move_types::Config::default(),
                 treasury: types::Treasury {
                     id: treasury_id(),
                     treasury_caps: BTreeMap::new(),
@@ -1336,6 +1339,7 @@ mod tests {
         id: Address,
         committees: CommitteeSetEnc,
         config: move_types::Config,
+        epoch_config: move_types::Config,
         versioning: VersioningEnc,
         treasury: TreasuryEnc,
         proposals: ProposalsEnc,
@@ -1393,6 +1397,7 @@ mod tests {
                 mpc_public_key: vec![9u8; 4],
             },
             config: move_types::Config::from_entries(vec![]),
+            epoch_config: move_types::Config::from_entries(vec![]),
             versioning: VersioningEnc {
                 enabled_versions: VecSetEnc { contents: vec![1] },
                 upgrade_cap: upgrade_cap.map(|(package, version)| UpgradeCapEnc {

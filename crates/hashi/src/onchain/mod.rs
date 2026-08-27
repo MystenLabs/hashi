@@ -952,19 +952,28 @@ impl OnchainState {
         self.state().hashi().config.bitcoin_deposit_time_delay_ms()
     }
 
+    /// The governed MPC parameters from the epoch config: what the NEXT
+    /// committee will be formed with. The active committee reads its own
+    /// pinned copy via [`Committee::config`](hashi_types::committee::Committee::config).
     pub fn mpc_nonce_generation_protocol(&self) -> u16 {
-        self.state().hashi().config.mpc_nonce_generation_protocol()
+        self.state()
+            .hashi()
+            .epoch_config
+            .mpc_nonce_generation_protocol()
     }
 
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
         self.state()
             .hashi()
-            .config
+            .epoch_config
             .mpc_weight_reduction_allowed_delta()
     }
 
     pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
-        self.state().hashi().config.mpc_max_faulty_in_basis_points()
+        self.state()
+            .hashi()
+            .epoch_config
+            .mpc_max_faulty_in_basis_points()
     }
 
     pub fn guardian_url(&self) -> Option<String> {
@@ -1352,6 +1361,7 @@ async fn scrape_hashi(
         id,
         committees,
         config,
+        epoch_config,
         versioning,
         treasury,
         proposals,
@@ -1443,6 +1453,7 @@ async fn scrape_hashi(
             id,
             committees: committee_set,
             config: convert_move_config(config, versioning),
+            epoch_config,
             treasury,
             bitcoin,
             proposals,
@@ -2319,6 +2330,8 @@ fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposa
     let proposal_type = parse_proposal_type(type_tag);
     let (id, timestamp_ms) = match &proposal_type {
         types::ProposalType::UpdateConfig => parse::<move_types::UpdateConfig>(contents),
+        types::ProposalType::UpdateEpochConfig => parse::<move_types::UpdateEpochConfig>(contents),
+        types::ProposalType::AddConfig => parse::<move_types::AddConfig>(contents),
         types::ProposalType::EnableVersion => parse::<move_types::EnableVersion>(contents),
         types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
         types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
@@ -2355,6 +2368,8 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 
     match (inner_tag.module().as_str(), inner_tag.name().as_str()) {
         ("update_config", "UpdateConfig") => types::ProposalType::UpdateConfig,
+        ("update_epoch_config", "UpdateEpochConfig") => types::ProposalType::UpdateEpochConfig,
+        ("add_config", "AddConfig") => types::ProposalType::AddConfig,
         ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
@@ -2486,6 +2501,39 @@ mod tests {
             vec![inner],
         )));
         assert_eq!(parse_proposal_type(&tag), types::ProposalType::IgnoreMember);
+    }
+
+    #[test]
+    fn test_parse_proposal_type_config_stores() {
+        use sui_sdk_types::Identifier;
+        use sui_sdk_types::StructTag;
+
+        let package =
+            Address::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+                .unwrap();
+        for (module, name, expected) in [
+            ("add_config", "AddConfig", types::ProposalType::AddConfig),
+            (
+                "update_epoch_config",
+                "UpdateEpochConfig",
+                types::ProposalType::UpdateEpochConfig,
+            ),
+        ] {
+            let inner = TypeTag::Struct(Box::new(StructTag::new(
+                package,
+                Identifier::new(module).unwrap(),
+                Identifier::new(name).unwrap(),
+                vec![],
+            )));
+            let tag = TypeTag::Struct(Box::new(StructTag::new(
+                package,
+                Identifier::new("proposal").unwrap(),
+                Identifier::new("Proposal").unwrap(),
+                vec![inner],
+            )));
+            assert_eq!(parse_proposal_type(&tag), expected);
+            assert_eq!(expected.package_version(), Some(1));
+        }
     }
 
     #[test]

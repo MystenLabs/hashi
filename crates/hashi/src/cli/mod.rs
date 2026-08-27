@@ -235,19 +235,61 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose updating a configuration value
+    /// Propose updating an existing instant config value (applies as soon as
+    /// the proposal executes)
     ///
     /// Known config keys and their expected value types:
     ///   bitcoin_deposit_minimum (u64),
     ///   bitcoin_withdrawal_minimum (u64),
     ///   bitcoin_confirmation_threshold (u64),
     ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool)
+    ///
+    /// The MPC parameters live in the epoch config: see `update-epoch-config`
+    /// and `update-mpc-config`.
     UpdateConfig {
         /// The config key to update
         key: String,
 
         /// The new value. Prefix with the type: u64:123, bool:true
         value: String,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
+    /// Propose updating an existing epoch config value (the MPC parameters
+    /// and any epoch-scoped keys governance added)
+    ///
+    /// The change is copied onto the next committee formed after execution;
+    /// the active committee keeps its pinned copy.
+    UpdateEpochConfig {
+        /// The epoch config key to update
+        key: String,
+
+        /// The new value. Prefix with the type: u64:123, bool:true
+        value: String,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
+    /// Propose adding a NEW config key
+    ///
+    /// Insert-only: the proposal aborts if the key already exists in the
+    /// target store, and the first value fixes the key's type for later
+    /// updates. Use this to make a node-side setting governable without a
+    /// package upgrade.
+    AddConfig {
+        /// The config key to add
+        key: String,
+
+        /// The initial value. Prefix with the type: u64:123, bool:true
+        value: String,
+
+        /// Add the key to the epoch config (copied onto each new committee)
+        /// instead of the instant config.
+        #[clap(long)]
+        epoch: bool,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -1067,6 +1109,36 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         &config,
                         &key,
                         &value,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::UpdateEpochConfig {
+                    key,
+                    value,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_epoch_config_proposal(
+                        &config,
+                        &key,
+                        &value,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::AddConfig {
+                    key,
+                    value,
+                    epoch,
+                    metadata,
+                } => {
+                    commands::proposal::create_add_config_proposal(
+                        &config,
+                        &key,
+                        &value,
+                        epoch,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

@@ -821,6 +821,8 @@ Create proposals:
 ```bash
 hashi proposal create update-config <key> <value> [-m key=value]
 hashi proposal create update-mpc-config [--max-faulty-bps <N>] [--weight-reduction-allowed-delta <N>] [-m key=value]
+hashi proposal create update-epoch-config <key> <value> [-m key=value]
+hashi proposal create add-config <key> <value> [--epoch] [-m key=value]
 hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=value]
 hashi proposal create upgrade [--package-path <path> | --digest <hex> [--allow-unverified-exclusive]] --exclusive <true|false> [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
@@ -897,8 +899,10 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 | Type | Threshold | Purpose | Parameters |
 |------|-----------|---------|-----------|
-| **UpdateConfig** | 2/3 | Change protocol parameters | `key` and type-prefixed `value` |
-| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
+| **UpdateConfig** | 2/3 | Change an existing instant config parameter (applies on execute) | `key` and type-prefixed `value` |
+| **UpdateEpochConfig** | 2/3 | Change an existing epoch config parameter (lands in the next committee) | `key` and type-prefixed `value` |
+| **AddConfig** | 2/3 | Add a new config key to either store (insert-only) | `key`, type-prefixed `value`, `--epoch` for the epoch store |
+| **UpdateMpcConfig** | 2/3 | Change MPC faulty bound / delta (epoch config) | `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
 | **Upgrade** | 2/3 | Publish a new package version with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |

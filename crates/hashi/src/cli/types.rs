@@ -51,6 +51,8 @@ pub mod display {
         match proposal_type {
             ProposalType::Upgrade => "Upgrade".to_string(),
             ProposalType::UpdateConfig => "UpdateConfig".to_string(),
+            ProposalType::UpdateEpochConfig => "UpdateEpochConfig".to_string(),
+            ProposalType::AddConfig => "AddConfig".to_string(),
             ProposalType::EnableVersion => "EnableVersion".to_string(),
             ProposalType::DisableVersion => "DisableVersion".to_string(),
             ProposalType::EmergencyPause => "EmergencyPause".to_string(),
