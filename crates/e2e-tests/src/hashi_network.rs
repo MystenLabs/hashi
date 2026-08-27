@@ -31,6 +31,48 @@ pub struct HashiNodeHandle {
     service: Option<(Service, Arc<Hashi>)>,
 }
 
+impl Drop for HashiNodeHandle {
+    /// Tear the node down and wait (bounded) until nothing holds its database
+    /// any more.
+    ///
+    /// Dropping the `Service` aborts the node's tasks, but a `spawn_blocking`
+    /// closure that a task already queued (e.g. the post-reconfig major
+    /// compaction) keeps running on the blocking pool with its own `db`
+    /// clone. The test's environment directory is deleted right after the
+    /// handles drop; if that happens under such a closure, its storage
+    /// workers crash on the missing files and the closure can wedge, and the
+    /// test runtime then waits on it forever (nextest kills the test at
+    /// terminate-after). The database lock is released only once every
+    /// handle is gone, so a successful re-open is the exact "no DB work in
+    /// flight" signal; the same idiom `create_hashi_retry` uses for restarts.
+    fn drop(&mut self) {
+        const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+        const STEP: std::time::Duration = std::time::Duration::from_millis(100);
+
+        if self.service.take().is_none() {
+            return;
+        }
+        let Some(db_path) = self.config.db.as_deref() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match hashi::db::Database::open(db_path) {
+                Ok(_probe) => return,
+                Err(_) if started.elapsed() < MAX_WAIT => std::thread::sleep(STEP),
+                Err(e) => {
+                    tracing::warn!(
+                        "Hashi node database still locked {:?} after shutdown; \
+                         tearing down anyway: {e}",
+                        started.elapsed()
+                    );
+                    return;
+                }
+            }
+        }
+    }
+}
+
 impl HashiNodeHandle {
     pub fn new(config: HashiConfig) -> Result<Self> {
         Ok(Self {
