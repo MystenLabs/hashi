@@ -37,6 +37,7 @@ mod tests {
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
     use crate::test_helpers::wait_for_spent_utxo_cleanup;
+    use crate::test_helpers::wait_for_withdrawal_archival;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -233,13 +234,25 @@ mod tests {
         }
     }
 
-    fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
-        let onchain_state = networks.hashi_network.nodes()[0].hashi().onchain_state();
-        let deposit_request = onchain_state
-            .deposit_requests()
-            .into_iter()
-            .find(|request| request.id == request_id)
-            .unwrap_or_else(|| panic!("deposit request {request_id} not found"));
+    async fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
+        // The mirror observes the create transaction a checkpoint later, so
+        // wait for visibility before asserting the property itself.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deposit_request = loop {
+            let found = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state()
+                .deposit_requests()
+                .into_iter()
+                .find(|request| request.id == request_id);
+            if let Some(request) = found {
+                break request;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("deposit request {request_id} never appeared in the mirror");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
         assert!(
             deposit_request.approval_cert.is_none(),
             "brand-new deposit should not be approved by epoch-change stale-cert processing"
@@ -432,7 +445,7 @@ mod tests {
                 Some(hbtc_recipient),
             )
             .await?;
-        assert_deposit_request_unapproved(&networks, unapproved_request_id);
+        assert_deposit_request_unapproved(&networks, unapproved_request_id).await;
 
         let initial_epoch = networks.hashi_network.nodes()[0]
             .current_epoch()
@@ -459,7 +472,7 @@ mod tests {
             Duration::from_secs(180),
         )
         .await?;
-        assert_deposit_request_unapproved(&networks, unapproved_request_id);
+        assert_deposit_request_unapproved(&networks, unapproved_request_id).await;
 
         let hbtc_balance = get_hbtc_balance(
             &mut networks.sui_network.client,
@@ -511,6 +524,16 @@ mod tests {
         );
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+
+        // The archival assertion below is v2 behavior; a dormant flow (v1
+        // still enabled) would run v1 semantics and time it out. Pin that
+        // the default boot's DisableVersion(1) actually opened the gate.
+        assert_eq!(
+            hashi.onchain_state().withdrawal_effective_version(),
+            Some(2),
+            "the withdrawal dormancy gate must be open under the default boot"
+        );
+
         let user_key = networks.sui_network.user_keys.first().unwrap();
         let withdrawal_amount_sats = 30_000u64;
         let btc_destination = networks.bitcoin_node.get_new_address()?;
@@ -576,6 +599,12 @@ mod tests {
         // must now clean them from its mirror, and the eventless cleanup
         // deletions must reach every node's mirror via the object stream.
         wait_for_spent_utxo_cleanup(&networks, Duration::from_secs(60)).await?;
+
+        // The confirm left the withdrawal txn (and its requests) in the hot
+        // bags; the leader's deferred-archival GC must move them to the
+        // archive bags on-chain, observable as the ids draining from every
+        // node's mirror. This pins the deferred-archival GC end-to-end.
+        wait_for_withdrawal_archival(&networks, Duration::from_secs(60)).await?;
 
         let guardian_state = networks
             .guardian_harness
@@ -663,28 +692,9 @@ mod tests {
         )
         .await?;
         rotate_into_avid(&mut networks).await?;
-        {
-            let hashi_ids = networks.hashi_network.ids();
-            let stamped_package = networks.hashi_network.nodes()[0]
-                .hashi()
-                .onchain_state()
-                .active_package()
-                .expect("an active package after upgrade")
-                .0;
-            let mut executors: Vec<hashi::sui_tx_executor::SuiTxExecutor> = networks
-                .hashi_network
-                .nodes()
-                .iter()
-                .map(|node| {
-                    hashi::sui_tx_executor::SuiTxExecutor::from_config(
-                        &node.hashi().config,
-                        node.hashi().onchain_state(),
-                    )
-                })
-                .collect::<Result<_>>()?;
-            crate::upgrade_flow::disable_version(&mut executors, hashi_ids, 1, stamped_package)
-                .await?;
-        }
+        // No in-test DisableVersion(1): the default builder boot already
+        // disables v1 (a second disable would abort on-chain). The
+        // assertion below still pins the layout precondition.
         {
             let hashi = networks.hashi_network.nodes()[0].hashi();
             let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
@@ -1496,6 +1506,13 @@ mod tests {
         drop(miner);
 
         info!("Batch withdrawal confirmed on Sui");
+
+        // The confirm left the batched txn (and both requests) in the hot
+        // bags; the leader's deferred-archival GC must drain them from every
+        // node's mirror. This pins the deferred-archival GC end-to-end for
+        // the batched (multi-request) shape.
+        wait_for_withdrawal_archival(&networks, Duration::from_secs(60)).await?;
+
         info!("=== Batch Withdrawal Test Passed ===");
         Ok(())
     }
@@ -1608,10 +1625,18 @@ mod tests {
         use hashi::cli::client::CreateProposalParams;
         use hashi::cli::client::build_create_proposal_transaction;
 
+        // Calls route through the chain's LATEST package: the default boot
+        // upgrades to the current source and disables v1, so a call built
+        // against the original id aborts at `versioning::assert_version_enabled`.
+        let execute_package_id = hashi
+            .onchain_state()
+            .package_id()
+            .unwrap_or(hashi_ids.package_id);
+
         let validator_address = executor.sender();
         let builder = build_create_proposal_transaction(
             hashi_ids,
-            hashi_ids.package_id,
+            execute_package_id,
             validator_address,
             CreateProposalParams::UpdateConfig {
                 key: "bitcoin_deposit_minimum".to_string(),
@@ -1707,12 +1732,19 @@ mod tests {
         let hashi_ids = networks.hashi_network.ids();
         let mut executor = SuiTxExecutor::from_config(&healthy.config, healthy.onchain_state())?;
         let creator = executor.sender();
+        // Calls route through the chain's LATEST package: the default boot
+        // disables v1, so the original id would abort at
+        // `versioning::assert_version_enabled`.
+        let execute_package_id = healthy
+            .onchain_state()
+            .package_id()
+            .unwrap_or(hashi_ids.package_id);
         let mut proposal_ids = Vec::new();
         let mut last_checkpoint = 0u64;
         for i in 0..3u64 {
             let builder = build_create_proposal_transaction(
                 hashi_ids,
-                hashi_ids.package_id,
+                execute_package_id,
                 creator,
                 CreateProposalParams::UpdateConfig {
                     // Never voted on or executed, so the values are inert.
@@ -2639,6 +2671,17 @@ mod tests {
         rotate_into_avid(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+
+        // The drain-mode cap this test fills is the v2 cap; a dormant flow
+        // (v1 still enabled) would trim the batch to 298 and never fire at
+        // the configured capacity. Pin that the default boot's
+        // DisableVersion(1) actually opened the gate.
+        assert_eq!(
+            hashi.onchain_state().withdrawal_effective_version(),
+            Some(2),
+            "the withdrawal dormancy gate must be open under the default boot"
+        );
+
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let hbtc_recipient = user_key.public_key().derive_address();
 

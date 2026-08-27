@@ -431,10 +431,12 @@ pub struct SuiTxExecutor {
     /// Present for node-internal executors (built via [`SuiTxExecutor::from_config`]
     /// / [`SuiTxExecutor::from_hashi`]). Supplies both the call target and the
     /// ABI shape (see [`Self::call_target`]), and refuses to submit when this
-    /// binary supports no live on-chain package version. `None` for CLI/ad-hoc
-    /// executors built via [`SuiTxExecutor::new`]: they are not version-gated
-    /// and call `hashi_ids.package_id`, the *original* package, so on an
-    /// upgraded chain they run v1 bytecode.
+    /// binary supports no live on-chain package version. CLI executors attach
+    /// a one-shot governance reader via [`SuiTxExecutor::with_onchain_state`]
+    /// for the same routing. `None` for ad-hoc executors built via
+    /// [`SuiTxExecutor::new`] that never attach one: those are not
+    /// version-gated and call `hashi_ids.package_id`, the *original* package,
+    /// so on an upgraded chain they run v1 bytecode.
     onchain_state: Option<OnchainState>,
 }
 
@@ -980,7 +982,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<Address> {
         let builder = build_create_withdrawal_request(
             self.hashi_ids,
-            self.active_call_package_id(),
+            self.withdrawal_call_package(),
             withdrawal_amount_sats,
             destination_bytes,
         );
@@ -1017,7 +1019,7 @@ impl SuiTxExecutor {
         let total_sats = total_sats as u64;
 
         let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
+        let package_id = self.withdrawal_call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1098,6 +1100,20 @@ impl SuiTxExecutor {
 
     pub(crate) fn active_call_package_id(&self) -> Address {
         self.call_target().0
+    }
+
+    /// Package id the withdrawal entry calls route through:
+    /// [`Self::active_call_package_id`] held at v1 while the bootstrap
+    /// window keeps v1 enabled (see
+    /// [`crate::withdrawals::withdrawal_effective_version`]), so this
+    /// binary's withdrawal writes always execute the bytecode generation
+    /// whose commit layout the chain is operating under. Falls back like
+    /// [`Self::call_target`] when no version resolves.
+    pub(crate) fn withdrawal_call_package(&self) -> Address {
+        self.onchain_state
+            .as_ref()
+            .and_then(OnchainState::withdrawal_package)
+            .map_or(self.hashi_ids.package_id, |(id, _)| id)
     }
 
     #[tracing::instrument(level = "info", skip_all)]
@@ -1223,7 +1239,7 @@ impl SuiTxExecutor {
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         builder.move_call(
             Function::new(
-                self.active_call_package_id(),
+                self.withdrawal_call_package(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
@@ -1390,7 +1406,7 @@ impl SuiTxExecutor {
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
+        let package_id = self.withdrawal_call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1443,7 +1459,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
+        let package_id = self.withdrawal_call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1565,7 +1581,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
+        let package_id = self.withdrawal_call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1623,7 +1639,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
+        let package_id = self.withdrawal_call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1687,7 +1703,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<()> {
         let builder = build_cancel_withdrawal(
             self.hashi_ids,
-            self.active_call_package_id(),
+            self.withdrawal_call_package(),
             withdrawal_id,
             self.sender(),
         );
@@ -1721,7 +1737,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
+        let package_id = self.withdrawal_call_package();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1780,7 +1796,7 @@ impl SuiTxExecutor {
         let mut max_checkpoint = 0;
         for chunk in utxo_ids.chunks(MAX_PER_TX) {
             let mut builder = TransactionBuilder::new();
-            let package_id = self.active_call_package_id();
+            let package_id = self.withdrawal_call_package();
             let hashi_arg = builder.object(
                 ObjectInput::new(self.hashi_ids.hashi_object_id)
                     .as_shared()
@@ -1835,11 +1851,298 @@ impl SuiTxExecutor {
         }
         Ok(max_checkpoint)
     }
+
+    /// Package id of the version the withdrawal flow operates at (the
+    /// dormancy-gated [`OnchainState::withdrawal_package`]). Entry functions
+    /// introduced by an upgrade only exist in the upgraded bytecode, so
+    /// callers targeting such entries must gate on the effective version
+    /// first; a dormant flow resolving here targets v1, where a v2-only
+    /// entry fails loudly instead of running the wrong bytecode.
+    fn withdrawal_version_package(&self) -> anyhow::Result<Address> {
+        let onchain_state = self
+            .onchain_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("executor has no onchain state to resolve versions"))?;
+        onchain_state
+            .withdrawal_package()
+            .map(|(id, _)| id)
+            .ok_or_else(|| anyhow::anyhow!("no withdrawal-effective package version resolved"))
+    }
+
+    /// Archive the given confirmed withdrawal txns, packed into a plan of
+    /// GC transactions that each stay inside the runtime-object budget.
+    /// Victims that fit a single transaction go through the atomic
+    /// `archive_confirmed_withdrawals` entry; oversized ones (request cost
+    /// beyond one transaction) archive through `archive_withdrawal_requests`
+    /// chunks followed by `finish_archive_withdrawal_txns`. Returns the max
+    /// landed checkpoint.
+    ///
+    /// The entries only exist in the v2 package; the caller gates on the
+    /// withdrawal-effective version, and the target resolves through it.
+    pub(crate) async fn execute_archive_confirmed_withdrawals(
+        &mut self,
+        victims: &[ArchiveVictim],
+    ) -> anyhow::Result<u64> {
+        let package_id = self.withdrawal_version_package()?;
+        let mut max_checkpoint = 0;
+        for call in plan_archive_calls(victims) {
+            let mut builder = TransactionBuilder::new();
+            let hashi_arg = builder.object(
+                ObjectInput::new(self.hashi_ids.hashi_object_id)
+                    .as_shared()
+                    .with_mutable(true),
+            );
+            let (function, args) = match &call {
+                ArchiveCall::Atomic(txn_ids) => {
+                    let ids_arg = builder.pure(txn_ids);
+                    ("archive_confirmed_withdrawals", vec![hashi_arg, ids_arg])
+                }
+                ArchiveCall::Requests {
+                    txn_id,
+                    request_ids,
+                } => {
+                    let txn_arg = builder.pure(txn_id);
+                    let ids_arg = builder.pure(request_ids);
+                    (
+                        "archive_withdrawal_requests",
+                        vec![hashi_arg, txn_arg, ids_arg],
+                    )
+                }
+                ArchiveCall::Finish(txn_ids) => {
+                    let ids_arg = builder.pure(txn_ids);
+                    ("finish_archive_withdrawal_txns", vec![hashi_arg, ids_arg])
+                }
+            };
+            builder.move_call(
+                Function::new(
+                    package_id,
+                    Identifier::from_static("withdraw"),
+                    Identifier::new(function)?,
+                ),
+                args,
+            );
+
+            let response = self.execute(builder).await?;
+            if !response.transaction().effects().status().success() {
+                anyhow::bail!(
+                    "{function} failed: {:?}",
+                    response.transaction().effects().status()
+                );
+            }
+            let checkpoint = response
+                .transaction()
+                .checkpoint_opt()
+                .ok_or_else(|| anyhow::anyhow!("{function} response missing checkpoint"))?;
+            max_checkpoint = max_checkpoint.max(checkpoint);
+        }
+        Ok(max_checkpoint)
+    }
 }
 
-// TODO: the builders below take the call target, but `cli/commands/{deposit,
-// withdraw}.rs` still pass the original package id, so those commands abort once
-// v1 is disabled. They need an `OnchainState` to resolve one.
+/// A confirmed withdrawal txn awaiting archival, with its request ids so the
+/// planner can price and, when oversized, chunk it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ArchiveVictim {
+    pub txn_id: Address,
+    pub request_ids: Vec<Address>,
+}
+
+/// One GC transaction of an archival plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArchiveCall {
+    /// Whole txns archived atomically, several per transaction.
+    Atomic(Vec<Address>),
+    /// One request chunk of an oversized txn.
+    Requests {
+        txn_id: Address,
+        request_ids: Vec<Address>,
+    },
+    /// Move fully-chunk-archived txns to the cold bag. Emitted after every
+    /// chunk of the txns it finishes, so in-order execution completes them.
+    Finish(Vec<Address>),
+}
+
+/// Pack archival victims into per-transaction calls under the runtime-object
+/// budget. Victims whose whole cost fits one transaction greedy-pack into
+/// atomic calls; oversized ones split into request chunks plus a batched
+/// finish (the `withdrawals.rs` compile-time asserts guarantee every chunk
+/// makes progress and a max-size finish walk fits one transaction).
+fn plan_archive_calls(victims: &[ArchiveVictim]) -> Vec<ArchiveCall> {
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST;
+    use crate::withdrawals::WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN;
+
+    let budget =
+        WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET - WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS;
+    let requests_per_chunk = (budget - WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN)
+        / WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST;
+
+    let mut calls = Vec::new();
+    let mut atomic: Vec<Address> = Vec::new();
+    let mut atomic_used = 0usize;
+    let mut finish: Vec<Address> = Vec::new();
+    let mut finish_used = 0usize;
+    for victim in victims {
+        let cost = WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
+            + WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST * victim.request_ids.len();
+        if cost <= budget {
+            if atomic_used + cost > budget {
+                calls.push(ArchiveCall::Atomic(std::mem::take(&mut atomic)));
+                atomic_used = 0;
+            }
+            atomic.push(victim.txn_id);
+            atomic_used += cost;
+        } else {
+            for chunk in victim.request_ids.chunks(requests_per_chunk) {
+                calls.push(ArchiveCall::Requests {
+                    txn_id: victim.txn_id,
+                    request_ids: chunk.to_vec(),
+                });
+            }
+            let finish_cost = WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_TXN
+                + WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST * victim.request_ids.len();
+            if finish_used + finish_cost > budget {
+                calls.push(ArchiveCall::Finish(std::mem::take(&mut finish)));
+                finish_used = 0;
+            }
+            finish.push(victim.txn_id);
+            finish_used += finish_cost;
+        }
+    }
+    if !atomic.is_empty() {
+        calls.push(ArchiveCall::Atomic(atomic));
+    }
+    if !finish.is_empty() {
+        calls.push(ArchiveCall::Finish(finish));
+    }
+    calls
+}
+
+#[cfg(test)]
+mod archive_planning_tests {
+    use super::*;
+    use crate::utxo_pool::CoinSelectionParams;
+
+    fn addr(byte: u8) -> Address {
+        Address::new([byte; 32])
+    }
+
+    fn victim(byte: u8, request_count: usize) -> ArchiveVictim {
+        // Planning depends only on counts; the ids themselves are opaque.
+        ArchiveVictim {
+            txn_id: addr(byte),
+            request_ids: (0..request_count).map(|i| addr(i as u8)).collect(),
+        }
+    }
+
+    #[test]
+    fn empty_input_yields_no_calls() {
+        assert!(plan_archive_calls(&[]).is_empty());
+    }
+
+    #[test]
+    fn small_victims_pack_into_one_atomic_call() {
+        let victims: Vec<_> = (0..10u8).map(|i| victim(i, 1)).collect();
+        let calls = plan_archive_calls(&victims);
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0], ArchiveCall::Atomic(ids) if ids.len() == 10));
+    }
+
+    #[test]
+    fn atomic_budget_boundary_splits() {
+        // Each 100-request victim costs 3 + 300 = 303; the 910-object budget
+        // fits three (909) and the fourth spills into a second call.
+        let victims: Vec<_> = (0..4u8).map(|i| victim(i, 100)).collect();
+        let calls = plan_archive_calls(&victims);
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(&calls[0], ArchiveCall::Atomic(ids) if ids.len() == 3));
+        assert!(matches!(&calls[1], ArchiveCall::Atomic(ids) if ids.len() == 1));
+    }
+
+    #[test]
+    fn max_size_txn_chunks_then_finishes() {
+        // A 447-request txn costs 3 + 1341, beyond one transaction: it must
+        // split into request chunks (302 per chunk at 3/request under the
+        // 910 budget) followed by one finish.
+        let victims = [victim(1, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)];
+        let calls = plan_archive_calls(&victims);
+        assert_eq!(calls.len(), 3);
+        let (mut chunked, mut finished) = (0usize, Vec::new());
+        for call in &calls {
+            match call {
+                ArchiveCall::Requests {
+                    txn_id,
+                    request_ids,
+                } => {
+                    assert_eq!(*txn_id, addr(1));
+                    chunked += request_ids.len();
+                }
+                ArchiveCall::Finish(ids) => finished = ids.clone(),
+                ArchiveCall::Atomic(_) => panic!("oversized victim must not go atomic"),
+            }
+        }
+        assert_eq!(chunked, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS);
+        assert_eq!(finished, vec![addr(1)]);
+        // The finish must come after every chunk of the txn it completes.
+        assert!(matches!(calls.last(), Some(ArchiveCall::Finish(_))));
+    }
+
+    #[test]
+    fn two_max_size_victims_finish_in_separate_calls() {
+        // Each finish walk costs 3 + 2 * 447 = 897 runtime objects, so two
+        // max-size victims must not share one Finish call (1794 would blow
+        // the 910-object budget on-chain).
+        let victims = [
+            victim(1, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS),
+            victim(2, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS),
+        ];
+        let calls = plan_archive_calls(&victims);
+        let finishes: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                ArchiveCall::Finish(ids) => Some(ids.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finishes, [vec![addr(1)], vec![addr(2)]]);
+        // Each finish must come after every chunk of the txn it completes.
+        let position = |pred: &dyn Fn(&ArchiveCall) -> bool| {
+            calls.iter().rposition(pred).expect("call must be present")
+        };
+        for byte in [1u8, 2u8] {
+            let last_chunk = position(
+                &|c| matches!(c, ArchiveCall::Requests { txn_id, .. } if *txn_id == addr(byte)),
+            );
+            let finish =
+                position(&|c| matches!(c, ArchiveCall::Finish(ids) if ids == &vec![addr(byte)]));
+            assert!(last_chunk < finish);
+        }
+    }
+
+    #[test]
+    fn mixed_sizes_route_by_cost() {
+        let victims = [
+            victim(1, 5),
+            victim(2, CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS),
+            victim(3, 5),
+        ];
+        let calls = plan_archive_calls(&victims);
+        let atomics: Vec<_> = calls
+            .iter()
+            .filter(|c| matches!(c, ArchiveCall::Atomic(_)))
+            .collect();
+        assert_eq!(atomics.len(), 1);
+        assert!(matches!(atomics[0], ArchiveCall::Atomic(ids) if ids.len() == 2));
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, ArchiveCall::Requests { .. }))
+        );
+        assert!(matches!(calls.last(), Some(ArchiveCall::Finish(ids)) if ids == &vec![addr(2)]));
+    }
+}
 
 /// Build the PTB for a single deposit request. Pure (no signer / no network),
 /// so it can be signed/executed by [`SuiTxExecutor::execute`] or serialized
@@ -1976,6 +2279,12 @@ pub fn withdrawal_request_id_from_response(
 /// Build the PTB for cancelling a withdrawal. The refunded `Balance<BTC>` is
 /// sent to `sender`'s address balance, so `sender` must be the same address the
 /// transaction is finalized for.
+///
+/// `call_package` must be the active version's package id (or the original
+/// id while only v1 is live): v1 cancel bytecode gates on `processed`-bag
+/// membership, which misses requests the v2 in-place commit left in
+/// `requests` — cancelling one there would destroy a request a live
+/// withdrawal txn still references.
 pub fn build_cancel_withdrawal(
     hashi_ids: HashiIds,
     call_package: Address,

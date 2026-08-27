@@ -9,6 +9,7 @@ use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
+use crate::sui_tx_executor::ArchiveVictim;
 use crate::sui_tx_executor::SuiTxExecutor;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -46,6 +47,35 @@ pub(super) enum UtxoCleanupErrorKind {
 }
 
 impl crate::leader::retry::RetryPolicy for UtxoCleanupErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        5_000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        5 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        u32::MAX
+    }
+}
+
+// Cap the archival scan so one GC task stays bounded; a larger backlog
+// drains over successive checkpoints, oldest confirmations first.
+const MAX_WITHDRAWAL_ARCHIVES_PER_GC: usize = 500;
+
+// `archive_confirmed_withdrawals` first exists in the v2 package, and
+// pre-upgrade there is nothing to archive (v1 confirm archives inline).
+const WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION: u64 = 2;
+
+/// Failure kind for the withdrawal archival GC. Unbounded retries for the
+/// same reason as [`UtxoCleanupErrorKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WithdrawalArchiveErrorKind {
+    Failed,
+}
+
+impl crate::leader::retry::RetryPolicy for WithdrawalArchiveErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
         5_000
     }
@@ -155,7 +185,8 @@ impl LeaderService {
     /// task that scans the object mirror for spent-but-uncleaned UTXO
     /// records and cleans them. The scan is armed at boot
     /// (crash-between-confirm-and-cleanup recovery), whenever a withdrawal
-    /// confirms on Sui, and after a task that did work or failed.
+    /// confirms on Sui, after a task that did work or failed, and by the
+    /// disarmed-state mirror probe below.
     pub(super) fn check_cleanup_spent_utxos(&mut self, checkpoint_timestamp_ms: u64) {
         if self.utxo_cleanup_gc_task.is_some() {
             debug!("UTXO cleanup GC task already in-flight, skipping");
@@ -163,7 +194,17 @@ impl LeaderService {
         }
 
         if !self.utxo_cleanup_scan_needed {
-            return;
+            // The arming flag is local, and a confirm can land without this
+            // node's broadcast result path observing it (another leader
+            // submitted it, the task timeout truncated the result, or it
+            // was submitted out-of-band); the retained-txn filter then
+            // blocks any retry from re-emitting ConfirmedOnSui. The spent
+            // records are still visible in every mirror, so probe for them
+            // rather than trust the flag alone.
+            if !has_spent_utxos_pending_cleanup(&self.inner.onchain_state().utxo_records()) {
+                return;
+            }
+            self.utxo_cleanup_scan_needed = true;
         }
 
         if self.utxo_cleanup_retry.should_skip(checkpoint_timestamp_ms) {
@@ -244,6 +285,113 @@ impl LeaderService {
             "Successfully cleaned up spent UTXOs",
         );
         Ok(utxo_ids.len())
+    }
+
+    /// Kick the deferred-archival GC for confirmed withdrawals. Shape and
+    /// arming protocol mirror [`Self::check_cleanup_spent_utxos`]; the extra
+    /// version gate exists because the archival entry only exists in v2
+    /// bytecode. It gates on the withdrawal-EFFECTIVE version (the active
+    /// version, held at v1 while the bootstrap window keeps v1 enabled): a
+    /// dormant flow confirms through v1 bytecode, which archives inline and
+    /// leaves nothing for this GC.
+    pub(super) fn check_archive_confirmed_withdrawals(&mut self, checkpoint_timestamp_ms: u64) {
+        if self.withdrawal_archive_gc_task.is_some() {
+            debug!("Withdrawal archival GC task already in-flight, skipping");
+            return;
+        }
+
+        let Some(effective) = self.inner.onchain_state().withdrawal_effective_version() else {
+            return;
+        };
+        if effective < WITHDRAWAL_ARCHIVE_MIN_PACKAGE_VERSION {
+            return;
+        }
+
+        if !self.withdrawal_archive_scan_needed {
+            // Mirror probe matching the cleanup arm in
+            // `check_cleanup_spent_utxos`: a confirm whose ConfirmedOnSui
+            // result never reached this node still leaves its txn visible
+            // as confirmed in the mirror, and no retry can re-emit the
+            // result once the mirror shows the confirm.
+            if !has_confirmed_withdrawals_pending_archive(
+                &self.inner.onchain_state().withdrawal_txns(),
+            ) {
+                return;
+            }
+            self.withdrawal_archive_scan_needed = true;
+        }
+
+        if self
+            .withdrawal_archive_retry
+            .should_skip(checkpoint_timestamp_ms)
+        {
+            debug!("Withdrawal archival GC in backoff, skipping");
+            return;
+        }
+
+        self.withdrawal_archive_scan_needed = false;
+        let inner = self.inner.clone();
+        let scan_target = self.withdrawal_archive_scan_target;
+        self.withdrawal_archive_gc_task =
+            Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
+                Self::archive_confirmed_withdrawals(inner, scan_target).await
+            })));
+    }
+
+    /// Scan the mirror for confirmed-but-unarchived withdrawal txns and
+    /// archive them (moving each txn to `confirmed_txns` and its requests to
+    /// `processed` on-chain). Returns how many were archived so the caller
+    /// can re-arm past the per-GC cap. Freshness protocol identical to
+    /// [`Self::cleanup_spent_utxos`].
+    async fn archive_confirmed_withdrawals(
+        inner: Arc<crate::Hashi>,
+        scan_target: u64,
+    ) -> anyhow::Result<usize> {
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(scan_target),
+        )
+        .await
+        .is_err()
+        {
+            anyhow::bail!(
+                "mirror did not reach the archival scan target checkpoint {scan_target} within \
+                 {VISIBILITY_TIMEOUT:?}"
+            );
+        }
+        let withdrawal_txns = inner.onchain_state().withdrawal_txns();
+        let victims = find_confirmed_withdrawals_pending_archive(&withdrawal_txns);
+        if victims.is_empty() {
+            return Ok(0);
+        }
+
+        info!(
+            txn_count = victims.len(),
+            "Archiving confirmed withdrawal(s) pending archival",
+        );
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let landed_at = executor
+            .execute_archive_confirmed_withdrawals(&victims)
+            .await?;
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(landed_at),
+        )
+        .await
+        .is_err()
+        {
+            warn!(
+                landed_at,
+                "Timeout waiting for the mirror to reach the archival checkpoint; \
+                 the next scan may resubmit already-archived txns"
+            );
+        }
+        info!(
+            txn_count = victims.len(),
+            "Successfully archived confirmed withdrawals",
+        );
+        Ok(victims.len())
     }
 
     async fn delete_expired_proposals(
@@ -428,12 +576,55 @@ fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>)
         .collect()
 }
 
+/// Disarmed-state probe for the cleanup scan's arming gate: whether the
+/// mirror holds any spent-but-uncleaned UTXO record. The arming flag is
+/// local to one node, so records left by a confirm this node's result path
+/// never observed would otherwise strand until an unrelated confirm re-arms
+/// whichever node is leader.
+fn has_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>) -> bool {
+    utxo_records
+        .values()
+        .any(|record| record.spent_epoch.is_some())
+}
+
+/// Disarmed-state probe for the archival scan's arming gate, the
+/// withdrawal-archive twin of [`has_spent_utxos_pending_cleanup`].
+fn has_confirmed_withdrawals_pending_archive(
+    withdrawal_txns: &[crate::onchain::types::WithdrawalTransaction],
+) -> bool {
+    withdrawal_txns.iter().any(|txn| txn.is_confirmed())
+}
+
+/// Confirmed-but-unarchived withdrawal txns, oldest confirmation first so a
+/// capped backlog drains FIFO. Each victim carries its request ids so the
+/// executor can pack GC transactions against the runtime-object budget and
+/// chunk oversized txns through the split archival entries.
+fn find_confirmed_withdrawals_pending_archive(
+    withdrawal_txns: &[crate::onchain::types::WithdrawalTransaction],
+) -> Vec<ArchiveVictim> {
+    let mut confirmed: Vec<_> = withdrawal_txns
+        .iter()
+        .filter(|txn| txn.is_confirmed())
+        .collect();
+    confirmed.sort_by_key(|txn| txn.confirmed_timestamp_ms);
+    confirmed
+        .into_iter()
+        .take(MAX_WITHDRAWAL_ARCHIVES_PER_GC)
+        .map(|txn| ArchiveVictim {
+            txn_id: txn.id,
+            request_ids: txn.request_ids.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::onchain::types::Utxo;
+    use crate::onchain::types::WithdrawalTransaction;
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::CommitteeSignature;
+    use hashi_types::move_types::SigningBatch;
     use sui_sdk_types::Digest;
 
     /// Helper: build a `UtxoId` from a distinguishing byte and vout.
@@ -571,5 +762,54 @@ mod tests {
 
         let result = find_spent_utxos_pending_cleanup(&utxo_records);
         assert_eq!(result.len(), MAX_UTXO_CLEANUPS_PER_GC);
+    }
+
+    /// Helper: build a `WithdrawalTransaction` that is confirmed or not.
+    fn withdrawal_txn(byte: u8, confirmed: bool) -> WithdrawalTransaction {
+        WithdrawalTransaction {
+            id: Address::new([byte; 32]),
+            txid: BitcoinTxid::new([byte; 32]),
+            request_ids: vec![],
+            inputs: vec![],
+            withdrawal_outputs: vec![],
+            change_outputs: vec![],
+            created_timestamp_ms: 0,
+            signed_timestamp_ms: None,
+            confirmed_timestamp_ms: confirmed.then_some(1),
+            randomness: vec![],
+            signing: SigningBatch {
+                signatures: vec![],
+                epoch: 0,
+            },
+            guardian_signatures: None,
+        }
+    }
+
+    /// The disarmed-state probe must arm only when a spent record actually
+    /// exists in the mirror; anything else would re-arm every leader tick.
+    #[test]
+    fn cleanup_probe_requires_a_spent_record() {
+        assert!(!has_spent_utxos_pending_cleanup(&BTreeMap::new()));
+        assert!(!has_spent_utxos_pending_cleanup(&BTreeMap::from([(
+            utxo_id(1, 0),
+            record(None)
+        )])));
+        assert!(has_spent_utxos_pending_cleanup(&BTreeMap::from([
+            (utxo_id(1, 0), record(None)),
+            (utxo_id(2, 0), record(Some(3))),
+        ])));
+    }
+
+    /// The archival twin: arm only on a confirmed-but-unarchived txn.
+    #[test]
+    fn archive_probe_requires_a_confirmed_txn() {
+        assert!(!has_confirmed_withdrawals_pending_archive(&[]));
+        assert!(!has_confirmed_withdrawals_pending_archive(&[
+            withdrawal_txn(1, false)
+        ]));
+        assert!(has_confirmed_withdrawals_pending_archive(&[
+            withdrawal_txn(1, false),
+            withdrawal_txn(2, true),
+        ]));
     }
 }

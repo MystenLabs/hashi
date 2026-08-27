@@ -931,7 +931,11 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
     let txid_address = sui_sdk_types::Address::new(txid.to_byte_array());
 
     let client = sui_rpc::Client::new(&state.sui_rpc_url)?;
-    let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    // Attach the onchain state so the deposit call routes through the package
+    // version that is enabled NOW (a bare executor calls the ORIGINAL package,
+    // which aborts on a chain that has upgraded and disabled v1).
+    let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids)
+        .with_onchain_state(&onchain_state);
 
     let request_id = executor
         .execute_create_deposit_request(txid_address, vout, amount, Some(recipient_addr))

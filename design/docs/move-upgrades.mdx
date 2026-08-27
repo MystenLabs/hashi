@@ -120,27 +120,56 @@ an exclusive publication causes old binaries to stop writing.
 The deployed testnet v1 package only has the legacy `upgrade` proposal. That
 proposal always leaves previous versions enabled, so it cannot make the first
 v1-to-v2 transition atomic. Testnet carries no real funds, and we accept a small
-race window for this one migration.
+race window for this one migration. Run the migration under the emergency
+pause, which closes the withdrawal-replay surface described below; the
+withdrawal queue does not need to drain first.
 
-Minimize that window as follows:
-
-1. Avoid active withdrawals during the rollout window.
-2. Create and fully vote both the v2 upgrade proposal and a
-   `DisableVersion(1)` proposal while v1 is active. Proposal creation permits
-   targeting the current version; only execution rejects disabling it.
-3. Execute, publish, and finalize v2 through the legacy v1 upgrade path.
+1. Create and fully vote the pause, v2 upgrade, and `DisableVersion(1)`
+   proposals while v1 is active. Proposal creation permits targeting the
+   current version; only execution rejects disabling it.
+2. Execute the pause once the remaining proposals are near quorum. Governance
+   entries are not pause-gated, so the remaining steps execute while paused.
+3. Verify the bridge is still paused, then execute, publish, and finalize v2
+   through the legacy v1 upgrade path.
 4. Wait for that transaction to succeed and obtain the newly published v2
    package ID.
 5. Immediately execute the already-approved disable-v1 proposal through the v2
-   package.
+   package. Pre-build this transaction so only the package ID needs filling.
 6. Verify that v1 calls fail with `EVersionDisabled` and that validators route
    ordinary work through v2.
+7. Create, vote, and execute the unpause.
 
-These are necessarily two transactions. They must not be submitted
-concurrently because shared-object ordering is not guaranteed; disable-v1 must
-execute through v2 after publication. Emergency pause is not a complete
-substitute because the legacy v1 withdrawal cancellation entry does not honor
-the pause flag.
+Proposal execution checks only quorum, not the caller, so any quorum-complete
+proposal is executable by any account. The strict ordering therefore votes the
+unpause only after `DisableVersion(1)` is verified: a pre-voted unpause would
+let an adversary unpause and commit through v2 in one transaction inside the
+window. The Testnet migration relaxes this and pre-votes the unpause
+alongside the other proposals, accepting the theoretical window: nothing of
+value is at stake, the window is seconds wide, and the proposing operators
+have executed every proposal to date. Any future migration that carries real
+value must use the strict ordering; on Mainnet the question should not arise
+at all, because exclusive upgrades replace the enabled set atomically and
+leave no window to protect.
+
+The upgrade and disable are necessarily two transactions. Do not submit them
+concurrently: the network does not guarantee shared-object ordering, and
+disable-v1 must execute through v2 after publication.
+
+The pause is what makes the window between them safe for withdrawals.
+Commitment and approval certificates bind no package version, so while both
+versions are enabled a live certificate can be replayed through v2's
+`commit_withdrawal_tx`. That commits the request in place, where v1's
+pause-exempt `cancel_withdrawal` (which checks only the `processed` bag) can
+destroy it, burning the user's hBTC while releasing no BTC and wedging the
+referencing withdrawal transaction forever. Every corrupting interleaving
+requires such a v2 commit to land while v1 is still enabled.
+`commit_withdrawal_tx` and `approve_request` honor the pause in both
+packages, so holding the pause across the window means no transaction can
+create that state, and the pause-exempt v1 cancel has nothing corruptible to
+act on. In-flight withdrawals ride
+through the flip without draining: committed batches sign, confirm, and
+archive from their v1 locations, and approved or requested entries commit
+v2-style afterward.
 
 Before the first mainnet publish, remove the legacy `upgrade` module, rename
 `upgrade_v2` to `upgrade`, and squash testnet-only package-version and storage

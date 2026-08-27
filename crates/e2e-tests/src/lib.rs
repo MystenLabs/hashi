@@ -148,6 +148,12 @@ pub struct TestNetworksBuilder {
     /// a real network is in. Opt out via [`Self::without_upgrade`] when v1-only
     /// is the point (snapshot signing) or the test drives its own upgrade.
     upgrade_to_current_source: bool,
+    /// When true, the auto-upgrade boot leaves v1 in the enabled set (the raw
+    /// legacy-upgrade outcome) instead of running DisableVersion(1). With v1
+    /// enabled the node-side withdrawal flow is dormant at v1 semantics, so
+    /// this is only for tests that deliberately exercise the both-enabled
+    /// bootstrap window. See [`Self::keep_v1_enabled`].
+    keep_v1_enabled: bool,
 }
 
 impl TestNetworksBuilder {
@@ -170,6 +176,7 @@ impl TestNetworksBuilder {
             external_guardian: None,
             v1_snapshot_dir: None,
             upgrade_to_current_source: true,
+            keep_v1_enabled: false,
         }
     }
 
@@ -178,6 +185,17 @@ impl TestNetworksBuilder {
     /// For tests where v1-only is the point, or that drive their own upgrade.
     pub fn without_upgrade(mut self) -> Self {
         self.upgrade_to_current_source = false;
+        self
+    }
+
+    /// Leave v1 in the enabled set after the default auto-upgrade boot,
+    /// skipping the DisableVersion(1) step. The node-side withdrawal flow
+    /// stays dormant at v1 semantics while v1 is enabled (see
+    /// `hashi::withdrawals::withdrawal_effective_version`), so only tests
+    /// that deliberately exercise the both-enabled bootstrap window (or that
+    /// drive DisableVersion(1) themselves) should opt in.
+    pub fn keep_v1_enabled(mut self) -> Self {
+        self.keep_v1_enabled = true;
         self
     }
 
@@ -464,6 +482,60 @@ impl TestNetworksBuilder {
             )
             .await?;
             tracing::info!("chain upgraded; the network runs the post-upgrade state");
+
+            // The legacy v1 -> v2 upgrade leaves BOTH versions enabled, and
+            // the node-side withdrawal flow stays dormant at v1 semantics
+            // while v1 is enabled (see
+            // `hashi::withdrawals::withdrawal_effective_version`). Close the
+            // bootstrap window through governance so the default boot hands
+            // tests a chain whose v2 withdrawal semantics are actually live;
+            // a withdrawal e2e running against the both-enabled window would
+            // silently exercise v1 and pass vacuously. Tests that need the
+            // window opt out via `keep_v1_enabled`.
+            if !self.keep_v1_enabled {
+                let hashi_ids = test_networks.hashi_network.ids();
+                let mut executors: Vec<hashi::sui_tx_executor::SuiTxExecutor> = test_networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.is_running())
+                    .map(|node| {
+                        let hashi = node.hashi();
+                        hashi::sui_tx_executor::SuiTxExecutor::from_config(
+                            &hashi.config,
+                            hashi.onchain_state(),
+                        )
+                    })
+                    .collect::<Result<_>>()?;
+                upgrade_flow::disable_version(&mut executors, hashi_ids, 1, new_package_id).await?;
+                upgrade_flow::wait_for_version_disabled(
+                    &test_networks,
+                    1,
+                    std::time::Duration::from_secs(30),
+                )
+                .await?;
+                for (i, node) in test_networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.is_running())
+                    .enumerate()
+                {
+                    let onchain = node.hashi().onchain_state();
+                    anyhow::ensure!(
+                        onchain.active_package_version() == Some(2),
+                        "node {i}: active version 2 must resolve after DisableVersion(1)"
+                    );
+                    anyhow::ensure!(
+                        onchain.withdrawal_effective_version() == Some(2),
+                        "node {i}: the withdrawal dormancy gate must be open (effective v2) \
+                         after DisableVersion(1)"
+                    );
+                }
+                tracing::info!(
+                    "version 1 disabled; the withdrawal flow runs v2 semantics on every node"
+                );
+            }
 
             // `update_config` cannot insert, and `init_defaults` runs only at the
             // original publish, so a key this upgrade adds keeps its default.
@@ -1555,7 +1627,15 @@ mod tests {
                 .unwrap()
                 .to_string(),
         );
-        super::hashi_network::update_tls_public_key(client, &updated_config)
+        // Route the call through the chain's LATEST package (the default boot
+        // upgrades and disables v1; the original id aborts at
+        // `versioning::assert_version_enabled`).
+        let call_package_id = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .onchain_state()
+            .package_id()
+            .unwrap_or(ids.package_id);
+        super::hashi_network::update_tls_public_key(client, &updated_config, call_package_id)
             .await
             .unwrap();
 

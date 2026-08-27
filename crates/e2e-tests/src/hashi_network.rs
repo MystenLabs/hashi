@@ -324,6 +324,16 @@ impl HashiNetwork {
     }
 
     pub async fn register_and_start_pending_node(&mut self, client: sui_rpc::Client) -> Result<()> {
+        // The registration call must route through the package that is enabled
+        // NOW (the default boot upgrades and disables v1 — the original id
+        // aborts at `versioning::assert_version_enabled`). The pending node has
+        // no Hashi instance to read the chain through, so borrow a running
+        // node's onchain state for the executor's version routing.
+        let onchain_state = self
+            .nodes
+            .iter()
+            .find(|n| n.is_running())
+            .map(|n| n.hashi().onchain_state().clone());
         let node = self
             .nodes
             .iter_mut()
@@ -343,7 +353,7 @@ impl HashiNetwork {
             [127, 0, 0, 1],
             hashi::config::get_available_port(),
         )));
-        register_onchain(client, &node.config).await?;
+        register_onchain(client, &node.config, onchain_state.as_ref()).await?;
         node.start().await?;
         Ok(())
     }
@@ -672,17 +682,35 @@ impl Default for HashiNetworkBuilder {
     }
 }
 
-async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+/// `onchain_state` supplies the executor's version routing so the register
+/// call executes the package that is enabled at submission time. Without it
+/// the executor falls back to the ORIGINAL package id, which aborts once the
+/// post-upgrade boot has disabled v1.
+async fn register_onchain(
+    client: sui_rpc::Client,
+    config: &HashiConfig,
+    onchain_state: Option<&hashi::onchain::OnchainState>,
+) -> Result<()> {
     let signer = config.operator_private_key()?;
     let hashi_ids = config.hashi_ids();
     let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    if let Some(onchain_state) = onchain_state {
+        executor = executor.with_onchain_state(onchain_state);
+    }
     executor
         .execute_register_or_update_validator(config, None, None, None)
         .await
         .map(|_| ())
 }
 
-pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+/// `call_package_id` is the package the Move call routes through — the
+/// chain's LATEST package (resolve it from a node's onchain state after the
+/// boot-time upgrade); the original id aborts once v1 is disabled.
+pub async fn update_tls_public_key(
+    client: sui_rpc::Client,
+    config: &HashiConfig,
+    call_package_id: Address,
+) -> Result<()> {
     let hashi_ids = config.hashi_ids();
     let private_key = config.operator_private_key()?;
     let validator_address = config.validator_address()?;
@@ -702,7 +730,7 @@ pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig
 
     builder.move_call(
         Function::new(
-            hashi_ids.package_id,
+            call_package_id,
             Identifier::from_static("validator"),
             Identifier::from_static("update_tls_public_key"),
         ),
