@@ -139,6 +139,14 @@ pub(crate) struct LeaderService {
     withdrawal_archive_retry: GlobalRetryTracker<garbage_collection::WithdrawalArchiveErrorKind>,
     withdrawal_archive_scan_needed: bool,
     withdrawal_archive_scan_target: u64,
+    // Singleton task that destroys dead TOB cert buckets on-chain; resolves
+    // to the sweep's outcome (epoch swept, whether the backlog drained).
+    tob_prune_task: Option<AbortOnDropHandle<anyhow::Result<garbage_collection::TobPruneOutcome>>>,
+    tob_prune_retry: GlobalRetryTracker<garbage_collection::TobPruneErrorKind>,
+    // Last hashi epoch whose TOB prune sweep fully drained the backlog.
+    // `None` triggers a sweep on the first leader tick (boot backlog); a
+    // cap-limited or failed sweep leaves it unset so the next tick re-runs.
+    last_tob_prune_epoch: Option<u64>,
 
     // Singleton task that reconciles the guardian committee with the on-chain committee.
     guardian_committee_reconcile_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -190,6 +198,9 @@ impl LeaderService {
             // a no-op pre-upgrade (the version gate skips the spawn).
             withdrawal_archive_scan_needed: true,
             withdrawal_archive_scan_target: 0,
+            tob_prune_task: None,
+            tob_prune_retry: GlobalRetryTracker::new(),
+            last_tob_prune_epoch: None,
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
             last_withdrawal_semantics: None,
@@ -300,6 +311,7 @@ impl LeaderService {
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                     self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
                     self.check_archive_confirmed_withdrawals(checkpoint_timestamp_ms);
+                    self.check_prune_tob_certs(checkpoint_timestamp_ms);
                     self.process_stale_unapproved_deposits_if_new_epoch();
                     self.process_approved_deposit_requests();
                 }
@@ -399,6 +411,24 @@ impl LeaderService {
                         }
                     }
                     Self::log_task_result("withdrawal_archive_gc", result);
+                }
+                Some(result) = OptionFuture::from(self.tob_prune_task.as_mut()) => {
+                    self.tob_prune_task = None;
+                    match &result {
+                        Ok(Ok(outcome)) => {
+                            self.tob_prune_retry.clear();
+                            // Only a fully-drained sweep closes the epoch
+                            // gate; a cap-limited one re-runs next tick.
+                            if outcome.drained {
+                                self.last_tob_prune_epoch = Some(outcome.swept_epoch);
+                            }
+                        }
+                        _ => self.tob_prune_retry.record_failure(
+                            garbage_collection::TobPruneErrorKind::Failed,
+                            checkpoint_rx.borrow().timestamp_ms,
+                        ),
+                    }
+                    Self::log_task_result("tob_prune", result);
                 }
                 Some(result) = OptionFuture::from(self.guardian_committee_reconcile_task.as_mut()) => {
                     self.guardian_committee_reconcile_task = None;
