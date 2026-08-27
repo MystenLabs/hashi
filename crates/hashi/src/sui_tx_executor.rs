@@ -349,6 +349,28 @@ impl TransactionExecutionError {
     }
 }
 
+/// The SDK build error behind `e`, if `e` is a [`TxFailure::NotSubmitted`]
+/// raised by [`finalize`] wrapping one.
+fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
+    match e.downcast_ref::<TxFailure>()? {
+        TxFailure::NotSubmitted(inner) => inner.downcast_ref(),
+        TxFailure::Submit(_) => None,
+    }
+}
+
+/// Whether `e` is a failure of transaction *execution* (a failed simulation
+/// inside the SDK build, or a failed on-chain status) rather than of building
+/// or submitting the transaction. [`SuiTxExecutor::execute_destroy_tob_certs`]
+/// splits a failing chunk only on these: only execution can reject a chunk
+/// for its size, so a build or transport failure is propagated as is.
+fn is_execution_failure(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<TransactionExecutionError>().is_some()
+        || matches!(
+            builder_error(e),
+            Some(sui_transaction_builder::Error::SimulationFailure(_))
+        )
+}
+
 /// Set the sender and gas overrides on `builder`, then finish it according to
 /// `mode`: serialize it unsigned, dry-run it, or sign and submit it.
 ///
@@ -1949,11 +1971,15 @@ impl SuiTxExecutor {
     /// sizes are unknowable here (candidate discovery decodes field names
     /// only) and grow with committee size, so instead of a sizing model the
     /// chunking is adaptive: start at `TOB_DESTROYS_PER_TX` calls per
-    /// transaction and HALVE any failing chunk down to singletons.
-    /// Transient RPC failures take the split path too — harmless, they just
-    /// retry at a smaller size — and only a singleton failure propagates, so
-    /// an over-limit chunk can never permanently wedge the sweep behind an
-    /// unbounded identical retry.
+    /// transaction and HALVE any chunk that fails to EXECUTE down to
+    /// singletons. Every chunk is simulated by the SDK build before it is
+    /// submitted, so an over-limit chunk always fails there (typed, nothing
+    /// submitted, no gas burned); a failed on-chain status is treated the
+    /// same way. Build and transport failures are not size signals, so they
+    /// propagate immediately to the caller's retry backoff instead of
+    /// spending halving attempts on a doomed RPC. Only a singleton execution
+    /// failure propagates, so an over-limit chunk can never permanently
+    /// wedge the sweep behind an unbounded identical retry.
     ///
     /// The entries are v2-introduced, so the calls route to the ACTIVE
     /// package (they do not exist in the original package) and the Hashi
@@ -1980,11 +2006,11 @@ impl SuiTxExecutor {
                 .await
             {
                 Ok(()) => {}
-                Err(e) if chunk.len() > 1 => {
+                Err(e) if chunk.len() > 1 && is_execution_failure(&e) => {
                     let mid = chunk.len() / 2;
                     tracing::warn!(
                         chunk_len = chunk.len(),
-                        "destroy TOB certs chunk failed; splitting and retrying: {e:#}"
+                        "destroy TOB certs chunk failed to execute; splitting and retrying: {e:#}"
                     );
                     queue.push_front(&chunk[mid..]);
                     queue.push_front(&chunk[..mid]);
@@ -2044,11 +2070,13 @@ impl SuiTxExecutor {
             }
         }
         let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "destroy TOB certs transaction failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "destroy_tob_certs",
+                status: status.clone(),
+            }
+            .into());
         }
         Ok(())
     }
@@ -2828,6 +2856,46 @@ pub async fn sweep_to_address_balance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn destroy_tob_splits_only_on_execution_failures() {
+        // A failed on-chain status is an execution failure.
+        let on_chain: anyhow::Error = TransactionExecutionError {
+            function: "destroy_tob_certs",
+            status: ExecutionStatus::default(),
+        }
+        .into();
+        assert!(is_execution_failure(&on_chain));
+
+        // The simulate RPC failing (as opposed to the simulated execution
+        // failing) is a build failure, not a size signal. Wrapped exactly as
+        // `finalize` wraps SDK build errors, and the intermediate downcast is
+        // asserted separately: `SimulationFailure` cannot be constructed
+        // outside the SDK, so this is what proves the classifier can reach
+        // the SDK error at all (a silently failing downcast would mean
+        // "never split", wedging the sweep on a genuinely over-limit chunk).
+        let simulate_rpc: anyhow::Error = TxFailure::NotSubmitted(
+            sui_transaction_builder::Error::Input(
+                "error simulating transaction: connection refused".to_owned(),
+            )
+            .into(),
+        )
+        .into();
+        assert!(matches!(
+            builder_error(&simulate_rpc),
+            Some(sui_transaction_builder::Error::Input(_))
+        ));
+        assert!(!is_execution_failure(&simulate_rpc));
+
+        // Neither is a post-submit transport failure or an untyped error
+        // from before the build (e.g. the shared-version fetch).
+        let submit: anyhow::Error =
+            TxFailure::Submit(Box::new(ExecuteAndWaitError::MissingTransaction)).into();
+        assert!(!is_execution_failure(&submit));
+        assert!(!is_execution_failure(&anyhow::anyhow!(
+            "shared version fetch failed"
+        )));
+    }
 
     #[test]
     fn chunk_empty_input() {
