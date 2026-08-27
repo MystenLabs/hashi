@@ -143,16 +143,16 @@ Proposal execution checks only quorum, not the caller, so any quorum-complete
 proposal is executable by any account. The strict ordering therefore votes the
 unpause only after `DisableVersion(1)` is verified: a pre-voted unpause would
 let an adversary unpause and commit through v2 in one transaction inside the
-window. On testnet we relax this and pre-vote the unpause alongside the other
-proposals, accepting the theoretical window: nothing of value is at stake, the
-window is seconds wide, and every proposal executed to date has been executed
-by the proposing operators. Any future migration that carries real value must
-use the strict ordering; on mainnet the question should not arise at all,
-because exclusive upgrades replace the enabled set atomically and leave no
-window to protect.
+window. The Testnet migration relaxes this and pre-votes the unpause
+alongside the other proposals, accepting the theoretical window: nothing of
+value is at stake, the window is seconds wide, and the proposing operators
+have executed every proposal to date. Any future migration that carries real
+value must use the strict ordering; on Mainnet the question should not arise
+at all, because exclusive upgrades replace the enabled set atomically and
+leave no window to protect.
 
-The upgrade and disable are necessarily two transactions. They must not be
-submitted concurrently because shared-object ordering is not guaranteed;
+The upgrade and disable are necessarily two transactions. Do not submit them
+concurrently: the network does not guarantee shared-object ordering, and
 disable-v1 must execute through v2 after publication.
 
 The pause is what makes the window between them safe for withdrawals.
@@ -160,12 +160,13 @@ Commitment and approval certificates bind no package version, so while both
 versions are enabled a live certificate can be replayed through v2's
 `commit_withdrawal_tx`. That commits the request in place, where v1's
 pause-exempt `cancel_withdrawal` (which checks only the `processed` bag) can
-destroy it: hBTC burned with no BTC released, and the referencing withdrawal
-transaction wedged forever. Every corrupting interleaving requires such a v2
-commit to land while v1 is still enabled. `commit_withdrawal_tx` and
-`approve_request` honor the pause in both packages, so holding the pause
-across the window means that state can never be created, and the pause-exempt
-v1 cancel has nothing corruptible to act on. In-flight withdrawals ride
+destroy it, burning the user's hBTC while releasing no BTC and wedging the
+referencing withdrawal transaction forever. Every corrupting interleaving
+requires such a v2 commit to land while v1 is still enabled.
+`commit_withdrawal_tx` and `approve_request` honor the pause in both
+packages, so holding the pause across the window means no transaction can
+create that state, and the pause-exempt v1 cancel has nothing corruptible to
+act on. In-flight withdrawals ride
 through the flip without draining: committed batches sign, confirm, and
 archive from their v1 locations, and approved or requested entries commit
 v2-style afterward.
