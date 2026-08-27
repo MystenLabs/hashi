@@ -1202,6 +1202,162 @@ fn test_largest_first_input_selection() {
 }
 
 #[test]
+fn test_required_small_input_is_selected_before_largest_funding_input() {
+    let required = confirmed_utxo(1, 1_000);
+    let required_id = required.id;
+    let utxos = vec![confirmed_utxo(2, 100_000), required];
+    let requests = vec![make_request(1, 50_000, 0)];
+    let params = CoinSelectionParams {
+        required_input: Some(required_id),
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &requests,
+        &params,
+        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
+    )
+    .expect("required input and funding input should be selected");
+
+    assert_eq!(
+        result.inputs.iter().map(|utxo| utxo.id).collect::<Vec<_>>(),
+        vec![required_id, make_utxo_id(2)]
+    );
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_required_input_that_funds_request_is_selected_alone() {
+    let required = confirmed_utxo(1, 100_000);
+    let required_id = required.id;
+    let utxos = vec![confirmed_utxo(2, 1_000_000), required];
+    let requests = vec![make_request(1, 50_000, 0)];
+    let params = CoinSelectionParams {
+        required_input: Some(required_id),
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &requests,
+        &params,
+        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
+    )
+    .expect("required input should fund the request");
+
+    assert_eq!(result.inputs.len(), 1);
+    assert_eq!(result.inputs[0].id, required_id);
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_non_required_inputs_remain_largest_first() {
+    let required = confirmed_utxo(1, 1_000);
+    let required_id = required.id;
+    let utxos = vec![
+        confirmed_utxo(5, 60_000),
+        confirmed_utxo(3, 90_000),
+        required,
+        confirmed_utxo(4, 70_000),
+        confirmed_utxo(2, 100_000),
+    ];
+    let requests = vec![make_request(1, 250_000, 0)];
+    let params = CoinSelectionParams {
+        required_input: Some(required_id),
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &requests,
+        &params,
+        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
+    )
+    .expect("required and largest remaining inputs should fund the request");
+
+    assert_eq!(
+        result.inputs.iter().map(|utxo| utxo.id).collect::<Vec<_>>(),
+        vec![
+            required_id,
+            make_utxo_id(2),
+            make_utxo_id(3),
+            make_utxo_id(4),
+        ]
+    );
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_required_input_counts_against_max_inputs() {
+    let required = confirmed_utxo(1, 1_000);
+    let required_id = required.id;
+    let utxos = vec![required, confirmed_utxo(2, 100_000)];
+    let requests = vec![make_request(1, 50_000, 0)];
+    let params = CoinSelectionParams {
+        required_input: Some(required_id),
+        max_inputs: 1,
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &requests,
+        &params,
+        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
+    );
+
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::InsufficientFunds {
+            available: 101_000,
+            selected: 1_000,
+            required: 50_000,
+            selected_inputs: 1,
+            max_inputs: 1,
+        })
+    ));
+}
+
+#[test]
+fn test_absent_required_input_is_unavailable() {
+    let required_id = make_utxo_id(9);
+    let utxos = vec![confirmed_utxo(1, 100_000)];
+    let requests = vec![make_request(1, 50_000, 0)];
+    let params = CoinSelectionParams {
+        required_input: Some(required_id),
+        ..default_params()
+    };
+
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
+
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::RequiredInputUnavailable(id)) if id == required_id
+    ));
+}
+
+#[test]
+fn test_ineligible_required_input_is_unavailable() {
+    let required = pending_utxo(1, 100_000);
+    let required_id = required.id;
+    let utxos = vec![required, confirmed_utxo(2, 100_000)];
+    let requests = vec![make_request(1, 50_000, 0)];
+    let params = CoinSelectionParams {
+        required_input: Some(required_id),
+        max_mempool_chain_depth: 0,
+        ..default_params()
+    };
+
+    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
+
+    assert!(matches!(
+        result,
+        Err(CoinSelectionError::RequiredInputUnavailable(id)) if id == required_id
+    ));
+}
+
+#[test]
 fn test_multiple_inputs_needed_largest_first() {
     let utxos: Vec<UtxoCandidate> = (0u8..10).map(|i| confirmed_utxo(i, 50_000)).collect();
     let requests = vec![make_request(1, 300_000, 0)];

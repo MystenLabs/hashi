@@ -1,8 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -13,6 +16,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use kyoto::FeeRate;
 use kyoto::HashCheckpoint;
 use kyoto::Warning;
@@ -54,6 +59,9 @@ const DEPOSIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 // minutes after every caller's own `DEPOSIT_CHECK_TIMEOUT` budget expired.
 const DEPOSIT_CHECK_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT: usize = 100;
+// At most 16 concurrent txid lookups: bitcoind's default rpcworkqueue is 16,
+// and overflowing it fails calls outright ("Work queue depth exceeded").
+const UTXO_HEIGHT_LOOKUP_CONCURRENCY: usize = 16;
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
@@ -75,6 +83,19 @@ pub enum DepositConfirmation {
     NotFound,
     InMempool,
     InsufficientConfirmations { confirmations: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UtxoHeightSnapshot {
+    pub(crate) tip: HashCheckpoint,
+    pub(crate) confirmation_height_by_txid: BTreeMap<bitcoin::Txid, u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxBlockLookup {
+    Confirmed(HashCheckpoint),
+    InMempool,
+    NotFound,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -216,6 +237,15 @@ struct DepositDiscoveryContext {
     requester: kyoto::Requester,
     deposit_lookup_cache: SharedDepositLookupCache,
     generation: u64,
+}
+
+struct UtxoHeightResolutionContext {
+    tip: HashCheckpoint,
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    requester: kyoto::Requester,
+    deposit_lookup_cache: SharedDepositLookupCache,
+    block_sequence: Arc<AtomicU64>,
+    captured_sequence: u64,
 }
 
 enum KyotoEventLoopExit {
@@ -715,6 +745,21 @@ impl Monitor {
         ))
     }
 
+    /// Invalidate Bitcoin-tip-dependent work before resetting Kyoto state.
+    fn reset_bitcoin_state_for_restart(&mut self) {
+        self.block_sequence.fetch_add(1, Ordering::SeqCst);
+        self.synced = false;
+        self.tip = None;
+        self.cancel_deposit_workers();
+        self.block_scan_queue.clear();
+        self.deposit_lookup_cache = self.deposit_lookup_cache.fresh();
+        self.deposit_tracker.reset_bitcoin_state();
+        self.metrics.kyoto_restarts.inc();
+        self.metrics.kyoto_connected_peers.set(0);
+        self.metrics.kyoto_synced.set(0);
+        self.metrics.kyoto_consecutive_failures.set(0);
+    }
+
     /// Run the monitor with automatic Kyoto restart on connectivity loss.
     async fn run_with_supervision(
         &mut self,
@@ -769,16 +814,7 @@ impl Monitor {
                 }
             }
 
-            self.synced = false;
-            self.tip = None;
-            self.cancel_deposit_workers();
-            self.block_scan_queue.clear();
-            self.deposit_lookup_cache = self.deposit_lookup_cache.fresh();
-            self.deposit_tracker.reset_bitcoin_state();
-            self.metrics.kyoto_restarts.inc();
-            self.metrics.kyoto_connected_peers.set(0);
-            self.metrics.kyoto_synced.set(0);
-            self.metrics.kyoto_consecutive_failures.set(0);
+            self.reset_bitcoin_state_for_restart();
 
             tokio::time::sleep(next_restart_delay()).await;
 
@@ -1042,6 +1078,26 @@ impl Monitor {
             MonitorMessage::CheckDeposit(request) => {
                 self.confirm_deposit(request);
             }
+            MonitorMessage::ResolveUtxoConfirmationHeights(txids, result_tx) => {
+                let Some(tip) = self.tip.filter(|_| self.synced) else {
+                    let _ = result_tx.send(Err(anyhow::anyhow!(
+                        "Bitcoin monitor is not synced to a chain tip"
+                    )));
+                    return;
+                };
+                let context = UtxoHeightResolutionContext {
+                    tip,
+                    bitcoind_rpc: self.bitcoind_rpc.clone(),
+                    requester: self.requester.clone(),
+                    deposit_lookup_cache: self.deposit_lookup_cache.clone(),
+                    block_sequence: self.block_sequence.clone(),
+                    captured_sequence: self.block_sequence.load(Ordering::SeqCst),
+                };
+                self.rpc_workers
+                    .spawn(Self::resolve_utxo_confirmation_heights(
+                        context, txids, result_tx,
+                    ));
+            }
             MonitorMessage::GetRecentFeeRate(conf_target, result_tx) => {
                 self.rpc_workers.spawn(Self::get_recent_fee_rate(
                     self.bitcoind_rpc.clone(),
@@ -1065,6 +1121,38 @@ impl Monitor {
                 ));
             }
         }
+    }
+
+    async fn resolve_utxo_confirmation_heights(
+        context: UtxoHeightResolutionContext,
+        txids: BTreeSet<bitcoin::Txid>,
+        result_tx: oneshot::Sender<Result<UtxoHeightSnapshot>>,
+    ) {
+        let UtxoHeightResolutionContext {
+            tip,
+            bitcoind_rpc,
+            requester,
+            deposit_lookup_cache,
+            block_sequence,
+            captured_sequence,
+        } = context;
+        let result = assemble_utxo_height_snapshot(
+            tip,
+            block_sequence,
+            captured_sequence,
+            txids,
+            move |txid| {
+                lookup_tx_block(
+                    bitcoind_rpc.clone(),
+                    requester.clone(),
+                    deposit_lookup_cache.clone(),
+                    txid,
+                    tip,
+                )
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
     }
 
     async fn get_recent_fee_rate(
@@ -1286,6 +1374,110 @@ async fn check_result_from_status(
     }
 }
 
+async fn lookup_tx_block(
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    requester: kyoto::Requester,
+    deposit_lookup_cache: SharedDepositLookupCache,
+    txid: bitcoin::Txid,
+    tip: HashCheckpoint,
+) -> Result<TxBlockLookup, DepositConfirmError> {
+    if let Some(block_info) = deposit_lookup_cache.get_tx_block(&txid) {
+        return Ok(TxBlockLookup::Confirmed(block_info));
+    }
+
+    debug!("Looking up block for transaction {txid}");
+    require_core_checkpoint(&bitcoind_rpc, tip, "before transaction lookup").await?;
+    let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
+        rpc.get_raw_transaction_verbose(txid)
+    })
+    .await
+    {
+        Ok(tx_info) => tx_info,
+        // -5 also covers "-txindex off" and "txindex still indexing";
+        // only the ready-index message is a durable not-found.
+        Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)))
+            if e.code == -5
+                && e.message
+                    .starts_with("No such mempool or blockchain transaction") =>
+        {
+            require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
+            return Ok(TxBlockLookup::NotFound);
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to look up txid {txid}: {e}").into());
+        }
+    };
+    let tx_info = tx_info
+        .into_model()
+        .map_err(|e| anyhow::anyhow!("Failed to parse transaction info for {txid}: {e}"))?;
+    let Some(block_hash) = tx_info.block_hash else {
+        require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
+        return Ok(TxBlockLookup::InMempool);
+    };
+    let height = if let Some(height) = deposit_lookup_cache.get_block_height(&block_hash) {
+        height
+    } else {
+        let height = requester
+            .height_of_hash(block_hash)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to look up block hash {block_hash} in Kyoto: {e}")
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Block hash {block_hash} from bitcoind is not on Kyoto's chain")
+            })?;
+        deposit_lookup_cache.put_block_height(block_hash, height);
+        height
+    };
+    let block_info = HashCheckpoint::new(height, block_hash);
+    deposit_lookup_cache.put_tx_block(txid, block_info);
+    Ok(TxBlockLookup::Confirmed(block_info))
+}
+
+async fn assemble_utxo_height_snapshot<F, Fut>(
+    tip: HashCheckpoint,
+    block_sequence: Arc<AtomicU64>,
+    captured_sequence: u64,
+    txids: BTreeSet<bitcoin::Txid>,
+    mut lookup: F,
+) -> Result<UtxoHeightSnapshot>
+where
+    F: FnMut(bitcoin::Txid) -> Fut,
+    Fut: Future<Output = Result<TxBlockLookup, DepositConfirmError>>,
+{
+    let confirmation_height_by_txid = futures::stream::iter(txids)
+        .map(move |txid| {
+            let lookup = lookup(txid);
+            async move {
+                match lookup.await? {
+                    TxBlockLookup::Confirmed(checkpoint) => Ok((txid, checkpoint.height)),
+                    TxBlockLookup::InMempool => {
+                        Err(anyhow::anyhow!("transaction {txid} is in the mempool"))
+                    }
+                    TxBlockLookup::NotFound => {
+                        Err(anyhow::anyhow!("transaction {txid} was not found"))
+                    }
+                }
+            }
+        })
+        .buffer_unordered(UTXO_HEIGHT_LOOKUP_CONCURRENCY)
+        .try_collect::<BTreeMap<_, _>>()
+        .await?;
+
+    let completed_sequence = block_sequence.load(Ordering::SeqCst);
+    if completed_sequence != captured_sequence {
+        anyhow::bail!(
+            "Bitcoin chain tip changed while resolving UTXO confirmation heights \
+             (sequence {captured_sequence} to {completed_sequence})"
+        );
+    }
+
+    Ok(UtxoHeightSnapshot {
+        tip,
+        confirmation_height_by_txid,
+    })
+}
+
 async fn discover_deposit(
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     requester: kyoto::Requester,
@@ -1294,54 +1486,18 @@ async fn discover_deposit(
     tip: HashCheckpoint,
 ) -> Result<DepositStatus, DepositConfirmError> {
     let txid = outpoint.txid;
-    let block_info = if let Some(block_info) = deposit_lookup_cache.get_tx_block(&txid) {
-        block_info
-    } else {
-        debug!("Looking up block for transaction {txid}");
-        require_core_checkpoint(&bitcoind_rpc, tip, "before transaction lookup").await?;
-        let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
-            rpc.get_raw_transaction_verbose(txid)
-        })
-        .await
-        {
-            Ok(tx_info) => tx_info,
-            // -5 also covers "-txindex off" and "txindex still indexing";
-            // only the ready-index message is a durable not-found.
-            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)))
-                if e.code == -5
-                    && e.message
-                        .starts_with("No such mempool or blockchain transaction") =>
-            {
-                require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
-                return Ok(DepositStatus::NotFound);
-            }
-            Err(e) => return Err(anyhow::anyhow!("Failed to look up txid {txid}: {e}").into()),
-        };
-        let tx_info = tx_info
-            .into_model()
-            .map_err(|e| anyhow::anyhow!("Failed to parse transaction info for {txid}: {e}"))?;
-        let Some(block_hash) = tx_info.block_hash else {
-            require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
-            return Ok(DepositStatus::InMempool);
-        };
-        let height = if let Some(height) = deposit_lookup_cache.get_block_height(&block_hash) {
-            height
-        } else {
-            let height = requester
-                .height_of_hash(block_hash)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to look up block hash {block_hash} in Kyoto: {e}")
-                })?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Block hash {block_hash} from bitcoind is not on Kyoto's chain")
-                })?;
-            deposit_lookup_cache.put_block_height(block_hash, height);
-            height
-        };
-        let block_info = HashCheckpoint::new(height, block_hash);
-        deposit_lookup_cache.put_tx_block(txid, block_info);
-        block_info
+    let block_info = match lookup_tx_block(
+        bitcoind_rpc,
+        requester.clone(),
+        deposit_lookup_cache.clone(),
+        txid,
+        tip,
+    )
+    .await?
+    {
+        TxBlockLookup::Confirmed(block_info) => block_info,
+        TxBlockLookup::InMempool => return Ok(DepositStatus::InMempool),
+        TxBlockLookup::NotFound => return Ok(DepositStatus::NotFound),
     };
 
     let transaction = if let Some(transaction) = deposit_lookup_cache.get_transaction(&txid) {
@@ -1583,6 +1739,18 @@ impl MonitorClient {
         .map_err(|_| DepositConfirmError::TimedOut)?
     }
 
+    pub(crate) async fn resolve_utxo_confirmation_heights(
+        &self,
+        txids: BTreeSet<bitcoin::Txid>,
+    ) -> Result<UtxoHeightSnapshot> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(MonitorMessage::ResolveUtxoConfirmationHeights(txids, tx))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        rx.await.map_err(|e| anyhow::anyhow!(e))?
+    }
+
     pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -1614,6 +1782,12 @@ impl MonitorClient {
 enum MonitorMessage {
     // Checks the given OutPoint against the monitor's current Bitcoin tip.
     CheckDeposit(DepositCheckRequest),
+
+    // Resolves confirmation heights against one stable, synced Bitcoin tip.
+    ResolveUtxoConfirmationHeights(
+        BTreeSet<bitcoin::Txid>,
+        oneshot::Sender<Result<UtxoHeightSnapshot>>,
+    ),
 
     // Returns an estimated fee rate targeting confirmation within `conf_target` blocks.
     GetRecentFeeRate(u16, oneshot::Sender<Result<FeeRate>>),
@@ -1716,6 +1890,150 @@ mod tests {
             rpc_workers: JoinSet::new(),
             trusted_peer_rotation: Vec::new().into_iter().cycle(),
         }
+    }
+
+    #[tokio::test]
+    async fn lookup_tx_block_returns_cached_confirmation_without_rpc() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let monitor = test_monitor(metrics.clone(), tracker);
+        let txid = make_outpoint(1).txid;
+        let cached = HashCheckpoint::new(42, block_hash(2));
+        monitor.deposit_lookup_cache.put_tx_block(txid, cached);
+
+        let result = lookup_tx_block(
+            monitor.bitcoind_rpc.clone(),
+            monitor.requester.clone(),
+            monitor.deposit_lookup_cache.clone(),
+            txid,
+            HashCheckpoint::new(100, block_hash(3)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, TxBlockLookup::Confirmed(cached));
+        assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 1);
+    }
+
+    #[tokio::test]
+    async fn cached_utxo_height_batch_returns_captured_tip_and_all_heights() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics.clone(), tracker);
+        let tip = HashCheckpoint::new(100, block_hash(3));
+        let first_txid = make_outpoint(1).txid;
+        let second_txid = make_outpoint(2).txid;
+        monitor.synced = true;
+        monitor.tip = Some(tip);
+        monitor
+            .deposit_lookup_cache
+            .put_tx_block(first_txid, HashCheckpoint::new(40, block_hash(4)));
+        monitor
+            .deposit_lookup_cache
+            .put_tx_block(second_txid, HashCheckpoint::new(75, block_hash(5)));
+        let (result_tx, result_rx) = oneshot::channel();
+
+        monitor.process_client_message(MonitorMessage::ResolveUtxoConfirmationHeights(
+            BTreeSet::from([first_txid, second_txid]),
+            result_tx,
+        ));
+        assert_eq!(monitor.rpc_workers.len(), 1);
+        monitor.rpc_workers.join_next().await.unwrap().unwrap();
+        let snapshot = result_rx.await.unwrap().unwrap();
+
+        assert_eq!(snapshot.tip, tip);
+        assert_eq!(
+            snapshot.confirmation_height_by_txid,
+            BTreeMap::from([(first_txid, 40), (second_txid, 75)])
+        );
+        assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 2);
+    }
+
+    #[tokio::test]
+    async fn unsynced_monitor_rejects_utxo_height_batch_without_worker() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker);
+        let (result_tx, result_rx) = oneshot::channel();
+
+        monitor.process_client_message(MonitorMessage::ResolveUtxoConfirmationHeights(
+            BTreeSet::from([make_outpoint(1).txid]),
+            result_tx,
+        ));
+
+        assert!(monitor.rpc_workers.is_empty());
+        assert!(
+            result_rx
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("not synced")
+        );
+    }
+
+    #[tokio::test]
+    async fn utxo_height_batch_rejects_mempool_and_not_found_transactions() {
+        let tip = HashCheckpoint::new(100, block_hash(3));
+        let txid = make_outpoint(1).txid;
+
+        for (lookup, expected) in [
+            (TxBlockLookup::InMempool, "mempool"),
+            (TxBlockLookup::NotFound, "not found"),
+        ] {
+            let result = assemble_utxo_height_snapshot(
+                tip,
+                Arc::new(AtomicU64::new(0)),
+                0,
+                BTreeSet::from([txid]),
+                move |_| async move { Ok::<_, DepositConfirmError>(lookup) },
+            )
+            .await;
+
+            assert!(result.unwrap_err().to_string().contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn utxo_height_batch_rejects_monitor_restart_during_lookup() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker);
+        let tip = HashCheckpoint::new(100, block_hash(3));
+        let txid = make_outpoint(1).txid;
+        let captured_sequence = monitor.block_sequence.load(Ordering::SeqCst);
+        let lookup_started = Arc::new(tokio::sync::Notify::new());
+        let release_lookup = Arc::new(tokio::sync::Notify::new());
+        // Hold one uncached-style lookup in flight so the restart is deterministic.
+        let worker = tokio::spawn(assemble_utxo_height_snapshot(
+            tip,
+            monitor.block_sequence.clone(),
+            captured_sequence,
+            BTreeSet::from([txid]),
+            {
+                let lookup_started = lookup_started.clone();
+                let release_lookup = release_lookup.clone();
+                move |_| {
+                    let lookup_started = lookup_started.clone();
+                    let release_lookup = release_lookup.clone();
+                    async move {
+                        lookup_started.notify_one();
+                        release_lookup.notified().await;
+                        Ok::<_, DepositConfirmError>(TxBlockLookup::Confirmed(HashCheckpoint::new(
+                            42,
+                            block_hash(2),
+                        )))
+                    }
+                }
+            },
+        ));
+
+        lookup_started.notified().await;
+        monitor.reset_bitcoin_state_for_restart();
+        release_lookup.notify_one();
+        let error = worker.await.unwrap().unwrap_err();
+
+        assert!(error.to_string().contains("chain tip changed"));
     }
 
     #[test]

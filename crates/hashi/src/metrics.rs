@@ -90,6 +90,8 @@ pub struct Metrics {
     withdrawal_queue_value: IntGaugeVec,
     utxo_pool_size: IntGaugeVec,
     utxo_pool_value: IntGaugeVec,
+    utxo_pool_average_age_blocks: IntGauge,
+    utxo_pool_oldest_age_blocks: IntGauge,
     proposals: IntGaugeVec,
     num_consumed_presigs: IntGauge,
     treasury_supply: IntGaugeVec,
@@ -126,6 +128,9 @@ pub struct Metrics {
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
     pub utxo_selection_attempt_failures_total: IntCounterVec,
+    /// Failures to resolve the oldest confirmed UTXO for a withdrawal's
+    /// required input; the withdrawal proceeds without one.
+    pub utxo_required_input_resolution_failures_total: IntCounter,
 
     /// Withdrawals skipped because their gross amount exceeds the
     /// guardian's `max_bucket_capacity`. The request stays approved
@@ -270,6 +275,34 @@ const MESSAGE_SIZE_BYTES_BUCKETS: &[f64] = &[
     16_777_216.,
     33_554_432.,
 ];
+/// Calculate the integer-floor average and maximum UTXO ages at `tip_height`.
+///
+/// Each iterator item corresponds to one UTXO, so multiple outputs from the
+/// same transaction are counted independently. A failed height lookup is
+/// propagated without publishing a partial sample.
+pub(crate) fn calculate_utxo_pool_ages<E>(
+    tip_height: u32,
+    confirmation_heights: impl IntoIterator<Item = Result<u32, E>>,
+) -> Result<(i64, i64), E> {
+    let mut count = 0u128;
+    let mut total_age = 0u128;
+    let mut oldest_age = 0u32;
+
+    for confirmation_height in confirmation_heights {
+        let age = tip_height.saturating_sub(confirmation_height?);
+        count += 1;
+        total_age += u128::from(age);
+        oldest_age = oldest_age.max(age);
+    }
+
+    if count == 0 {
+        return Ok((0, 0));
+    }
+
+    let average_age = (total_age / count).min(i64::MAX as u128) as i64;
+    let oldest_age = u128::from(oldest_age).min(i64::MAX as u128) as i64;
+    Ok((average_age, oldest_age))
+}
 
 impl Metrics {
     pub fn new_default() -> Self {
@@ -663,6 +696,18 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            utxo_pool_average_age_blocks: register_int_gauge_with_registry!(
+                "hashi_utxo_pool_average_age_blocks",
+                "Average age in Bitcoin blocks of unlocked, confirmation-threshold-confirmed UTXOs",
+                registry,
+            )
+            .unwrap(),
+            utxo_pool_oldest_age_blocks: register_int_gauge_with_registry!(
+                "hashi_utxo_pool_oldest_age_blocks",
+                "Age in Bitcoin blocks of the oldest unlocked, confirmation-threshold-confirmed UTXO",
+                registry,
+            )
+            .unwrap(),
             proposals: register_int_gauge_vec_with_registry!(
                 "hashi_proposals",
                 "number of active proposals by type",
@@ -814,6 +859,12 @@ impl Metrics {
                 "hashi_utxo_selection_attempt_failures_total",
                 "Failed UTXO selection attempts by concrete selector error kind",
                 &["error_kind"],
+                registry,
+            )
+            .unwrap(),
+            utxo_required_input_resolution_failures_total: register_int_counter_with_registry!(
+                "hashi_utxo_required_input_resolution_failures_total",
+                "Withdrawal builds that proceeded without a required input because oldest-UTXO resolution failed",
                 registry,
             )
             .unwrap(),
@@ -1367,6 +1418,11 @@ impl Metrics {
             .inc();
     }
 
+    pub fn set_utxo_pool_ages(&self, average_age_blocks: i64, oldest_age_blocks: i64) {
+        self.utxo_pool_average_age_blocks.set(average_age_blocks);
+        self.utxo_pool_oldest_age_blocks.set(oldest_age_blocks);
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -1813,5 +1869,42 @@ mod tests {
                 metrics.record_guardian_rpc(method, outcome, 0.1);
             }
         }
+    }
+
+    #[test]
+    fn utxo_pool_age_metrics_publish_average_and_oldest_ages() {
+        let metrics = Metrics::new(&Registry::new());
+        let ages = calculate_utxo_pool_ages(1_000, [Ok::<u32, ()>(100), Ok(400), Ok(700)]).unwrap();
+
+        metrics.set_utxo_pool_ages(ages.0, ages.1);
+
+        assert_eq!(metrics.utxo_pool_average_age_blocks.get(), 600);
+        assert_eq!(metrics.utxo_pool_oldest_age_blocks.get(), 900);
+    }
+
+    #[test]
+    fn utxo_pool_age_metrics_saturate_age_at_zero_above_tip() {
+        assert_eq!(
+            calculate_utxo_pool_ages(1_000, [Ok::<u32, ()>(1_001)]).unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn utxo_pool_age_metrics_report_zero_for_an_empty_pool() {
+        assert_eq!(
+            calculate_utxo_pool_ages(1_000, std::iter::empty::<Result<u32, ()>>()).unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn utxo_pool_age_metrics_publish_failure_sentinel() {
+        let metrics = Metrics::new(&Registry::new());
+
+        metrics.set_utxo_pool_ages(-1, -1);
+
+        assert_eq!(metrics.utxo_pool_average_age_blocks.get(), -1);
+        assert_eq!(metrics.utxo_pool_oldest_age_blocks.get(), -1);
     }
 }

@@ -936,6 +936,7 @@ impl Hashi {
             tracing::error!("Failed to initialize BtcMonitor: {e}");
             e
         })?;
+        let utxo_age_metrics_service = self.clone().start_utxo_age_metrics();
 
         // Start services
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
@@ -949,6 +950,7 @@ impl Hashi {
         let service = Service::new()
             .merge(onchain_service)
             .merge(btc_monitor_service)
+            .merge(utxo_age_metrics_service)
             .merge(http_service)
             .merge(leader_service)
             .merge(backup_service)
@@ -1186,6 +1188,99 @@ impl Hashi {
                 "Local guardian limiter bucket reconciled after a mirror re-bootstrap",
             );
         }
+    }
+
+    async fn sample_utxo_pool_ages(&self) -> anyhow::Result<(i64, i64)> {
+        // Snapshot both maps under one state lock so promotion of confirmed
+        // withdrawal change cannot race the pool membership calculation.
+        let (withdrawal_txns, utxo_records) = {
+            let state = self.onchain_state().state();
+            (
+                state
+                    .hashi()
+                    .bitcoin()
+                    .withdrawal_queue
+                    .withdrawal_txns()
+                    .clone(),
+                state.hashi().bitcoin().utxo_pool.utxo_records().clone(),
+            )
+        };
+        let confirmed_unlocked_ids =
+            withdrawals::confirmed_unlocked_utxo_ids(&utxo_records, &withdrawal_txns);
+        if confirmed_unlocked_ids.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let txids = confirmed_unlocked_ids
+            .iter()
+            .map(|id| id.txid.into())
+            .collect();
+        let height_snapshot = self
+            .btc_monitor()
+            .resolve_utxo_confirmation_heights(txids)
+            .await?;
+
+        metrics::calculate_utxo_pool_ages(
+            height_snapshot.tip.height,
+            confirmed_unlocked_ids.iter().map(|id| {
+                let txid: bitcoin::Txid = id.txid.into();
+                height_snapshot
+                    .confirmation_height_by_txid
+                    .get(&txid)
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Bitcoin confirmation-height snapshot omitted UTXO {id:?} transaction {txid}"
+                        )
+                    })
+            }),
+        )
+    }
+
+    fn start_utxo_age_metrics(self: Arc<Self>) -> Service {
+        /// Retry cadence after a failed sample (unsynced monitor, a block
+        /// arriving mid-lookup), instead of holding the -1 sentinel until
+        /// the next Bitcoin block triggers a resample.
+        const SAMPLE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+        // Subscribe synchronously before the startup sample so a block arriving
+        // during that sample makes `changed()` immediately trigger a resample.
+        let mut block_height_rx = self.btc_monitor().subscribe_block_height();
+        // The startup sample accounts for the value present at subscription;
+        // only notifications published after this point should trigger another.
+        drop(block_height_rx.borrow_and_update());
+        Service::new().spawn_aborting(async move {
+            loop {
+                let failed = match self.sample_utxo_pool_ages().await {
+                    Ok((average_age_blocks, oldest_age_blocks)) => {
+                        self.metrics
+                            .set_utxo_pool_ages(average_age_blocks, oldest_age_blocks);
+                        false
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            ?error,
+                            "Failed to sample confirmed unlocked UTXO pool ages"
+                        );
+                        self.metrics.set_utxo_pool_ages(-1, -1);
+                        true
+                    }
+                };
+
+                if failed {
+                    tokio::select! {
+                        changed = block_height_rx.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        _ = tokio::time::sleep(SAMPLE_RETRY_INTERVAL) => {}
+                    }
+                } else if block_height_rx.changed().await.is_err() {
+                    return Ok(());
+                }
+            }
+        })
     }
 
     /// Poll the operator gas wallet's total SUI balance (owned coins plus

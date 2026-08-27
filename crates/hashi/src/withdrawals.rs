@@ -1474,6 +1474,11 @@ impl Hashi {
             )
         };
 
+        let confirmed_unlocked_ids = confirmed_unlocked_utxo_ids(&utxo_records, &withdrawal_txns);
+        let required_input = self
+            .resolve_oldest_confirmed_utxo(&confirmed_unlocked_ids)
+            .await;
+
         // Query Bitcoin in parallel for the confirmation count of every
         // pending withdrawal so we can accurately fill AncestorTx::confirmations
         // instead of always hardcoding 0.
@@ -1552,6 +1557,7 @@ impl Hashi {
 
             let params = CoinSelectionParams {
                 max_inputs,
+                required_input,
                 min_fee_rate,
                 long_term_fee_rate: configured_long_term_fee_rate,
                 max_fee_per_request: self.onchain_state().worst_case_network_fee(),
@@ -1667,6 +1673,41 @@ impl Hashi {
             outputs,
             txid,
         })
+    }
+
+    /// Resolve the oldest confirmed unlocked UTXO to require as a withdrawal
+    /// input, so no pool UTXO ages toward the MPC-only recovery window.
+    ///
+    /// Best-effort: resolution failures (monitor not synced, a reorg or new
+    /// block mid-lookup, RPC errors) degrade to `None` so withdrawals keep
+    /// flowing without a required input rather than blocking on Bitcoin
+    /// lookups.
+    async fn resolve_oldest_confirmed_utxo(&self, ids: &[UtxoId]) -> Option<UtxoId> {
+        if ids.is_empty() {
+            return None;
+        }
+        let txids: BTreeSet<bitcoin::Txid> = ids.iter().map(|id| id.txid.into()).collect();
+        let result = self
+            .btc_monitor()
+            .resolve_utxo_confirmation_heights(txids)
+            .await
+            .and_then(|snapshot| {
+                oldest_confirmed_utxo_id(ids, &snapshot.confirmation_height_by_txid)
+            });
+        match result {
+            Ok(oldest) => oldest,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Failed to resolve the oldest confirmed UTXO; \
+                     building the withdrawal without a required input",
+                );
+                self.metrics
+                    .utxo_required_input_resolution_failures_total
+                    .inc();
+                None
+            }
+        }
     }
 
     /// Run AML/Sanctions checks for a withdrawal request.
@@ -1853,6 +1894,47 @@ fn withdrawal_input_signing_id(withdrawal_txn_id: &Address, input_index: u32) ->
     let bytes =
         bcs::to_bytes(&(withdrawal_txn_id, input_index)).expect("serialization should succeed");
     Address::new(Blake2b256::digest(&bytes).digest)
+}
+
+/// Return the unlocked UTXOs that are known to be confirmed by the on-chain
+/// snapshot.
+///
+/// Change outputs are pending while their producing withdrawal remains in the
+/// same snapshot. Once that withdrawal has been removed, they are promoted to
+/// confirmed, matching [`build_utxo_status`].
+pub(crate) fn confirmed_unlocked_utxo_ids(
+    records: &BTreeMap<UtxoId, UtxoRecord>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
+) -> Vec<UtxoId> {
+    records
+        .values()
+        .filter(|record| {
+            record.spent_by.is_none()
+                && record
+                    .produced_by
+                    .is_none_or(|producer| !withdrawal_txns.contains_key(&producer))
+        })
+        .map(|record| record.utxo.id)
+        .collect()
+}
+
+fn oldest_confirmed_utxo_id(
+    ids: &[UtxoId],
+    heights: &BTreeMap<bitcoin::Txid, u32>,
+) -> anyhow::Result<Option<UtxoId>> {
+    let mut oldest = None;
+    for &id in ids {
+        let txid: bitcoin::Txid = id.txid.into();
+        let height = heights
+            .get(&txid)
+            .copied()
+            .ok_or_else(|| anyhow!("missing confirmation height for UTXO {id:?}"))?;
+        let candidate = (height, id);
+        if oldest.is_none_or(|current| candidate < current) {
+            oldest = Some(candidate);
+        }
+    }
+    Ok(oldest.map(|(_, id)| id))
 }
 
 /// Query Bitcoin in parallel for the confirmation count of every pending
@@ -2354,6 +2436,136 @@ mod tests {
             },
             guardian_signatures: None,
         }
+    }
+
+    fn test_utxo_id(txid_byte: u8, vout: u32) -> UtxoId {
+        UtxoId {
+            txid: BitcoinTxid::new([txid_byte; 32]),
+            vout,
+        }
+    }
+
+    fn test_utxo_record(
+        id: UtxoId,
+        produced_by: Option<Address>,
+        spent_by: Option<Address>,
+    ) -> UtxoRecord {
+        UtxoRecord {
+            utxo: Utxo {
+                id,
+                amount: 1_000,
+                derivation_path: None,
+            },
+            produced_by,
+            spent_by,
+            spent_epoch: None,
+        }
+    }
+
+    fn test_confirmation_heights(entries: &[(UtxoId, u32)]) -> BTreeMap<bitcoin::Txid, u32> {
+        entries
+            .iter()
+            .map(|(id, height)| (id.txid.into(), *height))
+            .collect()
+    }
+
+    #[test]
+    fn oldest_confirmed_utxo_uses_lowest_confirmation_height() {
+        let newer = test_utxo_id(1, 0);
+        let older = test_utxo_id(2, 0);
+        let heights = test_confirmation_heights(&[(newer, 500), (older, 100)]);
+
+        assert_eq!(
+            oldest_confirmed_utxo_id(&[newer, older], &heights).unwrap(),
+            Some(older)
+        );
+    }
+
+    #[test]
+    fn oldest_confirmed_utxo_breaks_same_height_ties_by_id() {
+        let first = test_utxo_id(1, 1);
+        let second = test_utxo_id(2, 0);
+        let heights = test_confirmation_heights(&[(first, 100), (second, 100)]);
+
+        assert_eq!(
+            oldest_confirmed_utxo_id(&[second, first], &heights).unwrap(),
+            Some(first.min(second))
+        );
+    }
+
+    #[test]
+    fn oldest_confirmed_utxo_handles_outputs_sharing_a_txid() {
+        let first_output = test_utxo_id(3, 0);
+        let second_output = test_utxo_id(3, 1);
+        let heights = test_confirmation_heights(&[(first_output, 100)]);
+
+        assert_eq!(
+            oldest_confirmed_utxo_id(&[second_output, first_output], &heights).unwrap(),
+            Some(first_output)
+        );
+    }
+
+    #[test]
+    fn confirmed_unlocked_utxos_exclude_pending_and_locked_records() {
+        let confirmed = test_utxo_id(1, 0);
+        let pending = test_utxo_id(2, 0);
+        let locked = test_utxo_id(3, 0);
+        let pending_producer = Address::new([4; 32]);
+        let spender = Address::new([5; 32]);
+        let records = BTreeMap::from([
+            (confirmed, test_utxo_record(confirmed, None, None)),
+            (
+                pending,
+                test_utxo_record(pending, Some(pending_producer), None),
+            ),
+            (locked, test_utxo_record(locked, None, Some(spender))),
+        ]);
+        let withdrawal_txns =
+            BTreeMap::from([(pending_producer, make_txn(vec![], vec![], vec![]))]);
+
+        assert_eq!(
+            confirmed_unlocked_utxo_ids(&records, &withdrawal_txns),
+            vec![confirmed]
+        );
+    }
+
+    #[test]
+    fn confirmed_unlocked_utxos_include_change_with_absent_producer() {
+        let promoted = test_utxo_id(1, 0);
+        let removed_producer = Address::new([2; 32]);
+        let records = BTreeMap::from([(
+            promoted,
+            test_utxo_record(promoted, Some(removed_producer), None),
+        )]);
+
+        assert_eq!(
+            confirmed_unlocked_utxo_ids(&records, &BTreeMap::new()),
+            vec![promoted]
+        );
+    }
+
+    #[test]
+    fn confirmed_unlocked_and_oldest_helpers_handle_empty_pool() {
+        let ids = confirmed_unlocked_utxo_ids(&BTreeMap::new(), &BTreeMap::new());
+
+        assert!(ids.is_empty());
+        assert_eq!(
+            oldest_confirmed_utxo_id(&ids, &BTreeMap::new()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn oldest_confirmed_utxo_rejects_missing_height() {
+        let present = test_utxo_id(1, 0);
+        let missing = test_utxo_id(2, 0);
+        let heights = test_confirmation_heights(&[(present, 100)]);
+
+        let error = oldest_confirmed_utxo_id(&[present, missing], &heights).unwrap_err();
+        assert!(
+            error.to_string().contains("missing confirmation height"),
+            "unexpected error: {error}"
+        );
     }
 
     fn signing(

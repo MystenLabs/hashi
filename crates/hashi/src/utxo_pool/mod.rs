@@ -258,6 +258,13 @@ pub struct CoinSelectionParams {
     /// Step 3.
     pub max_inputs: usize,
 
+    /// UTXO that must be included in selection.
+    ///
+    /// An absent or ineligible required input causes selection to fail. When
+    /// eligible, it is selected before the otherwise largest-first funding
+    /// inputs and counts toward [`Self::max_inputs`].
+    pub required_input: Option<UtxoId>,
+
     /// Maximum number of withdrawal requests that may be batched into a single
     /// transaction.
     pub max_withdrawal_requests: usize,
@@ -459,6 +466,7 @@ impl CoinSelectionParams {
             max_tx_weight: Self::DEFAULT_MAX_TX_WEIGHT,
             max_ancestor_package_weight: Self::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT,
             max_inputs: Self::DEFAULT_MAX_INPUTS,
+            required_input: None,
             max_withdrawal_requests: Self::MAX_WITHDRAWAL_REQUESTS,
             max_fee_per_request,
             min_fee_rate: Self::DEFAULT_MIN_FEE_RATE,
@@ -530,6 +538,11 @@ pub enum CoinSelectionError {
     /// No withdrawal requests were provided to the algorithm.
     #[error("no withdrawal requests provided")]
     NoRequests,
+
+    /// The required input is absent from the supplied pool or does not satisfy
+    /// the normal input eligibility rules.
+    #[error("required input {0:?} is unavailable")]
+    RequiredInputUnavailable(UtxoId),
 
     /// The final per-request fee share exceeds `params.max_fee_per_request`.
     ///
@@ -663,6 +676,7 @@ impl CoinSelectionError {
         match self {
             Self::EmptyPool => "empty_pool",
             Self::NoRequests => "no_requests",
+            Self::RequiredInputUnavailable(_) => "required_input_unavailable",
             Self::FeeExceedsCap { .. } => "fee_exceeds_cap",
             Self::SubDustChange { .. } => "sub_dust_change",
             Self::InsufficientFunds { .. } => "insufficient_funds",
@@ -736,8 +750,9 @@ fn fee_for_weight(fee_rate: FeeRate, weight: Weight) -> u64 {
 /// 1. **Request selection** — up to `max_withdrawal_requests` requests
 ///    are taken oldest-first by timestamp.
 ///
-/// 2. **Input selection** — UTXOs are sorted largest-first and selected
-///    greedily until `input_total >= total_requested`. Both confirmed
+/// 2. **Input selection** — UTXOs are sorted largest-first. If
+///    `required_input` is configured, it is moved to the front, then inputs are
+///    selected greedily until `input_total >= total_requested`. Both confirmed
 ///    and pending UTXOs are eligible, subject to the
 ///    `max_mempool_chain_depth` filter.
 ///
@@ -767,7 +782,12 @@ pub fn select_coins(
 ) -> Result<CoinSelectionResult, CoinSelectionError> {
     // ── Early validation ────────────────────────────────────────────────────
     if utxos.is_empty() {
-        return Err(CoinSelectionError::EmptyPool);
+        return match params.required_input {
+            Some(required_input) => {
+                Err(CoinSelectionError::RequiredInputUnavailable(required_input))
+            }
+            None => Err(CoinSelectionError::EmptyPool),
+        };
     }
     if requests.is_empty() {
         return Err(CoinSelectionError::NoRequests);
@@ -802,13 +822,14 @@ pub fn select_coins(
     }
     let total_requested = builder.total_requested();
 
-    // ── Step 2: Input selection (largest-first) ────────────────────────────
+    // ── Step 2: Input selection (required first, then largest-first) ────────
     //
-    // Sort all UTXOs by descending value, then by id for determinism.
-    // Both confirmed and pending UTXOs are eligible — pending ones may
-    // require CPFP fee boosting, accounted for in Step 4. UTXOs with
-    // too many mempool-only (0-confirmation) ancestors are excluded to
-    // stay within Bitcoin's relay policy limits.
+    // Sort all UTXOs by descending value, then by id for determinism. Both
+    // confirmed and pending UTXOs are eligible — pending ones may require CPFP
+    // fee boosting, accounted for in Step 4. UTXOs with too many mempool-only
+    // (0-confirmation) ancestors are excluded to stay within Bitcoin's relay
+    // policy limits. A configured required input is moved to the front after
+    // eligibility filtering.
     let mut pool: Vec<&UtxoCandidate> = utxos
         .iter()
         .filter(|u| {
@@ -826,6 +847,14 @@ pub fn select_coins(
         })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
+
+    if let Some(required_input) = params.required_input {
+        let Some(required_index) = pool.iter().position(|utxo| utxo.id == required_input) else {
+            return Err(CoinSelectionError::RequiredInputUnavailable(required_input));
+        };
+        let required = pool.remove(required_index);
+        pool.insert(0, required);
+    }
 
     let mut input_total = 0u64;
 
