@@ -1,11 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use hashi::config::get_available_port;
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -35,6 +38,8 @@ use tokio::time::sleep;
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 86_400_000; // 24 hours; tests that need epoch changes should set a shorter duration
+const MAX_NETWORK_STARTUP_ATTEMPTS: usize = 5;
+const NETWORK_STARTUP_LOCK_FILE: &str = "hashi-e2e-sui-startup.lock";
 const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 120;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 
@@ -59,9 +64,68 @@ pub fn sui_binary() -> &'static Path {
         .as_path()
 }
 
-async fn wait_for_ready(client: &mut Client, dir: &Path) -> Result<()> {
-    // Wait till the network has started up and at least one checkpoint has been produced
+#[derive(Debug)]
+enum NetworkStartupError {
+    AddressInUse(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for NetworkStartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AddressInUse(diagnostics) => {
+                write!(f, "Sui network failed to bind a port. {diagnostics}")
+            }
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for NetworkStartupError {}
+
+async fn acquire_startup_lock() -> Result<File> {
+    let path = std::env::temp_dir().join(NETWORK_STARTUP_LOCK_FILE);
+    tokio::task::spawn_blocking(move || {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open Sui startup lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("lock Sui startup lock {}", path.display()))?;
+        Ok(file)
+    })
+    .await
+    .context("join Sui startup lock task")?
+}
+
+async fn wait_for_ready(
+    client: &mut Client,
+    process: &mut Child,
+    dir: &Path,
+) -> std::result::Result<(), NetworkStartupError> {
+    // Wait till the network has started up and at least one checkpoint has been produced.
     for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
+        if let Some(diagnostics) = address_in_use_diagnostics(dir) {
+            return Err(NetworkStartupError::AddressInUse(diagnostics));
+        }
+        match process.try_wait() {
+            Ok(Some(status)) => {
+                return Err(NetworkStartupError::Failed(format!(
+                    "Sui network exited during startup with {status}. {}",
+                    startup_diagnostics(dir),
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(NetworkStartupError::Failed(format!(
+                    "Failed to inspect Sui network process: {error}. {}",
+                    startup_diagnostics(dir),
+                )));
+            }
+        }
         if let Ok(resp) = client
             .ledger_client()
             .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
@@ -72,11 +136,18 @@ async fn wait_for_ready(client: &mut Client, dir: &Path) -> Result<()> {
         }
         sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
     }
-    anyhow::bail!(
+    Err(NetworkStartupError::Failed(format!(
         "Network failed to start within {}s timeout. {}",
         NETWORK_STARTUP_TIMEOUT_SECS,
         startup_diagnostics(dir),
-    )
+    )))
+}
+
+fn address_in_use_diagnostics(dir: &Path) -> Option<String> {
+    let stderr = std::fs::read_to_string(dir.join("out.stderr")).ok()?;
+    stderr
+        .contains("Address already in use")
+        .then(|| startup_diagnostics(dir))
 }
 
 fn startup_diagnostics(dir: &Path) -> String {
@@ -84,6 +155,37 @@ fn startup_diagnostics(dir: &Path) -> String {
         ("stderr", &dir.join("out.stderr")),
         ("stdout", &dir.join("out.stdout")),
     ])
+}
+
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child guard is armed")
+    }
+
+    fn disarm(mut self) -> Child {
+        self.child.take().expect("child guard is armed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            terminate_child(child);
+        }
+    }
+}
+
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Handle for a Sui network running via pre-compiled binary
@@ -111,7 +213,7 @@ pub struct SuiNetworkHandle {
 
 impl Drop for SuiNetworkHandle {
     fn drop(&mut self) {
-        let _ = self.process.kill();
+        terminate_child(&mut self.process);
     }
 }
 
@@ -166,20 +268,60 @@ impl SuiNetworkBuilder {
             .dir
             .clone()
             .ok_or_else(|| anyhow!("no directory configured"))?;
-        self.generate_genesis(&dir)?;
-        let NetworkKeys {
-            validator_keys,
-            user_keys,
-            admin_ports,
-        } = load_keys(&dir)?;
 
-        let rpc_port = self.rpc_port.unwrap_or_else(get_available_port);
-        let process = self.start_network(&dir, rpc_port)?;
+        let (process, rpc_url, client, validator_keys, user_keys, admin_ports) = {
+            // Sui genesis probes ports and releases them before `sui start` binds. Serialize that
+            // gap across test processes, then retry a fresh genesis if an already-running swarm
+            // owns one of the selected ports.
+            let _startup_lock = acquire_startup_lock().await?;
 
-        let rpc_url = format!("http://127.0.0.1:{rpc_port}");
+            let mut started = None;
+            for attempt in 1..=MAX_NETWORK_STARTUP_ATTEMPTS {
+                if attempt > 1 {
+                    std::fs::remove_dir_all(&dir).with_context(|| {
+                        format!("remove failed Sui genesis directory {}", dir.display())
+                    })?;
+                }
+                self.generate_genesis(&dir)?;
+                let NetworkKeys {
+                    validator_keys,
+                    user_keys,
+                    admin_ports,
+                } = load_keys(&dir)?;
 
-        let mut client = sui_rpc::Client::new(&rpc_url)?;
-        wait_for_ready(&mut client, &dir).await?;
+                let rpc_port = self.rpc_port.unwrap_or_else(get_available_port);
+                let mut process = ChildGuard::new(self.start_network(&dir, rpc_port)?);
+                let rpc_url = format!("http://127.0.0.1:{rpc_port}");
+                let mut client = sui_rpc::Client::new(&rpc_url)?;
+
+                match wait_for_ready(&mut client, process.child_mut(), &dir).await {
+                    Ok(()) => {
+                        started = Some((
+                            process.disarm(),
+                            rpc_url,
+                            client,
+                            validator_keys,
+                            user_keys,
+                            admin_ports,
+                        ));
+                        break;
+                    }
+                    Err(NetworkStartupError::AddressInUse(diagnostics))
+                        if attempt < MAX_NETWORK_STARTUP_ATTEMPTS =>
+                    {
+                        tracing::warn!(
+                            attempt,
+                            max_attempts = MAX_NETWORK_STARTUP_ATTEMPTS,
+                            "Sui network selected an occupied port; regenerating genesis. \
+                             {diagnostics}",
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            started.ok_or_else(|| anyhow!("Sui network startup attempts exhausted"))?
+        };
+
         let mut sui = SuiNetworkHandle {
             process,
             dir,
