@@ -1731,25 +1731,7 @@ impl MpcService {
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         let pruning_references = {
             let state = self.inner.onchain_state().state();
-            let committee_set = &state.hashi().committees;
-            let mut referenced = crate::db::PruningReferences::default();
-            for committee in committee_set.committees().values() {
-                for member in committee.members() {
-                    referenced
-                        .add_member_pubkeys(member.encryption_public_key(), member.public_key());
-                }
-            }
-            for member_info in committee_set.members().values() {
-                referenced.add_pending_registration(
-                    member_info.next_epoch_encryption_public_key(),
-                    member_info.next_epoch_public_key(),
-                );
-            }
-            if let Some((prev_epoch, _)) = committee_set.previous_committee_for_target(target_epoch)
-            {
-                referenced.add_committee_epoch(prev_epoch);
-            }
-            referenced
+            build_pruning_references(&state.hashi().committees, target_epoch)
         };
         if let Err(e) = self
             .inner
@@ -2362,8 +2344,142 @@ mod presig_count_tests {
     }
 }
 
+pub(crate) fn build_pruning_references(
+    committee_set: &crate::onchain::types::CommitteeSet,
+    target_epoch: u64,
+) -> crate::db::PruningReferences {
+    let mut referenced = crate::db::PruningReferences::default();
+    let previous = committee_set.previous_committee_for_target(target_epoch);
+    let preceding = committee_set.committees().range(..target_epoch).next_back();
+    for committee in committee_set
+        .committees()
+        .get(&target_epoch)
+        .into_iter()
+        .chain(previous.map(|(_, committee)| committee))
+        .chain(preceding.map(|(_, committee)| committee))
+    {
+        for member in committee.members() {
+            referenced.add_member_pubkeys(member.encryption_public_key(), member.public_key());
+        }
+    }
+    for (epoch, _) in previous.into_iter().chain(preceding.map(|(e, c)| (*e, c))) {
+        referenced.add_committee_epoch(epoch);
+    }
+    for member_info in committee_set.members().values() {
+        referenced.add_pending_registration(
+            member_info.next_epoch_encryption_public_key(),
+            member_info.next_epoch_public_key(),
+        );
+    }
+    referenced
+}
+
 fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) || current_epoch == target_epoch
+}
+
+#[cfg(test)]
+mod pruning_reference_tests {
+    use super::build_pruning_references;
+    use crate::db::Database;
+    use crate::onchain::types::CommitteeSet;
+    use crate::onchain::types::MemberInfo;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
+    use std::collections::BTreeMap;
+    use sui_sdk_types::Address;
+
+    #[test]
+    fn previous_committee_survives_a_gap_while_a_change_is_pending() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+        let address = Address::new([1u8; 32]);
+        let mut committees = BTreeMap::new();
+        for epoch in [500u64, 520] {
+            let enc = EncryptionPrivateKey::new(&mut rand::thread_rng());
+            let enc_pub = EncryptionPublicKey::from_private_key(&enc);
+            let bls = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+            db.store_encryption_key(epoch, &enc).unwrap();
+            db.store_signing_key(epoch, &bls).unwrap();
+            committees.insert(
+                epoch,
+                Committee::new(
+                    vec![CommitteeMember::new(address, bls.public_key(), enc_pub, 1)],
+                    epoch,
+                    0,
+                    5_000,
+                    0,
+                ),
+            );
+        }
+        let mut set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        set.set_epoch(520)
+            .set_pending_epoch_change(Some(521))
+            .set_committees(committees)
+            .set_members(BTreeMap::<Address, MemberInfo>::new());
+        db.prune_messages_below(520, &build_pruning_references(&set, 520))
+            .unwrap();
+        assert!(
+            db.get_encryption_key(500).unwrap().is_some(),
+            "the real predecessor must stay pinned even when `previous_committee_for_target` \
+             names the target itself"
+        );
+    }
+
+    #[test]
+    fn committees_older_than_the_predecessor_stop_being_pinned() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+        let address = Address::new([1u8; 32]);
+
+        let mut committees = BTreeMap::new();
+        for epoch in [10u64, 20, 30, 40] {
+            let enc = EncryptionPrivateKey::new(&mut rand::thread_rng());
+            let enc_pub = EncryptionPublicKey::from_private_key(&enc);
+            let bls = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+            db.store_encryption_key(epoch, &enc).unwrap();
+            db.store_signing_key(epoch, &bls).unwrap();
+            committees.insert(
+                epoch,
+                Committee::new(
+                    vec![CommitteeMember::new(address, bls.public_key(), enc_pub, 1)],
+                    epoch,
+                    0,
+                    5_000,
+                    0,
+                ),
+            );
+        }
+
+        let mut set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+        set.set_epoch(30)
+            .set_pending_epoch_change(None)
+            .set_committees(committees)
+            .set_members(BTreeMap::<Address, MemberInfo>::new());
+
+        db.prune_messages_below(40, &build_pruning_references(&set, 40))
+            .unwrap();
+
+        for epoch in [40u64, 30] {
+            assert!(
+                db.get_encryption_key(epoch).unwrap().is_some(),
+                "epoch {epoch} is the target or its predecessor and must stay pinned"
+            );
+        }
+        for epoch in [10u64, 20] {
+            assert!(
+                db.get_encryption_key(epoch).unwrap().is_none(),
+                "epoch {epoch} is older than the predecessor and must no longer be pinned"
+            );
+            assert!(
+                db.get_signing_key(epoch).unwrap().is_none(),
+                "epoch {epoch} signing key rides the same reference set"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
