@@ -734,9 +734,10 @@ mod avid_conversion_tests {
 
     fn confirm_cert() -> types::AvidConfirmCertificate {
         // Cert contents are arbitrary here — the round-trip test only checks BCS serialization.
-        let message = types::DealerMessagesHash {
+        let message = types::AvssVoteMessagesHash {
             dealer_address: Address::new([0u8; 32]),
             messages_hash: Blake2b256::digest(b"confirm cert").digest.into(),
+            batch_index: 0,
         };
         let signature = BLS12381AggregateSignature::default();
         SignedMessage::new(7, message, signature.as_bytes(), &[1u8]).unwrap()

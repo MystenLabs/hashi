@@ -26,9 +26,12 @@ const PROOF_OF_POSSESSION: u16 = 0x0000;
 const COMMITTEE_TRANSITION: u16 = 0x0001;
 /// Reconfiguration completion: the next committee holds the MPC key(s).
 const RECONFIG_COMPLETION: u16 = 0x0002;
-/// AVID/TOB dealer-messages hash certificates (MPC ceremonies). Verified
-/// off-chain only; the intent is reserved here so the registry is complete.
+/// Dealer-messages hash certificates.
 const DEALER_MESSAGES_HASH: u16 = 0x0003;
+/// AVID optimistic-path certificate.
+const AVSS_VOTE_MESSAGES_HASH: u16 = 0x0004;
+/// AVID pessimistic-path certificate.
+const AVID_VOTE_MESSAGES_HASH: u16 = 0x0005;
 
 // ==== Bitcoin (0x0100..=0x01FF) ====
 
@@ -57,6 +60,10 @@ public(package) fun committee_transition(): u16 { COMMITTEE_TRANSITION }
 public(package) fun reconfig_completion(): u16 { RECONFIG_COMPLETION }
 
 public(package) fun dealer_messages_hash(): u16 { DEALER_MESSAGES_HASH }
+
+public(package) fun avss_vote_messages_hash(): u16 { AVSS_VOTE_MESSAGES_HASH }
+
+public(package) fun avid_vote_messages_hash(): u16 { AVID_VOTE_MESSAGES_HASH }
 
 public(package) fun deposit_confirmation(): u16 { DEPOSIT_CONFIRMATION }
 

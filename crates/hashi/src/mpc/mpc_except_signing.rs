@@ -14,11 +14,14 @@ use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::types::AvidCertificate;
+use crate::mpc::types::AvidConfirmCertificate;
 use crate::mpc::types::AvidDealerFlowData;
 use crate::mpc::types::AvidNonceMessage;
 use crate::mpc::types::AvidNonceMessageKind;
 use crate::mpc::types::AvidNonceRetrievalMessage;
 use crate::mpc::types::AvidRoundState;
+use crate::mpc::types::AvidVoteMessagesHash;
+use crate::mpc::types::AvssVoteMessagesHash;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
 pub use crate::mpc::types::ComplaintResponse;
@@ -62,6 +65,7 @@ use crate::mpc::types::RotationReconstructionContext;
 pub use crate::mpc::types::SendMessagesRequest;
 pub use crate::mpc::types::SendMessagesResponse;
 pub use crate::mpc::types::SessionId;
+use crate::mpc::types::UnclassifiedNonceCert;
 use crate::mpc::types::VerifiedAvidVoteCert;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::mpc::types::hash_avid_vote;
@@ -93,6 +97,7 @@ use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::ReducedWeight;
+use hashi_types::committee::SignedMessage;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -132,8 +137,21 @@ type AvidEchoAndVote = (
     Vec<(Address, Messages)>,
 );
 
+#[derive(Clone, Copy)]
+pub(crate) enum AdjudicatedCert {
+    Rejected,
+    Accepted(Option<CertKind>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CertKind {
+enum LocalMaterial {
+    Matches,
+    Absent,
+    Mismatches,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CertKind {
     AvssVote,
     AvidVote,
 }
@@ -207,28 +225,50 @@ pub(crate) struct AdmittedNonceDealers {
     pub(crate) cutoff_ms: Option<u64>,
 }
 
-pub(crate) struct VerifiedNonceCerts<T>(Vec<(Address, T)>);
+pub(crate) struct VerifiedNonceCerts<T> {
+    certs: Vec<(Address, T)>,
+    kinds: HashMap<Address, CertKind>,
+}
 
 impl<T> VerifiedNonceCerts<T> {
+    pub(crate) fn new(certs: Vec<(Address, T)>, kinds: HashMap<Address, CertKind>) -> Self {
+        Self { certs, kinds }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unclassified(certs: Vec<(Address, T)>) -> Self {
+        Self {
+            certs,
+            kinds: HashMap::new(),
+        }
+    }
+
     pub(crate) fn as_slice(&self) -> &[(Address, T)] {
-        &self.0
+        &self.certs
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.certs.is_empty()
     }
 
-    /// Re-express verified certs in another form. The verification proof
-    /// carries over because every output is derived from a verified input.
+    pub(crate) fn kind_of(&self, dealer: &Address) -> Option<CertKind> {
+        self.kinds.get(dealer).copied()
+    }
+
     pub(crate) fn filter_map<U>(
         &self,
         f: impl Fn(&Address, &T) -> Option<(Address, U)>,
     ) -> VerifiedNonceCerts<U> {
-        VerifiedNonceCerts(self.0.iter().filter_map(|(a, t)| f(a, t)).collect())
+        let certs: Vec<(Address, U)> = self.certs.iter().filter_map(|(a, t)| f(a, t)).collect();
+        let kinds = certs
+            .iter()
+            .filter_map(|(a, _)| self.kinds.get(a).map(|k| (*a, *k)))
+            .collect();
+        VerifiedNonceCerts { certs, kinds }
     }
 
     pub(crate) fn into_inner(self) -> Vec<(Address, T)> {
-        self.0
+        self.certs
     }
 }
 
@@ -1145,14 +1185,14 @@ impl MpcManager {
         &self,
         certs: &VerifiedNonceCerts<T>,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
-        self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window(), |_| true)
+        self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window(), |_, _| true)
     }
 
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
         &self,
         certs: &VerifiedNonceCerts<T>,
         mut window: NonceCollectionWindow,
-        admit: impl Fn(&T) -> bool,
+        admit: impl Fn(&T, Option<CertKind>) -> bool,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         let mut certified = HashSet::new();
         for (table_dealer, cert) in certs.as_slice() {
@@ -1173,7 +1213,7 @@ impl MpcManager {
             if certified.contains(&dealer) {
                 continue;
             }
-            if !admit(cert) {
+            if !admit(cert, certs.kind_of(table_dealer)) {
                 continue;
             }
             let Some(admission) = window.try_admit(cert.nonce_timestamp_ms()) else {
@@ -1218,10 +1258,8 @@ impl MpcManager {
         (certified, window.weight())
     }
 
-    fn avid_admission(&self) -> impl Fn(&CertificateV1) -> bool + '_ {
-        let vote_quorum_weight =
-            Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
-        move |stamped| {
+    fn avid_admission(&self) -> impl Fn(&CertificateV1, Option<CertKind>) -> bool + '_ {
+        move |stamped, kind| {
             let CertificateV1::NonceGeneration { cert, .. } = stamped else {
                 return false;
             };
@@ -1233,13 +1271,29 @@ impl MpcManager {
                     return false;
                 }
             };
-            if signer_weight < vote_quorum_weight {
+            let required = match kind {
+                Some(kind) => Self::required_cert_weight(
+                    &self.mpc_config.nodes,
+                    self.mpc_config.max_faulty,
+                    kind,
+                ),
+                None => {
+                    tracing::warn!(
+                        "Excluding AVID nonce cert for dealer {:?} from sizing: \
+                         no signing domain classified it",
+                        dealer,
+                    );
+                    return false;
+                }
+            };
+            if signer_weight < required {
                 tracing::warn!(
                     "Excluding AVID nonce cert for dealer {:?} from sizing: \
-                     signer weight {} below the vote quorum {}",
+                     signer weight {} below the {:?} bar {}",
                     dealer,
                     signer_weight,
-                    vote_quorum_weight,
+                    kind,
+                    required,
                 );
                 return false;
             }
@@ -1251,16 +1305,21 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         certs: Vec<(Address, T)>,
-        adjudicated: &mut HashMap<Address, bool>,
+        batch_index: u32,
+        adjudicated: &mut HashMap<Address, AdjudicatedCert>,
         metrics: &Metrics,
     ) -> VerifiedNonceCerts<T>
     where
         T: NonceCertToVerify,
     {
         let mut verified = Vec::with_capacity(certs.len());
+        let mut kinds: HashMap<Address, CertKind> = HashMap::new();
         for (dealer, cert) in certs {
-            if let Some(&accepted) = adjudicated.get(&dealer) {
-                if accepted {
+            if let Some(&adjudged) = adjudicated.get(&dealer) {
+                if let AdjudicatedCert::Accepted(kind) = adjudged {
+                    if let Some(kind) = kind {
+                        kinds.insert(dealer, kind);
+                    }
                     verified.push((dealer, cert));
                 }
                 continue;
@@ -1275,26 +1334,31 @@ impl MpcManager {
                         .mpc_certs_rejected_total
                         .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "malformed"])
                         .inc();
-                    adjudicated.insert(dealer, false);
+                    adjudicated.insert(dealer, AdjudicatedCert::Rejected);
                     continue;
                 }
             };
             let mgr = Arc::clone(mpc_manager);
             let verification = spawn_blocking(move || {
                 let mgr = mgr.read().unwrap();
-                mgr.verify_nonce_dealer_certificate(&dealer_cert)
+                let unclassified =
+                    UnclassifiedNonceCert::from_dealer_certificate(&dealer_cert, batch_index);
+                mgr.verify_and_classify_nonce_cert(&unclassified)
                     .map_err(|e| {
                         let reason = mgr.rejection_reason(
                             &dealer_cert,
-                            mgr.nonce_cert_quorum(dealer_cert.epoch()),
+                            mgr.nonce_cert_required_weight(&unclassified),
                         );
                         (e, reason)
                     })
             })
             .await;
             match verification {
-                Ok(_) => {
-                    adjudicated.insert(dealer, true);
+                Ok((kind, _)) => {
+                    adjudicated.insert(dealer, AdjudicatedCert::Accepted(kind));
+                    if let Some(kind) = kind {
+                        kinds.insert(dealer, kind);
+                    }
                     verified.push((dealer, cert));
                 }
                 Err((e, reason)) => {
@@ -1306,11 +1370,11 @@ impl MpcManager {
                         .mpc_certs_rejected_total
                         .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
                         .inc();
-                    adjudicated.insert(dealer, false);
+                    adjudicated.insert(dealer, AdjudicatedCert::Rejected);
                 }
             }
         }
-        VerifiedNonceCerts(verified)
+        VerifiedNonceCerts::new(verified, kinds)
     }
 
     async fn run_dkg_as_dealer(
@@ -2644,9 +2708,10 @@ impl MpcManager {
             .insert((batch_index, dealer), output);
         self.current_avid_verified_common
             .insert((batch_index, dealer), verified_common);
-        let confirm = DealerMessagesHash {
+        let confirm = AvssVoteMessagesHash {
             dealer_address: dealer,
             messages_hash: MessagesHash::from(avss_vote.common_message_hash.digest),
+            batch_index,
         };
         let signature = self
             .signing_key
@@ -2657,7 +2722,7 @@ impl MpcManager {
     fn create_avid_nonce_dispersal_messages(
         &self,
         builder: &batch_avss_avid::AvssMessageBuilder,
-        confirm_cert: DealerCertificate,
+        confirm_cert: AvidConfirmCertificate,
         batch_index: u32,
     ) -> MpcResult<Vec<(Address, Messages)>> {
         let dealer_sid = SessionId::nonce_dealer_session_id(
@@ -2711,7 +2776,7 @@ impl MpcManager {
         batch_index: u32,
         common: batch_avss_avid::AvssCommonMessage,
         dispersal: batch_avss_avid::Dispersal,
-        confirm_cert: DealerCertificate,
+        confirm_cert: AvidConfirmCertificate,
     ) -> MpcResult<AvidEchoAndVote> {
         let own_common = self
             .get_avid_round_state(batch_index, &dealer)?
@@ -2737,9 +2802,10 @@ impl MpcManager {
         let (echo_builder, avid_vote) = receiver
             .process_avid_message(&verified_common, avid_message)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-        let target = DealerMessagesHash {
+        let target = AvidVoteMessagesHash {
             dealer_address: dealer,
             messages_hash: hash_avid_vote(&avid_vote),
+            batch_index,
         };
         let vote = self
             .signing_key
@@ -2839,7 +2905,15 @@ impl MpcManager {
                         self.mpc_config.epoch,
                     )));
                 }
-                self.verify_nonce_dealer_certificate(vote_cert)?;
+                let unclassified = UnclassifiedNonceCert::from_signed(vote_cert, batch_index);
+                match self.verify_and_classify_nonce_cert(&unclassified)? {
+                    (Some(CertKind::AvidVote), _) => {}
+                    (kind, _) => {
+                        return Err(MpcError::InvalidCertificate(format!(
+                            "blame carried a {kind:?} cert; only an AvidVote cert can back a blame"
+                        )));
+                    }
+                }
                 let cert = AvidCertificate::vote(
                     vote_cert.clone(),
                     held_vote,
@@ -3040,9 +3114,10 @@ impl MpcManager {
         let signature =
             self.try_sign_avid_nonce_optimistic(self.address, batch_index, &own_avss)?;
         let my_signature = MemberSignature::new(epoch, self.address, signature);
-        let confirm_target = DealerMessagesHash {
+        let confirm_target = AvssVoteMessagesHash {
             dealer_address: self.address,
             messages_hash: MessagesHash::from(own_avss.common.hash().digest),
+            batch_index,
         };
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
         let vote_quorum_weight =
@@ -3176,9 +3251,10 @@ impl MpcManager {
                         .expect("own dispersal was just processed")
                         .0,
                 );
-                let vote_target = DealerMessagesHash {
+                let vote_target = AvidVoteMessagesHash {
                     dealer_address: mgr.address,
                     messages_hash: vote_hash,
+                    batch_index,
                 };
                 let my_vote = MemberSignature::new(mgr.mpc_config.epoch, mgr.address, signature);
                 Ok((vote_target, my_vote, dispersals))
@@ -3300,6 +3376,13 @@ impl MpcManager {
         params.t as u32 + params.f as u32
     }
 
+    fn required_cert_weight(nodes: &Nodes<EncryptionGroupElement>, f: u16, kind: CertKind) -> u32 {
+        match kind {
+            CertKind::AvssVote => nodes.total_weight() as u32,
+            CertKind::AvidVote => Self::avid_vote_quorum(nodes, f),
+        }
+    }
+
     fn avid_vote_quorum(nodes: &Nodes<EncryptionGroupElement>, f: u16) -> u32 {
         Self::fail_closed_sub(nodes.total_weight() as u32, f as u32)
     }
@@ -3347,6 +3430,70 @@ impl MpcManager {
     ) -> MpcResult<u32> {
         let required = self.nonce_cert_quorum(cert.epoch())?;
         self.verify_dealer_certificate(cert, required)
+    }
+
+    fn avid_cert_kind(committee: &Committee, cert: &UnclassifiedNonceCert) -> MpcResult<CertKind> {
+        if committee
+            .verify_signature_any_weight(&cert.as_avss_vote()?)
+            .is_ok()
+        {
+            return Ok(CertKind::AvssVote);
+        }
+        committee
+            .verify_signature_any_weight(&cert.as_avid_vote()?)
+            .map(|_| CertKind::AvidVote)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+    }
+
+    fn nonce_cert_required_weight(&self, cert: &UnclassifiedNonceCert) -> MpcResult<u32> {
+        let (committee, nodes, params) = self.cert_verification_context(cert.epoch())?;
+        let protocol =
+            NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
+        Ok(match protocol {
+            NonceGenerationProtocol::Vanilla => Self::dealer_cert_quorum(params),
+            NonceGenerationProtocol::Avid => Self::required_cert_weight(
+                nodes,
+                params.f,
+                Self::avid_cert_kind(committee, cert).unwrap_or(CertKind::AvidVote),
+            ),
+        })
+    }
+
+    pub(crate) fn verify_and_classify_nonce_cert(
+        &self,
+        cert: &UnclassifiedNonceCert,
+    ) -> MpcResult<(Option<CertKind>, u32)> {
+        let (committee, nodes, params) = self.cert_verification_context(cert.epoch())?;
+        let protocol =
+            NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
+        match protocol {
+            NonceGenerationProtocol::Vanilla => {
+                let required = Self::dealer_cert_quorum(params);
+                let weight = committee
+                    .verify_signature_and_reduced_weight(
+                        &cert.as_dealer_messages_hash()?,
+                        nodes,
+                        required,
+                    )
+                    .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+                Ok((None, weight))
+            }
+            NonceGenerationProtocol::Avid => {
+                let weight = cert
+                    .as_avss_vote()?
+                    .committee_signature()
+                    .reduced_weight(committee, nodes)
+                    .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+                let kind = Self::avid_cert_kind(committee, cert)?;
+                let required = Self::required_cert_weight(nodes, params.f, kind);
+                if weight < required {
+                    return Err(MpcError::InvalidCertificate(format!(
+                        "nonce cert reduced weight {weight} below the {kind:?} bar {required}"
+                    )));
+                }
+                Ok((Some(kind), weight))
+            }
+        }
     }
 
     async fn verified_dealer_weight_blocking(
@@ -3431,8 +3578,13 @@ impl MpcManager {
             CertificateV1::Dkg(c) | CertificateV1::Rotation(c) => {
                 self.rejection_reason(c, self.key_generation_cert_quorum(c.epoch()))
             }
-            CertificateV1::NonceGeneration { cert: c, .. } => {
-                self.rejection_reason(c, self.nonce_cert_quorum(c.epoch()))
+            CertificateV1::NonceGeneration {
+                cert: c,
+                batch_index,
+                ..
+            } => {
+                let unclassified = UnclassifiedNonceCert::from_dealer_certificate(c, *batch_index);
+                self.rejection_reason(c, self.nonce_cert_required_weight(&unclassified))
             }
         }
     }
@@ -3444,37 +3596,45 @@ impl MpcManager {
                 self.verify_dealer_certificate(dealer_cert, required)?;
             }
             CertificateV1::NonceGeneration {
-                cert: dealer_cert, ..
+                cert: dealer_cert,
+                batch_index,
+                ..
             } => {
-                self.verify_nonce_dealer_certificate(dealer_cert)?;
+                let unclassified =
+                    UnclassifiedNonceCert::from_dealer_certificate(dealer_cert, *batch_index);
+                self.verify_and_classify_nonce_cert(&unclassified)?;
             }
         }
         Ok(VerifiedCertificateV1::new_unchecked(cert))
     }
 
-    fn resolve_avid_cert_kind_locally(
+    fn avid_local_material(
         &self,
         batch_index: u32,
         dealer: &Address,
+        kind: CertKind,
         digest: &MessagesHash,
-    ) -> Option<CertKind> {
-        if let Some(state) = self
-            .get_avid_round_state(batch_index, dealer)
-            .ok()
-            .flatten()
-            && MessagesHash::from(state.common.hash().digest) == *digest
-        {
-            return Some(CertKind::AvssVote);
+    ) -> LocalMaterial {
+        let read = match kind {
+            CertKind::AvssVote => self
+                .get_avid_round_state(batch_index, dealer)
+                .map(|s| s.map(|state| MessagesHash::from(state.common.hash().digest))),
+            CertKind::AvidVote => self
+                .try_get_avid_held_echoes(batch_index, dealer)
+                .map(|e| e.map(|(vote, _)| hash_avid_vote(&vote))),
+        };
+        let held = read.unwrap_or_else(|e| {
+            tracing::warn!(
+                "AVID local material for {dealer:?} batch {batch_index} unreadable, \
+                 treating as absent: {e}"
+            );
+            None
+        });
+        match held {
+            None => LocalMaterial::Absent,
+            Some(local) if local == *digest => LocalMaterial::Matches,
+            Some(_) => LocalMaterial::Mismatches,
         }
-        if let Some((vote, _)) = self
-            .try_get_avid_held_echoes(batch_index, dealer)
-            .ok()
-            .flatten()
-            && hash_avid_vote(&vote) == *digest
-        {
-            return Some(CertKind::AvidVote);
-        }
-        None
     }
 
     async fn pull_and_resolve_avid_cert(
@@ -3566,8 +3726,11 @@ impl MpcManager {
                 .ok_or_else(|| {
                     MpcError::NotFound("no common message pins to the certified vote".into())
                 })?;
+            let typed_vote_cert =
+                UnclassifiedNonceCert::from_dealer_certificate(&nonce_cert, batch_index)
+                    .as_avid_vote()?;
             let vote_cert = AvidCertificate::vote(
-                nonce_cert.clone(),
+                typed_vote_cert.clone(),
                 avid_vote,
                 Arc::new(mgr.committee.clone()),
             )?
@@ -3619,7 +3782,7 @@ impl MpcManager {
                         Some((
                             ProtocolComplaint::AvidBlame {
                                 complaint,
-                                vote_cert: nonce_cert,
+                                vote_cert: typed_vote_cert,
                             },
                             verified_common,
                         )),
@@ -3765,14 +3928,9 @@ impl MpcManager {
         cutoff_ms: Option<u64>,
         metrics: &Metrics,
     ) -> MpcResult<NoncePartyAdmission> {
-        let (mut window, total_reduced_weight, vote_quorum_weight) = {
+        let mut window = {
             let mgr = mpc_manager.read().unwrap();
-            let total = mgr.mpc_config.nodes.total_weight() as u32;
-            (
-                NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms),
-                total,
-                Self::avid_vote_quorum(&mgr.mpc_config.nodes, mgr.mpc_config.max_faulty),
-            )
+            NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms)
         };
         let mut certified_dealers = HashSet::new();
         let mut local_skips = 0u32;
@@ -3798,7 +3956,21 @@ impl MpcManager {
             if certified_dealers.contains(&dealer) {
                 continue;
             }
-            let signer_weight = {
+            {
+                let mgr = mpc_manager.read().unwrap();
+                if nonce_cert.epoch() != mgr.mpc_config.epoch {
+                    tracing::warn!(
+                        "Dropping AVID nonce cert from {:?}: epoch {} is not the current epoch {}",
+                        dealer,
+                        nonce_cert.epoch(),
+                        mgr.mpc_config.epoch,
+                    );
+                    continue;
+                }
+            }
+            let unclassified =
+                UnclassifiedNonceCert::from_dealer_certificate(&nonce_cert, batch_index);
+            let kind = {
                 let _timer = metrics
                     .mpc_cert_verify_duration_seconds
                     .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -3807,27 +3979,29 @@ impl MpcManager {
                 let cert = nonce_cert.clone();
                 let result = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee
-                        .verify_signature_and_reduced_weight(
-                            &cert,
-                            &mgr.mpc_config.nodes,
-                            vote_quorum_weight,
-                        )
-                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
+                    mgr.verify_and_classify_nonce_cert(&unclassified)
+                        .map_err(|e| {
+                            let reason = mgr.rejection_reason(
+                                &cert,
+                                mgr.nonce_cert_required_weight(&unclassified),
+                            );
+                            (e, reason)
+                        })
                 })
                 .await;
                 drop(_timer);
                 match result {
-                    Ok(weight) => weight,
-                    Err(e) => {
+                    Ok((Some(kind), _)) => kind,
+                    Ok((None, _)) => {
+                        tracing::warn!(
+                            "Nonce cert from {:?} classified as vanilla inside the AVID \
+                             party loop; dropping",
+                            dealer
+                        );
+                        continue;
+                    }
+                    Err((e, reason)) => {
                         tracing::warn!("Rejected AVID nonce cert from {:?}: {}", dealer, e);
-                        let reason = {
-                            let mgr = mpc_manager.read().unwrap();
-                            mgr.rejection_reason(
-                                &nonce_cert,
-                                mgr.nonce_cert_quorum(nonce_cert.epoch()),
-                            )
-                        };
                         metrics
                             .mpc_certs_rejected_total
                             .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
@@ -3837,58 +4011,44 @@ impl MpcManager {
                 }
             };
             let digest = nonce_cert.message().messages_hash;
-            let kind = {
+            let material = {
                 let mgr = mpc_manager.read().unwrap();
-                mgr.resolve_avid_cert_kind_locally(batch_index, &dealer, &digest)
+                mgr.avid_local_material(batch_index, &dealer, kind, &digest)
             };
-            let kind = match kind {
-                Some(kind) => kind,
-                None => {
-                    let _timer = metrics
-                        .mpc_message_retrieval_duration_seconds
-                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                        .start_timer();
-                    let result = Self::pull_and_resolve_avid_cert(
-                        mpc_manager,
-                        dealer,
-                        batch_index,
-                        &nonce_cert,
-                        p2p_channel,
-                        metrics,
-                    )
-                    .await;
-                    drop(_timer);
-                    match result {
-                        Ok(kind) => kind,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Could not resolve AVID cert kind for dealer {:?}: {}",
-                                dealer,
-                                e
-                            );
-                            local_skips += 1;
-                            continue;
-                        }
+            if material != LocalMaterial::Matches {
+                let _timer = metrics
+                    .mpc_message_retrieval_duration_seconds
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                    .start_timer();
+                let repaired = Self::pull_and_resolve_avid_cert(
+                    mpc_manager,
+                    dealer,
+                    batch_index,
+                    &nonce_cert,
+                    p2p_channel,
+                    metrics,
+                )
+                .await;
+                drop(_timer);
+                match repaired {
+                    Ok(repaired_kind) if repaired_kind == kind => {}
+                    Ok(other) => {
+                        tracing::warn!(
+                            "AVID retrieval for {:?} pinned {:?} against a cert signed as \
+                             {:?}; refusing.",
+                            dealer,
+                            other,
+                            kind
+                        );
+                        local_skips += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!("AVID retrieval failed for {:?}: {}", dealer, e);
+                        local_skips += 1;
+                        continue;
                     }
                 }
-            };
-            let required_cert_weight = match kind {
-                CertKind::AvssVote => total_reduced_weight,
-                CertKind::AvidVote => vote_quorum_weight,
-            };
-            if signer_weight < required_cert_weight {
-                tracing::warn!(
-                    "AVID nonce cert for dealer {:?} below quorum: {} < {} ({:?})",
-                    dealer,
-                    signer_weight,
-                    required_cert_weight,
-                    kind
-                );
-                metrics
-                    .mpc_certs_rejected_total
-                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "weight"])
-                    .inc();
-                continue;
             }
             let dealer_weight = {
                 let mut mgr = mpc_manager.write().unwrap();
@@ -3948,12 +4108,14 @@ impl MpcManager {
         })
     }
 
-    async fn publish_nonce_generation_cert(
+    async fn publish_nonce_generation_cert<T: crate::mpc::types::NonceCertPayload>(
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         batch_index: u32,
-        cert: DealerCertificate,
+        cert: SignedMessage<T>,
         metrics: &Metrics,
     ) -> MpcResult<()> {
+        let cert =
+            UnclassifiedNonceCert::from_signed(&cert, batch_index).as_dealer_messages_hash()?;
         let cert = CertificateV1::NonceGeneration {
             batch_index,
             cert,
@@ -6593,8 +6755,8 @@ fn verify_complaint_response_from_signer(
     }
 }
 
-async fn collect_dealer_signatures<P: P2PChannel>(
-    aggregator: &mut BlsSignatureAggregator<'_, DealerMessagesHash, ReducedWeight<'_>>,
+async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::IntentMessage + Clone>(
+    aggregator: &mut BlsSignatureAggregator<'_, M, ReducedWeight<'_>>,
     requests: Vec<(Address, Arc<SendMessagesRequest>)>,
     stop_threshold: u32,
     grace: Duration,

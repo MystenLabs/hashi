@@ -36,8 +36,12 @@ pub enum Intent {
     CommitteeTransition = 0x0001,
     /// Reconfiguration completion: the next committee holds the MPC key(s).
     ReconfigCompletion = 0x0002,
-    /// AVID/TOB dealer-messages hash certificates (MPC ceremonies).
+    /// Dealer-messages hash certificates.
     DealerMessagesHash = 0x0003,
+    /// AVID nonce optimistic-path certificate (`CertKind::AvssVote`).
+    AvssVoteMessagesHash = 0x0004,
+    /// AVID nonce pessimistic-path certificate (`CertKind::AvidVote`).
+    AvidVoteMessagesHash = 0x0005,
 
     // ==== Bitcoin (0x0100..=0x01FF) ====
     /// Deposit confirmation over (request_id, utxo).
@@ -92,6 +96,8 @@ mod tests {
         assert_eq!(Intent::CommitteeTransition as u16, 0x0001);
         assert_eq!(Intent::ReconfigCompletion as u16, 0x0002);
         assert_eq!(Intent::DealerMessagesHash as u16, 0x0003);
+        assert_eq!(Intent::AvssVoteMessagesHash as u16, 0x0004);
+        assert_eq!(Intent::AvidVoteMessagesHash as u16, 0x0005);
         assert_eq!(Intent::DepositConfirmation as u16, 0x0100);
         assert_eq!(Intent::WithdrawalRequestApproval as u16, 0x0101);
         assert_eq!(Intent::WithdrawalCommitment as u16, 0x0102);
