@@ -200,8 +200,8 @@ where
 /// confirm a ciphertext is addressed to the expected cert without holding its
 /// secret key (e.g. a yubikey-bound key, which can't be inspected in memory).
 ///
-/// Rejects anonymous/hidden recipients: if the recipient key handle is omitted,
-/// callers cannot prove the ciphertext is addressed only to the expected cert.
+/// Rejects password-based and anonymous/hidden recipients because callers
+/// cannot prove the ciphertext is decryptable only by the expected cert.
 pub fn pgp_message_recipients(armored: &str) -> Result<Vec<openpgp::KeyHandle>> {
     use openpgp::parse::PacketParser;
     use openpgp::parse::PacketParserResult;
@@ -216,11 +216,17 @@ pub fn pgp_message_recipients(armored: &str) -> Result<Vec<openpgp::KeyHandle>> 
         // encrypted message the PKESKs sit at the top level and the SEIP body
         // is opaque (still ciphertext), so only the recipients are visible.
         let (packet, next_ppr) = pp.recurse().context("parsing OpenPGP packet stream")?;
-        if let openpgp::Packet::PKESK(pkesk) = packet {
-            let handle = pkesk
-                .recipient()
-                .ok_or_else(|| anyhow::anyhow!("OpenPGP message has an anonymous recipient"))?;
-            handles.push(handle);
+        match packet {
+            openpgp::Packet::PKESK(pkesk) => {
+                let handle = pkesk
+                    .recipient()
+                    .ok_or_else(|| anyhow::anyhow!("OpenPGP message has an anonymous recipient"))?;
+                handles.push(handle);
+            }
+            openpgp::Packet::SKESK(_) => {
+                anyhow::bail!("OpenPGP message has a password recipient")
+            }
+            _ => {}
         }
         ppr = next_ppr;
     }
@@ -828,6 +834,40 @@ mod tests {
         assert!(
             recipients.iter().all(|h| cert_owns_key_handle(&cert, h)),
             "all recipients should belong to the cert"
+        );
+    }
+
+    #[test]
+    fn pgp_message_recipients_rejects_password_recipient() {
+        let (public, _secret) = test_utils::mock_pgp_keypair();
+        let cert = PgpPublicCert::new(public).unwrap();
+        let recipients = cert
+            .cert
+            .keys()
+            .with_policy(&*POLICY, None)
+            .supported()
+            .alive()
+            .revoked(false)
+            .for_transport_encryption();
+        let mut ciphertext = Vec::new();
+        let message = Message::new(&mut ciphertext);
+        let message = Armorer::new(message)
+            .kind(openpgp::armor::Kind::Message)
+            .build()
+            .unwrap();
+        let message = Encryptor::for_recipients(message, recipients)
+            .add_passwords(Some("hidden decryption path"))
+            .build()
+            .unwrap();
+        let mut writer = LiteralWriter::new(message).build().unwrap();
+        writer.write_all(b"share bytes").unwrap();
+        writer.finalize().unwrap();
+        let ciphertext = String::from_utf8(ciphertext).unwrap();
+
+        let err = pgp_message_recipients(&ciphertext).unwrap_err();
+        assert!(
+            err.to_string().contains("password recipient"),
+            "unexpected error: {err}"
         );
     }
 
