@@ -99,6 +99,8 @@ pub struct GuardianInfo {
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
+    // TODO(SEC-525): Include the Bitcoin network in signed GuardianInfo so
+    // readers with a trusted expected network can validate it.
     /// Encryption key. Used by KPs to encrypt their shares.
     #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
