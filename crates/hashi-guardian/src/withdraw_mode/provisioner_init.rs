@@ -57,6 +57,12 @@ impl PIInstall {
         let enclave_k256_sk = combine_shares(&shares, threshold)?;
         let enclave_btc_keypair = k256_sk_to_btc_keypair(&enclave_k256_sk);
         let enclave_btc_pubkey = enclave_btc_keypair.x_only_public_key().0;
+        if enclave_btc_pubkey != ceremony_state.btc_master_pubkey {
+            return Err(GuardianError::InvalidInputs(format!(
+                "reconstructed BTC pubkey {enclave_btc_pubkey:?} differs from ceremony BTC pubkey {:?}",
+                ceremony_state.btc_master_pubkey
+            )));
+        }
         let share_ids = shares.iter().map(|share| share.id).collect();
 
         if genesis_state.is_some() {
@@ -192,6 +198,7 @@ fn verify_signed_submissions(
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
+    use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::GuardianError::Unauthenticated;
@@ -213,6 +220,14 @@ mod tests {
 
     async fn setup() -> TestContext {
         let sk = SecretKey::random(&mut rand::thread_rng());
+        let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
+        setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey).await
+    }
+
+    async fn setup_with_secret_and_ceremony_pubkey(
+        sk: SecretKey,
+        ceremony_btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
+    ) -> TestContext {
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
         let share_commitments = ShareCommitments::from_shares(&shares).unwrap();
@@ -253,13 +268,12 @@ mod tests {
         )
         .unwrap();
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default()
-                .with_s3_logger(logger)
-                .with_commitments(share_commitments)
-                .with_kp_encrypted_shares(kp_encrypted_shares),
-        )
-        .await;
+        let mut init_args = OperatorInitTestArgs::default()
+            .with_s3_logger(logger)
+            .with_commitments(share_commitments)
+            .with_kp_encrypted_shares(kp_encrypted_shares);
+        init_args.ceremony_state.btc_master_pubkey = ceremony_btc_pubkey;
+        let enclave = Enclave::create_operator_initialized_with(init_args).await;
         TestContext {
             shares,
             enclave,
@@ -481,6 +495,32 @@ mod tests {
         ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
             .await
             .expect("valid retry should succeed");
+    }
+
+    #[tokio::test]
+    async fn rejects_reconstructed_key_mismatching_ceremony() {
+        let sk = SecretKey::random(&mut rand::thread_rng());
+        let different_sk = SecretKey::random(&mut rand::thread_rng());
+        let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&different_sk);
+        let ctx = setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey).await;
+
+        let err = ctx
+            .provision(ctx.request(&ctx.shares[..TEST_T]))
+            .await
+            .expect_err("mismatched reconstructed key should fail");
+        assert!(
+            matches!(&err, InvalidInputs(message) if message.contains("differs from ceremony BTC pubkey")),
+            "{err}"
+        );
+        assert!(
+            !ctx.enclave.config.is_enclave_btc_keypair_set(),
+            "mismatched Bitcoin key should not be installed"
+        );
+        assert_eq!(
+            ctx.enclave.lifecycle(),
+            WithdrawStage::OperatorInitialized.into(),
+            "failed preparation should not advance the lifecycle"
+        );
     }
 
     #[tokio::test]
