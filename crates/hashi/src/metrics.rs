@@ -128,9 +128,9 @@ pub struct Metrics {
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
     pub utxo_selection_attempt_failures_total: IntCounterVec,
-    /// Failures to resolve the oldest confirmed UTXO for a withdrawal's
-    /// required input; the withdrawal proceeds without one.
-    pub utxo_required_input_resolution_failures_total: IntCounter,
+    /// Withdrawal builds that fell back to ordinary consolidation ordering
+    /// because confirmation-age resolution failed.
+    pub utxo_confirmation_age_resolution_failures_total: IntCounter,
 
     /// Withdrawals skipped because their gross amount exceeds the
     /// guardian's `max_bucket_capacity`. The request stays approved
@@ -862,9 +862,9 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            utxo_required_input_resolution_failures_total: register_int_counter_with_registry!(
-                "hashi_utxo_required_input_resolution_failures_total",
-                "Withdrawal builds that proceeded without a required input because oldest-UTXO resolution failed",
+            utxo_confirmation_age_resolution_failures_total: register_int_counter_with_registry!(
+                "hashi_utxo_confirmation_age_resolution_failures_total",
+                "Withdrawal builds that used ordinary consolidation order because UTXO confirmation-age resolution failed",
                 registry,
             )
             .unwrap(),

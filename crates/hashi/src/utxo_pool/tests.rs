@@ -47,9 +47,16 @@ fn confirmed_utxo(n: u8, amount: u64) -> UtxoCandidate {
     UtxoCandidate {
         id: make_utxo_id(n),
         amount,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Confirmed,
     }
+}
+
+fn confirmed_utxo_with_age(n: u8, amount: u64, age: u32) -> UtxoCandidate {
+    let mut utxo = confirmed_utxo(n, amount);
+    utxo.confirmation_age_blocks = Some(age);
+    utxo
 }
 
 fn confirmed_utxo_with_vout(vout: u32, amount: u64) -> UtxoCandidate {
@@ -59,6 +66,7 @@ fn confirmed_utxo_with_vout(vout: u32, amount: u64) -> UtxoCandidate {
             vout,
         },
         amount,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Confirmed,
     }
@@ -80,6 +88,7 @@ fn pending_utxo(n: u8, amount: u64) -> UtxoCandidate {
     UtxoCandidate {
         id: make_utxo_id(n),
         amount,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -107,6 +116,7 @@ fn pending_utxo_deep(n: u8, amount: u64, depth: usize, fee_per_ancestor: u64) ->
     UtxoCandidate {
         id: make_utxo_id(n),
         amount,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending { chain },
     }
@@ -128,6 +138,7 @@ fn pending_utxo_mixed(n: u8, amount: u64, ancestors: &[(u32, u64, u64)]) -> Utxo
     UtxoCandidate {
         id: make_utxo_id(n),
         amount,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending { chain },
     }
@@ -395,6 +406,7 @@ fn test_cpfp_pending_utxo_increases_fee() {
     let low_fee_ancestor = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 5_000_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -451,6 +463,7 @@ fn test_cpfp_multiple_pending_utxos_summed() {
     let utxo1 = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 200_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -464,6 +477,7 @@ fn test_cpfp_multiple_pending_utxos_summed() {
     let utxo2 = UtxoCandidate {
         id: make_utxo_id(2),
         amount: 200_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -559,6 +573,113 @@ fn test_low_fee_consolidation_active_smallest_first() {
             "second-smallest should be consolidated: {extra_amounts:?}"
         );
     }
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_urgent_consolidation_starts_strictly_above_boundary() {
+    let utxos = vec![
+        confirmed_utxo(1, 1_000_000),
+        confirmed_utxo_with_age(2, 5_000, 4_320),
+        confirmed_utxo_with_age(3, 20_000, 4_321),
+    ];
+    let params = CoinSelectionParams {
+        max_inputs: 2,
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &[make_request(1, 500_000, 0)],
+        &params,
+        FeeRate::from_sat_per_vb_unchecked(1),
+    )
+    .expect("urgent candidate should fit the consolidation envelope");
+
+    assert_eq!(
+        result.inputs.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![make_utxo_id(1), make_utxo_id(3)]
+    );
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_multiple_urgent_consolidation_candidates_are_oldest_first() {
+    let utxos = vec![
+        confirmed_utxo(1, 1_000_000),
+        confirmed_utxo_with_age(2, 10_000, 5_000),
+        confirmed_utxo_with_age(3, 20_000, 6_000),
+    ];
+    let params = CoinSelectionParams {
+        max_inputs: 2,
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &[make_request(1, 500_000, 0)],
+        &params,
+        FeeRate::from_sat_per_vb_unchecked(1),
+    )
+    .expect("oldest urgent candidate should fit");
+
+    assert_eq!(result.inputs[1].id, make_utxo_id(3));
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_equal_age_urgent_candidates_use_amount_then_id() {
+    let utxos = vec![
+        confirmed_utxo(1, 1_000_000),
+        confirmed_utxo_with_age(4, 10_000, 5_000),
+        confirmed_utxo_with_age(3, 20_000, 5_000),
+        confirmed_utxo_with_age(2, 10_000, 5_000),
+    ];
+    let params = CoinSelectionParams {
+        max_inputs: 3,
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &[make_request(1, 500_000, 0)],
+        &params,
+        FeeRate::from_sat_per_vb_unchecked(1),
+    )
+    .expect("equal-age urgent candidates should consolidate deterministically");
+
+    assert_eq!(
+        result.inputs.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![make_utxo_id(1), make_utxo_id(2), make_utxo_id(4)]
+    );
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_unknown_and_non_urgent_consolidation_remain_smallest_first() {
+    let utxos = vec![
+        confirmed_utxo(1, 1_000_000),
+        confirmed_utxo_with_age(2, 20_000, 4_320),
+        confirmed_utxo(3, 5_000),
+        confirmed_utxo_with_age(4, 10_000, 100),
+    ];
+    let params = CoinSelectionParams {
+        max_inputs: 3,
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &[make_request(1, 500_000, 0)],
+        &params,
+        FeeRate::from_sat_per_vb_unchecked(1),
+    )
+    .expect("ordinary candidates should consolidate smallest-first");
+
+    assert_eq!(
+        result.inputs.iter().map(|u| u.id).collect::<Vec<_>>(),
+        vec![make_utxo_id(1), make_utxo_id(3), make_utxo_id(4)]
+    );
     assert_conservation(&result);
 }
 
@@ -666,17 +787,24 @@ fn test_no_consolidation_when_raw_change_zero() {
 
 #[test]
 fn test_consolidation_only_confirmed_utxos() {
-    // Consolidation should only pull in confirmed UTXOs, never pending.
+    let mut urgent_pending = pending_utxo(2, 5_000);
+    urgent_pending.confirmation_age_blocks = Some(10_000);
     let utxos = vec![
-        confirmed_utxo(1, 1_000_000), // covers request
-        pending_utxo(2, 5_000),       // pending, should not be consolidated
-        confirmed_utxo(3, 10_000),    // confirmed, eligible for consolidation
+        confirmed_utxo(1, 1_000_000),
+        urgent_pending,
+        confirmed_utxo(3, 10_000),
     ];
     let requests = vec![make_request(1, 200_000, 0)];
 
     let low_fee = FeeRate::from_sat_per_vb_unchecked(1);
     let result =
         select_coins(&utxos, &requests, &default_params(), low_fee).expect("should succeed");
+    assert!(
+        !result
+            .inputs
+            .iter()
+            .any(|input| input.id == make_utxo_id(2))
+    );
 
     // All extra inputs (beyond the first) must be confirmed.
     for input in &result.inputs {
@@ -867,6 +995,7 @@ fn arb_pending_utxo() -> impl Strategy<Value = UtxoCandidate> {
             UtxoCandidate {
                 id: make_utxo_id(id),
                 amount,
+                confirmation_age_blocks: None,
                 spend_path: SpendPath::TaprootScriptPath2of2,
                 status: UtxoStatus::Pending { chain },
             }
@@ -1202,100 +1331,14 @@ fn test_largest_first_input_selection() {
 }
 
 #[test]
-fn test_required_small_input_is_selected_before_largest_funding_input() {
-    let required = confirmed_utxo(1, 1_000);
-    let required_id = required.id;
-    let utxos = vec![confirmed_utxo(2, 100_000), required];
+fn test_age_metadata_does_not_displace_largest_funding_input() {
+    let mut aged = confirmed_utxo(1, 1_000);
+    aged.confirmation_age_blocks = Some(10_000);
+    let newer = confirmed_utxo(2, 100_000);
+    let newer_id = newer.id;
+    let utxos = vec![aged, newer];
     let requests = vec![make_request(1, 50_000, 0)];
     let params = CoinSelectionParams {
-        required_input: Some(required_id),
-        ..default_params()
-    };
-
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &params,
-        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
-    )
-    .expect("required input and funding input should be selected");
-
-    assert_eq!(
-        result.inputs.iter().map(|utxo| utxo.id).collect::<Vec<_>>(),
-        vec![required_id, make_utxo_id(2)]
-    );
-    assert_conservation(&result);
-}
-
-#[test]
-fn test_required_input_that_funds_request_is_selected_alone() {
-    let required = confirmed_utxo(1, 100_000);
-    let required_id = required.id;
-    let utxos = vec![confirmed_utxo(2, 1_000_000), required];
-    let requests = vec![make_request(1, 50_000, 0)];
-    let params = CoinSelectionParams {
-        required_input: Some(required_id),
-        ..default_params()
-    };
-
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &params,
-        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
-    )
-    .expect("required input should fund the request");
-
-    assert_eq!(result.inputs.len(), 1);
-    assert_eq!(result.inputs[0].id, required_id);
-    assert_conservation(&result);
-}
-
-#[test]
-fn test_non_required_inputs_remain_largest_first() {
-    let required = confirmed_utxo(1, 1_000);
-    let required_id = required.id;
-    let utxos = vec![
-        confirmed_utxo(5, 60_000),
-        confirmed_utxo(3, 90_000),
-        required,
-        confirmed_utxo(4, 70_000),
-        confirmed_utxo(2, 100_000),
-    ];
-    let requests = vec![make_request(1, 250_000, 0)];
-    let params = CoinSelectionParams {
-        required_input: Some(required_id),
-        ..default_params()
-    };
-
-    let result = select_coins(
-        &utxos,
-        &requests,
-        &params,
-        CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
-    )
-    .expect("required and largest remaining inputs should fund the request");
-
-    assert_eq!(
-        result.inputs.iter().map(|utxo| utxo.id).collect::<Vec<_>>(),
-        vec![
-            required_id,
-            make_utxo_id(2),
-            make_utxo_id(3),
-            make_utxo_id(4),
-        ]
-    );
-    assert_conservation(&result);
-}
-
-#[test]
-fn test_required_input_counts_against_max_inputs() {
-    let required = confirmed_utxo(1, 1_000);
-    let required_id = required.id;
-    let utxos = vec![required, confirmed_utxo(2, 100_000)];
-    let requests = vec![make_request(1, 50_000, 0)];
-    let params = CoinSelectionParams {
-        required_input: Some(required_id),
         max_inputs: 1,
         ..default_params()
     };
@@ -1305,56 +1348,12 @@ fn test_required_input_counts_against_max_inputs() {
         &requests,
         &params,
         CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
-    );
+    )
+    .expect("largest input should fund the request");
 
-    assert!(matches!(
-        result,
-        Err(CoinSelectionError::InsufficientFunds {
-            available: 101_000,
-            selected: 1_000,
-            required: 50_000,
-            selected_inputs: 1,
-            max_inputs: 1,
-        })
-    ));
-}
-
-#[test]
-fn test_absent_required_input_is_unavailable() {
-    let required_id = make_utxo_id(9);
-    let utxos = vec![confirmed_utxo(1, 100_000)];
-    let requests = vec![make_request(1, 50_000, 0)];
-    let params = CoinSelectionParams {
-        required_input: Some(required_id),
-        ..default_params()
-    };
-
-    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
-
-    assert!(matches!(
-        result,
-        Err(CoinSelectionError::RequiredInputUnavailable(id)) if id == required_id
-    ));
-}
-
-#[test]
-fn test_ineligible_required_input_is_unavailable() {
-    let required = pending_utxo(1, 100_000);
-    let required_id = required.id;
-    let utxos = vec![required, confirmed_utxo(2, 100_000)];
-    let requests = vec![make_request(1, 50_000, 0)];
-    let params = CoinSelectionParams {
-        required_input: Some(required_id),
-        max_mempool_chain_depth: 0,
-        ..default_params()
-    };
-
-    let result = select_coins(&utxos, &requests, &params, default_fee_rate());
-
-    assert!(matches!(
-        result,
-        Err(CoinSelectionError::RequiredInputUnavailable(id)) if id == required_id
-    ));
+    assert_eq!(result.inputs.len(), 1);
+    assert_eq!(result.inputs[0].id, newer_id);
+    assert_conservation(&result);
 }
 
 #[test]
@@ -1508,6 +1507,7 @@ fn test_cpfp_no_deficit_for_well_paying_ancestor() {
     let well_paid = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 5_000_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -1553,6 +1553,7 @@ fn test_cpfp_deficit_exhausts_fee_cap() {
     let heavy_low_fee = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 5_000_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -1632,6 +1633,7 @@ fn test_fund_balance_with_cpfp() {
     let utxo = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 2_000_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
@@ -1805,6 +1807,7 @@ fn test_custom_spend_path_weight() {
     let utxo = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 1_000_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::Custom(Weight::from_wu(100)),
         status: UtxoStatus::Confirmed,
     };
@@ -1828,6 +1831,7 @@ fn test_taproot_key_path_spend() {
     let utxo = UtxoCandidate {
         id: make_utxo_id(1),
         amount: 1_000_000,
+        confirmation_age_blocks: None,
         spend_path: SpendPath::TaprootKeyPath,
         status: UtxoStatus::Confirmed,
     };
