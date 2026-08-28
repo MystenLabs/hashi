@@ -26,6 +26,15 @@ pub struct VerifiedSessionInfo {
 }
 
 impl VerifiedSessionInfo {
+    #[cfg(test)]
+    pub(super) fn new_for_test(signing_pubkey: GuardianPubKey, build_pcrs: BuildPcrs) -> Self {
+        Self {
+            signing_pubkey,
+            info: GuardianInfo::mock_for_testing(),
+            build_pcrs,
+        }
+    }
+
     pub(super) async fn read_from_s3(
         s3: &GuardianS3Client,
         session_id: &str,

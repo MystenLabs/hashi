@@ -18,7 +18,9 @@ use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::KpShareStateLogMessage;
+use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
@@ -30,6 +32,7 @@ use hashi_types::guardian::VersionedLogMessage::V2;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use tracing::info;
 
 mod heartbeat_checks;
@@ -67,6 +70,7 @@ pub struct GuardianReader {
     s3: GuardianS3Client,
     allowlist: PcrAllowlist,
     sessions: HashMap<SessionID, VerifiedSessionInfo>,
+    activated_sessions: HashSet<SessionID>,
 }
 
 impl GuardianReader {
@@ -83,6 +87,7 @@ impl GuardianReader {
             s3,
             allowlist,
             sessions: HashMap::new(),
+            activated_sessions: HashSet::new(),
         }
     }
 
@@ -102,8 +107,37 @@ impl GuardianReader {
 
     /// Verify a record with its session's attestation-anchored signing key.
     async fn verify_record(&mut self, record: LogRecord) -> GuardianResult<VerifiedLogRecord> {
-        let session_info = self.get_or_load_session_info(record.session_id()).await?;
-        session_info.verify_record(record)
+        let session_id = record.session_id().clone();
+        let session_info = self.get_or_load_session_info(&session_id).await?;
+        let verified_record = session_info.verify_record(record)?;
+        if requires_activation_marker(verified_record.entry()) {
+            self.ensure_session_activated(&session_id).await?;
+        }
+        Ok(verified_record)
+    }
+
+    /// Verify a session's activation marker once, then cache the result.
+    async fn ensure_session_activated(&mut self, session_id: &str) -> GuardianResult<()> {
+        if self.activated_sessions.contains(session_id) {
+            return Ok(());
+        }
+
+        let session_info = self.get_or_load_session_info(session_id).await?.clone();
+        let key = InitLogMessage::oa_activated_object_key(session_id);
+        let record = self.s3.get_log_record(&key).await?;
+        let verified_record = session_info.verify_record(record)?;
+        let message = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::Init(message)) | V2(LogMessageV2::Init(message)) => message,
+            V1(_) | V2(_) => {
+                return Err(InvalidS3Log(format!("expected OAActivated at key {key}")));
+            }
+        };
+        if !matches!(*message, InitLogMessage::OAActivated { .. }) {
+            return Err(InvalidS3Log(format!("expected OAActivated at key {key}")));
+        }
+
+        self.activated_sessions.insert(session_id.into());
+        Ok(())
     }
 
     /// Read an immutable S3 record and verify it with its session's
@@ -386,6 +420,170 @@ impl GuardianReader {
     }
 }
 
+fn requires_activation_marker(entry: &LogEntry) -> bool {
+    matches!(
+        entry.message(),
+        V1(LogMessageV1::Withdrawal(_) | LogMessageV1::CommitteeUpdate(_))
+            | V2(LogMessageV2::Withdrawal(_) | LogMessageV2::CommitteeUpdate(_))
+    )
+}
+
 fn log_verified_read(key: &str, session_id: &SessionID) {
     info!("Successfully read {key} from session {session_id}.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_s3::operation::get_object::GetObjectOutput;
+    use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::primitives::DateTime;
+    use aws_sdk_s3::types::ObjectLockMode;
+    use aws_sdk_s3::types::ObjectVersion;
+    use aws_sdk_s3::Client;
+    use aws_smithy_mocks::mock;
+    use aws_smithy_mocks::mock_client;
+    use aws_smithy_mocks::RuleMode;
+    use bitcoin::Network;
+    use hashi_types::guardian::GuardianError;
+    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::HeartbeatLogMessage;
+    use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::StandardWithdrawalRequestWire;
+    use hashi_types::move_types;
+    use std::time::Duration;
+    use std::time::SystemTime;
+
+    fn build_pcrs() -> BuildPcrs {
+        BuildPcrs::new("current", vec![0])
+    }
+
+    fn entry_for(message: LogMessage) -> LogEntry {
+        let signing_key = GuardianSignKeyPair::from([7u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        LogRecord::new_at_timestamp(session_id, message, &signing_key, 0).into_entry_unchecked()
+    }
+
+    fn withdrawal_failure() -> WithdrawalLogMessage {
+        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let (request_sign, request_data) = signed.into_parts();
+        WithdrawalLogMessage::Failure {
+            request_data: StandardWithdrawalRequestWire::from(request_data),
+            request_sign,
+            error: GuardianError::RateLimitExceeded.to_string(),
+        }
+    }
+
+    fn committee_update_failure() -> CommitteeUpdateLogMessage {
+        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let (request_sign, _) = signed.into_parts();
+        CommitteeUpdateLogMessage::Failure {
+            from_epoch: 6,
+            new_committee: move_types::Committee {
+                epoch: 7,
+                members: vec![],
+                total_weight: 0,
+                config: move_types::Config::default(),
+            },
+            request_sign,
+            error: GuardianError::InvalidInputs("test failure".into()).to_string(),
+        }
+    }
+
+    #[test]
+    fn only_post_activation_records_require_activation_marker() {
+        let withdrawal = entry_for(LogMessage::Withdrawal(Box::new(withdrawal_failure())));
+        let committee_update = entry_for(LogMessage::CommitteeUpdate(Box::new(
+            committee_update_failure(),
+        )));
+        let heartbeat = entry_for(LogMessage::Heartbeat(HeartbeatLogMessage::new(0)));
+
+        assert!(requires_activation_marker(&withdrawal));
+        assert!(requires_activation_marker(&committee_update));
+        assert!(!requires_activation_marker(&heartbeat));
+    }
+
+    #[tokio::test]
+    async fn activation_marker_is_verified_once_per_session() {
+        let signing_key = GuardianSignKeyPair::from([8u8; 32]);
+        let signing_pubkey = signing_key.verification_key();
+        let session_id = SessionID::from_signing_pubkey(&signing_pubkey);
+        let marker = LogRecord::new_at_timestamp(
+            session_id.clone(),
+            LogMessage::Init(Box::new(InitLogMessage::OAActivated {
+                state_hash: [1; 32],
+                config_hash: [2; 32],
+                sharing_seq: 3,
+                committee_epoch: 4,
+                limiter_state: LimiterState {
+                    num_tokens_available: 5,
+                    last_updated_at: 6,
+                    next_seq: 7,
+                },
+            })),
+            &signing_key,
+            0,
+        );
+        let key = marker.object_key().to_string();
+        let body = serde_json::to_vec(&marker).unwrap();
+
+        let list_key = key.clone();
+        let output_key = key.clone();
+        let list_marker = mock!(Client::list_object_versions)
+            .match_requests(move |request| request.prefix() == Some(list_key.as_str()))
+            .then_output(move || {
+                ListObjectVersionsOutput::builder()
+                    .versions(
+                        ObjectVersion::builder()
+                            .key(output_key.clone())
+                            .is_latest(true)
+                            .build(),
+                    )
+                    .build()
+            });
+        let get_key = key.clone();
+        let get_marker = mock!(Client::get_object)
+            .match_requests(move |request| request.key() == Some(get_key.as_str()))
+            .then_output(move || {
+                GetObjectOutput::builder()
+                    .object_lock_mode(ObjectLockMode::Compliance)
+                    .object_lock_retain_until_date(DateTime::from(
+                        SystemTime::now() + Duration::from_secs(60),
+                    ))
+                    .body(ByteStream::from(body.clone()))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_marker, &get_marker]);
+        let s3 =
+            GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client);
+        let allowlist = PcrAllowlist::new(build_pcrs(), []).unwrap();
+        let mut reader = GuardianReader::from_s3_client(s3, allowlist);
+        reader.sessions.insert(
+            session_id.clone(),
+            VerifiedSessionInfo::new_for_test(signing_pubkey, build_pcrs()),
+        );
+
+        let first = LogRecord::new_at_timestamp(
+            session_id.clone(),
+            LogMessage::Withdrawal(Box::new(withdrawal_failure())),
+            &signing_key,
+            0,
+        );
+        let second = LogRecord::new_at_timestamp(
+            session_id.clone(),
+            LogMessage::Withdrawal(Box::new(withdrawal_failure())),
+            &signing_key,
+            1,
+        );
+
+        reader.verify_record(first).await.unwrap();
+        reader.verify_record(second).await.unwrap();
+
+        assert!(reader.activated_sessions.contains(&session_id));
+        assert_eq!(list_marker.num_calls(), 1);
+        assert_eq!(get_marker.num_calls(), 1);
+    }
 }
