@@ -15,6 +15,7 @@ use super::log_layout::ObjectKeyPattern;
 use super::log_schema::LogMessage;
 use super::log_schema::LogMessageV1;
 use super::log_schema::LogMessageV2;
+use super::log_schema::LogType;
 use super::log_schema::VersionedLogMessage;
 use crate::guardian::GuardianError::InvalidS3Log;
 use crate::guardian::GuardianPubKey;
@@ -159,6 +160,11 @@ impl LogEntry {
     /// Return the versioned log payload.
     pub fn message(&self) -> &VersionedLogMessage {
         &self.message
+    }
+
+    /// Return the log payload type.
+    pub fn log_type(&self) -> LogType {
+        self.message.log_type()
     }
 
     /// Consume the entry and return its versioned log payload.
@@ -309,6 +315,11 @@ impl LogRecord {
         &self.data().message
     }
 
+    /// Return the log payload type.
+    pub fn log_type(&self) -> LogType {
+        self.data().log_type()
+    }
+
     /// Validate the record against its externally established signing key.
     ///
     /// For a signed record, this binds the session to the caller-supplied key
@@ -352,7 +363,7 @@ impl LogRecord {
 
     /// Return the object-lock duration selected for the message type.
     pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
-        self.data().message.log_type().object_lock_duration(policy)
+        self.log_type().object_lock_duration(policy)
     }
 
     /// Consume the record and extract its entry without validation.

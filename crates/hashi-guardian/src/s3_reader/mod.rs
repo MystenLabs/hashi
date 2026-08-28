@@ -4,8 +4,8 @@
 //! Verified reads from the guardian's S3 logs.
 //!
 //! [`GuardianReader`] applies each log stream's S3 immutability policy, verifies
-//! records with their writing session's attestation-anchored key, and caches the
-//! verified session info for reuse.
+//! records with their writing session's attestation-anchored key and required
+//! initialization logs, and caches the verified session info for reuse.
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
@@ -66,28 +66,27 @@ impl GuardianReader {
         }
     }
 
-    /// Load and verify a session's attestation and guardian info on first use,
-    /// then return the cached result.
-    async fn get_or_load_session_info(
-        &mut self,
-        session_id: &str,
-    ) -> GuardianResult<&VerifiedSessionInfo> {
+    /// Load and verify a session's attestation and guardian info on first use.
+    async fn ensure_session_info_loaded(&mut self, session_id: &str) -> GuardianResult<()> {
         if !self.sessions.contains_key(session_id) {
             let session_info =
                 VerifiedSessionInfo::read_from_s3(&self.s3, session_id, &self.allowlist).await?;
             self.sessions.insert(session_id.into(), session_info);
         }
-        Ok(&self.sessions[session_id])
+        Ok(())
     }
 
-    /// Verify a record with its session's attestation-anchored signing key.
+    /// Verify a record and the initialization checkpoint required to emit it.
     async fn verify_record(&mut self, record: LogRecord) -> GuardianResult<VerifiedLogRecord> {
-        let session_info = self.get_or_load_session_info(record.session_id()).await?;
-        session_info.verify_record(record)
+        self.ensure_session_info_loaded(record.session_id()).await?;
+        let session_info = self
+            .sessions
+            .get_mut(record.session_id())
+            .expect("session info was loaded above");
+        session_info.verify_record(&self.s3, record).await
     }
 
-    /// Read an immutable S3 record and verify it with its session's
-    /// attestation-anchored signing key.
+    /// Read an immutable S3 record and verify it against its writing session.
     async fn read_verified_record(&mut self, key: &str) -> GuardianResult<VerifiedLogRecord> {
         let record = self.s3.get_log_record(key).await?;
         self.verify_record(record).await
@@ -137,10 +136,14 @@ impl GuardianReader {
         &mut self,
         session_id: &str,
     ) -> GuardianResult<VerifiedSessionInfo> {
-        let session_info = self.get_or_load_session_info(session_id).await?.clone();
+        self.ensure_session_info_loaded(session_id).await?;
+        let session_info = self
+            .sessions
+            .get(session_id)
+            .expect("session info was loaded above");
         self.allowlist
             .require_current_build(session_info.build_pcrs())?;
-        Ok(session_info)
+        Ok(session_info.clone())
     }
 
     /// Read and verify the latest ceremony, or return `None` if none exists.
