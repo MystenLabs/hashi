@@ -22,6 +22,10 @@ use tokio::sync::OwnedMutexGuard;
 use tracing::error;
 use tracing::info;
 
+const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
+// Requests are minted per attempt and should not remain usable indefinitely.
+const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
+
 pub async fn standard_withdrawal(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
@@ -85,18 +89,7 @@ async fn normal_withdrawal_inner(
     //    The returned guard holds the mutex — no other withdrawal can proceed
     //    until this one is durably logged or the enclave aborts.
     //
-    // Reject timestamps too far in the future (clock skew protection).
-    // Old timestamps are safe — the limiter's monotonicity check prevents replay,
-    // and old timestamps result in less refill (conservative).
-    const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
-    let guardian_now = now_timestamp_secs();
-    if request.timestamp_secs() > guardian_now + MAX_CLOCK_SKEW_SECS {
-        return Err(InvalidInputs(format!(
-            "request timestamp {} is too far in the future (guardian clock: {})",
-            request.timestamp_secs(),
-            guardian_now
-        )));
-    }
+    validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
 
     info!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
@@ -125,6 +118,27 @@ async fn normal_withdrawal_inner(
     info!("BTC signatures generated.");
 
     Ok((txid, response, limiter_guard))
+}
+
+fn validate_request_timestamp(
+    request_timestamp_secs: u64,
+    guardian_now: u64,
+) -> GuardianResult<()> {
+    if request_timestamp_secs > guardian_now + MAX_CLOCK_SKEW_SECS {
+        return Err(InvalidInputs(format!(
+            "request timestamp {} is too far in the future (guardian clock: {})",
+            request_timestamp_secs, guardian_now
+        )));
+    }
+
+    if guardian_now.saturating_sub(request_timestamp_secs) > MAX_REQUEST_AGE_SECS {
+        return Err(InvalidInputs(format!(
+            "request timestamp {} is too old (guardian clock: {}, maximum age: {} seconds)",
+            request_timestamp_secs, guardian_now, MAX_REQUEST_AGE_SECS
+        )));
+    }
+
+    Ok(())
 }
 
 async fn log_withdrawal_success(
@@ -242,7 +256,12 @@ mod tests {
     #[tokio::test]
     async fn test_normal_withdrawal() {
         let (signed_request, committee) =
-            StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
+            StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+                Network::Regtest,
+                WithdrawalID::new([0xab; 32]),
+                now_timestamp_secs(),
+                0,
+            );
         let amount_sats = signed_request
             .message()
             .utxos()
@@ -258,10 +277,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_standard_withdrawal_rate_limit_exceeded() {
+        let timestamp_secs = now_timestamp_secs();
         let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
             WithdrawalID::new([0x01; 32]),
-            100,
+            timestamp_secs,
             0,
         );
         let amount_sats = req1.message().utxos().gross_outflow_amount().to_sat();
@@ -276,7 +296,7 @@ mod tests {
         let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
             WithdrawalID::new([0x02; 32]),
-            200,
+            timestamp_secs + 1,
             1,
         );
         let second = standard_withdrawal(enclave, req2).await;
@@ -323,5 +343,28 @@ mod tests {
         };
         assert_eq!(request_data.seq, 1);
         assert_eq!(error, &GuardianError::RateLimitExceeded.to_string());
+    }
+
+    #[test]
+    fn test_request_timestamp_bounds() {
+        const GUARDIAN_NOW: u64 = 1_000_000;
+
+        assert!(
+            validate_request_timestamp(GUARDIAN_NOW - MAX_REQUEST_AGE_SECS, GUARDIAN_NOW).is_ok()
+        );
+        assert!(
+            validate_request_timestamp(GUARDIAN_NOW + MAX_CLOCK_SKEW_SECS, GUARDIAN_NOW).is_ok()
+        );
+
+        let too_old =
+            validate_request_timestamp(GUARDIAN_NOW - MAX_REQUEST_AGE_SECS - 1, GUARDIAN_NOW);
+        assert!(matches!(too_old, Err(InvalidInputs(message)) if message.contains("too old")));
+
+        let too_far_in_the_future =
+            validate_request_timestamp(GUARDIAN_NOW + MAX_CLOCK_SKEW_SECS + 1, GUARDIAN_NOW);
+        assert!(matches!(
+            too_far_in_the_future,
+            Err(InvalidInputs(message)) if message.contains("too far in the future")
+        ));
     }
 }
