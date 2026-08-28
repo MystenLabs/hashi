@@ -163,12 +163,16 @@ impl VerifiedSessionInfo {
                 unreachable!("session construction verifies operator initialization")
             }
             InitCheckpoint::OperatorActivated => {
-                // Exact S3-key binding plus canonical init keys establishes each variant.
                 let pi_key = InitLogMessage::pi_fully_initialized_object_key(session_id);
-                Self::read_init_log(s3, &pi_key, Some(&self.signing_pubkey)).await?;
+                let pi_message =
+                    Self::read_init_log(s3, &pi_key, Some(&self.signing_pubkey)).await?;
 
                 let oa_key = InitLogMessage::oa_activated_object_key(session_id);
-                Self::read_init_log(s3, &oa_key, Some(&self.signing_pubkey)).await?;
+                let oa_message =
+                    Self::read_init_log(s3, &oa_key, Some(&self.signing_pubkey)).await?;
+                InitLogMessage::verify_oi_pi_consistency(&self.info, &pi_message)?;
+                InitLogMessage::verify_oi_oa_consistency(&self.info, &oa_message)?;
+                InitLogMessage::verify_pi_oa_consistency(&pi_message, &oa_message)?;
             }
         }
 
@@ -262,6 +266,8 @@ mod tests {
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::ResolvedS3Config;
     use hashi_types::guardian::SessionID;
+    use hashi_types::guardian::SetupNewKeyResponse;
+    use hashi_types::guardian::ShareID;
     use std::time::Duration;
     use std::time::SystemTime;
 
@@ -297,6 +303,14 @@ mod tests {
 
     fn build_pcrs() -> BuildPcrs {
         BuildPcrs::new("current", vec![0])
+    }
+
+    fn session_info_ready_for_activation(signing_pubkey: GuardianPubKey) -> VerifiedSessionInfo {
+        let mut session_info = VerifiedSessionInfo::new_for_test(signing_pubkey, build_pcrs());
+        session_info.info.secret_sharing_instance =
+            Some(SetupNewKeyResponse::mock_for_testing().secret_sharing_instance);
+        session_info.info.config_hash = Some([2; 32]);
+        session_info
     }
 
     fn listed_record(key: String) -> ListObjectVersionsOutput {
@@ -356,8 +370,8 @@ mod tests {
         let pi_log = LogRecord::new_at_timestamp(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
-                sharing_seq: 3,
-                share_ids: vec![],
+                sharing_seq: 0,
+                share_ids: (1..=3).map(|id| ShareID::new(id).unwrap()).collect(),
                 enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
                     .x_only_public_key()
                     .0,
@@ -370,7 +384,7 @@ mod tests {
             LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                 state_hash: [1; 32],
                 config_hash: [2; 32],
-                sharing_seq: 3,
+                sharing_seq: 0,
                 committee_epoch: 4,
                 limiter_state: LimiterState {
                     num_tokens_available: 5,
@@ -399,7 +413,7 @@ mod tests {
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
         let s3 =
             GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client);
-        let mut session_info = VerifiedSessionInfo::new_for_test(signing_pubkey, build_pcrs());
+        let mut session_info = session_info_ready_for_activation(signing_pubkey);
 
         session_info
             .ensure_init_checkpoint(&s3, &session_id, InitCheckpoint::OperatorActivated)
