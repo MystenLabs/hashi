@@ -570,6 +570,7 @@ impl Simulator {
             let candidate = UtxoCandidate {
                 id,
                 amount,
+                confirmation_age_blocks: None,
                 spend_path: SpendPath::TaprootScriptPath2of2,
                 status: UtxoStatus::Pending {
                     chain: vec![AncestorTx {
@@ -773,6 +774,7 @@ impl Simulator {
             let candidate = UtxoCandidate {
                 id,
                 amount: change,
+                confirmation_age_blocks: None,
                 spend_path: SpendPath::TaprootScriptPath2of2,
                 status: UtxoStatus::Pending {
                     chain: vec![AncestorTx {

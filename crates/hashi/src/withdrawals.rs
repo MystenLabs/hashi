@@ -24,6 +24,7 @@ use sui_sdk_types::Address;
 
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
+use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::leader::RetryPolicy;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
@@ -1473,6 +1474,13 @@ impl Hashi {
                 state.hashi().bitcoin().utxo_pool.utxo_records().clone(),
             )
         };
+        let confirmed_unlocked_ids = confirmed_unlocked_utxo_ids(&utxo_records, &withdrawal_txns);
+        let confirmation_ages = if fee_rate < CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD {
+            self.resolve_confirmed_utxo_ages(&confirmed_unlocked_ids)
+                .await
+        } else {
+            BTreeMap::new()
+        };
 
         // Query Bitcoin in parallel for the confirmation count of every
         // pending withdrawal so we can accurately fill AncestorTx::confirmations
@@ -1489,6 +1497,7 @@ impl Hashi {
                 UtxoCandidate {
                     id: r.utxo.id,
                     amount: r.utxo.amount,
+                    confirmation_age_blocks: confirmation_ages.get(&r.utxo.id).copied(),
                     spend_path: SpendPath::TaprootScriptPath2of2,
                     status,
                 }
@@ -1667,6 +1676,36 @@ impl Hashi {
             outputs,
             txid,
         })
+    }
+
+    /// Resolve confirmation ages for confirmed unlocked UTXOs from one stable
+    /// Bitcoin height snapshot.
+    ///
+    /// Best-effort: resolution failures degrade to an empty map so withdrawal
+    /// funding and ordinary smallest-first consolidation remain available.
+    async fn resolve_confirmed_utxo_ages(&self, ids: &[UtxoId]) -> BTreeMap<UtxoId, u32> {
+        if ids.is_empty() {
+            return BTreeMap::new();
+        }
+        let txids: BTreeSet<bitcoin::Txid> = ids.iter().map(|id| id.txid.into()).collect();
+        let result = self
+            .btc_monitor()
+            .resolve_utxo_confirmation_heights(txids)
+            .await
+            .and_then(|snapshot| confirmation_age_blocks_by_utxo_id(ids, &snapshot));
+        match result {
+            Ok(ages) => ages,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Failed to resolve confirmed UTXO ages; using ordinary consolidation order",
+                );
+                self.metrics
+                    .utxo_confirmation_age_resolution_failures_total
+                    .inc();
+                BTreeMap::new()
+            }
+        }
     }
 
     /// Run AML/Sanctions checks for a withdrawal request.
@@ -1853,6 +1892,45 @@ fn withdrawal_input_signing_id(withdrawal_txn_id: &Address, input_index: u32) ->
     let bytes =
         bcs::to_bytes(&(withdrawal_txn_id, input_index)).expect("serialization should succeed");
     Address::new(Blake2b256::digest(&bytes).digest)
+}
+
+/// Return the unlocked UTXOs that are known to be confirmed by the on-chain
+/// snapshot.
+///
+/// Change outputs are pending while their producing withdrawal remains in the
+/// same snapshot. Once that withdrawal has been removed, they are promoted to
+/// confirmed, matching [`build_utxo_status`].
+pub(crate) fn confirmed_unlocked_utxo_ids(
+    records: &BTreeMap<UtxoId, UtxoRecord>,
+    withdrawal_txns: &BTreeMap<Address, WithdrawalTransaction>,
+) -> Vec<UtxoId> {
+    records
+        .values()
+        .filter(|record| {
+            record.spent_by.is_none()
+                && record
+                    .produced_by
+                    .is_none_or(|producer| !withdrawal_txns.contains_key(&producer))
+        })
+        .map(|record| record.utxo.id)
+        .collect()
+}
+
+fn confirmation_age_blocks_by_utxo_id(
+    ids: &[UtxoId],
+    snapshot: &UtxoHeightSnapshot,
+) -> anyhow::Result<BTreeMap<UtxoId, u32>> {
+    ids.iter()
+        .map(|&id| {
+            let txid: bitcoin::Txid = id.txid.into();
+            let confirmation_height = snapshot
+                .confirmation_height_by_txid
+                .get(&txid)
+                .copied()
+                .ok_or_else(|| anyhow!("missing confirmation height for UTXO {id:?}"))?;
+            Ok((id, snapshot.tip.height.saturating_sub(confirmation_height)))
+        })
+        .collect()
 }
 
 /// Query Bitcoin in parallel for the confirmation count of every pending
@@ -2241,6 +2319,7 @@ mod tests {
     use crate::onchain::types::Utxo;
     use crate::onchain::types::UtxoId;
     use crate::utxo_pool::CoinSelectionParams;
+    use bitcoin::hashes::Hash as _;
     use hashi_types::bitcoin_txid::BitcoinTxid;
 
     fn a_signature() -> SchnorrSignature {
@@ -2354,6 +2433,144 @@ mod tests {
             },
             guardian_signatures: None,
         }
+    }
+
+    fn test_utxo_id(txid_byte: u8, vout: u32) -> UtxoId {
+        UtxoId {
+            txid: BitcoinTxid::new([txid_byte; 32]),
+            vout,
+        }
+    }
+
+    fn test_utxo_record(
+        id: UtxoId,
+        produced_by: Option<Address>,
+        spent_by: Option<Address>,
+    ) -> UtxoRecord {
+        UtxoRecord {
+            utxo: Utxo {
+                id,
+                amount: 1_000,
+                derivation_path: None,
+            },
+            produced_by,
+            spent_by,
+            spent_epoch: None,
+        }
+    }
+
+    fn test_confirmation_heights(entries: &[(UtxoId, u32)]) -> BTreeMap<bitcoin::Txid, u32> {
+        entries
+            .iter()
+            .map(|(id, height)| (id.txid.into(), *height))
+            .collect()
+    }
+
+    fn test_height_snapshot(tip_height: u32, entries: &[(UtxoId, u32)]) -> UtxoHeightSnapshot {
+        UtxoHeightSnapshot {
+            tip: kyoto::HashCheckpoint::new(tip_height, bitcoin::BlockHash::all_zeros()),
+            confirmation_height_by_txid: test_confirmation_heights(entries),
+        }
+    }
+
+    #[test]
+    fn confirmation_ages_use_one_tip_for_different_heights() {
+        let newer = test_utxo_id(1, 0);
+        let older = test_utxo_id(2, 0);
+        let snapshot = test_height_snapshot(600, &[(newer, 500), (older, 100)]);
+
+        assert_eq!(
+            confirmation_age_blocks_by_utxo_id(&[newer, older], &snapshot).unwrap(),
+            BTreeMap::from([(newer, 100), (older, 500)])
+        );
+    }
+
+    #[test]
+    fn confirmation_ages_preserve_outputs_sharing_a_txid() {
+        let first_output = test_utxo_id(3, 0);
+        let second_output = test_utxo_id(3, 1);
+        let snapshot = test_height_snapshot(600, &[(first_output, 100)]);
+
+        assert_eq!(
+            confirmation_age_blocks_by_utxo_id(&[second_output, first_output], &snapshot,).unwrap(),
+            BTreeMap::from([(first_output, 500), (second_output, 500)])
+        );
+    }
+
+    #[test]
+    fn confirmation_age_saturates_when_height_exceeds_tip() {
+        let id = test_utxo_id(1, 0);
+        let snapshot = test_height_snapshot(100, &[(id, 101)]);
+
+        assert_eq!(
+            confirmation_age_blocks_by_utxo_id(&[id], &snapshot).unwrap(),
+            BTreeMap::from([(id, 0)])
+        );
+    }
+
+    #[test]
+    fn confirmed_unlocked_utxos_exclude_pending_and_locked_records() {
+        let confirmed = test_utxo_id(1, 0);
+        let pending = test_utxo_id(2, 0);
+        let locked = test_utxo_id(3, 0);
+        let pending_producer = Address::new([4; 32]);
+        let spender = Address::new([5; 32]);
+        let records = BTreeMap::from([
+            (confirmed, test_utxo_record(confirmed, None, None)),
+            (
+                pending,
+                test_utxo_record(pending, Some(pending_producer), None),
+            ),
+            (locked, test_utxo_record(locked, None, Some(spender))),
+        ]);
+        let withdrawal_txns =
+            BTreeMap::from([(pending_producer, make_txn(vec![], vec![], vec![]))]);
+
+        assert_eq!(
+            confirmed_unlocked_utxo_ids(&records, &withdrawal_txns),
+            vec![confirmed]
+        );
+    }
+
+    #[test]
+    fn confirmed_unlocked_utxos_include_change_with_absent_producer() {
+        let promoted = test_utxo_id(1, 0);
+        let removed_producer = Address::new([2; 32]);
+        let records = BTreeMap::from([(
+            promoted,
+            test_utxo_record(promoted, Some(removed_producer), None),
+        )]);
+
+        assert_eq!(
+            confirmed_unlocked_utxo_ids(&records, &BTreeMap::new()),
+            vec![promoted]
+        );
+    }
+
+    #[test]
+    fn confirmed_unlocked_and_confirmation_age_helpers_handle_empty_pool() {
+        let ids = confirmed_unlocked_utxo_ids(&BTreeMap::new(), &BTreeMap::new());
+        let snapshot = test_height_snapshot(600, &[]);
+
+        assert!(ids.is_empty());
+        assert!(
+            confirmation_age_blocks_by_utxo_id(&ids, &snapshot)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn confirmation_ages_reject_missing_height_for_complete_map() {
+        let present = test_utxo_id(1, 0);
+        let missing = test_utxo_id(2, 0);
+        let snapshot = test_height_snapshot(600, &[(present, 100)]);
+
+        let error = confirmation_age_blocks_by_utxo_id(&[present, missing], &snapshot).unwrap_err();
+        assert!(
+            error.to_string().contains("missing confirmation height"),
+            "unexpected error: {error}"
+        );
     }
 
     fn signing(

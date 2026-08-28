@@ -77,6 +77,13 @@ where:
   (`50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0`)
   with no known private key, ensuring all spends occur through the script path.
 
+Normal withdrawal funding remains largest-first. Within the existing
+fee-eligible consolidation budget, confirmed UTXOs older than 4,320 blocks are
+prioritized before ordinary smallest-first candidates. The 4,320-block
+threshold estimates 30 days using Bitcoin's ten-minute block target; actual
+MPC-only recovery eligibility remains governed by the time-based CSV script
+above.
+
 The key derivation is not BIP-32. It is a purpose-built unhardened derivation
 over secp256k1, keyed by the Sui address, giving each depositor a unique
 Bitcoin address while the master signing key remains shared across the MPC

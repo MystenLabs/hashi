@@ -61,6 +61,10 @@ pub const TR_DUST_RELAY_MIN_VALUE: u64 = 330;
 /// threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
 const WPKH_DUST_RELAY_MIN_VALUE: u64 = 294;
 
+/// 4,320 blocks is a ten-minute-target estimate of half the fixed 60-day
+/// time-based CSV delay, not consensus recovery eligibility.
+const RECOVERY_PRIORITY_AGE_BLOCKS: u32 = 30 * 24 * 6;
+
 // ── Spend Path ───────────────────────────────────────────────────────────────
 
 /// Describes the spend path for a UTXO, used to calculate the witness
@@ -206,6 +210,9 @@ pub struct UtxoCandidate {
     pub id: UtxoId,
     /// The value of this UTXO in satoshis.
     pub amount: u64,
+    /// Best-effort confirmation age sampled from one stable Bitcoin height
+    /// snapshot. Pending or unavailable ages are `None`.
+    pub confirmation_age_blocks: Option<u32>,
     /// The spend path for this UTXO, used to compute the weight contribution
     /// of this input to the transaction.
     pub spend_path: SpendPath,
@@ -736,15 +743,16 @@ fn fee_for_weight(fee_rate: FeeRate, weight: Weight) -> u64 {
 /// 1. **Request selection** — up to `max_withdrawal_requests` requests
 ///    are taken oldest-first by timestamp.
 ///
-/// 2. **Input selection** — UTXOs are sorted largest-first and selected
-///    greedily until `input_total >= total_requested`. Both confirmed
-///    and pending UTXOs are eligible, subject to the
-///    `max_mempool_chain_depth` filter.
+/// 2. **Input selection** — UTXOs are sorted largest-first, then selected
+///    greedily until `input_total >= total_requested`. Both confirmed and
+///    pending UTXOs are eligible, subject to the `max_mempool_chain_depth`
+///    filter. Confirmation age never affects funding order.
 ///
 /// 3. **Consolidation** — if there is change (excess input value) and
-///    the fee rate is favourable, extra *confirmed* UTXOs are pulled in
-///    smallest-first to reduce the UTXO set. Aggressiveness depends on
-///    the fee environment:
+///    the fee rate is favourable, extra *confirmed* UTXOs are pulled in to
+///    reduce the UTXO set. Recovery-risk candidates older than 4,320 blocks
+///    are considered oldest-first, then ordinary candidates smallest-first.
+///    Aggressiveness depends on the fee environment:
 ///    - Below `long_term_fee_rate`: up to `input_budget × N` extras.
 ///    - Between long-term and `high_fee_rate_threshold`: up to
 ///      `input_budget × N / 2` extras.
@@ -802,13 +810,13 @@ pub fn select_coins(
     }
     let total_requested = builder.total_requested();
 
-    // ── Step 2: Input selection (largest-first) ────────────────────────────
+    // ── Step 2: Input selection (largest-first) ─────────────────────────────
     //
-    // Sort all UTXOs by descending value, then by id for determinism.
-    // Both confirmed and pending UTXOs are eligible — pending ones may
-    // require CPFP fee boosting, accounted for in Step 4. UTXOs with
-    // too many mempool-only (0-confirmation) ancestors are excluded to
-    // stay within Bitcoin's relay policy limits.
+    // Sort all UTXOs by descending value, then by id for determinism. Both
+    // confirmed and pending UTXOs are eligible — pending ones may require CPFP
+    // fee boosting, accounted for in Step 4. UTXOs with too many mempool-only
+    // (0-confirmation) ancestors are excluded to stay within Bitcoin's relay
+    // policy limits.
     let mut pool: Vec<&UtxoCandidate> = utxos
         .iter()
         .filter(|u| {
@@ -861,11 +869,12 @@ pub fn select_coins(
 
     // ── Step 3: Consolidation ──────────────────────────────────────────
     //
-    // Pull in extra *confirmed* inputs (smallest-first) to reduce the
-    // UTXO set toward a single output. Only confirmed UTXOs are
-    // eligible — pending UTXOs would add unaccounted ancestors to the
-    // CPFP calculation. Consolidation only runs when there is already
-    // a change output (raw_change > 0).
+    // Pull in extra *confirmed* inputs to reduce the UTXO set toward a single
+    // output. Recovery-risk UTXOs are considered oldest-first before ordinary
+    // candidates are considered smallest-first. Pending UTXOs remain
+    // ineligible because they would add unaccounted ancestors to the CPFP
+    // calculation. Consolidation only runs when there is already a change
+    // output (raw_change > 0).
     //
     // The aggressiveness depends on the fee environment:
     // - Below long-term rate: up to `input_budget × N` extras.
@@ -891,7 +900,24 @@ pub fn select_coins(
             })
             .copied()
             .collect();
-        remaining.sort_by_key(|u| u.amount);
+        remaining.sort_by(|a, b| {
+            let a_urgent = a
+                .confirmation_age_blocks
+                .is_some_and(|age| age > RECOVERY_PRIORITY_AGE_BLOCKS);
+            let b_urgent = b
+                .confirmation_age_blocks
+                .is_some_and(|age| age > RECOVERY_PRIORITY_AGE_BLOCKS);
+            match (a_urgent, b_urgent) {
+                (true, true) => b
+                    .confirmation_age_blocks
+                    .cmp(&a.confirmation_age_blocks)
+                    .then_with(|| a.amount.cmp(&b.amount))
+                    .then_with(|| a.id.cmp(&b.id)),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => a.amount.cmp(&b.amount).then_with(|| a.id.cmp(&b.id)),
+            }
+        });
 
         for utxo in remaining.into_iter().take(max_consolidation) {
             if builder.inputs.len() >= params.max_inputs {
@@ -902,7 +928,7 @@ pub fn select_coins(
 
             // If adding this input pushed fees or weight over the
             // limit, undo it and stop consolidating. This is a
-            // greedy heuristic: inputs are sorted smallest-first and
+            // greedy heuristic: prioritized inputs are deterministic and
             // transaction weight increases monotonically.
             if builder.check_fees().is_err() || builder.exceeds_any_weight_limit() {
                 builder.inputs.pop();
