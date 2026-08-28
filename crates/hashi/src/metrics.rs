@@ -85,7 +85,7 @@ pub struct Metrics {
     reconfig_in_progress: IntGauge,
     paused: IntGauge,
     deposit_queue_size: IntGauge,
-    pub deposit_request_confirmations: IntGaugeVec,
+    pub deposit_outpoint_confirmations: IntGaugeVec,
     withdrawal_queue_size: IntGaugeVec,
     withdrawal_queue_value: IntGaugeVec,
     utxo_pool_size: IntGaugeVec,
@@ -239,9 +239,11 @@ pub const MPC_LABEL_SIGNING: &str = "signing";
 pub const STALL_OUTCOME_ABSORBED: &str = "absorbed";
 pub const STALL_OUTCOME_FAILED: &str = "failed";
 
-pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
+pub(crate) const CONFIRMATION_STATUS_LABELS: &[&str] = &[
+    "unchecked",
     "not_found",
     "mempool",
+    "invalid_vout",
     "0",
     "1",
     "2",
@@ -625,10 +627,10 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            deposit_request_confirmations: register_int_gauge_vec_with_registry!(
-                "hashi_deposit_request_confirmations",
-                "Pending deposit requests bucketed by their transaction status (and block confirmations) on Bitcoin. \
-                 The `status` label is one of: not_found, mempool, 0, 1, 2, 3, 4, 5, 6_plus.",
+            deposit_outpoint_confirmations: register_int_gauge_vec_with_registry!(
+                "hashi_deposit_outpoint_confirmations",
+                "Pending deposit outpoints bucketed by their transaction status (and block confirmations) on Bitcoin. \
+                 The `status` label is one of: unchecked, not_found, mempool, invalid_vout, 0, 1, 2, 3, 4, 5, 6_plus.",
                 &["status"],
                 registry,
             )

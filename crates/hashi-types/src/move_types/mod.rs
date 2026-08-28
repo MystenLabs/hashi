@@ -852,6 +852,15 @@ pub struct UtxoId {
     pub vout: u32,
 }
 
+impl From<UtxoId> for bitcoin::OutPoint {
+    fn from(id: UtxoId) -> Self {
+        Self {
+            txid: id.txid.into(),
+            vout: id.vout,
+        }
+    }
+}
+
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct UtxoPool {
     pub utxo_records: Bag,

@@ -35,9 +35,9 @@ Dashboard-worthy but **not** alerts:
   upgrade progress is counted before the on-chain upgrade flips `active`.
 - `hashi_is_leader` — leadership rotates; useful context when reading other
   metrics, meaningless to alert on.
-- `hashi_deposit_request_confirmations{status="not_found"}` — a sustained
-  nonzero value while peers confirm deposits normally suggests your bitcoind
-  or kyoto view is on the wrong network or corrupted.
+- `hashi_deposit_outpoint_confirmations{status="not_found"}` — expected for
+  unbroadcast transactions. It is suspicious only when your node reports it
+  while peers report confirmations for the same deposits.
 
 ## What NOT to alert on
 
@@ -59,6 +59,7 @@ Dashboard-worthy but **not** alerts:
 | Metric | Scope |
 | --- | --- |
 | `hashi_kyoto_*` | node |
+| `hashi_deposit_outpoint_confirmations` | node |
 | `hashi_latest_checkpoint_*`, `hashi_task_last_iteration_timestamp_seconds` | node |
 | `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |

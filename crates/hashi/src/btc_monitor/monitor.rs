@@ -2,12 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
+use futures::FutureExt;
 use kyoto::FeeRate;
 use kyoto::HashCheckpoint;
 use kyoto::Warning;
@@ -22,6 +27,10 @@ use tracing::info;
 use tracing::warn;
 
 use super::config::MonitorConfig;
+use crate::deposit_tracker::DepositDiscovery;
+use crate::deposit_tracker::DepositStatus;
+use crate::deposit_tracker::DepositTracker;
+use crate::deposit_tracker::DiscoveryResolution;
 use crate::metrics::Metrics;
 
 /// 1 sat/vB expressed as sat/kwu.
@@ -36,9 +45,15 @@ const KYOTO_RESTART_DELAY_BASE: Duration = Duration::from_secs(5);
 /// Random additional delay to spread reconnects across pods.
 const KYOTO_MAX_RESTART_DELAY_JITTER: Duration = Duration::from_secs(30);
 
-/// How many Bitcoin blocks a deposit observation can go without being
-/// refreshed before it's dropped from the confirmation-metrics cache.
-const STALE_OBSERVATION_BLOCKS: u32 = 10;
+/// Kyoto's block request has no internal deadline.
+const BLOCK_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+const BLOCK_SCAN_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
+const DEPOSIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+// Also bounds the check worker itself: the underlying bitcoind HTTP client
+// times out per call (60s), so an unbounded worker could hold RPC slots for
+// minutes after every caller's own `DEPOSIT_CHECK_TIMEOUT` budget expired.
+const DEPOSIT_CHECK_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT: usize = 100;
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
@@ -62,17 +77,23 @@ pub enum DepositConfirmation {
     InsufficientConfirmations { confirmations: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CachedDepositObservation {
-    NotFound,
-    InMempool,
-    InBlock { height: u32 },
+#[derive(Debug, thiserror::Error)]
+pub enum DepositConfirmError {
+    #[error("UTXO {txid}:{vout} has already been spent on Bitcoin")]
+    UtxoSpent { txid: bitcoin::Txid, vout: u32 },
+    #[error("transaction {txid} has no output at vout {vout}")]
+    InvalidVout { txid: bitcoin::Txid, vout: u32 },
+    #[error("Bitcoin deposit check timed out")]
+    TimedOut,
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CachedDepositEntry {
-    observation: CachedDepositObservation,
-    last_updated_tip: u32,
+#[derive(Debug)]
+struct DepositCheckRequest {
+    outpoint: bitcoin::OutPoint,
+    confirmation_threshold: u32,
+    result_tx: oneshot::Sender<Result<DepositConfirmation, DepositConfirmError>>,
 }
 
 struct DepositLookupCache {
@@ -96,12 +117,6 @@ impl DepositLookupCache {
         }
     }
 
-    fn clear(&mut self) {
-        self.tx_blocks.clear();
-        self.block_heights.clear();
-        self.transactions.clear();
-    }
-
     fn invalidate_tx(&mut self, txid: &bitcoin::Txid) {
         self.tx_blocks.pop(txid);
         self.transactions.pop(txid);
@@ -122,8 +137,8 @@ impl SharedDepositLookupCache {
         }
     }
 
-    fn clear(&self) {
-        self.lock().clear();
+    fn fresh(&self) -> Self {
+        Self::new(self.metrics.clone())
     }
 
     fn get_tx_block(&self, txid: &bitcoin::Txid) -> Option<HashCheckpoint> {
@@ -175,14 +190,32 @@ impl SharedDepositLookupCache {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum DepositConfirmError {
-    #[error("UTXO {txid}:{vout} has already been spent on Bitcoin")]
-    UtxoSpent { txid: bitcoin::Txid, vout: u32 },
-    #[error("transaction {txid} has no output at vout {vout}")]
-    InvalidVout { txid: bitcoin::Txid, vout: u32 },
-    #[error("{0}")]
-    Other(#[from] anyhow::Error),
+struct BlockScanResult {
+    checkpoint: HashCheckpoint,
+    generation: u64,
+    retry_round: u32,
+    result: Result<bitcoin::Block>,
+}
+
+struct DepositCheckWorkerResult {
+    generation: u64,
+    result_tx: oneshot::Sender<Result<DepositConfirmation, DepositConfirmError>>,
+    result: Result<DepositConfirmation, DepositConfirmError>,
+}
+
+struct DepositDiscoveryWorkerResult {
+    token: Option<crate::deposit_tracker::ObservationToken>,
+    generation: u64,
+    outpoint: bitcoin::OutPoint,
+    result: Result<DepositStatus, DepositConfirmError>,
+}
+
+struct DepositDiscoveryContext {
+    tip: HashCheckpoint,
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    requester: kyoto::Requester,
+    deposit_lookup_cache: SharedDepositLookupCache,
+    generation: u64,
 }
 
 enum KyotoEventLoopExit {
@@ -199,18 +232,25 @@ pub struct Monitor {
     config: MonitorConfig,
     metrics: Arc<Metrics>,
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
-    client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
-    requester: kyoto::Requester,
     tip: Option<HashCheckpoint>,
     start_checkpoint: HashCheckpoint,
     /// Set once Kyoto's initial filter sync completes; gates per-block side
     /// effects so the catch-up replay doesn't run them per header.
     synced: bool,
     block_height_tx: tokio::sync::watch::Sender<u32>,
-    deposit_check_workers: JoinSet<()>,
-    rpc_workers: JoinSet<()>,
+    block_sequence: Arc<AtomicU64>,
+    requester: kyoto::Requester,
+    deposit_check_workers: JoinSet<DepositCheckWorkerResult>,
+    deposit_discovery_workers: JoinSet<DepositDiscoveryWorkerResult>,
+    pending_deposit_checks: HashMap<bitcoin::OutPoint, Vec<DepositCheckRequest>>,
+    block_scan_workers: JoinSet<BlockScanResult>,
+    /// Pending block scans. The front entry is the one running in
+    /// `block_scan_workers` (if any); it is only popped when its result
+    /// arrives, so cancelled scans are respawned rather than lost.
+    block_scan_queue: VecDeque<(HashCheckpoint, u32)>,
     deposit_lookup_cache: SharedDepositLookupCache,
-    deposit_observation_cache: HashMap<bitcoin::OutPoint, CachedDepositEntry>,
+    deposit_tracker: DepositTracker,
+    rpc_workers: JoinSet<()>,
     /// Endless rotation of `config.trusted_peers`; yields `None` when it's empty.
     trusted_peer_rotation: std::iter::Cycle<std::vec::IntoIter<kyoto::TrustedPeer>>,
 }
@@ -228,6 +268,305 @@ where
 }
 
 impl Monitor {
+    fn confirm_deposit(&mut self, request: DepositCheckRequest) {
+        debug!("Checking deposit for {}", request.outpoint.txid);
+
+        if request.result_tx.is_closed() {
+            return;
+        }
+
+        // Refuse checks until Kyoto is synced: catch-up `Connected` events set
+        // `self.tip` but are never block-scanned, so a `NotFound`/`InMempool`
+        // status discovered against a catch-up tip would go permanently stale
+        // if the transaction confirms in a block connected before sync
+        // completes. Callers retry when sync completion bumps the block
+        // sequence.
+        let Some(tip) = self.tip.filter(|_| self.synced) else {
+            let _ = request.result_tx.send(Err(anyhow::anyhow!(
+                "Bitcoin monitor is not synced to a chain tip"
+            )
+            .into()));
+            return;
+        };
+
+        let discovery = self.deposit_tracker.discovery(&request.outpoint);
+        match discovery {
+            DepositDiscovery::Discover(token) => {
+                let outpoint = request.outpoint;
+                if self.queue_deposit_check(request) {
+                    let context = self.deposit_discovery_context(tip);
+                    self.deposit_discovery_workers
+                        .spawn(process_deposit_discovery(context, outpoint, Some(token)));
+                } else {
+                    let _ = self
+                        .deposit_tracker
+                        .resolve_discovery(token, Err::<DepositStatus, ()>(()));
+                }
+            }
+            DepositDiscovery::Pending => {
+                self.queue_deposit_check(request);
+            }
+            DepositDiscovery::Untracked => {
+                let outpoint = request.outpoint;
+                let already_pending = self.pending_deposit_checks.contains_key(&outpoint);
+                if self.queue_deposit_check(request) && !already_pending {
+                    let context = self.deposit_discovery_context(tip);
+                    self.deposit_discovery_workers
+                        .spawn(process_deposit_discovery(context, outpoint, None));
+                }
+            }
+            DepositDiscovery::Known(status) => self.start_deposit_check(tip, request, status),
+        }
+    }
+
+    fn queue_deposit_check(&mut self, request: DepositCheckRequest) -> bool {
+        let requests = self
+            .pending_deposit_checks
+            .entry(request.outpoint)
+            .or_default();
+        requests.retain(|request| !request.result_tx.is_closed());
+        if requests.len() >= MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT {
+            let _ = request.result_tx.send(Err(anyhow::anyhow!(
+                "Too many pending checks for Bitcoin deposit {}",
+                request.outpoint
+            )
+            .into()));
+            false
+        } else {
+            requests.push(request);
+            true
+        }
+    }
+
+    fn deposit_discovery_context(&self, tip: HashCheckpoint) -> DepositDiscoveryContext {
+        DepositDiscoveryContext {
+            tip,
+            bitcoind_rpc: self.bitcoind_rpc.clone(),
+            requester: self.requester.clone(),
+            deposit_lookup_cache: self.deposit_lookup_cache.clone(),
+            generation: self.deposit_tracker.bitcoin_generation(),
+        }
+    }
+
+    fn start_deposit_check(
+        &mut self,
+        tip: HashCheckpoint,
+        request: DepositCheckRequest,
+        status: DepositStatus,
+    ) {
+        self.deposit_check_workers.spawn(process_deposit_check(
+            self.deposit_tracker.bitcoin_generation(),
+            tip,
+            self.bitcoind_rpc.clone(),
+            request,
+            status,
+        ));
+    }
+
+    fn queue_block_scan(&mut self, checkpoint: HashCheckpoint) {
+        if !self.deposit_tracker.has_scan_candidates() {
+            return;
+        }
+
+        self.block_scan_queue.push_back((checkpoint, 0));
+        self.start_next_block_scan();
+    }
+
+    fn cancel_deposit_workers(&mut self) {
+        self.deposit_check_workers.abort_all();
+        self.deposit_discovery_workers.abort_all();
+        for request in self
+            .pending_deposit_checks
+            .drain()
+            .flat_map(|(_, requests)| requests)
+        {
+            let _ = request.result_tx.send(Err(anyhow::anyhow!(
+                "Bitcoin deposit check was invalidated by a chain update"
+            )
+            .into()));
+        }
+        self.block_scan_workers.abort_all();
+    }
+
+    /// Drop only the scans for disconnected blocks. Scans for blocks that
+    /// survived the reorg must still run: nothing re-discovers a
+    /// `NotFound`/`InMempool` entry, so a dropped scan would leave a deposit
+    /// confirmed in one of those blocks stuck forever.
+    fn drop_disconnected_block_scans(&mut self, disconnected: &[HashCheckpoint]) {
+        self.block_scan_queue
+            .retain(|(checkpoint, _)| !disconnected.contains(checkpoint));
+    }
+
+    fn finish_deposit_check(
+        &mut self,
+        join_result: std::result::Result<DepositCheckWorkerResult, tokio::task::JoinError>,
+    ) {
+        match join_result {
+            Ok(result) if result.generation == self.deposit_tracker.bitcoin_generation() => {
+                let _ = result.result_tx.send(result.result);
+            }
+            Ok(result) => {
+                let _ = result.result_tx.send(Err(anyhow::anyhow!(
+                    "Bitcoin deposit check was invalidated by a chain update"
+                )
+                .into()));
+            }
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                error!("Deposit check worker task failed: {e}");
+            }
+        }
+    }
+
+    fn finish_deposit_discovery(
+        &mut self,
+        join_result: std::result::Result<DepositDiscoveryWorkerResult, tokio::task::JoinError>,
+    ) {
+        let result = match join_result {
+            Ok(result) => result,
+            Err(e) if e.is_cancelled() => return,
+            Err(e) => {
+                error!("Deposit discovery worker task failed: {e}");
+                return;
+            }
+        };
+        if result.generation != self.deposit_tracker.bitcoin_generation() {
+            return;
+        }
+
+        let status = match result.token {
+            Some(token) => match self.deposit_tracker.resolve_discovery(token, result.result) {
+                DiscoveryResolution::Complete(result) => result,
+                DiscoveryResolution::Pending => return,
+                DiscoveryResolution::Untracked => Err(anyhow::anyhow!(
+                    "Bitcoin deposit request left the tracker during discovery"
+                )
+                .into()),
+            },
+            None => result.result,
+        };
+        let requests = self
+            .pending_deposit_checks
+            .remove(&result.outpoint)
+            .unwrap_or_default();
+        let Some(tip) = self.tip else {
+            for request in requests {
+                let _ = request.result_tx.send(Err(anyhow::anyhow!(
+                    "Bitcoin deposit check was invalidated by a chain update"
+                )
+                .into()));
+            }
+            return;
+        };
+        for request in requests {
+            if request.result_tx.is_closed() {
+                continue;
+            }
+            match &status {
+                Ok(status) => self.start_deposit_check(tip, request, status.clone()),
+                Err(e) => {
+                    let _ = request
+                        .result_tx
+                        .send(Err(anyhow::anyhow!(e.to_string()).into()));
+                }
+            }
+        }
+    }
+
+    fn start_next_block_scan(&mut self) {
+        if !self.block_scan_workers.is_empty() {
+            return;
+        }
+
+        if !self.deposit_tracker.has_scan_candidates() {
+            self.block_scan_queue.clear();
+            return;
+        }
+
+        // Scan order does not affect correctness, so run the scan with the
+        // fewest failed attempts first: its backoff sleep happens inside
+        // the single-flight worker, and a persistently failing block must
+        // not delay scans of fresh blocks. Move the pick to the front,
+        // where `finish_block_scan` expects the in-flight scan.
+        let Some(next) = self
+            .block_scan_queue
+            .iter()
+            .enumerate()
+            .min_by_key(|(index, (_, retry_round))| (*retry_round, *index))
+            .map(|(index, _)| index)
+        else {
+            return;
+        };
+        let (checkpoint, retry_round) = self.block_scan_queue.remove(next).unwrap();
+        self.block_scan_queue.push_front((checkpoint, retry_round));
+
+        let requester = self.requester.clone();
+        let generation = self.deposit_tracker.bitcoin_generation();
+        self.block_scan_workers.spawn(async move {
+            let scan = AssertUnwindSafe(async {
+                if retry_round > 0 {
+                    tokio::time::sleep(BLOCK_SCAN_RETRY_BASE_DELAY * 2u32.pow(retry_round.min(5)))
+                        .await;
+                }
+                fetch_block_for_scan(&requester, checkpoint).await
+            })
+            .catch_unwind()
+            .await;
+            BlockScanResult {
+                checkpoint,
+                generation,
+                retry_round,
+                result: scan.unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "Bitcoin block scan task panicked for {} at height {}",
+                        checkpoint.hash,
+                        checkpoint.height,
+                    ))
+                }),
+            }
+        });
+    }
+
+    fn finish_block_scan(
+        &mut self,
+        join_result: std::result::Result<BlockScanResult, tokio::task::JoinError>,
+    ) {
+        match join_result {
+            // The reset or reorg that bumped the generation already cleared
+            // this scan from the queue or decided it should be rescanned;
+            // either way the front of the queue is no longer this scan.
+            Ok(result) if result.generation != self.deposit_tracker.bitcoin_generation() => {}
+            Ok(BlockScanResult {
+                checkpoint,
+                generation,
+                result: Ok(block),
+                ..
+            }) => {
+                self.block_scan_queue.pop_front();
+                self.deposit_tracker
+                    .apply_block_if_current(generation, checkpoint, &block);
+            }
+            Ok(BlockScanResult {
+                checkpoint,
+                retry_round,
+                result: Err(e),
+                ..
+            }) => {
+                error!(
+                    "Failed to scan Bitcoin block {} at height {}: {e}",
+                    checkpoint.hash, checkpoint.height,
+                );
+                self.block_scan_queue.pop_front();
+                self.block_scan_queue
+                    .push_back((checkpoint, retry_round.saturating_add(1)));
+            }
+            Err(e) if e.is_cancelled() => {}
+            // Scans catch panics internally, so this should be unreachable.
+            // The scan stays at the front of the queue and is respawned.
+            Err(e) => error!("Block scan worker task failed: {e}"),
+        }
+    }
+
     fn build_kyoto_node(
         config: &MonitorConfig,
         checkpoint: HashCheckpoint,
@@ -312,6 +651,15 @@ impl Monitor {
     /// Run a BTC monitor with the given configuration.
     /// Returns the client for interacting with the monitor and a Service for lifecycle management.
     pub fn run(config: MonitorConfig, metrics: Arc<Metrics>) -> Result<(MonitorClient, Service)> {
+        let deposit_tracker = DepositTracker::new(metrics.clone());
+        Self::run_with_tracker(config, metrics, deposit_tracker)
+    }
+
+    pub(crate) fn run_with_tracker(
+        config: MonitorConfig,
+        metrics: Arc<Metrics>,
+        deposit_tracker: DepositTracker,
+    ) -> Result<(MonitorClient, Service)> {
         let bitcoind_rpc = crate::btc_monitor::config::new_rpc_client(
             config.bitcoind_rpc_url.as_str(),
             config.bitcoind_rpc_auth.clone(),
@@ -319,9 +667,10 @@ impl Monitor {
 
         let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(100);
         let (block_height_tx, block_height_rx) = tokio::sync::watch::channel(0u32);
+        let block_sequence = Arc::new(AtomicU64::new(0));
 
+        let service_block_sequence = block_sequence.clone();
         let service = Service::new().spawn_aborting({
-            let client_tx = client_tx.clone();
             async move {
                 let bitcoind_rpc = Arc::new(bitcoind_rpc);
 
@@ -333,16 +682,20 @@ impl Monitor {
                     config,
                     metrics: metrics.clone(),
                     bitcoind_rpc,
-                    requester: kyoto_client.requester.clone(),
-                    client_tx,
                     tip: None,
                     start_checkpoint,
                     synced: false,
                     block_height_tx,
+                    block_sequence: service_block_sequence,
+                    requester: kyoto_client.requester.clone(),
                     deposit_check_workers: JoinSet::new(),
-                    rpc_workers: JoinSet::new(),
+                    deposit_discovery_workers: JoinSet::new(),
+                    pending_deposit_checks: HashMap::new(),
+                    block_scan_workers: JoinSet::new(),
+                    block_scan_queue: VecDeque::new(),
                     deposit_lookup_cache: SharedDepositLookupCache::new(metrics),
-                    deposit_observation_cache: HashMap::new(),
+                    deposit_tracker,
+                    rpc_workers: JoinSet::new(),
                     trusted_peer_rotation,
                 };
 
@@ -356,6 +709,7 @@ impl Monitor {
             MonitorClient {
                 tx: client_tx,
                 block_height_rx,
+                block_sequence,
             },
             service,
         ))
@@ -417,10 +771,10 @@ impl Monitor {
 
             self.synced = false;
             self.tip = None;
-            self.deposit_check_workers.abort_all();
-            self.deposit_lookup_cache.clear();
-            self.deposit_observation_cache.clear();
-            self.rebuild_confirmation_metrics();
+            self.cancel_deposit_workers();
+            self.block_scan_queue.clear();
+            self.deposit_lookup_cache = self.deposit_lookup_cache.fresh();
+            self.deposit_tracker.reset_bitcoin_state();
             self.metrics.kyoto_restarts.inc();
             self.metrics.kyoto_connected_peers.set(0);
             self.metrics.kyoto_synced.set(0);
@@ -519,9 +873,14 @@ impl Monitor {
                     }
                 }
                 Some(join_result) = self.deposit_check_workers.join_next() => {
-                    if let Err(e) = join_result && !e.is_cancelled() {
-                        error!("Deposit check worker task failed: {e}");
-                    }
+                    self.finish_deposit_check(join_result);
+                }
+                Some(join_result) = self.deposit_discovery_workers.join_next() => {
+                    self.finish_deposit_discovery(join_result);
+                }
+                Some(join_result) = self.block_scan_workers.join_next() => {
+                    self.finish_block_scan(join_result);
+                    self.start_next_block_scan();
                 }
                 Some(join_result) = self.rpc_workers.join_next() => {
                     if let Err(e) = join_result {
@@ -583,8 +942,11 @@ impl Monitor {
                         indexed_header.height,
                         indexed_header.block_hash()
                     );
-                    let _ = self.block_height_tx.send(indexed_header.height);
-                    self.rebuild_confirmation_metrics();
+                    let checkpoint =
+                        HashCheckpoint::new(indexed_header.height, indexed_header.block_hash());
+                    self.deposit_tracker.set_tip(checkpoint);
+                    self.publish_block_height(checkpoint.height);
+                    self.queue_block_scan(checkpoint);
                 } else {
                     debug!(
                         "Catching up: connected header at height {} ({})",
@@ -603,20 +965,43 @@ impl Monitor {
                     reorganized.len()
                 );
                 self.metrics.kyoto_reorgs.inc();
-                // Checks are tied to the tip they started against. Request cancellation
-                // before clearing caches, though workers may run until their next await.
-                self.deposit_check_workers.abort_all();
-                self.deposit_lookup_cache.clear();
-                self.deposit_observation_cache.clear();
-                if let Some(new_tip) = accepted.last() {
-                    self.tip = Some(kyoto::HashCheckpoint::new(
-                        new_tip.height,
-                        new_tip.block_hash(),
-                    ));
+                // Checks are tied to the tip they started against. Cancel them before
+                // clearing caches so stale workers cannot repopulate disconnected data.
+                let disconnected: Vec<_> = reorganized
+                    .iter()
+                    .map(|header| HashCheckpoint::new(header.height, header.block_hash()))
+                    .collect();
+                self.cancel_deposit_workers();
+                self.drop_disconnected_block_scans(&disconnected);
+                self.tip = None;
+                self.deposit_lookup_cache = self.deposit_lookup_cache.fresh();
+                self.deposit_tracker.apply_reorg(&disconnected);
+
+                let new_tip = accepted
+                    .last()
+                    .map(|header| HashCheckpoint::new(header.height, header.block_hash()))
+                    .or_else(|| {
+                        reorganized.first().and_then(|header| {
+                            header
+                                .height
+                                .checked_sub(1)
+                                .map(|height| HashCheckpoint::new(height, header.prev_blockhash()))
+                        })
+                    });
+                if let Some(new_tip) = new_tip {
+                    self.tip = Some(new_tip);
+                    self.deposit_tracker.set_tip(new_tip);
                     self.metrics.kyoto_best_height.set(new_tip.height as i64);
-                    let _ = self.block_height_tx.send(new_tip.height);
+                    if self.synced {
+                        self.publish_block_height(new_tip.height);
+                        for header in accepted {
+                            self.queue_block_scan(HashCheckpoint::new(
+                                header.height,
+                                header.block_hash(),
+                            ));
+                        }
+                    }
                 }
-                self.rebuild_confirmation_metrics();
             }
             kyoto::chain::BlockHeaderChanges::ForkAdded(indexed_header) => {
                 debug!(
@@ -641,13 +1026,20 @@ impl Monitor {
         self.metrics.kyoto_best_height.set(tip.height as i64);
         self.metrics.kyoto_sync_percent.set(100);
         self.tip = Some(tip);
-        let _ = self.block_height_tx.send(tip.height);
-        self.rebuild_confirmation_metrics();
+        self.deposit_tracker.set_tip(tip);
+        // Publish the synchronized tip. Subsequent updates are published as soon
+        // as their headers connect; deposit scans notify the tracker separately.
+        self.publish_block_height(tip.height);
+    }
+
+    fn publish_block_height(&self, height: u32) {
+        self.block_sequence.fetch_add(1, Ordering::SeqCst);
+        let _ = self.block_height_tx.send(height);
     }
 
     fn process_client_message(&mut self, msg: MonitorMessage) {
         match msg {
-            MonitorMessage::ConfirmDeposit(request) => {
+            MonitorMessage::CheckDeposit(request) => {
                 self.confirm_deposit(request);
             }
             MonitorMessage::GetRecentFeeRate(conf_target, result_tx) => {
@@ -672,87 +1064,7 @@ impl Monitor {
                     result_tx,
                 ));
             }
-            MonitorMessage::RecordDepositObservation {
-                outpoint,
-                observation,
-            } => {
-                self.record_deposit_observation(outpoint, observation);
-            }
-            MonitorMessage::ForgetDeposit(outpoint) => {
-                self.forget_deposit_observation(outpoint);
-            }
         }
-    }
-
-    fn record_deposit_observation(
-        &mut self,
-        outpoint: bitcoin::OutPoint,
-        observation: CachedDepositObservation,
-    ) {
-        let last_updated_tip = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
-        let previous = self.deposit_observation_cache.insert(
-            outpoint,
-            CachedDepositEntry {
-                observation,
-                last_updated_tip,
-            },
-        );
-        update_confirmation_metrics_for_change(
-            &self.metrics,
-            last_updated_tip,
-            previous.map(|entry| entry.observation),
-            Some(observation),
-        );
-    }
-
-    fn forget_deposit_observation(&mut self, outpoint: bitcoin::OutPoint) {
-        let Some(previous) = self.deposit_observation_cache.remove(&outpoint) else {
-            return;
-        };
-        let tip_height = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
-        update_confirmation_metrics_for_change(
-            &self.metrics,
-            tip_height,
-            Some(previous.observation),
-            None,
-        );
-    }
-
-    /// Drop cache entries that haven't been refreshed in the last
-    /// `STALE_OBSERVATION_BLOCKS` Bitcoin blocks, then write the current
-    /// bucket counts to `deposit_request_confirmations`.
-    fn rebuild_confirmation_metrics(&mut self) {
-        let tip_height = self.tip.as_ref().map(|t| t.height).unwrap_or(0);
-        rebuild_confirmation_metrics_inner(
-            &mut self.deposit_observation_cache,
-            tip_height,
-            &self.metrics,
-        );
-    }
-
-    fn confirm_deposit(&mut self, request: DepositCheckRequest) {
-        debug!(
-            "Checking deposit confirmation for {}",
-            request.outpoint.txid
-        );
-
-        let Some(tip) = &self.tip else {
-            let _ =
-                request.result_tx.send(Err(
-                    anyhow::anyhow!("Bitcoin chain tip is not available").into()
-                ));
-            return;
-        };
-
-        self.deposit_check_workers
-            .spawn(Monitor::process_deposit_check(
-                tip.to_owned(),
-                self.bitcoind_rpc.clone(),
-                self.requester.clone(),
-                self.client_tx.clone(),
-                self.deposit_lookup_cache.clone(),
-                request,
-            ));
     }
 
     async fn get_recent_fee_rate(
@@ -855,339 +1167,398 @@ impl Monitor {
         };
         let _ = result_tx.send(result);
     }
+}
 
-    async fn process_deposit_check(
-        tip: HashCheckpoint,
-        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
-        requester: kyoto::Requester,
-        client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
-        deposit_lookup_cache: SharedDepositLookupCache,
-        request: DepositCheckRequest,
-    ) {
-        if request.result_tx.is_closed() {
-            // Cancel if the receiver is no longer listening.
-            return;
-        }
-
-        let DepositCheckRequest {
-            outpoint,
-            confirmation_threshold,
-            result_tx,
-        } = request;
-        let result = Self::observe_deposit(
-            tip,
-            confirmation_threshold,
-            bitcoind_rpc,
-            requester,
-            client_tx,
-            deposit_lookup_cache,
-            outpoint,
-        )
-        .await;
-        let _ = result_tx.send(result);
-    }
-
-    async fn observe_deposit(
-        tip: HashCheckpoint,
-        confirmation_threshold: u32,
-        bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
-        requester: kyoto::Requester,
-        client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
-        deposit_lookup_cache: SharedDepositLookupCache,
-        outpoint: bitcoin::OutPoint,
-    ) -> Result<DepositConfirmation, DepositConfirmError> {
-        let txid = outpoint.txid;
-
-        // Look up block from the txid.
-        let block_info = if let Some(block_info) = deposit_lookup_cache.get_tx_block(&txid) {
-            block_info
-        } else {
-            debug!("Looking up block for transaction {txid}");
-            let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
-                rpc.get_raw_transaction_verbose(txid)
-            })
+async fn fetch_block_for_scan(
+    requester: &kyoto::Requester,
+    checkpoint: HashCheckpoint,
+) -> Result<bitcoin::Block> {
+    let indexed_block =
+        tokio::time::timeout(BLOCK_SCAN_TIMEOUT, requester.get_block(checkpoint.hash))
             .await
-            {
-                Ok(tx_info) => tx_info,
-                Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(
-                    ref e,
-                ))) if e.code == -5 => {
-                    // RPC error -5: "No such mempool or blockchain transaction"
-                    debug!("Transaction {txid} not found in mempool or blockchain");
-                    send_observation(&client_tx, outpoint, CachedDepositObservation::NotFound);
-                    return Ok(DepositConfirmation::NotFound);
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to look up txid {txid}: {e}").into());
-                }
-            };
-            let tx_info = tx_info
-                .into_model()
-                .map_err(|e| anyhow::anyhow!("Failed to parse transaction info for {txid}: {e}"))?;
-            let Some(block_hash) = tx_info.block_hash else {
-                debug!("Transaction {txid} is not yet included in a block");
-                send_observation(&client_tx, outpoint, CachedDepositObservation::InMempool);
-                return Ok(DepositConfirmation::InMempool);
-            };
-            // Verify the block hash is in kyoto's independently-validated
-            // chain of most work. This catches a malicious bitcoind reporting
-            // a fake or forked block hash.
-            let cached_height = deposit_lookup_cache.get_block_height(&block_hash);
-            let height = match cached_height {
-                Some(height) => height,
-                None => {
-                    let height = match requester.height_of_hash(block_hash).await {
-                        Ok(Some(height)) => height,
-                        Ok(None) => {
-                            return Err(anyhow::anyhow!(
-                                "Block hash {block_hash} from bitcoind is not on Kyoto's chain"
-                            )
-                            .into());
-                        }
-                        Err(e) => {
-                            return Err(anyhow::anyhow!(
-                                "Failed to look up block hash {block_hash} in Kyoto: {e}"
-                            )
-                            .into());
-                        }
-                    };
-                    deposit_lookup_cache.put_block_height(block_hash, height);
-                    height
-                }
-            };
-            let block_info = kyoto::HashCheckpoint {
-                height,
-                hash: block_hash,
-            };
-            deposit_lookup_cache.put_tx_block(txid, block_info);
-            block_info
-        };
-
-        send_observation(
-            &client_tx,
-            outpoint,
-            CachedDepositObservation::InBlock {
-                height: block_info.height,
-            },
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Timed out fetching block {} at height {}",
+                    checkpoint.hash,
+                    checkpoint.height,
+                )
+            })??;
+    let fetched_hash = indexed_block.block.block_hash();
+    if indexed_block.height != checkpoint.height || fetched_hash != checkpoint.hash {
+        anyhow::bail!(
+            "Kyoto returned block {fetched_hash} at height {} for requested {} at height {}",
+            indexed_block.height,
+            checkpoint.hash,
+            checkpoint.height,
         );
-
-        // Check if the deposit has enough confirmations yet.
-        let confirmations = (tip.height + 1).saturating_sub(block_info.height);
-        if confirmations < confirmation_threshold {
-            debug!(
-                "Transaction {} has {confirmations}/{confirmation_threshold} confirmations. Waiting for more blocks.",
-                outpoint.txid,
-            );
-            return Ok(DepositConfirmation::InsufficientConfirmations { confirmations });
-        }
-
-        // If deposit is confirmed, look up the TxOut info.
-        let cached_transaction = deposit_lookup_cache.get_transaction(&txid);
-        let transaction = match cached_transaction {
-            Some(transaction) => transaction,
-            None => {
-                let block = match requester.get_block(block_info.hash).await {
-                    Ok(block) => block,
-                    Err(kyoto::error::FetchBlockError::UnknownHash) => {
-                        deposit_lookup_cache.invalidate_tx(&txid);
-                        return Err(anyhow::anyhow!(
-                            "Block {} is no longer in the current chain",
-                            block_info.hash
-                        )
-                        .into());
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Failed to look up block {}: {e}",
-                            block_info.hash
-                        )
-                        .into());
-                    }
-                };
-                let Some(transaction) = block
-                    .block
-                    .txdata
-                    .iter()
-                    .find(|tx| tx.compute_txid() == txid)
-                else {
-                    deposit_lookup_cache.invalidate_tx(&txid);
-                    return Err(anyhow::anyhow!(
-                        "Transaction {txid} is not present in block {} reported by Bitcoin Core",
-                        block_info.hash
-                    )
-                    .into());
-                };
-                let transaction = Arc::new(transaction.clone());
-                deposit_lookup_cache.put_transaction(txid, transaction.clone());
-                transaction
-            }
-        };
-
-        let txout = match transaction.tx_out(outpoint.vout.try_into().unwrap()) {
-            Ok(txout) => txout.clone(),
-            Err(_) => {
-                send_forget(&client_tx, outpoint);
-                return Err(DepositConfirmError::InvalidVout {
-                    txid,
-                    vout: outpoint.vout,
-                });
-            }
-        };
-
-        // Verify the UTXO is still unspent in Bitcoin's UTXO set (including mempool).
-        // Use raw `call()` because gettxout returns null when the UTXO is spent,
-        // and the typed `get_tx_out` method doesn't return Option.
-        let outpoint_txid = outpoint.txid;
-        let outpoint_vout = outpoint.vout;
-        let gettxout_result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
-            rpc.call::<Option<serde_json::Value>>(
-                "gettxout",
-                &[
-                    serde_json::json!(outpoint_txid),
-                    serde_json::json!(outpoint_vout),
-                    serde_json::json!(true), // include_mempool
-                ],
-            )
-        })
-        .await;
-        match gettxout_result {
-            Ok(Some(_)) => {
-                info!(
-                    "Deposit {}:{} confirmed with {confirmations}/{confirmation_threshold} confirmations",
-                    outpoint.txid, outpoint.vout,
-                );
-                send_forget(&client_tx, outpoint);
-                Ok(DepositConfirmation::Confirmed(txout))
-            }
-            Ok(None) => {
-                warn!(
-                    "Deposit UTXO {}:{} has already been spent on Bitcoin. Rejecting deposit.",
-                    outpoint.txid, outpoint.vout,
-                );
-                send_forget(&client_tx, outpoint);
-                Err(DepositConfirmError::UtxoSpent {
-                    txid,
-                    vout: outpoint.vout,
-                })
-            }
-            Err(e) => {
-                Err(anyhow::anyhow!("Failed to check UTXO spent status via gettxout: {e}").into())
-            }
-        }
     }
+    Ok(indexed_block.block)
 }
 
-/// GC stale entries from the cache, then write bucket counts into the
-/// `deposit_request_confirmations` gauge.
-fn rebuild_confirmation_metrics_inner(
-    cache: &mut HashMap<bitcoin::OutPoint, CachedDepositEntry>,
-    tip_height: u32,
-    metrics: &Metrics,
-) {
-    let min_fresh = tip_height.saturating_sub(STALE_OBSERVATION_BLOCKS);
-    cache.retain(|_, entry| entry.last_updated_tip >= min_fresh);
-
-    let mut counts = [0i64; crate::metrics::CONFIRMATION_STATUS_LABELS.len()];
-    for entry in cache.values() {
-        let idx = confirmation_bucket(entry.observation, tip_height);
-        counts[idx] += 1;
-    }
-
-    for (i, label) in crate::metrics::CONFIRMATION_STATUS_LABELS
-        .iter()
-        .enumerate()
-    {
-        metrics
-            .deposit_request_confirmations
-            .with_label_values(&[label])
-            .set(counts[i]);
-    }
-}
-
-fn update_confirmation_metrics_for_change(
-    metrics: &Metrics,
-    tip_height: u32,
-    previous: Option<CachedDepositObservation>,
-    current: Option<CachedDepositObservation>,
-) {
-    if let Some(previous) = previous {
-        let label =
-            crate::metrics::CONFIRMATION_STATUS_LABELS[confirmation_bucket(previous, tip_height)];
-        metrics
-            .deposit_request_confirmations
-            .with_label_values(&[label])
-            .dec();
-    }
-    if let Some(current) = current {
-        let label =
-            crate::metrics::CONFIRMATION_STATUS_LABELS[confirmation_bucket(current, tip_height)];
-        metrics
-            .deposit_request_confirmations
-            .with_label_values(&[label])
-            .inc();
-    }
-}
-
-fn confirmation_bucket(observation: CachedDepositObservation, tip_height: u32) -> usize {
-    match observation {
-        CachedDepositObservation::NotFound => 0,
-        CachedDepositObservation::InMempool => 1,
-        CachedDepositObservation::InBlock { height } => {
-            let confirmations = (tip_height + 1).saturating_sub(height);
-            // +2 skips the not_found/mempool slots; 0..=6 confirmations land in indices 2..=8.
-            (2 + confirmations.min(6) as usize).min(8)
-        }
-    }
-}
-
-fn send_observation(
-    client_tx: &tokio::sync::mpsc::Sender<MonitorMessage>,
+async fn process_deposit_discovery(
+    context: DepositDiscoveryContext,
     outpoint: bitcoin::OutPoint,
-    observation: CachedDepositObservation,
-) {
-    let result = client_tx.try_send(MonitorMessage::RecordDepositObservation {
+    token: Option<crate::deposit_tracker::ObservationToken>,
+) -> DepositDiscoveryWorkerResult {
+    let generation = context.generation;
+    let discovery = AssertUnwindSafe(discover_deposit(
+        context.bitcoind_rpc,
+        context.requester,
+        context.deposit_lookup_cache,
         outpoint,
-        observation,
-    });
-    match result {
-        Ok(()) => {}
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            debug!("Dropping deposit observation because the monitor channel is full");
+        context.tip,
+    ));
+    let result = match tokio::time::timeout(DEPOSIT_DISCOVERY_TIMEOUT, discovery.catch_unwind())
+        .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => {
+            Err(anyhow::anyhow!("Bitcoin deposit discovery task panicked for {outpoint}").into())
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            debug!("Dropping deposit observation because the monitor channel is closed");
-        }
+        Err(_) => Err(anyhow::anyhow!("Timed out discovering Bitcoin deposit {outpoint}").into()),
+    };
+    DepositDiscoveryWorkerResult {
+        token,
+        generation,
+        outpoint,
+        result,
     }
 }
 
-fn send_forget(client_tx: &tokio::sync::mpsc::Sender<MonitorMessage>, outpoint: bitcoin::OutPoint) {
-    match client_tx.try_send(MonitorMessage::ForgetDeposit(outpoint)) {
-        Ok(()) => {}
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            debug!("Dropping deposit observation removal because the monitor channel is full");
-        }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            debug!("Dropping deposit observation removal because the monitor channel is closed");
-        }
+async fn process_deposit_check(
+    generation: u64,
+    tip: HashCheckpoint,
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    request: DepositCheckRequest,
+    status: DepositStatus,
+) -> DepositCheckWorkerResult {
+    let DepositCheckRequest {
+        outpoint,
+        confirmation_threshold,
+        result_tx,
+    } = request;
+    let result = tokio::time::timeout(
+        DEPOSIT_CHECK_TIMEOUT,
+        check_result_from_status(status, tip, confirmation_threshold, bitcoind_rpc, outpoint),
+    )
+    .await
+    .unwrap_or(Err(DepositConfirmError::TimedOut));
+    DepositCheckWorkerResult {
+        generation,
+        result_tx,
+        result,
     }
 }
 
-#[derive(Debug)]
-struct DepositCheckRequest {
-    outpoint: bitcoin::OutPoint,
+async fn check_result_from_status(
+    status: DepositStatus,
+    tip: HashCheckpoint,
     confirmation_threshold: u32,
-    result_tx: oneshot::Sender<Result<DepositConfirmation, DepositConfirmError>>,
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    outpoint: bitcoin::OutPoint,
+) -> Result<DepositConfirmation, DepositConfirmError> {
+    match status {
+        DepositStatus::Unchecked => unreachable!("discovery returned Unchecked"),
+        DepositStatus::NotFound => Ok(DepositConfirmation::NotFound),
+        DepositStatus::InMempool => Ok(DepositConfirmation::InMempool),
+        DepositStatus::InvalidVout { .. } => Err(DepositConfirmError::InvalidVout {
+            txid: outpoint.txid,
+            vout: outpoint.vout,
+        }),
+        DepositStatus::InBlock { checkpoint, txout } => {
+            let confirmations = tip
+                .height
+                .saturating_add(1)
+                .saturating_sub(checkpoint.height);
+            if confirmations < confirmation_threshold {
+                return Ok(DepositConfirmation::InsufficientConfirmations { confirmations });
+            }
+            check_unspent_at_tip(
+                bitcoind_rpc,
+                tip,
+                outpoint,
+                txout,
+                confirmations,
+                confirmation_threshold,
+            )
+            .await
+        }
+    }
+}
+
+async fn discover_deposit(
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    requester: kyoto::Requester,
+    deposit_lookup_cache: SharedDepositLookupCache,
+    outpoint: bitcoin::OutPoint,
+    tip: HashCheckpoint,
+) -> Result<DepositStatus, DepositConfirmError> {
+    let txid = outpoint.txid;
+    let block_info = if let Some(block_info) = deposit_lookup_cache.get_tx_block(&txid) {
+        block_info
+    } else {
+        debug!("Looking up block for transaction {txid}");
+        require_core_checkpoint(&bitcoind_rpc, tip, "before transaction lookup").await?;
+        let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
+            rpc.get_raw_transaction_verbose(txid)
+        })
+        .await
+        {
+            Ok(tx_info) => tx_info,
+            // -5 also covers "-txindex off" and "txindex still indexing";
+            // only the ready-index message is a durable not-found.
+            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)))
+                if e.code == -5
+                    && e.message
+                        .starts_with("No such mempool or blockchain transaction") =>
+            {
+                require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
+                return Ok(DepositStatus::NotFound);
+            }
+            Err(e) => return Err(anyhow::anyhow!("Failed to look up txid {txid}: {e}").into()),
+        };
+        let tx_info = tx_info
+            .into_model()
+            .map_err(|e| anyhow::anyhow!("Failed to parse transaction info for {txid}: {e}"))?;
+        let Some(block_hash) = tx_info.block_hash else {
+            require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
+            return Ok(DepositStatus::InMempool);
+        };
+        let height = if let Some(height) = deposit_lookup_cache.get_block_height(&block_hash) {
+            height
+        } else {
+            let height = requester
+                .height_of_hash(block_hash)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to look up block hash {block_hash} in Kyoto: {e}")
+                })?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Block hash {block_hash} from bitcoind is not on Kyoto's chain")
+                })?;
+            deposit_lookup_cache.put_block_height(block_hash, height);
+            height
+        };
+        let block_info = HashCheckpoint::new(height, block_hash);
+        deposit_lookup_cache.put_tx_block(txid, block_info);
+        block_info
+    };
+
+    let transaction = if let Some(transaction) = deposit_lookup_cache.get_transaction(&txid) {
+        transaction
+    } else {
+        let indexed_block = requester
+            .get_block(block_info.hash)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to look up block {}: {e}", block_info.hash))?;
+        let fetched_hash = indexed_block.block.block_hash();
+        if indexed_block.height != block_info.height || fetched_hash != block_info.hash {
+            deposit_lookup_cache.invalidate_tx(&txid);
+            return Err(anyhow::anyhow!(
+                "Kyoto returned block {fetched_hash} at height {} for requested {} at height {}",
+                indexed_block.height,
+                block_info.hash,
+                block_info.height,
+            )
+            .into());
+        }
+        let Some(transaction) = indexed_block
+            .block
+            .txdata
+            .iter()
+            .find(|transaction| transaction.compute_txid() == txid)
+        else {
+            deposit_lookup_cache.invalidate_tx(&txid);
+            return Err(anyhow::anyhow!(
+                "Transaction {txid} is not present in block {} reported by Bitcoin Core",
+                block_info.hash,
+            )
+            .into());
+        };
+        let transaction = Arc::new(transaction.clone());
+        deposit_lookup_cache.put_transaction(txid, transaction.clone());
+        transaction
+    };
+
+    let Some(txout) = transaction.output.get(outpoint.vout as usize) else {
+        return Ok(DepositStatus::InvalidVout {
+            checkpoint: block_info,
+        });
+    };
+    Ok(DepositStatus::InBlock {
+        checkpoint: block_info,
+        txout: txout.clone(),
+    })
+}
+
+async fn get_best_block(
+    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+) -> Result<bitcoin::BlockHash> {
+    btc_rpc_call(bitcoind_rpc, move |rpc| {
+        rpc.call::<bitcoin::BlockHash>("getbestblockhash", &[])
+    })
+    .await
+    .map_err(anyhow::Error::from)
+}
+
+async fn get_block_hash(
+    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    height: u32,
+) -> Result<bitcoin::BlockHash> {
+    btc_rpc_call(bitcoind_rpc, move |rpc| {
+        rpc.call::<bitcoin::BlockHash>("getblockhash", &[serde_json::json!(height)])
+    })
+    .await
+    .map_err(anyhow::Error::from)
+}
+
+async fn require_core_checkpoint(
+    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    tip: HashCheckpoint,
+    context: &str,
+) -> Result<(), DepositConfirmError> {
+    let bitcoind_hash = get_block_hash(bitcoind_rpc, tip.height)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read Bitcoin Core block at Kyoto height {} {context}: {e}",
+                tip.height
+            )
+        })?;
+    if bitcoind_hash != tip.hash {
+        return Err(anyhow::anyhow!(
+            "Bitcoin Core has {bitcoind_hash} at height {}, but captured Kyoto checkpoint is {} {context}",
+            tip.height,
+            tip.hash,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn get_tx_out(
+    bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    outpoint: bitcoin::OutPoint,
+    include_mempool: bool,
+) -> Result<Option<serde_json::Value>, corepc_client::client_sync::Error> {
+    btc_rpc_call(bitcoind_rpc, move |rpc| {
+        rpc.call::<Option<serde_json::Value>>(
+            "gettxout",
+            &[
+                serde_json::json!(outpoint.txid),
+                serde_json::json!(outpoint.vout),
+                serde_json::json!(include_mempool),
+            ],
+        )
+    })
+    .await
+}
+
+fn get_tx_out_best_block(response: &serde_json::Value) -> Result<bitcoin::BlockHash> {
+    response
+        .get("bestblock")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("gettxout response is missing bestblock"))?
+        .parse::<bitcoin::BlockHash>()
+        .map_err(|e| anyhow::anyhow!("invalid gettxout bestblock: {e}"))
+}
+
+async fn check_unspent_at_tip(
+    bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
+    tip: HashCheckpoint,
+    outpoint: bitcoin::OutPoint,
+    txout: bitcoin::TxOut,
+    confirmations: u32,
+    confirmation_threshold: u32,
+) -> Result<DepositConfirmation, DepositConfirmError> {
+    // Always make this check fresh; neither successful nor spent results clear
+    // the tracker's independently established InBlock observation.
+    let bitcoind_tip = get_best_block(&bitcoind_rpc)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read Bitcoin Core tip: {e}"))?;
+    // Bitcoin Core only needs to be on Kyoto's chain at or past `tip`: unspent
+    // at a descendant implies unspent at `tip`, and a spend at a descendant is
+    // real.
+    require_core_checkpoint(&bitcoind_rpc, tip, "before gettxout").await?;
+
+    let unspent = get_tx_out(&bitcoind_rpc, outpoint, true)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check UTXO spent status via gettxout: {e}"))?;
+    // With include_mempool, a missing UTXO can mean an *unconfirmed* spend,
+    // which can vanish again without a reorg (eviction, replacement). Only a
+    // spend missing from the confirmed UTXO set too is reported as
+    // `UtxoSpent`; the leader suppresses those until a reorg.
+    let spent_in_mempool_only = unspent.is_none()
+        && get_tx_out(&bitcoind_rpc, outpoint, false)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to check confirmed UTXO spent status via gettxout: {e}")
+            })?
+            .is_some();
+    let updated_bitcoind_tip = get_best_block(&bitcoind_rpc)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to re-read Bitcoin Core tip: {e}"))?;
+    if updated_bitcoind_tip != bitcoind_tip {
+        return Err(anyhow::anyhow!(
+            "Bitcoin Core tip changed from {bitcoind_tip} to {updated_bitcoind_tip} during gettxout"
+        )
+        .into());
+    }
+    match unspent {
+        Some(response) => {
+            let best_block = get_tx_out_best_block(&response)?;
+            if best_block != bitcoind_tip {
+                return Err(anyhow::anyhow!(
+                    "Bitcoin Core UTXO view is at {best_block}, but its captured tip is {bitcoind_tip}",
+                )
+                .into());
+            }
+            info!(
+                "Deposit {}:{} confirmed with {confirmations}/{confirmation_threshold} confirmations",
+                outpoint.txid, outpoint.vout,
+            );
+            Ok(DepositConfirmation::Confirmed(txout))
+        }
+        None if spent_in_mempool_only => {
+            warn!(
+                "Deposit UTXO {}:{} is spent by an unconfirmed transaction. Deferring deposit.",
+                outpoint.txid, outpoint.vout,
+            );
+            Err(anyhow::anyhow!(
+                "Deposit UTXO {}:{} is spent by an unconfirmed transaction",
+                outpoint.txid,
+                outpoint.vout,
+            )
+            .into())
+        }
+        None => {
+            warn!(
+                "Deposit UTXO {}:{} has already been spent on Bitcoin. Rejecting deposit.",
+                outpoint.txid, outpoint.vout,
+            );
+            Err(DepositConfirmError::UtxoSpent {
+                txid: outpoint.txid,
+                vout: outpoint.vout,
+            })
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct MonitorClient {
     tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     block_height_rx: tokio::sync::watch::Receiver<u32>,
+    block_sequence: Arc<AtomicU64>,
 }
 
 impl MonitorClient {
+    /// Subscribe to sync-complete and connected Bitcoin tip updates.
     pub fn subscribe_block_height(&self) -> tokio::sync::watch::Receiver<u32> {
         self.block_height_rx.clone()
+    }
+
+    pub(crate) fn block_sequence(&self) -> u64 {
+        self.block_sequence.load(Ordering::SeqCst)
     }
 
     pub async fn confirm_deposit(
@@ -1201,17 +1572,15 @@ impl MonitorClient {
             confirmation_threshold,
             result_tx: tx,
         };
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(DEPOSIT_CHECK_TIMEOUT, async {
             self.tx
-                .send(MonitorMessage::ConfirmDeposit(request))
+                .send(MonitorMessage::CheckDeposit(request))
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
             rx.await.map_err(|e| anyhow::anyhow!(e))?
         })
         .await
-        .map_err(|_| {
-            anyhow::anyhow!("confirm_deposit timed out waiting for Bitcoin deposit check")
-        })?
+        .map_err(|_| DepositConfirmError::TimedOut)?
     }
 
     pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
@@ -1244,7 +1613,7 @@ impl MonitorClient {
 
 enum MonitorMessage {
     // Checks the given OutPoint against the monitor's current Bitcoin tip.
-    ConfirmDeposit(DepositCheckRequest),
+    CheckDeposit(DepositCheckRequest),
 
     // Returns an estimated fee rate targeting confirmation within `conf_target` blocks.
     GetRecentFeeRate(u16, oneshot::Sender<Result<FeeRate>>),
@@ -1254,15 +1623,6 @@ enum MonitorMessage {
 
     // Query the status of a transaction (confirmed, in mempool, or not found).
     GetTransactionStatus(bitcoin::Txid, oneshot::Sender<Result<TxStatus>>),
-
-    // Updates `deposit_observation_cache`
-    RecordDepositObservation {
-        outpoint: bitcoin::OutPoint,
-        observation: CachedDepositObservation,
-    },
-
-    // Drop a deposit from `deposit_observation_cache`
-    ForgetDeposit(bitcoin::OutPoint),
 }
 
 #[cfg(test)]
@@ -1283,25 +1643,11 @@ mod tests {
         Metrics::new(&prometheus::Registry::new())
     }
 
-    fn bucket(metrics: &Metrics, label: &str) -> i64 {
-        metrics
-            .deposit_request_confirmations
-            .with_label_values(&[label])
-            .get()
-    }
-
     fn cache_requests(metrics: &Metrics, cache: &str, result: &str) -> u64 {
         metrics
             .deposit_lookup_cache_requests_total
             .with_label_values(&[cache, result])
             .get()
-    }
-
-    fn entry(observation: CachedDepositObservation, last_updated_tip: u32) -> CachedDepositEntry {
-        CachedDepositEntry {
-            observation,
-            last_updated_tip,
-        }
     }
 
     fn block_hash(seed: u8) -> bitcoin::BlockHash {
@@ -1327,8 +1673,53 @@ mod tests {
         )
     }
 
+    fn record_status(
+        tracker: &DepositTracker,
+        outpoint: &bitcoin::OutPoint,
+        status: DepositStatus,
+    ) {
+        let DepositDiscovery::Discover(token) = tracker.discovery(outpoint) else {
+            panic!("expected discovery token");
+        };
+        assert_eq!(
+            tracker.resolve_discovery(token, Ok::<_, ()>(status.clone())),
+            DiscoveryResolution::Complete(Ok(status))
+        );
+    }
+
+    fn test_monitor(metrics: Arc<Metrics>, tracker: DepositTracker) -> Monitor {
+        let (_, kyoto_client) = kyoto::Builder::new(bitcoin::Network::Bitcoin)
+            .chain_state(kyoto::ChainState::Checkpoint(HashCheckpoint::from_genesis(
+                bitcoin::Network::Bitcoin,
+            )))
+            .build();
+        let start_checkpoint = HashCheckpoint::from_genesis(bitcoin::Network::Bitcoin);
+        Monitor {
+            config: MonitorConfig::default(),
+            metrics: metrics.clone(),
+            bitcoind_rpc: Arc::new(corepc_client::client_sync::v29::Client::new(
+                "http://127.0.0.1:1",
+            )),
+            tip: None,
+            start_checkpoint,
+            synced: false,
+            block_height_tx: tokio::sync::watch::channel(0).0,
+            block_sequence: Arc::new(AtomicU64::new(0)),
+            requester: kyoto_client.requester,
+            deposit_check_workers: JoinSet::new(),
+            deposit_discovery_workers: JoinSet::new(),
+            pending_deposit_checks: HashMap::new(),
+            block_scan_workers: JoinSet::new(),
+            block_scan_queue: VecDeque::new(),
+            deposit_lookup_cache: SharedDepositLookupCache::new(metrics),
+            deposit_tracker: tracker,
+            rpc_workers: JoinSet::new(),
+            trusted_peer_rotation: Vec::new().into_iter().cycle(),
+        }
+    }
+
     #[test]
-    fn deposit_lookup_cache_records_and_clears_entries() {
+    fn deposit_lookup_cache_records_and_replaces_entries() {
         let txid = make_outpoint(1).txid;
         let block_hash = block_hash(2);
         let block_info = HashCheckpoint::new(42, block_hash);
@@ -1343,7 +1734,7 @@ mod tests {
         assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 1);
         assert_eq!(cache_requests(&metrics, "block_height", "hit"), 1);
 
-        cache.clear();
+        let cache = cache.fresh();
 
         assert!(cache.get_tx_block(&txid).is_none());
         assert!(cache.get_block_height(&block_hash).is_none());
@@ -1367,42 +1758,311 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_deposit_check_reuses_cached_tx_block_for_shared_txid() {
+    async fn stale_worker_result_is_not_delivered_after_reset() {
         let metrics = Arc::new(fresh_metrics());
-        let cache = SharedDepositLookupCache::new(metrics.clone());
-        let txid = make_outpoint(1).txid;
-        let block_info = HashCheckpoint::new(42, block_hash(2));
-        cache.put_tx_block(txid, block_info);
-        let (client_tx, _client_rx) = tokio::sync::mpsc::channel(10);
-        let mut result_rxs = Vec::new();
-        let (_, kyoto_client) = Monitor::build_kyoto_node(
-            &MonitorConfig::default(),
-            HashCheckpoint::from_genesis(bitcoin::Network::Bitcoin),
-        );
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker.clone());
+        let outpoint = make_outpoint(1);
+        let (request, result_rx) = deposit_check_request_for(outpoint);
+        let generation = tracker.bitcoin_generation();
 
+        tracker.reset_bitcoin_state();
+        monitor.finish_deposit_check(Ok(DepositCheckWorkerResult {
+            generation,
+            result_tx: request.result_tx,
+            result: Ok(DepositConfirmation::NotFound),
+        }));
+
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(DepositConfirmError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn stale_discovery_result_does_not_drain_new_generation_waiters() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker.clone());
+        let outpoint = make_outpoint(1);
+        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        let DepositDiscovery::Discover(stale_token) = tracker.discovery(&outpoint) else {
+            panic!("expected initial discovery token");
+        };
+        let stale_generation = tracker.bitcoin_generation();
+        tracker.reset_bitcoin_state();
+        let DepositDiscovery::Discover(_current_token) = tracker.discovery(&outpoint) else {
+            panic!("expected current discovery token");
+        };
+        let (request, _result_rx) = deposit_check_request_for(outpoint);
+        monitor
+            .pending_deposit_checks
+            .insert(outpoint, vec![request]);
+
+        monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
+            token: Some(stale_token),
+            generation: stale_generation,
+            outpoint,
+            result: Ok(DepositStatus::NotFound),
+        }));
+
+        assert_eq!(monitor.pending_deposit_checks[&outpoint].len(), 1);
+        assert_eq!(tracker.discovery(&outpoint), DepositDiscovery::Pending);
+    }
+
+    #[test]
+    fn replaced_tracker_lease_keeps_waiters_for_the_new_discovery() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker.clone());
+        let outpoint = make_outpoint(1);
+        let old_request_id = sui_sdk_types::Address::new([1; 32]);
+        tracker.upsert_request(old_request_id, outpoint);
+        let DepositDiscovery::Discover(old_token) = tracker.discovery(&outpoint) else {
+            panic!("expected old discovery token");
+        };
+        tracker.remove_request(&old_request_id);
+        tracker.upsert_request(sui_sdk_types::Address::new([2; 32]), outpoint);
+        let DepositDiscovery::Discover(_new_token) = tracker.discovery(&outpoint) else {
+            panic!("expected new discovery token");
+        };
+        let (old_request, _old_result_rx) = deposit_check_request_for(outpoint);
+        let (new_request, _new_result_rx) = deposit_check_request_for(outpoint);
+        monitor
+            .pending_deposit_checks
+            .insert(outpoint, vec![old_request, new_request]);
+
+        monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
+            token: Some(old_token),
+            generation: tracker.bitcoin_generation(),
+            outpoint,
+            result: Ok(DepositStatus::NotFound),
+        }));
+
+        assert_eq!(monitor.pending_deposit_checks[&outpoint].len(), 2);
+        assert_eq!(tracker.discovery(&outpoint), DepositDiscovery::Pending);
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_uses_a_superseding_block_scan_result() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker.clone());
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
+        let outpoint = bitcoin::OutPoint::new(block.txdata[0].compute_txid(), 0);
+        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        let DepositDiscovery::Discover(token) = tracker.discovery(&outpoint) else {
+            panic!("expected discovery token");
+        };
+        let generation = tracker.bitcoin_generation();
+        let checkpoint = HashCheckpoint::new(0, block.block_hash());
+        tracker.apply_block_if_current(generation, checkpoint, &block);
+        monitor.tip = Some(checkpoint);
+        let (request, _result_rx) = deposit_check_request_for(outpoint);
+        monitor
+            .pending_deposit_checks
+            .insert(outpoint, vec![request]);
+
+        monitor.finish_deposit_discovery(Ok(DepositDiscoveryWorkerResult {
+            token: Some(token),
+            generation,
+            outpoint,
+            result: Err(anyhow::anyhow!("stale discovery failure").into()),
+        }));
+
+        assert!(!monitor.pending_deposit_checks.contains_key(&outpoint));
+        assert_eq!(monitor.deposit_check_workers.len(), 1);
+    }
+
+    #[test]
+    fn failed_block_scan_is_requeued_without_restarting_kyoto() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), make_outpoint(1));
+        let generation = tracker.bitcoin_generation();
+        let mut monitor = test_monitor(metrics, tracker);
+        let checkpoint = HashCheckpoint::new(42, block_hash(2));
+        monitor.block_scan_queue = VecDeque::from([(checkpoint, 2)]);
+
+        monitor.finish_block_scan(Ok(BlockScanResult {
+            checkpoint,
+            generation,
+            retry_round: 2,
+            result: Err(anyhow::anyhow!("fetch failed")),
+        }));
+
+        assert_eq!(monitor.block_scan_queue, VecDeque::from([(checkpoint, 3)]));
+    }
+
+    #[test]
+    fn reorg_drops_only_disconnected_block_scans() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker);
+        let inflight = HashCheckpoint::new(39, block_hash(3));
+        let survived = HashCheckpoint::new(40, block_hash(1));
+        let disconnected = HashCheckpoint::new(41, block_hash(2));
+        monitor.block_scan_queue =
+            VecDeque::from([(inflight, 2), (survived, 0), (disconnected, 1)]);
+
+        monitor.drop_disconnected_block_scans(&[disconnected]);
+
+        assert_eq!(
+            monitor.block_scan_queue,
+            VecDeque::from([(inflight, 2), (survived, 0)])
+        );
+    }
+
+    #[test]
+    fn stale_block_scan_result_does_not_pop_the_queue() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let stale_generation = tracker.bitcoin_generation();
+        tracker.reset_bitcoin_state();
+        let mut monitor = test_monitor(metrics, tracker);
+        let checkpoint = HashCheckpoint::new(42, block_hash(2));
+        monitor.block_scan_queue = VecDeque::from([(checkpoint, 0)]);
+
+        monitor.finish_block_scan(Ok(BlockScanResult {
+            checkpoint,
+            generation: stale_generation,
+            retry_round: 0,
+            result: Err(anyhow::anyhow!("fetch failed")),
+        }));
+
+        assert_eq!(monitor.block_scan_queue, VecDeque::from([(checkpoint, 0)]));
+    }
+
+    #[tokio::test]
+    async fn untracked_discovery_is_single_flight() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker);
+        monitor.synced = true;
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
+        let outpoint = make_outpoint(1);
+        let (first, _first_rx) = deposit_check_request_for(outpoint);
+        let (second, _second_rx) = deposit_check_request_for(outpoint);
+
+        monitor.confirm_deposit(first);
+        monitor.confirm_deposit(second);
+
+        assert_eq!(monitor.deposit_discovery_workers.len(), 1);
+        assert_eq!(monitor.pending_deposit_checks[&outpoint].len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deposit_check_during_kyoto_catch_up_is_refused() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker.clone());
+        // Catch-up `Connected` events set the tip before the node is synced;
+        // a check accepted here would cache a status that block scans can
+        // never correct.
+        monitor.tip = Some(HashCheckpoint::new(42, block_hash(2)));
+        let outpoint = make_outpoint(1);
+        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        let (request, result_rx) = deposit_check_request_for(outpoint);
+
+        monitor.confirm_deposit(request);
+
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(DepositConfirmError::Other(_))
+        ));
+        assert!(monitor.deposit_discovery_workers.is_empty());
+        assert!(monitor.pending_deposit_checks.is_empty());
+        assert!(matches!(
+            tracker.discovery(&outpoint),
+            DepositDiscovery::Discover(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn failing_block_scan_does_not_delay_fresh_blocks() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), make_outpoint(1));
+        let mut monitor = test_monitor(metrics, tracker);
+        let failing = HashCheckpoint::new(41, block_hash(1));
+        let fresh = HashCheckpoint::new(42, block_hash(2));
+        monitor.block_scan_queue = VecDeque::from([(failing, 3), (fresh, 0)]);
+
+        monitor.start_next_block_scan();
+
+        assert_eq!(
+            monitor.block_scan_queue,
+            VecDeque::from([(fresh, 0), (failing, 3)])
+        );
+        assert_eq!(monitor.block_scan_workers.len(), 1);
+    }
+
+    #[test]
+    fn scan_without_candidates_does_not_start_a_worker() {
+        let metrics = Arc::new(fresh_metrics());
+        let tracker = DepositTracker::new(metrics.clone());
+        let mut monitor = test_monitor(metrics, tracker);
+
+        monitor.queue_block_scan(HashCheckpoint::new(42, block_hash(2)));
+
+        assert!(monitor.block_scan_queue.is_empty());
+        assert!(monitor.block_scan_workers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_deposit_check_uses_tracker_state_without_rpc() {
+        let metrics = Arc::new(fresh_metrics());
+        let outpoint = make_outpoint(1);
+        let txid = outpoint.txid;
+        let block_info = HashCheckpoint::new(42, block_hash(2));
+        let tracker = DepositTracker::new(metrics.clone());
+        tracker.upsert_request(sui_sdk_types::Address::new([1; 32]), outpoint);
+        record_status(
+            &tracker,
+            &outpoint,
+            DepositStatus::InBlock {
+                checkpoint: block_info,
+                txout: bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1),
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                },
+            },
+        );
+        let mut result_rxs = Vec::new();
         for vout in [0, 1] {
-            let (request, result_rx) = deposit_check_request_for(bitcoin::OutPoint { txid, vout });
+            let current = bitcoin::OutPoint { txid, vout };
+            if vout == 1 {
+                tracker.upsert_request(sui_sdk_types::Address::new([2; 32]), current);
+                record_status(&tracker, &current, DepositStatus::NotFound);
+            }
+            let DepositDiscovery::Known(status) = tracker.discovery(&current) else {
+                panic!("expected known tracker status");
+            };
+            let (request, result_rx) = deposit_check_request_for(current);
             result_rxs.push(result_rx);
-            Monitor::process_deposit_check(
+            let result = process_deposit_check(
+                tracker.bitcoin_generation(),
                 HashCheckpoint::new(50, block_hash(3)),
                 Arc::new(corepc_client::client_sync::v29::Client::new(
                     "http://127.0.0.1:1",
                 )),
-                kyoto_client.requester.clone(),
-                client_tx.clone(),
-                cache.clone(),
                 request,
+                status,
             )
             .await;
+            let _ = result.result_tx.send(result.result);
         }
 
-        assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 2);
-        for result_rx in result_rxs {
-            assert_eq!(
-                result_rx.await.unwrap().unwrap(),
-                DepositConfirmation::InsufficientConfirmations { confirmations: 9 }
-            );
-        }
+        assert_eq!(
+            result_rxs.remove(0).await.unwrap().unwrap(),
+            DepositConfirmation::InsufficientConfirmations { confirmations: 9 }
+        );
+        assert_eq!(
+            result_rxs.remove(0).await.unwrap().unwrap(),
+            DepositConfirmation::NotFound
+        );
+        assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 0);
+        assert_eq!(cache_requests(&metrics, "tx_block", "miss"), 0);
     }
 
     #[tokio::test]
@@ -1431,157 +2091,6 @@ mod tests {
             Monitor::resolve_start_checkpoint(&rpc, &between_segwit_and_taproot).await,
             HashCheckpoint::segwit_activation(),
         );
-    }
-
-    #[test]
-    fn empty_cache_writes_all_labels_as_zero() {
-        let metrics = fresh_metrics();
-        let mut cache: HashMap<bitcoin::OutPoint, CachedDepositEntry> = HashMap::new();
-
-        rebuild_confirmation_metrics_inner(&mut cache, 100, &metrics);
-
-        for label in crate::metrics::CONFIRMATION_STATUS_LABELS {
-            assert_eq!(bucket(&metrics, label), 0, "label {label} should be zero");
-        }
-    }
-
-    #[test]
-    fn observation_to_bucket_mapping() {
-        // (observation, tip, expected bucket). Covers NotFound, InMempool,
-        // and InBlock at 0 (height > tip via saturating_sub), 1, 5, 6 (boundary),
-        // and a far-clamp case.
-        let cases: &[(CachedDepositObservation, u32, &str)] = &[
-            (CachedDepositObservation::NotFound, 100, "not_found"),
-            (CachedDepositObservation::InMempool, 100, "mempool"),
-            (CachedDepositObservation::InBlock { height: 101 }, 100, "0"),
-            (CachedDepositObservation::InBlock { height: 100 }, 100, "1"),
-            (CachedDepositObservation::InBlock { height: 96 }, 100, "5"),
-            (
-                CachedDepositObservation::InBlock { height: 95 },
-                100,
-                "6_plus",
-            ),
-            (
-                CachedDepositObservation::InBlock { height: 0 },
-                100,
-                "6_plus",
-            ),
-        ];
-
-        for &(observation, tip, want_label) in cases {
-            let metrics = fresh_metrics();
-            let mut cache = HashMap::from([(make_outpoint(1), entry(observation, tip))]);
-            rebuild_confirmation_metrics_inner(&mut cache, tip, &metrics);
-            assert_eq!(
-                bucket(&metrics, want_label),
-                1,
-                "{observation:?} with tip {tip} should land in {want_label}"
-            );
-        }
-    }
-
-    #[test]
-    fn incremental_observation_changes_update_affected_buckets() {
-        let metrics = fresh_metrics();
-        let tip = 100;
-
-        update_confirmation_metrics_for_change(
-            &metrics,
-            tip,
-            None,
-            Some(CachedDepositObservation::InMempool),
-        );
-        assert_eq!(bucket(&metrics, "mempool"), 1);
-
-        update_confirmation_metrics_for_change(
-            &metrics,
-            tip,
-            Some(CachedDepositObservation::InMempool),
-            Some(CachedDepositObservation::InBlock { height: 100 }),
-        );
-        assert_eq!(bucket(&metrics, "mempool"), 0);
-        assert_eq!(bucket(&metrics, "1"), 1);
-
-        update_confirmation_metrics_for_change(
-            &metrics,
-            tip,
-            Some(CachedDepositObservation::InBlock { height: 100 }),
-            Some(CachedDepositObservation::InBlock { height: 100 }),
-        );
-        assert_eq!(bucket(&metrics, "1"), 1);
-
-        update_confirmation_metrics_for_change(
-            &metrics,
-            tip,
-            Some(CachedDepositObservation::InBlock { height: 100 }),
-            None,
-        );
-        assert_eq!(bucket(&metrics, "1"), 0);
-    }
-
-    #[test]
-    fn tip_advance_shifts_buckets_without_fresh_observations() {
-        let metrics = fresh_metrics();
-        let mut cache = HashMap::from([(
-            make_outpoint(1),
-            entry(CachedDepositObservation::InBlock { height: 100 }, 100),
-        )]);
-
-        // Tip 100: confirmations = (100+1) - 100 = 1 → bucket "1".
-        rebuild_confirmation_metrics_inner(&mut cache, 100, &metrics);
-        assert_eq!(bucket(&metrics, "1"), 1);
-
-        // Tip 101 (no re-observation): confirmations = 2 → bucket "2".
-        rebuild_confirmation_metrics_inner(&mut cache, 101, &metrics);
-        assert_eq!(bucket(&metrics, "1"), 0);
-        assert_eq!(bucket(&metrics, "2"), 1);
-    }
-
-    #[test]
-    fn stale_entries_gced_at_inclusive_boundary() {
-        let metrics = fresh_metrics();
-        let tip = 100;
-        let mut cache = HashMap::from([
-            // On the boundary: kept (inclusive).
-            (
-                make_outpoint(1),
-                entry(
-                    CachedDepositObservation::InMempool,
-                    tip - STALE_OBSERVATION_BLOCKS,
-                ),
-            ),
-            // Just past the boundary: dropped.
-            (
-                make_outpoint(2),
-                entry(
-                    CachedDepositObservation::InMempool,
-                    tip - STALE_OBSERVATION_BLOCKS - 1,
-                ),
-            ),
-        ]);
-
-        rebuild_confirmation_metrics_inner(&mut cache, tip, &metrics);
-
-        assert_eq!(cache.len(), 1, "entry past boundary should be GC'd");
-        assert!(cache.contains_key(&make_outpoint(1)));
-        assert_eq!(bucket(&metrics, "mempool"), 1);
-    }
-
-    #[test]
-    fn tip_zero_bootstrap_keeps_entries() {
-        // Before the first block, tip is 0. Entries with `last_updated_tip = 0`
-        // must not be GC'd immediately, otherwise fresh observations would
-        // vanish before the first block arrives.
-        let metrics = fresh_metrics();
-        let mut cache = HashMap::from([(
-            make_outpoint(1),
-            entry(CachedDepositObservation::InMempool, 0),
-        )]);
-
-        rebuild_confirmation_metrics_inner(&mut cache, 0, &metrics);
-
-        assert_eq!(cache.len(), 1);
-        assert_eq!(bucket(&metrics, "mempool"), 1);
     }
 
     #[test]
