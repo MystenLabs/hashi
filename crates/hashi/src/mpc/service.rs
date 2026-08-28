@@ -605,7 +605,7 @@ impl MpcService {
             .mpc_tob_poll_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let final_certs = Self::fetch_final_nonce_certs(
+        let (final_certs, settled_cutoff_ms) = Self::fetch_final_nonce_certs(
             &onchain_state_for_certs,
             &mpc_manager,
             epoch,
@@ -630,7 +630,7 @@ impl MpcService {
             let mgr = mpc_manager.read().unwrap();
             match mgr.mpc_config.nonce_generation_protocol {
                 NonceGenerationProtocol::Avid => {
-                    let admitted = mgr.avid_admitted_nonce_dealers(&canonical);
+                    let admitted = mgr.avid_admitted_nonce_dealers(&canonical, settled_cutoff_ms);
                     (admitted.cutoff_ms, Some(admitted.weight))
                 }
                 NonceGenerationProtocol::Vanilla => {
@@ -990,7 +990,7 @@ impl MpcService {
                 mpc_manager
                     .read()
                     .unwrap()
-                    .avid_admitted_nonce_dealers(&certs)
+                    .avid_admitted_nonce_dealers(&certs, None)
                     .weight
             }
         };
@@ -1231,7 +1231,10 @@ impl MpcService {
         batch_index: u32,
         wait_for_floor: bool,
         metrics: &crate::metrics::Metrics,
-    ) -> anyhow::Result<VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>> {
+    ) -> anyhow::Result<(
+        VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>,
+        Option<u64>,
+    )> {
         let mut wait_deadline = tokio::time::Instant::now() + NONCE_RECEIVE_IDLE_TIMEOUT;
         let overall_deadline = tokio::time::Instant::now() + NONCE_WAIT_TOTAL_BUDGET;
         let mut best_weight = 0u32;
@@ -1382,10 +1385,10 @@ impl MpcService {
                 }
             };
             let Some(cutoff_ms) = cutoff_ms else {
-                return Ok(certs);
+                return Ok((certs, None));
             };
             if cutoff_confirmed == Some(cutoff_ms) {
-                return Ok(certs);
+                return Ok((certs, Some(cutoff_ms)));
             }
             if tokio::time::Instant::now() >= wait_deadline {
                 metrics.mpc_nonce_cutoff_unsettled_total.inc();
@@ -1451,7 +1454,7 @@ impl MpcService {
             );
             Ok(presig_count(weight as usize, params, batch_size_per_weight))
         };
-        let certs = Self::fetch_final_nonce_certs(
+        let (certs, settled_cutoff_ms) = Self::fetch_final_nonce_certs(
             &onchain_state,
             mpc_manager,
             epoch,
@@ -1496,7 +1499,7 @@ impl MpcService {
                 let cutoff_ms = mpc_manager
                     .read()
                     .unwrap()
-                    .avid_admitted_nonce_dealers(&avid_certs)
+                    .avid_admitted_nonce_dealers(&avid_certs, settled_cutoff_ms)
                     .cutoff_ms;
                 let mut prefetched = PrefetchedTobChannel::new(avid_certs.into_inner())
                     .with_supersede_check(onchain_state.clone(), epoch);
