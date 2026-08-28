@@ -1305,8 +1305,12 @@ async fn discover_deposit(
         .await
         {
             Ok(tx_info) => tx_info,
-            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
-                if e.code == -5 =>
+            // -5 also covers "-txindex off" and "txindex still indexing";
+            // only the ready-index message is a durable not-found.
+            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(e)))
+                if e.code == -5
+                    && e.message
+                        .starts_with("No such mempool or blockchain transaction") =>
             {
                 require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
                 return Ok(DepositStatus::NotFound);
@@ -1472,13 +1476,10 @@ async fn check_unspent_at_tip(
     let bitcoind_tip = get_best_block(&bitcoind_rpc)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read Bitcoin Core tip: {e}"))?;
-    if bitcoind_tip != tip.hash {
-        return Err(anyhow::anyhow!(
-            "Bitcoin Core tip is {bitcoind_tip}, but captured Kyoto tip is {}",
-            tip.hash,
-        )
-        .into());
-    }
+    // Bitcoin Core only needs to be on Kyoto's chain at or past `tip`: unspent
+    // at a descendant implies unspent at `tip`, and a spend at a descendant is
+    // real.
+    require_core_checkpoint(&bitcoind_rpc, tip, "before gettxout").await?;
 
     let unspent = get_tx_out(&bitcoind_rpc, outpoint, true)
         .await
