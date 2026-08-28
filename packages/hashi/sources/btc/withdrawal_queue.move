@@ -35,6 +35,9 @@ const EOutputAddressMismatch: vector<u8> = b"Withdrawal output address does not 
 #[error]
 const EMinerFeeExceedsMax: vector<u8> = b"Per-user miner fee exceeds worst-case network fee budget";
 #[error]
+const EMinerFeeNotEvenlySplit: vector<u8> =
+    b"Miner fee does not split evenly across withdrawal requests";
+#[error]
 const EInputsBelowOutputs: vector<u8> = b"Total input amount is less than total output amount";
 #[error]
 const EOutputCountMismatch: vector<u8> =
@@ -487,12 +490,9 @@ public(package) fun new_withdrawal_txn(
     // unreachable for real Bitcoin transactions, but make the cast explicit.
     assert!(output_count <= (std::u32::max_value!() as u64), EOutputCountMismatch);
 
-    // Miner fee is split evenly across all withdrawal requests, rounded up so
-    // the bridge does not subsidize any division remainder.
-    let mut per_user_miner_fee = miner_fee / request_count;
-    if (miner_fee % request_count > 0) {
-        per_user_miner_fee = per_user_miner_fee + 1;
-    };
+    // The miner fee must split evenly across all withdrawal requests.
+    assert!(miner_fee % request_count == 0, EMinerFeeNotEvenlySplit);
+    let per_user_miner_fee = miner_fee / request_count;
     assert!(per_user_miner_fee <= max_network_fee, EMinerFeeExceedsMax);
 
     // Each withdrawal output must match the expected amount after deducting
