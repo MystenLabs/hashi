@@ -211,6 +211,17 @@ The 32-byte Bitcoin chain identifier as defined by
 (the genesis block hash). Set at genesis and not updatable through the
 `UpdateConfig` proposal.
 
+### `guardian_btc_public_key`
+
+| | |
+|---|---|
+| **Type** | `bytes` |
+
+The guardian's x-only BTC public key (32 bytes), pinned at genesis. Every
+2-of-2 deposit address is derived against it, so it is write-once and not
+updatable through the `UpdateConfig` proposal. The guardian URL
+(`guardian_url`) remains governable.
+
 ## Derived values
 
 Several values are computed from the configurable parameters above rather than
