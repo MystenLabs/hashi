@@ -13,6 +13,7 @@ use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
+use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::VersionedLogMessage::V1;
 use hashi_types::guardian::VersionedLogMessage::V2;
 
@@ -84,6 +85,8 @@ impl VerifiedSessionInfo {
             .verify_replay(&signing_pubkey, &build_pcrs)
             .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
 
+        ensure_bucket_info_matches(session_id, info.bucket_info.as_ref(), s3.bucket_info())?;
+
         Ok(Self {
             signing_pubkey,
             info,
@@ -113,6 +116,24 @@ impl VerifiedSessionInfo {
     }
 }
 
+fn ensure_bucket_info_matches(
+    session_id: &str,
+    reported: Option<&S3BucketInfo>,
+    expected: &S3BucketInfo,
+) -> GuardianResult<()> {
+    let reported = reported.ok_or_else(|| {
+        InvalidS3Log(format!(
+            "session {session_id} GuardianInfo is missing bucket_info"
+        ))
+    })?;
+    if reported != expected {
+        return Err(InvalidS3Log(format!(
+            "session {session_id} GuardianInfo bucket_info {reported:?} does not match reader bucket_info {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// A log record whose message signature and writing session's attestation/PCRs
 /// have both been verified. The exact versioned entry is retained so callers
 /// can choose which schema versions they accept and how to interpret them.
@@ -138,5 +159,40 @@ impl VerifiedLogRecord {
 
     pub fn into_entry(self) -> LogEntry {
         self.entry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bucket_info(bucket: &str, region: &str) -> S3BucketInfo {
+        S3BucketInfo {
+            bucket: bucket.into(),
+            region: region.into(),
+        }
+    }
+
+    #[test]
+    fn matching_bucket_info_is_accepted() {
+        let expected = bucket_info("guardian-bucket", "us-east-1");
+        ensure_bucket_info_matches("session", Some(&expected), &expected).unwrap();
+    }
+
+    #[test]
+    fn mismatched_bucket_info_is_rejected() {
+        let expected = bucket_info("guardian-bucket", "us-east-1");
+        let reported = bucket_info("other-bucket", "us-west-2");
+
+        let error = ensure_bucket_info_matches("session", Some(&reported), &expected).unwrap_err();
+        assert!(matches!(error, InvalidS3Log(message) if message.contains("does not match")));
+    }
+
+    #[test]
+    fn missing_bucket_info_is_rejected() {
+        let expected = bucket_info("guardian-bucket", "us-east-1");
+
+        let error = ensure_bucket_info_matches("session", None, &expected).unwrap_err();
+        assert!(matches!(error, InvalidS3Log(message) if message.contains("missing bucket_info")));
     }
 }

@@ -10,7 +10,6 @@
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
-use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
@@ -38,25 +37,6 @@ mod verified;
 
 pub use verified::VerifiedLogRecord;
 pub use verified::VerifiedSessionInfo;
-
-/// Internal policy for sharing read implementations that differ only in which
-/// attested guardian builds they accept.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BuildPolicy {
-    /// Require the configured current build.
-    Current,
-    /// Accept any build represented in the PCR allowlist.
-    AnyAllowlisted,
-}
-
-impl BuildPolicy {
-    fn enforce(self, allowlist: &PcrAllowlist, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
-        match self {
-            Self::Current => allowlist.require_current_build(build_pcrs),
-            Self::AnyAllowlisted => Ok(()),
-        }
-    }
-}
 
 /// Verified reader over the guardian's S3 logs.
 ///
@@ -169,7 +149,7 @@ impl GuardianReader {
     /// lexicographically greatest key identifies the latest ceremony.
     async fn read_latest_ceremony_log(
         &mut self,
-        build_policy: BuildPolicy,
+        require_current: bool,
     ) -> GuardianResult<Option<CeremonyLogMessage>> {
         let keys = self
             .s3
@@ -179,7 +159,10 @@ impl GuardianReader {
             return Ok(None);
         };
         let verified_record = self.read_verified_record(&key).await?;
-        build_policy.enforce(&self.allowlist, verified_record.build_pcrs())?;
+        if require_current {
+            self.allowlist
+                .require_current_build(verified_record.build_pcrs())?;
+        }
         let session_id = verified_record.entry().session_id().clone();
         let msg = match verified_record.into_entry().into_message() {
             V1(LogMessageV1::Ceremony(msg)) | V2(LogMessageV2::Ceremony(msg)) => msg,
@@ -200,7 +183,7 @@ impl GuardianReader {
     async fn read_latest_kp_share_state_log(
         &mut self,
         sharing_seq: u64,
-        build_policy: BuildPolicy,
+        require_current: bool,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self.s3.list_keys(&prefix, false).await?;
@@ -208,7 +191,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let msg = self
-            .read_kp_share_state_log_at_key(&key, build_policy)
+            .read_kp_share_state_log_at_key(&key, require_current)
             .await?;
         if msg.sharing_seq != sharing_seq {
             return Err(InvalidS3Log(format!(
@@ -232,15 +215,14 @@ impl GuardianReader {
         cert_seq: u64,
     ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
-        self.read_kp_share_state_log_at_key(&key, BuildPolicy::Current)
-            .await
+        self.read_kp_share_state_log_at_key(&key, true).await
     }
 
     /// Read and verify one KP-share object under the requested build policy.
     async fn read_kp_share_state_log_at_key(
         &mut self,
         key: &str,
-        build_policy: BuildPolicy,
+        require_current: bool,
     ) -> GuardianResult<KpShareStateLogMessage> {
         // KP-share locks are expected to expire, so authenticate the record
         // without claiming that S3 still makes it immutable.
@@ -249,7 +231,10 @@ impl GuardianReader {
             .get_log_record_inner(key, ImmutabilityCheck::Skipped)
             .await?;
         let verified_record = self.verify_record(record).await?;
-        build_policy.enforce(&self.allowlist, verified_record.build_pcrs())?;
+        if require_current {
+            self.allowlist
+                .require_current_build(verified_record.build_pcrs())?;
+        }
         let session_id = verified_record.entry().session_id().clone();
         let msg = match verified_record.into_entry().into_message() {
             V1(LogMessageV1::KpShareState(msg)) => (*msg)
@@ -267,7 +252,7 @@ impl GuardianReader {
     /// Read the latest ceremony together with the latest KP-share state for its
     /// `sharing_seq`, accepting any allowlisted build.
     pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_policy(BuildPolicy::AnyAllowlisted)
+        self.read_latest_ceremony_state_with_build_requirement(false)
             .await
     }
 
@@ -276,25 +261,25 @@ impl GuardianReader {
     pub async fn read_latest_ceremony_state_from_current_build(
         &mut self,
     ) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_policy(BuildPolicy::Current)
+        self.read_latest_ceremony_state_with_build_requirement(true)
             .await
     }
 
     /// Once a ceremony is present, its matching KP-share state must also exist
     /// because writers publish `kp-shares/` before `ceremony/`.
-    async fn read_latest_ceremony_state_with_build_policy(
+    async fn read_latest_ceremony_state_with_build_requirement(
         &mut self,
-        build_policy: BuildPolicy,
+        require_current: bool,
     ) -> GuardianResult<CeremonyState> {
         let ceremony = self
-            .read_latest_ceremony_log(build_policy)
+            .read_latest_ceremony_log(require_current)
             .await?
             .ok_or_else(|| {
                 InvalidInputs("no ceremony log found; setup_new_key has not run".into())
             })?;
         let sharing_seq = ceremony.sharing_seq();
         let kp_share_state = self
-            .read_latest_kp_share_state_log(sharing_seq, build_policy)
+            .read_latest_kp_share_state_log(sharing_seq, require_current)
             .await?
             .ok_or_else(|| {
                 InvalidS3Log(format!(
