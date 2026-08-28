@@ -87,7 +87,9 @@ pub enum LogMessageV2 {
 /// Writer-facing alias for the log-message schema emitted by guardians.
 pub type LogMessage = LogMessageV2;
 
-pub(super) enum LogType {
+/// Schema-independent category of a Guardian log payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogType {
     Heartbeat,
     Init,
     Withdrawal,
@@ -182,7 +184,7 @@ impl VersionedLogMessage {
         self.as_attestation_log().is_some()
     }
 
-    pub(super) fn log_type(&self) -> LogType {
+    pub fn log_type(&self) -> LogType {
         match self {
             Self::V1(message) => message.log_type(),
             Self::V2(message) => message.log_type(),

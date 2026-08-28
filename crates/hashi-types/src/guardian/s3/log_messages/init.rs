@@ -75,6 +75,14 @@ impl InitLogMessage {
         Self::object_key_for_suffix(session_id, Self::OI_GUARDIAN_INFO)
     }
 
+    pub fn pi_fully_initialized_object_key(session_id: &str) -> String {
+        Self::object_key_for_suffix(session_id, Self::PI_FULLY_INITIALIZED)
+    }
+
+    pub fn oa_activated_object_key(session_id: &str) -> String {
+        Self::object_key_for_suffix(session_id, Self::OA_ACTIVATED)
+    }
+
     fn object_key_for_suffix(session_id: &str, suffix: &str) -> String {
         format!("{S3_DIR_INIT}/{session_id}/{suffix}.json")
     }
