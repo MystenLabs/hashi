@@ -72,9 +72,17 @@ active version cannot be disabled, to avoid bricking the protocol.
 
 ## `UpdateConfig`
 
-Updates a protocol configuration parameter by key. Supports any config
-key-value pair (for example, deposit fee, rate limits). See
+Updates one or more protocol configuration parameters by key. See
 [Configuration](config.mdx) for the full list of keys and defaults.
+
+Every entry is validated when the proposal executes, and the whole proposal
+aborts if any entry fails: the key must already exist, the value must have the
+same type as the current entry, MPC keys must pass their range check
+(`EInvalidConfigEntry`), and the key must be governable. The guardian BTC
+public key and the Bitcoin chain id are pinned for the deployment's lifetime
+and cannot be written through this proposal (`EProtectedConfigKey`). Values
+themselves are otherwise not bounded onchain: a proposal needs a supermajority
+of committee weight, and reviewing the proposed value is part of voting.
 
 ## `EmergencyPause`
 

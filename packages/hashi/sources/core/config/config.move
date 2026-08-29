@@ -101,6 +101,15 @@ public(package) fun is_valid_config_update(self: &Config, key: &String, value: &
     self.config.get(key).same_variant(value)
 }
 
+/// Whether `UpdateConfig` may write `key`. The guardian BTC public key is
+/// write-once (see `set_guardian_btc_public_key`); rotating it through the
+/// generic update path would silently invalidate every derived deposit
+/// address, so the governance path refuses the key outright.
+#[allow(implicit_const_copy)]
+public(package) fun is_governable_key(key: &String): bool {
+    key.as_bytes() != &GUARDIAN_BTC_PUBLIC_KEY_KEY
+}
+
 // === Core Accessors ===
 
 public(package) fun paused(self: &Config): bool {
