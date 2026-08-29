@@ -5,22 +5,25 @@ use std::time::Duration;
 
 /// Interval between successful heartbeat writes.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
-/// Maximum write failure interval before the enclave aborts.
-pub const MAX_S3_WRITE_FAILURE_INTERVAL: Duration = Duration::from_mins(5);
+/// Absolute timeout for one Guardian S3 log write attempt.
+pub const S3_WRITE_ATTEMPT_TIMEOUT: Duration = Duration::from_mins(5);
 /// The live session's latest heartbeat must be at most 3 minutes old.
 pub const LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE: Duration = Duration::from_mins(3);
 /// Silence required before another session is considered inactive.
 pub const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
+/// Reader-ahead wall-clock skew reserved by the writer's earlier fence.
+pub const ACTIVATING_READER_CLOCK_SKEW_BUDGET: Duration = Duration::from_mins(1);
 
-// An enclave that cannot write its next heartbeat must abort before another
-// session is allowed to treat it as quiet. This fencing argument assumes the
-// old enclave either keeps executing until that abort or is permanently
-// terminated. Nitro Enclaves currently have no suspend/resume lifecycle (and
-// stopping the parent terminates its enclaves); a future platform that can
-// resume preserved enclave memory would need an explicit activation-generation
-// fence before serving withdrawals.
+// Withdraw-mode log writes are serialized. After the first durable heartbeat,
+// every attempt must fit strictly before the last successful heartbeat plus
+// the reader's quiet period, minus the clock-skew budget. At cooperative poll
+// boundaries, the timer-first deadline checks time before polling S3 and
+// rejects results observed after the boundary. See the README for the fencing
+// assumptions.
 const _: () = assert!(
-    HEARTBEAT_INTERVAL.as_secs() + MAX_S3_WRITE_FAILURE_INTERVAL.as_secs()
+    HEARTBEAT_INTERVAL.as_secs()
+        + S3_WRITE_ATTEMPT_TIMEOUT.as_secs()
+        + ACTIVATING_READER_CLOCK_SKEW_BUDGET.as_secs()
         < OTHER_SESSION_QUIET_PERIOD.as_secs()
 );
 
@@ -28,6 +31,7 @@ pub mod attestation;
 pub mod ceremony_mode;
 pub mod enclave;
 pub mod info;
+mod log_writer;
 pub mod operator_init;
 pub mod rpc;
 pub mod s3_client; // used by the monitor

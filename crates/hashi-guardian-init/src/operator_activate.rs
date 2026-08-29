@@ -7,8 +7,8 @@
 use anyhow::Context;
 use anyhow::ensure;
 use hashi_guardian::HEARTBEAT_INTERVAL;
-use hashi_guardian::MAX_S3_WRITE_FAILURE_INTERVAL;
 use hashi_guardian::OTHER_SESSION_QUIET_PERIOD;
+use hashi_guardian::S3_WRITE_ATTEMPT_TIMEOUT;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
@@ -31,13 +31,12 @@ use tracing::warn;
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
 
-// The live-session freshness threshold is intentionally shorter than the
-// writer's normal upper bound: one heartbeat interval plus the S3 write-failure
-// interval (six minutes). A not-live session may therefore still recover, and
-// ten minutes leaves an explicit operational buffer for that recovery.
+// The retry window is long enough for the next scheduled heartbeat to start a
+// complete S3 attempt: one heartbeat interval plus five minutes. A not-live
+// session may therefore still recover before the ten-minute window expires.
 const CURRENT_SESSION_HEARTBEAT_RETRY_WINDOW: Duration = Duration::from_mins(10);
 const _: () = assert!(
-    HEARTBEAT_INTERVAL.as_secs() + MAX_S3_WRITE_FAILURE_INTERVAL.as_secs()
+    HEARTBEAT_INTERVAL.as_secs() + S3_WRITE_ATTEMPT_TIMEOUT.as_secs()
         < CURRENT_SESSION_HEARTBEAT_RETRY_WINDOW.as_secs()
 );
 

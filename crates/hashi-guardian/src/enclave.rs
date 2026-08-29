@@ -31,6 +31,7 @@ use std::time::Duration;
 use tokio::sync::OwnedMutexGuard;
 use tracing::info;
 
+use crate::log_writer::LogWriter;
 use crate::s3_client::GuardianS3Client;
 use crate::s3_reader::GuardianReader;
 use hashi_types::committee::Committee as HashiCommittee;
@@ -48,6 +49,8 @@ pub struct Enclave {
     control_lock: tokio::sync::Mutex<()>,
     /// Ceremony state retained until every KP confirms successful share recovery.
     pending_ceremony: OnceLock<PendingCeremony>,
+    /// Serializes and fences every S3 log write from this enclave session.
+    log_writer: LogWriter,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -395,6 +398,7 @@ impl Enclave {
             temporary_init_state: RwLock::new(None),
             pending_ceremony: OnceLock::new(),
             control_lock: tokio::sync::Mutex::new(()),
+            log_writer: LogWriter::new(),
         }
     }
 
@@ -636,49 +640,41 @@ impl Enclave {
     }
 
     async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
-        let log = LogRecord::new(self.s3_session_id(), message, &self.config.signing_keys);
-
-        self.config.s3_logger()?.write_log_record(log).await
+        let s3 = self.config.s3_logger()?;
+        self.log_writer
+            .write(s3, self.s3_session_id(), message, &self.config.signing_keys)
+            .await;
+        Ok(())
     }
 
-    async fn write_log_or_abort(&self, message: LogMessage) -> GuardianResult<()> {
-        let log = LogRecord::new(self.s3_session_id(), message, &self.config.signing_keys);
-
-        self.config
-            .s3_logger()?
-            .write_log_record_or_abort(log)
-            .await
-    }
-
-    /// Only init skips grace-period retries, providing quick fail-stop for basic
-    /// S3 write/access issues. The incomplete enclave cannot serve and will restart,
-    /// so S3 being ahead after a lost acknowledgement is acceptable.
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
         self.write_log(LogMessage::Init(Box::new(msg))).await
     }
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Withdrawal(Box::new(msg)))
-            .await
+        self.write_log(LogMessage::Withdrawal(Box::new(msg))).await
     }
 
     pub async fn log_committee_update(&self, msg: CommitteeUpdateLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::CommitteeUpdate(Box::new(msg)))
+        self.write_log(LogMessage::CommitteeUpdate(Box::new(msg)))
             .await
     }
 
     pub async fn log_genesis(&self, msg: GenesisLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Genesis(Box::new(msg)))
-            .await
+        self.write_log(LogMessage::Genesis(Box::new(msg))).await
     }
 
     pub async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Heartbeat(msg)).await
+        assert_eq!(
+            self.mode(),
+            EnclaveMode::Withdraw,
+            "heartbeats are only supported in withdraw mode"
+        );
+        self.write_log(LogMessage::Heartbeat(msg)).await
     }
 
     pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Ceremony(Box::new(state)))
-            .await
+        self.write_log(LogMessage::Ceremony(Box::new(state))).await
     }
 
     /// Persist the current encrypted KP share state to `kp-shares/` for recovery.
@@ -690,7 +686,7 @@ impl Enclave {
         cert_seq: u64,
         encrypted_shares: KPEncryptedSharesRoster,
     ) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::KpShareState(Box::new(
+        self.write_log(LogMessage::KpShareState(Box::new(
             KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
         )))
         .await

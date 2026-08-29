@@ -33,8 +33,8 @@ impl HeartbeatWriter {
     ///
     /// - If operator init is not complete, this is a no-op.
     ///
-    /// The shared S3 writer retries failures and aborts the process if its grace
-    /// period expires.
+    /// The shared S3 writer retries failures and aborts the process on a
+    /// terminal retry or heartbeat-fence failure.
     pub async fn tick(&mut self) -> GuardianResult<()> {
         if self.enclave.lifecycle() == WithdrawStage::Uninitialized.into() {
             return Ok(());
@@ -94,5 +94,14 @@ mod tests {
             panic!("expected V2 heartbeat record");
         };
         assert_eq!(message.seq, 0);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "heartbeats are only supported in withdraw mode")]
+    async fn ceremony_mode_rejects_heartbeats() {
+        Enclave::create_with_random_keys_for_mode(EnclaveMode::Ceremony)
+            .log_heartbeat(HeartbeatLogMessage::new(0))
+            .await
+            .unwrap();
     }
 }
