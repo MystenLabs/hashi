@@ -897,10 +897,8 @@ impl Metrics {
             .unwrap(),
             mpc_nonce_size_mismatch_total: register_int_counter_with_registry!(
                 "hashi_mpc_nonce_size_mismatch_total",
-                "AVID nonce batches whose built size differs from what the served cert list \
-                 implies. Not emitted on the vanilla path, where any divergence is a \
-                 node-local skip that already discards the batch — a zero there means \
-                 unchecked, not clean",
+                "AVID nonce batches refused because their built size differs from what the \
+                 served cert list implies.",
                 registry,
             )
             .unwrap(),
