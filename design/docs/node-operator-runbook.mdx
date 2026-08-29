@@ -813,6 +813,7 @@ hashi proposal view <proposal-id>
 hashi proposal vote <proposal-id> [--execute]
 hashi proposal remove-vote <proposal-id>
 hashi proposal execute <proposal-id>
+hashi proposal execute-upgrade <proposal-id> --package-path <path>   # upgrade proposals only
 ```
 
 Create proposals:
@@ -957,9 +958,11 @@ hashi proposal create upgrade-v2 --exclusive true --package-path /path/to/packag
 # Vote (--execute is NOT supported for Upgrade proposals)
 hashi proposal vote 0x<proposal-id>
 
-# After quorum: use the release tooling to build and submit one programmable
-# transaction containing proposal execution, package publication, and upgrade
-# finalization. The generic `proposal execute` command rejects upgrade types.
+# After quorum: one programmable transaction executes the proposal, publishes
+# the package, and finalizes the upgrade. Build from the same commit, with the
+# same `sui`, that produced the proposal's digest. The generic
+# `proposal execute` command rejects upgrade types.
+hashi proposal execute-upgrade 0x<proposal-id> --package-path /path/to/packages/hashi
 ```
 
 ---

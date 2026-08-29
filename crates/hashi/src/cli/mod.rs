@@ -160,6 +160,31 @@ pub enum ProposalCommands {
         proposal_id: String,
     },
 
+    /// Execute an approved upgrade proposal: `<module>::execute`, publish the
+    /// package, and `<module>::finalize_upgrade` in one transaction.
+    ///
+    /// Builds the package with `sui move build` first and verifies that its
+    /// `PACKAGE_VERSION` constant is exactly +1 of the currently published
+    /// version. Build from the same commit, with the same `sui`, that produced
+    /// the proposal's digest: the chain rejects the publish otherwise. Works
+    /// for both `upgrade` and `upgrade-v2` proposals.
+    ExecuteUpgrade {
+        /// The proposal object ID to execute
+        proposal_id: String,
+
+        /// Path to the upgrade package source (the directory with `Move.toml`).
+        #[clap(long, value_name = "PATH")]
+        package_path: std::path::PathBuf,
+
+        /// Path to the `sui` CLI binary.
+        #[clap(long, env = "SUI_BINARY", default_value = "sui")]
+        sui_binary: std::path::PathBuf,
+
+        /// Optional path to a sui `client.yaml` for dependency resolution.
+        #[clap(long)]
+        sui_client_config: Option<std::path::PathBuf>,
+    },
+
     /// Create a new proposal
     Create {
         #[clap(subcommand)]
@@ -1020,6 +1045,24 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             ProposalCommands::Execute { proposal_id } => {
                 commands::proposal::execute(&config, &proposal_id, &tx_opts).await?;
+            }
+            ProposalCommands::ExecuteUpgrade {
+                proposal_id,
+                package_path,
+                sui_binary,
+                sui_client_config,
+            } => {
+                commands::proposal::execute_upgrade(
+                    &config,
+                    &proposal_id,
+                    commands::proposal::ExecuteUpgradeArgs {
+                        package_path: &package_path,
+                        sui_binary: &sui_binary,
+                        sui_client_config: sui_client_config.as_deref(),
+                    },
+                    &tx_opts,
+                )
+                .await?;
             }
             ProposalCommands::Create { proposal } => match proposal {
                 CreateProposalCommands::Upgrade {
