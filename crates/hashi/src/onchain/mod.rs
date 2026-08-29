@@ -499,9 +499,13 @@ impl OnchainState {
     fn reconcile_deposit_tracker(&self) {
         let requests = {
             let state = self.state();
-            state
-                .hashi
-                .bitcoin()
+            // A `ScrapeScope::GovernanceOnly` mirror (the CLI, `hashi launch`)
+            // carries no Bitcoin collections and runs no deposit tracker
+            // consumer, so there is nothing to reconcile.
+            let Some(bitcoin) = state.hashi.try_bitcoin() else {
+                return;
+            };
+            bitcoin
                 .deposit_queue
                 .requests()
                 .iter()
