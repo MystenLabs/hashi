@@ -26,6 +26,7 @@ use serde::Serializer;
 use std::cmp::Ordering;
 use std::fmt;
 use std::io;
+use std::io::BufRead;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
@@ -342,16 +343,17 @@ pub fn decrypt_with_gpg_stdin(
 }
 
 /// Decrypt an armored OpenPGP message string via `gpg --decrypt`, returning the
-/// plaintext bytes. The ciphertext is piped to gpg over its stdin (a background
-/// writer thread) and the plaintext streams back over gpg's stdout pipe into
-/// memory — nothing touches disk.
+/// plaintext bytes. A rejected smartcard PIN can be retried without restarting
+/// the calling command.
 pub fn decrypt_armored_via_gpg(armored: &str, homedir: Option<&Path>) -> Result<Vec<u8>> {
-    let mut decryptor = decrypt_with_gpg_stdin(armored.as_bytes(), homedir)?;
-    let mut plaintext = Vec::new();
-    decryptor
-        .read_to_end(&mut plaintext)
-        .context("read decrypted bytes from gpg")?;
-    Ok(plaintext)
+    run_buffered_gpg(
+        armored.as_bytes(),
+        homedir,
+        GpgOperation::Decrypt,
+        |command| {
+            command.arg("--decrypt").arg("--");
+        },
+    )
 }
 
 /// Produce an armored detached OpenPGP signature over `payload` with the local
@@ -362,36 +364,234 @@ pub fn sign_detached_via_gpg(
     signer_fingerprint: &Fingerprint,
     homedir: Option<&Path>,
 ) -> Result<String> {
+    let signature = run_buffered_gpg(payload, homedir, GpgOperation::Sign, |command| {
+        command
+            .arg("--local-user")
+            .arg(signer_fingerprint.to_hex())
+            .arg("--armor")
+            .arg("--detach-sign");
+    })?;
+    String::from_utf8(signature).context("gpg produced a non-UTF8 armored signature")
+}
+
+#[derive(Clone, Copy)]
+enum GpgOperation {
+    Decrypt,
+    Sign,
+}
+
+impl GpgOperation {
+    fn command_name(self) -> &'static str {
+        match self {
+            Self::Decrypt => "gpg --decrypt",
+            Self::Sign => "gpg --detach-sign",
+        }
+    }
+}
+#[derive(Debug)]
+enum GpgFailure {
+    BadPin(anyhow::Error),
+    Other(anyhow::Error),
+}
+
+fn run_buffered_gpg(
+    input: &[u8],
+    homedir: Option<&Path>,
+    operation: GpgOperation,
+    configure: impl Fn(&mut Command),
+) -> Result<Vec<u8>> {
+    let stdin = io::stdin();
+    let mut confirmation = stdin.lock();
+    let stderr = io::stderr();
+    let mut messages = stderr.lock();
+    retry_bad_pin(
+        || run_buffered_gpg_once(input, homedir, operation, &configure),
+        || openpgp_user_pin_retries(homedir),
+        &mut confirmation,
+        &mut messages,
+    )
+}
+
+fn run_buffered_gpg_once(
+    input: &[u8],
+    homedir: Option<&Path>,
+    operation: GpgOperation,
+    configure: &impl Fn(&mut Command),
+) -> std::result::Result<Vec<u8>, GpgFailure> {
+    let status_file = tempfile::NamedTempFile::new().map_err(|error| {
+        GpgFailure::Other(anyhow::Error::new(error).context("create temporary GPG status file"))
+    })?;
     let mut command = Command::new("gpg");
-    command
-        .arg("--local-user")
-        .arg(signer_fingerprint.to_hex())
-        .arg("--armor")
-        .arg("--detach-sign");
+    command.arg("--status-file").arg(status_file.path());
+    configure(&mut command);
     if let Some(homedir) = homedir {
         command.env("GNUPGHOME", homedir);
     }
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::inherit());
-    let mut child = command
-        .spawn()
-        .context("Failed to run `gpg --detach-sign`; is gpg installed and on PATH?")?;
-    // Dropping the `ChildStdin` below signals EOF, making gpg emit the signature.
-    let write_result = match child.stdin.take() {
-        Some(mut stdin) => stdin.write_all(payload),
-        None => Err(io::Error::other("failed to open gpg stdin")),
+
+    let command_name = operation.command_name();
+    let mut child = command.spawn().map_err(|error| {
+        GpgFailure::Other(anyhow::Error::new(error).context(format!(
+            "Failed to run `{command_name}`; is gpg installed and on PATH?"
+        )))
+    })?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(GpgFailure::Other(anyhow::anyhow!(
+            "failed to open {command_name} stdin"
+        )));
     };
-    // Reap gpg even if the write failed (EPIPE = gpg died early); its exit
-    // status is the more useful error, so check it first.
-    let output = child
-        .wait_with_output()
-        .context("wait for `gpg --detach-sign`")?;
+
+    // Feed stdin on a scoped thread while `wait_with_output` drains stdout.
+    let (output, write_result) = std::thread::scope(|scope| {
+        let writer = match std::thread::Builder::new()
+            .name("gpg-buffered-stdin-writer".into())
+            .spawn_scoped(scope, move || stdin.write_all(input))
+        {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GpgFailure::Other(
+                    anyhow::Error::new(error).context("spawn GPG stdin writer thread"),
+                ));
+            }
+        };
+        let output = child.wait_with_output().map_err(|error| {
+            GpgFailure::Other(
+                anyhow::Error::new(error).context(format!("wait for `{command_name}`")),
+            )
+        })?;
+        let write_result = writer
+            .join()
+            .map_err(|_| GpgFailure::Other(anyhow::anyhow!("GPG stdin writer thread panicked")))?;
+        Ok((output, write_result))
+    })?;
+
+    let machine_status = std::fs::read_to_string(status_file.path()).map_err(|error| {
+        GpgFailure::Other(anyhow::Error::new(error).context("read machine-readable GPG status"))
+    })?;
     if !output.status.success() {
-        anyhow::bail!("`gpg --detach-sign` exited with status {}", output.status);
+        let error = anyhow::anyhow!("`{command_name}` exited with status {}", output.status);
+        return Err(if gpg_reported_bad_pin(&machine_status, operation) {
+            GpgFailure::BadPin(error)
+        } else {
+            GpgFailure::Other(error)
+        });
     }
-    write_result.context("write payload to gpg stdin")?;
-    String::from_utf8(output.stdout).context("gpg produced a non-UTF8 armored signature")
+    write_result.map_err(|error| {
+        GpgFailure::Other(
+            anyhow::Error::new(error).context(format!("write input to `{command_name}`")),
+        )
+    })?;
+    Ok(output.stdout)
+}
+
+fn retry_bad_pin<T>(
+    mut operation: impl FnMut() -> std::result::Result<T, GpgFailure>,
+    mut pin_retries: impl FnMut() -> Result<u32>,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<T> {
+    loop {
+        let failure = match operation() {
+            Ok(value) => return Ok(value),
+            Err(GpgFailure::BadPin(error)) => error,
+            Err(GpgFailure::Other(error)) => return Err(error),
+        };
+        let remaining = pin_retries().with_context(|| {
+            format!("query YubiKey PIN attempts after gpg reported a bad PIN: {failure}")
+        })?;
+        let attempt = if remaining == 1 {
+            "attempt"
+        } else {
+            "attempts"
+        };
+        writeln!(output, "Bad PIN. {remaining} {attempt} remaining.")?;
+        if remaining == 0 {
+            writeln!(output, "The YubiKey PIN is blocked; not retrying.")?;
+            output.flush()?;
+            return Err(failure.context("YubiKey PIN is blocked"));
+        }
+        if remaining == 1 {
+            writeln!(output, "Warning: another bad PIN will block the YubiKey.")?;
+        }
+        writeln!(output, "Press Enter to retry, or Ctrl-C to abort.")?;
+        output.flush()?;
+
+        let mut confirmation = String::new();
+        if input
+            .read_line(&mut confirmation)
+            .context("read bad-PIN retry confirmation from stdin")?
+            == 0
+        {
+            anyhow::bail!("stdin reached EOF; aborting bad-PIN retry");
+        }
+    }
+}
+
+fn gpg_reported_bad_pin(status: &str, operation: GpgOperation) -> bool {
+    let encoded = match operation {
+        GpgOperation::Decrypt => match find_gpg_error(status, "ERROR", "pkdecrypt_failed") {
+            Some(encoded) => encoded,
+            None => find_gpg_error(status, "FAILURE", "decrypt").flatten(),
+        },
+        GpgOperation::Sign => find_gpg_error(status, "FAILURE", "sign").flatten(),
+    };
+    encoded
+        .and_then(decode_gpg_error)
+        .is_some_and(|code| code & 0xffff == 87)
+}
+
+fn find_gpg_error<'a>(status: &'a str, keyword: &str, location: &str) -> Option<Option<&'a str>> {
+    status.lines().find_map(|line| {
+        let mut fields = line.split_ascii_whitespace();
+        (fields.next() == Some("[GNUPG:]")
+            && fields.next() == Some(keyword)
+            && fields.next() == Some(location))
+        .then(|| fields.next())
+    })
+}
+
+fn decode_gpg_error(encoded: &str) -> Option<u32> {
+    encoded
+        .split_once('_')
+        .map_or(encoded, |(value, _)| value)
+        .parse()
+        .ok()
+}
+
+fn openpgp_user_pin_retries(homedir: Option<&Path>) -> Result<u32> {
+    let mut command = Command::new("gpg");
+    command.args(["--batch", "--with-colons", "--card-status"]);
+    if let Some(homedir) = homedir {
+        command.env("GNUPGHOME", homedir);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::inherit());
+    let output = command
+        .output()
+        .context("Failed to run `gpg --batch --with-colons --card-status`")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "`gpg --card-status` exited with status {}",
+        output.status
+    );
+    let status = std::str::from_utf8(&output.stdout).context("non-UTF8 GPG card status")?;
+    parse_openpgp_user_pin_retries(status)
+}
+
+fn parse_openpgp_user_pin_retries(card_status: &str) -> Result<u32> {
+    let retries = card_status
+        .lines()
+        .find_map(|line| line.strip_prefix("pinretry:"))
+        .and_then(|fields| fields.split(':').next())
+        .context("GPG card status did not contain a pinretry record")?;
+    retries.parse().context("malformed user PIN retry counter")
 }
 
 /// A `VerificationHelper` that accepts exactly one signer cert.
@@ -732,6 +932,76 @@ mod tests {
         let homedir = tempfile::Builder::new().tempdir().unwrap();
         test_utils::prepare_gnupg_home(homedir.path());
         homedir
+    }
+
+    #[test]
+    fn bad_pin_status_is_operation_scoped() {
+        let encoded = (42_u32 << 24) | 87;
+        assert!(gpg_reported_bad_pin(
+            &format!("[GNUPG:] ERROR pkdecrypt_failed {encoded}_BAD_PIN"),
+            GpgOperation::Decrypt,
+        ));
+        assert!(gpg_reported_bad_pin(
+            "[GNUPG:] FAILURE sign 87",
+            GpgOperation::Sign,
+        ));
+        for (status, operation) in [
+            ("[GNUPG:] BAD_PASSPHRASE ABCDEF", GpgOperation::Decrypt),
+            ("[GNUPG:] SC_OP_FAILURE 2", GpgOperation::Decrypt),
+            ("[GNUPG:] ERROR other_location 87", GpgOperation::Decrypt),
+            ("[GNUPG:] FAILURE sign 130", GpgOperation::Sign),
+            ("[GNUPG:] FAILURE sign 99", GpgOperation::Sign),
+        ] {
+            assert!(!gpg_reported_bad_pin(status, operation));
+        }
+    }
+
+    #[test]
+    fn card_retry_parser_reads_user_pin_attempts() {
+        assert_eq!(
+            parse_openpgp_user_pin_retries("reader:A Card Reader:\npinretry:3:0:3:\n").unwrap(),
+            3
+        );
+        assert!(parse_openpgp_user_pin_retries("").is_err());
+        assert!(parse_openpgp_user_pin_retries("pinretry:not-a-number:0:3:").is_err());
+    }
+
+    #[test]
+    fn bad_pin_retry_requires_enter_and_reports_lockout() {
+        let mut attempts = 0;
+        let mut input = io::Cursor::new(b"\n");
+        let mut output = Vec::new();
+        let result = retry_bad_pin(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(GpgFailure::BadPin(anyhow::anyhow!("bad PIN")))
+                } else {
+                    Ok(7)
+                }
+            },
+            || Ok(1),
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(result, 7);
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Bad PIN. 1 attempt remaining.\n\
+             Warning: another bad PIN will block the YubiKey.\n\
+             Press Enter to retry, or Ctrl-C to abort.\n"
+        );
+
+        let error = retry_bad_pin(
+            || Err::<(), _>(GpgFailure::BadPin(anyhow::anyhow!("bad PIN"))),
+            || Ok(0),
+            &mut io::Cursor::new(b""),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("YubiKey PIN is blocked"));
     }
 
     #[test]
