@@ -659,10 +659,7 @@ impl MpcService {
                 outcome.local_skips,
             );
         }
-        metrics.mpc_nonce_batch_index.set(batch_index as i64);
-        metrics
-            .mpc_nonce_batch_dealers
-            .set(outcome.outputs.len() as i64);
+        let dealer_count = outcome.outputs.len();
         let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
             (
@@ -690,18 +687,16 @@ impl MpcService {
                 presig_count(served_weight as usize, params, batch_size_per_weight);
             if presignatures.len() != served_implies {
                 metrics.mpc_nonce_size_mismatch_total.inc();
-                error!(
+                anyhow::bail!(
                     "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
-                     served certs size to {served_implies} (weight {served_weight}). The certs \
-                     are frozen, so a restart rebuilds this boundary at {served_implies}: from \
-                     the first boundary holding a pending presig index — or the last boundary \
-                     when none is pending — onward, the Phase-1/Phase-2 assert fails \
-                     identically on every later tick, while boundaries before it are skipped, \
-                     uncross-checked, and silently shift every later batch's start_index",
+                     served certs size to {served_implies} (weight {served_weight}); sizing \
+                     and the party phase admitted different dealers, refusing to install",
                     presignatures.len(),
                 );
             }
         }
+        metrics.mpc_nonce_batch_index.set(batch_index as i64);
+        metrics.mpc_nonce_batch_dealers.set(dealer_count as i64);
         info!(
             "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
             presignatures.len(),
