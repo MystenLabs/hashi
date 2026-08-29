@@ -998,6 +998,7 @@ Notes:
 | `uptime` | gauge | Node uptime (s). Labels: `version`, `sui_chain_id`, `bitcoin_chain_id`, `package_id`. |
 | `hashi_epoch` | gauge | Current Hashi epoch. Should advance with Sui epochs. |
 | `hashi_sui_epoch` | gauge | Current Sui epoch. |
+| `hashi_sui_rpc_info` | gauge | Configured Sui RPC endpoint. The `endpoint` label identifies the fullnode used by this validator. |
 | `hashi_reconfig_in_progress` | gauge | 1 during reconfiguration. Extended periods = problem. |
 | `hashi_paused` | gauge | 1 when the onchain `paused` config flag is set (governance emergency pause). Healthy: `0`. This tracks the governance flag only. The separate pause that occurs during reconfiguration is reflected by `hashi_reconfig_in_progress`, not here. |
 | `hashi_presig_pool_remaining` | gauge | Presignatures available. Should not reach 0. |

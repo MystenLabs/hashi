@@ -1683,6 +1683,19 @@ fn limiter_outcome_label(
     }
 }
 
+pub fn sui_rpc_info_metric(endpoint: &str) -> Box<dyn prometheus::core::Collector> {
+    let metric = IntGaugeVec::new(
+        prometheus::opts!(
+            "hashi_sui_rpc_info",
+            "Configured Sui RPC endpoint for this validator"
+        ),
+        &["endpoint"],
+    )
+    .unwrap();
+    metric.with_label_values(&[endpoint]).set(1);
+    Box::new(metric)
+}
+
 /// Create a metric that measures the uptime from when this metric was constructed.
 /// The metric is labeled with:
 /// - 'version': binary version, generally be of the format: 'semver-gitrevision'
