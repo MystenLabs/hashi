@@ -20,6 +20,11 @@ use crate::cli::print_info;
 use crate::cli::print_warning;
 use crate::cli::types::Proposal;
 use crate::cli::types::display;
+use crate::cli::upgrade::build_upgrade_execution_transaction;
+use crate::cli::upgrade::build_upgrade_package;
+use crate::cli::upgrade::build_upgrade_v2_execution_transaction;
+use crate::cli::upgrade::extract_new_package_id_from_response;
+use crate::onchain::types::ProposalType;
 
 /// Print metadata if present
 fn print_metadata(metadata: &[(String, String)]) {
@@ -237,14 +242,10 @@ pub async fn vote(
 
     // Upgrade proposals require the dedicated upgrade flow — the generic
     // `<module>::execute` path can't construct an UpgradeTicket.
-    use crate::onchain::types::ProposalType;
-    if matches!(
-        proposal.proposal_type,
-        ProposalType::Upgrade | ProposalType::UpgradeV2
-    ) {
+    if upgrade_proposal_kind(&proposal.proposal_type).is_some() {
         print_warning(
-            "--execute is not supported for Upgrade proposals; run the \
-             dedicated upgrade flow once quorum is reached.",
+            "--execute is not supported for Upgrade proposals; run \
+             `proposal execute-upgrade` once quorum is reached.",
         );
         return Ok(());
     }
@@ -350,14 +351,10 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     let proposal_type = &proposal.proposal_type;
     let proposal_type_str = display::format_proposal_type(proposal_type);
 
-    use crate::onchain::types::ProposalType;
-    if matches!(
-        proposal_type,
-        ProposalType::Upgrade | ProposalType::UpgradeV2
-    ) {
+    if upgrade_proposal_kind(proposal_type).is_some() {
         anyhow::bail!(
-            "Upgrade proposals cannot be executed via the CLI. \
-             Use the full upgrade flow (execute + publish + finalize) instead."
+            "Upgrade proposals publish a package as part of their execution; \
+             use `proposal execute-upgrade {proposal_id} --package-path <dir>` instead."
         );
     }
 
@@ -376,6 +373,195 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     ));
 
     execute_or_simulate(&mut client, tx, tx_opts).await?;
+    Ok(())
+}
+
+/// Which upgrade proposal module an approved proposal executes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpgradeProposalKind {
+    /// `hashi::upgrade`: the legacy proposal, which leaves every previously
+    /// enabled package version enabled.
+    Legacy,
+    /// `hashi::upgrade_v2`: carries the committee-approved exclusive or
+    /// non-exclusive version policy.
+    V2,
+}
+
+impl UpgradeProposalKind {
+    /// The Move module whose `execute` and `finalize_upgrade` the PTB calls.
+    pub fn module(self) -> &'static str {
+        match self {
+            UpgradeProposalKind::Legacy => "upgrade",
+            UpgradeProposalKind::V2 => "upgrade_v2",
+        }
+    }
+}
+
+/// The upgrade module an approved proposal executes through, or `None` for
+/// every proposal type that goes through the generic `proposal execute` path.
+pub fn upgrade_proposal_kind(proposal_type: &ProposalType) -> Option<UpgradeProposalKind> {
+    match proposal_type {
+        ProposalType::Upgrade => Some(UpgradeProposalKind::Legacy),
+        ProposalType::UpgradeV2 => Some(UpgradeProposalKind::V2),
+        _ => None,
+    }
+}
+
+/// Inputs for [`execute_upgrade`]: where to build the package from and which
+/// `sui` binary to build it with.
+pub struct ExecuteUpgradeArgs<'a> {
+    pub package_path: &'a std::path::Path,
+    pub sui_binary: &'a std::path::Path,
+    pub sui_client_config: Option<&'a std::path::Path>,
+}
+
+/// Execute an approved upgrade proposal.
+///
+/// One programmable transaction: `<module>::execute` consumes the proposal and
+/// returns the `UpgradeTicket`, the `Upgrade` command publishes the freshly
+/// built modules against that ticket, and `<module>::finalize_upgrade` commits
+/// the receipt (which also enables the new version). The ticket and receipt
+/// are hot potatoes, so the three steps cannot be split across transactions.
+///
+/// The package is built here, from `package_path`, and must be byte-identical
+/// to the build whose digest went into the proposal: same commit, same `sui`.
+/// The chain enforces that when it processes the `Upgrade` command, so a
+/// mismatch fails at simulation rather than costing gas.
+pub async fn execute_upgrade(
+    config: &CliConfig,
+    proposal_id: &str,
+    args: ExecuteUpgradeArgs<'_>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let ExecuteUpgradeArgs {
+        package_path,
+        sui_binary,
+        sui_client_config,
+    } = args;
+    let mut client = HashiClient::new(config).await?;
+
+    let proposal_addr = Address::from_hex(proposal_id)
+        .with_context(|| format!("Invalid proposal ID: {}", proposal_id))?;
+
+    print_info(&format!("Fetching proposal {}...", proposal_id));
+
+    let proposal = client
+        .fetch_proposal(&proposal_addr)
+        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+
+    let kind = upgrade_proposal_kind(&proposal.proposal_type).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is a {} proposal, not an upgrade; use `proposal execute` instead",
+            proposal_id,
+            display::format_proposal_type(&proposal.proposal_type)
+        )
+    })?;
+    let module = kind.module();
+
+    let current_version = client.highest_package_version().context(
+        "could not determine current package version from on-chain state; \
+         is the package deployed?",
+    )?;
+    let expected_version = current_version + 1;
+    let current_package_id = client.latest_package_id()?;
+
+    print_detail(&format!("\n{}", "Execute Upgrade Proposal:".bold()));
+    print_detail(&format!(
+        "  Type:            {}",
+        display::format_proposal_type(&proposal.proposal_type).cyan()
+    ));
+    print_detail(&format!("  ID:              {}", proposal_id));
+    print_detail(&format!("  Module:          {}", module));
+    print_detail(&format!(
+        "  Current package: v{} at {}",
+        current_version,
+        current_package_id.to_hex()
+    ));
+    print_detail(&format!("  Package path:    {}", package_path.display()));
+    print_detail(&format!(
+        "  Expects:         PACKAGE_VERSION = {expected_version}"
+    ));
+
+    print_info(&format!(
+        "Building upgrade package at {} with {}",
+        package_path.display(),
+        sui_binary.display()
+    ));
+    let (compiled, digest) = build_upgrade_package(
+        sui_binary,
+        package_path,
+        sui_client_config,
+        expected_version,
+    )
+    .context("failed to build upgrade package")?;
+    print_detail(&format!("  Built digest:    0x{}", hex::encode(&digest)));
+    print_detail(
+        "  The publish is accepted only if this digest matches the proposal's; \
+         build from the same commit with the same `sui` that produced the proposal.",
+    );
+
+    prompt_continue(
+        "execute this upgrade (execute + publish + finalize in one transaction)",
+        tx_opts,
+    )
+    .await?;
+
+    let hashi_ids = *client.hashi_ids();
+    let tx = match kind {
+        UpgradeProposalKind::Legacy => build_upgrade_execution_transaction(
+            hashi_ids,
+            current_package_id,
+            proposal_addr,
+            compiled,
+        ),
+        UpgradeProposalKind::V2 => build_upgrade_v2_execution_transaction(
+            hashi_ids,
+            current_package_id,
+            proposal_addr,
+            compiled,
+        ),
+    };
+
+    print_info(&format!(
+        "Transaction: {module}::execute + Upgrade + {module}::finalize_upgrade on {}",
+        proposal_id
+    ));
+
+    let Some(response) = execute_or_simulate(&mut client, tx, tx_opts).await? else {
+        return Ok(());
+    };
+
+    let new_package_id = extract_new_package_id_from_response(&response)?;
+    println!(
+        "  {} {}",
+        "New package ID:".bold(),
+        new_package_id.to_hex().cyan()
+    );
+
+    // Re-read the chain so the operator sees what the commit enabled, rather
+    // than the pre-upgrade snapshot this client was built from.
+    let refreshed = HashiClient::new(config).await?;
+    let mut enabled: Vec<u64> = refreshed
+        .onchain_state()
+        .state()
+        .hashi()
+        .config
+        .enabled_versions
+        .iter()
+        .copied()
+        .collect();
+    enabled.sort_unstable();
+    println!("  {} {:?}", "Enabled versions:".bold(), enabled);
+    if let Some(latest) = refreshed.highest_package_version() {
+        println!("  {} v{latest}", "Latest package:".bold());
+    }
+    if kind == UpgradeProposalKind::Legacy && enabled.contains(&current_version) {
+        print_warning(&format!(
+            "v{current_version} stays enabled: the legacy upgrade proposal never retires \
+             versions. Execute the DisableVersion({current_version}) proposal through \
+             the new package when the fleet is ready."
+        ));
+    }
     Ok(())
 }
 
