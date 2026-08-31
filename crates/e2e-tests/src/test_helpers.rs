@@ -13,9 +13,12 @@ use anyhow::anyhow;
 use bitcoin::Amount;
 use bitcoin::Txid;
 use futures::StreamExt;
+use hashi::onchain::TobCertLayout;
 use hashi::sui_tx_executor::SuiTxExecutor;
 use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::move_types::DepositConfirmed;
+use hashi_types::move_types::ProtocolType;
+use hashi_types::move_types::StampedDealerSubmissionV1;
 use hashi_types::move_types::WithdrawalConfirmed;
 use hashi_types::move_types::WithdrawalStatus;
 use std::sync::Arc;
@@ -462,6 +465,80 @@ pub async fn wait_for_withdrawal_archival(
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Assert the mirrored TOB matches the chain: every bucket the mirror
+/// holds must fetch from the on-demand cert reader (the oracle until
+/// mirror reads replace it) with the mirror's certs as a prefix, in
+/// order. Prefix rather than equality because cert submissions may
+/// still be landing (e.g. a presignature refill) between the mirror
+/// read and the chain fetch. The fetcher is picked by the bucket's
+/// layout, with bare submissions lifted to the stamped form the mirror
+/// stores.
+pub async fn assert_tob_mirror_parity(networks: &TestNetworks) -> Result<()> {
+    let state = networks.hashi_network.nodes()[0].hashi().onchain_state();
+    let keys = state.tob_bucket_keys();
+    anyhow::ensure!(
+        !keys.is_empty(),
+        "expected at least one mirrored TOB bucket after DKG"
+    );
+    for (key, _) in keys {
+        let (layout, mirrored) = state
+            .tob_certs(key.epoch, key.batch_index, key.protocol_type)
+            .ok_or_else(|| anyhow!("mirrored TOB bucket {key:?} vanished mid-check"))?;
+        let fetched: Vec<(Address, StampedDealerSubmissionV1)> = match layout {
+            TobCertLayout::Bare => state
+                .fetch_certs(key.epoch, key.batch_index, key.protocol_type)
+                .await?
+                .ok_or_else(|| anyhow!("TOB bucket {key:?} is in the mirror but not on-chain"))?
+                .into_iter()
+                .map(|(dealer, submission)| {
+                    (
+                        dealer,
+                        StampedDealerSubmissionV1 {
+                            submission,
+                            timestamp_ms: 0,
+                        },
+                    )
+                })
+                .collect(),
+            TobCertLayout::Stamped => {
+                anyhow::ensure!(
+                    key.protocol_type == ProtocolType::NonceGeneration,
+                    "only nonce buckets use the stamped layout, got {key:?}"
+                );
+                state
+                    .fetch_nonce_certs_stamped_or_bare(key.epoch, key.batch_index)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow!("TOB bucket {key:?} is in the mirror but not on-chain")
+                    })?
+            }
+        };
+        anyhow::ensure!(
+            fetched.len() >= mirrored.len() && fetched[..mirrored.len()] == mirrored[..],
+            "TOB bucket {key:?} diverged: mirror holds {mirrored:?}, chain holds {fetched:?}"
+        );
+    }
+    info!("TOB mirror parity verified");
+    Ok(())
+}
+
+/// Assert the object mirror routed every changed object on every
+/// running node. A nonzero counter means a Hashi-package object arrived
+/// that the mirror could not place — a lossless-coverage gap.
+pub fn assert_no_unrouted_objects(networks: &TestNetworks) {
+    for (index, node) in networks.hashi_network.nodes().iter().enumerate() {
+        if !node.is_running() {
+            continue;
+        }
+        let unrouted = node.hashi().metrics.watcher_unrouted_objects_total.get();
+        assert_eq!(
+            unrouted, 0,
+            "node {index}'s mirror failed to route {unrouted} object(s); \
+             check the 'could not route' warnings in its log"
+        );
     }
 }
 
