@@ -33,6 +33,7 @@ mod tests {
     use crate::test_helpers::assert_tob_mirror_parity;
     use crate::test_helpers::create_deposit_and_wait;
     use crate::test_helpers::extract_witness_program;
+    use crate::test_helpers::fetch_tob_certs_from_chain;
     use crate::test_helpers::get_hbtc_balance;
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
@@ -2564,17 +2565,29 @@ mod tests {
         // too, not just from the mirrors — and the genesis DKG bucket
         // must still exist, held by the key-generation retention floor.
         for batch_index in genesis_nonce_batches {
-            let onchain = state
-                .fetch_nonce_certs_stamped_or_bare(genesis_epoch, Some(batch_index))
-                .await?;
+            let onchain = fetch_tob_certs_from_chain(
+                &networks,
+                hashi_types::move_types::TobKey {
+                    epoch: genesis_epoch,
+                    batch_index: Some(batch_index),
+                    protocol_type: ProtocolType::NonceGeneration,
+                },
+            )
+            .await?;
             assert!(
                 onchain.is_none(),
                 "genesis nonce bucket (batch {batch_index}) still exists on-chain"
             );
         }
-        let dkg_bucket = state
-            .fetch_certs(genesis_epoch, None, ProtocolType::Dkg)
-            .await?;
+        let dkg_bucket = fetch_tob_certs_from_chain(
+            &networks,
+            hashi_types::move_types::TobKey {
+                epoch: genesis_epoch,
+                batch_index: None,
+                protocol_type: ProtocolType::Dkg,
+            },
+        )
+        .await?;
         assert!(
             dkg_bucket.is_some(),
             "the genesis DKG bucket was pruned below its retention floor"

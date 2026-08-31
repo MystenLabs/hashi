@@ -22,24 +22,18 @@ use crate::mpc::types::CertificateV1;
 use crate::mpc::types::DealerMessagesHash;
 use crate::mpc::types::MessagesHash;
 use crate::onchain::OnchainState;
+use crate::onchain::TobCertLayout;
 use crate::sui_tx_executor::SubmitCertError;
 use crate::sui_tx_executor::SuiTxExecutor;
 
+/// Pace of the receive loop's mirror polls. The read itself is a local
+/// lookup; the interval just paces the wait for new submissions to
+/// stream into the mirror.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
-const DEDUP_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const _: () = assert!(
-    DEDUP_READ_TIMEOUT.as_millis() < super::timeout_and_retry::CALL_TIMEOUT.as_millis(),
-    "publish runs inside with_timeout_and_retry, so a dedup bound at or above CALL_TIMEOUT \
-     never fires and the submit-anyway branch becomes dead code",
-);
 
 #[derive(Debug, Error)]
 pub enum TobError {
-    #[error("Sui RPC error: {0}")]
-    RpcError(String),
-
     #[error("Invalid certificate data: {0}")]
     InvalidCertificate(String),
 
@@ -55,10 +49,7 @@ pub enum TobError {
 
 impl From<TobError> for ChannelError {
     fn from(e: TobError) -> Self {
-        match e {
-            TobError::RpcError(msg) => ChannelError::RequestFailed(msg),
-            _ => ChannelError::Other(e.to_string()),
-        }
+        ChannelError::Other(e.to_string())
     }
 }
 
@@ -70,17 +61,12 @@ pub struct SuiTobSessionChannel {
     protocol_type: ProtocolType,
     signer: SimpleKeypair,
     idle_timeout: Option<Duration>,
-    stall_counter: Option<prometheus::IntCounter>,
-    stall_failed_counter: Option<prometheus::IntCounter>,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
     pending_certs: VecDeque<CertificateV1>,
-    pending_fetch: Option<(PendingFetch, tokio::time::Instant)>,
     wait_started: Option<tokio::time::Instant>,
 }
-
-type PendingFetch = tokio::task::JoinHandle<Result<Vec<(Address, CertificateV1)>, TobError>>;
 
 impl SuiTobSessionChannel {
     pub fn new(
@@ -99,33 +85,9 @@ impl SuiTobSessionChannel {
             protocol_type,
             signer,
             idle_timeout: None,
-            stall_counter: None,
-            stall_failed_counter: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
-            pending_fetch: None,
             wait_started: None,
-        }
-    }
-
-    pub fn with_stall_counters(
-        mut self,
-        absorbed: prometheus::IntCounter,
-        failed: prometheus::IntCounter,
-    ) -> Self {
-        self.stall_counter = Some(absorbed);
-        self.stall_failed_counter = Some(failed);
-        self
-    }
-
-    fn record_stall(&self, terminal: bool) {
-        let counter = if terminal {
-            &self.stall_failed_counter
-        } else {
-            &self.stall_counter
-        };
-        if let Some(counter) = counter {
-            counter.inc();
         }
     }
 
@@ -145,15 +107,7 @@ impl SuiTobSessionChannel {
     }
 }
 
-impl Drop for SuiTobSessionChannel {
-    fn drop(&mut self) {
-        if let Some((fetch, _)) = &self.pending_fetch {
-            fetch.abort();
-        }
-    }
-}
-
-fn tob_fetch_error(e: anyhow::Error) -> TobError {
+fn tob_read_error(e: anyhow::Error) -> TobError {
     if crate::onchain::is_inconsistent_listing(&e) {
         TobError::IncompleteRead(e.to_string())
     } else if e
@@ -162,58 +116,52 @@ fn tob_fetch_error(e: anyhow::Error) -> TobError {
     {
         TobError::UnorderedRead(e.to_string())
     } else {
-        TobError::RpcError(e.to_string())
+        TobError::InvalidState(e.to_string())
     }
 }
 
-pub async fn fetch_certificates(
+/// Read one TOB bucket's certificates from the object mirror, in TOB
+/// order. Returns an empty vector when the bucket does not exist (yet):
+/// a lagging mirror shows up as certificates arriving slightly later,
+/// and every caller sits in a retry or poll loop, so freshness needs no
+/// extra gating here.
+pub fn tob_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
     Ok(
-        fetch_certificates_if_present(onchain_state, epoch, batch_index, protocol_type)
-            .await?
+        tob_certificates_if_present(onchain_state, epoch, batch_index, protocol_type)?
             .unwrap_or_default(),
     )
 }
 
-async fn fetch_certificates_if_present(
+fn tob_certificates_if_present(
     onchain_state: &OnchainState,
     epoch: u64,
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Option<Vec<(Address, CertificateV1)>>, TobError> {
-    let raw: Option<Vec<(Address, hashi_types::move_types::DealerSubmissionV1, u64)>> =
-        if protocol_type == ProtocolType::NonceGeneration {
-            onchain_state
-                .fetch_nonce_certs_stamped_or_bare(epoch, batch_index)
-                .await
-                .map_err(tob_fetch_error)?
-                .map(|certs| {
-                    certs
-                        .into_iter()
-                        .map(|(dealer, s)| (dealer, s.submission, s.timestamp_ms))
-                        .collect()
-                })
-        } else {
-            onchain_state
-                .fetch_certs(epoch, batch_index, protocol_type)
-                .await
-                .map_err(tob_fetch_error)?
-                .map(|certs| {
-                    certs
-                        .into_iter()
-                        .map(|(dealer, submission)| (dealer, submission, 0u64))
-                        .collect()
-                })
-        };
-    let Some(raw) = raw else {
+    let Some((layout, raw)) = onchain_state
+        .tob_certs(epoch, batch_index, protocol_type)
+        .map_err(tob_read_error)?
+    else {
         return Ok(None);
     };
+    // Only nonce buckets ever carry the stamped layout on-chain; the
+    // mirror hands every submission back in stamped form regardless (a
+    // bare one carries `timestamp_ms: 0`), so the layout only needs a
+    // sanity gate, not a decode dispatch.
+    if protocol_type != ProtocolType::NonceGeneration && layout != TobCertLayout::Bare {
+        return Err(TobError::InvalidState(format!(
+            "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses the \
+             {layout:?} cert layout, which only nonce buckets may carry"
+        )));
+    }
     let mut certificates = Vec::with_capacity(raw.len());
-    for (dealer, submission, timestamp_ms) in raw {
+    for (dealer, stamped) in raw {
+        let (submission, timestamp_ms) = (stamped.submission, stamped.timestamp_ms);
         let inner_cert = match DealerMessagesHash::from_onchain_cert(&submission, epoch) {
             Ok(inner_cert) => inner_cert,
             Err(e) => {
@@ -288,14 +236,13 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 }
 
-pub async fn fetch_key_generation_certificates(
+pub fn key_generation_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
     let earliest_committee_epoch = onchain_state.earliest_committee_epoch();
     let protocol_type = key_generation_protocol(earliest_committee_epoch, epoch);
-    let certificates = fetch_certificates_if_present(onchain_state, epoch, None, protocol_type)
-        .await?
+    let certificates = tob_certificates_if_present(onchain_state, epoch, None, protocol_type)?
         .ok_or_else(|| {
             TobError::InvalidState(format!(
                 "epoch {epoch}: {protocol_type:?} certificate bucket not found — either absent or \
@@ -324,19 +271,17 @@ fn key_generation_protocol(earliest_committee_epoch: Option<u64>, epoch: u64) ->
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<PublishOutcome> {
         let ours = cert.message();
-        let fetched = tokio::time::timeout(
-            DEDUP_READ_TIMEOUT,
-            fetch_certificates(
-                &self.onchain_state,
-                self.epoch,
-                self.batch_index,
-                self.protocol_type,
-            ),
-        )
-        .await;
-        let existing = match fetched {
-            Ok(Ok(existing)) => existing,
-            Ok(Err(e @ (TobError::IncompleteRead(_) | TobError::UnorderedRead(_)))) => {
+        // The dedup read is a local mirror lookup; a lagging mirror at
+        // worst resubmits, which `submit_cert`'s first-submission-wins
+        // turns into a paid on-chain no-op.
+        let existing = match tob_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
+        ) {
+            Ok(existing) => existing,
+            Err(e @ (TobError::IncompleteRead(_) | TobError::UnorderedRead(_))) => {
                 tracing::warn!(
                     "{:?} dedup read for epoch {} batch {:?} unusable ({e}); submitting anyway",
                     self.protocol_type,
@@ -345,18 +290,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 );
                 Vec::new()
             }
-            Ok(Err(e)) => return Err(ChannelError::from(e)),
-            Err(_) => {
-                self.record_stall(false);
-                tracing::warn!(
-                    "{:?} dedup read for epoch {} batch {:?} stalled >{DEDUP_READ_TIMEOUT:?}; \
-                     submitting anyway",
-                    self.protocol_type,
-                    self.epoch,
-                    self.batch_index,
-                );
-                Vec::new()
-            }
+            Err(e) => return Err(ChannelError::from(e)),
         };
         let published: Vec<(Address, MessagesHash)> = existing
             .iter()
@@ -397,23 +331,46 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         if inserted {
             return Ok(PublishOutcome::Landed);
         }
-        let settled = fetch_certificates(
-            &self.onchain_state,
-            self.epoch,
-            self.batch_index,
-            self.protocol_type,
-        )
-        .await
-        .map_err(ChannelError::from)?;
-        let settled: Vec<(Address, MessagesHash)> = settled
-            .iter()
-            .map(|(d, c)| (*d, c.message().messages_hash))
-            .collect();
-        let outcome = raced_outcome(&classify_published_cert(
-            &settled,
-            &ours.dealer_address,
-            ours.messages_hash,
-        ));
+        // Nothing inserted means a certificate for this dealer already
+        // holds the slot on-chain, but the mirror may not have applied
+        // the transaction that beat ours yet — poll briefly for it
+        // rather than misreading the lag as divergence.
+        let settled_deadline = tokio::time::Instant::now() + TX_CONFIRMATION_TIMEOUT;
+        let classified = loop {
+            match tob_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                self.protocol_type,
+            ) {
+                Ok(settled) => {
+                    let settled: Vec<(Address, MessagesHash)> = settled
+                        .iter()
+                        .map(|(d, c)| (*d, c.message().messages_hash))
+                        .collect();
+                    let classified =
+                        classify_published_cert(&settled, &ours.dealer_address, ours.messages_hash);
+                    if !matches!(classified, PublishedCert::Absent)
+                        || tokio::time::Instant::now() >= settled_deadline
+                    {
+                        break classified;
+                    }
+                }
+                Err(e @ (TobError::IncompleteRead(_) | TobError::UnorderedRead(_)))
+                    if tokio::time::Instant::now() < settled_deadline =>
+                {
+                    tracing::debug!(
+                        "{:?} settled read for epoch {} batch {:?} unusable ({e}); retrying",
+                        self.protocol_type,
+                        self.epoch,
+                        self.batch_index,
+                    );
+                }
+                Err(e) => return Err(ChannelError::from(e)),
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        };
+        let outcome = raced_outcome(&classified);
         tracing::warn!(
             "{:?} epoch {} batch {:?}: this submission for dealer {} inserted nothing; a \
              certificate already held the slot (ours {}), outcome {:?}",
@@ -438,65 +395,25 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 self.wait_started = None;
                 return Ok(cert);
             }
-            // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let fetched = {
-                if self.pending_fetch.is_none() {
-                    let onchain_state = self.onchain_state.clone();
-                    let (epoch, batch_index, protocol_type) =
-                        (self.epoch, self.batch_index, self.protocol_type);
-                    self.pending_fetch = Some((
-                        tokio::spawn(async move {
-                            fetch_certificates(&onchain_state, epoch, batch_index, protocol_type)
-                                .await
-                        }),
-                        tokio::time::Instant::now(),
-                    ));
-                }
-                let (fetch, started) = self.pending_fetch.as_mut().expect("just populated");
-                let remaining = FETCH_STALL_TIMEOUT.saturating_sub(started.elapsed());
-                tokio::time::timeout(remaining, fetch).await
-            };
-            let mut stalled = false;
-            let all_certs = match fetched {
-                Ok(Ok(result)) => {
-                    self.pending_fetch = None;
-                    match result {
-                        Ok(certs) => certs,
-                        Err(TobError::IncompleteRead(msg)) => {
-                            tracing::debug!(
-                                "{:?} TOB cert read for epoch {} raced an insert ({msg}); \
-                                 retrying",
-                                self.protocol_type,
-                                self.epoch,
-                            );
-                            Vec::new()
-                        }
-                        Err(e) => {
-                            self.wait_started = None;
-                            return Err(ChannelError::from(e));
-                        }
-                    }
-                }
-                Ok(Err(join_err)) => {
-                    self.pending_fetch = None;
-                    self.wait_started = None;
-                    return Err(ChannelError::Other(format!(
-                        "{:?} TOB cert fetch task failed for epoch {}: {join_err}",
-                        self.protocol_type, self.epoch,
-                    )));
-                }
-                Err(_) => {
-                    if let Some((fetch, _)) = self.pending_fetch.take() {
-                        fetch.abort();
-                    }
-                    stalled = true;
-                    tracing::warn!(
-                        "{:?} TOB cert fetch for epoch {} stalled >{:?}",
+            let all_certs = match tob_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                self.protocol_type,
+            ) {
+                Ok(certs) => certs,
+                Err(TobError::IncompleteRead(msg)) => {
+                    tracing::debug!(
+                        "{:?} TOB cert read for epoch {} raced the mirror's replay ({msg}); \
+                         retrying",
                         self.protocol_type,
                         self.epoch,
-                        FETCH_STALL_TIMEOUT,
                     );
                     Vec::new()
+                }
+                Err(e) => {
+                    self.wait_started = None;
+                    return Err(ChannelError::from(e));
                 }
             };
             for (dealer, cert) in all_certs {
@@ -512,9 +429,6 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                     (committees.epoch(), committees.pending_epoch_change())
                 };
                 if tob_wait_superseded(self.protocol_type, self.epoch, onchain_epoch, pending) {
-                    if stalled {
-                        self.record_stall(false);
-                    }
                     tracing::info!(
                         "aborting {:?} TOB wait for epoch {}: superseded (onchain epoch \
                          {onchain_epoch}, pending epoch change {pending:?})",
@@ -531,9 +445,6 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 if let Some(idle_timeout) = self.idle_timeout
                     && wait_started.elapsed() >= idle_timeout
                 {
-                    if stalled {
-                        self.record_stall(true);
-                    }
                     tracing::info!(
                         "aborting {:?} TOB wait for epoch {}: no certificate in {:?} \
                          ({} dealers seen)",
@@ -547,25 +458,17 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
-            if stalled {
-                self.record_stall(false);
-            }
         }
     }
 
     async fn certified_dealers(&mut self) -> Vec<(Address, CertificateV1)> {
-        match tokio::time::timeout(
-            FETCH_STALL_TIMEOUT,
-            fetch_certificates(
-                &self.onchain_state,
-                self.epoch,
-                self.batch_index,
-                self.protocol_type,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(all_certs)) => {
+        match tob_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
+        ) {
+            Ok(all_certs) => {
                 for (dealer, cert) in &all_certs {
                     if !self.seen_dealers.contains(dealer) {
                         self.seen_dealers.insert(*dealer);
@@ -574,25 +477,13 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
                 }
                 all_certs
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 tracing::warn!(
-                    "{:?} certified_dealers fetch for epoch {} batch {:?} failed: {e}; \
+                    "{:?} certified_dealers read for epoch {} batch {:?} failed: {e}; \
                      reporting none certified",
                     self.protocol_type,
                     self.epoch,
                     self.batch_index,
-                );
-                vec![]
-            }
-            Err(_) => {
-                self.record_stall(false);
-                tracing::warn!(
-                    "{:?} certified_dealers fetch for epoch {} batch {:?} stalled >{:?}; \
-                     reporting none certified",
-                    self.protocol_type,
-                    self.epoch,
-                    self.batch_index,
-                    FETCH_STALL_TIMEOUT,
                 );
                 vec![]
             }
@@ -665,23 +556,22 @@ mod tests {
 
         let raced = inconsistent_listing("dangling node".into());
         assert!(
-            matches!(super::tob_fetch_error(raced), TobError::IncompleteRead(_)),
-            "a raced cert-table read must stay distinguishable from an RPC failure"
+            matches!(super::tob_read_error(raced), TobError::IncompleteRead(_)),
+            "a raced cert-table read must stay distinguishable from other failures"
         );
 
-        let wrapped =
-            inconsistent_listing("dangling node".into()).context("fetching stamped certs");
+        let wrapped = inconsistent_listing("dangling node".into()).context("reading certs");
         assert!(matches!(
-            super::tob_fetch_error(wrapped),
+            super::tob_read_error(wrapped),
             TobError::IncompleteRead(_)
         ));
 
         assert!(
             matches!(
-                super::tob_fetch_error(anyhow::anyhow!("connection reset")),
-                TobError::RpcError(_)
+                super::tob_read_error(anyhow::anyhow!("unexpected mirror failure")),
+                TobError::InvalidState(_)
             ),
-            "a genuine RPC failure must not be swallowed as retryable"
+            "an unrecognized read failure must not be swallowed as retryable"
         );
 
         use crate::onchain::UnorderedCertTableRead;
@@ -693,16 +583,14 @@ mod tests {
         };
         assert!(
             matches!(
-                super::tob_fetch_error(unordered().into()),
+                super::tob_read_error(unordered().into()),
                 TobError::UnorderedRead(_)
             ),
             "an unordered read must stay distinguishable: publish tolerates it, the window \
              walks must not"
         );
         assert!(matches!(
-            super::tob_fetch_error(
-                anyhow::Error::from(unordered()).context("fetching stamped certs")
-            ),
+            super::tob_read_error(anyhow::Error::from(unordered()).context("reading certs")),
             TobError::UnorderedRead(_)
         ));
     }
