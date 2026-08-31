@@ -12895,6 +12895,69 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
 }
 
 #[tokio::test]
+async fn test_avid_nonce_dealer_phase_skips_at_zero_weight() {
+    let weights: [u16; 4] = [0, 3, 3, 4];
+    let setup = TestSetup::with_weights_avid(&weights);
+    let batch_index = 0u32;
+
+    let mut managers: Vec<_> = (0..weights.len())
+        .map(|i| setup.create_manager(i))
+        .collect();
+    let mut test_manager = managers.remove(0);
+    let zero_weighted = test_manager
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == test_manager.party_id {
+                0
+            } else {
+                n.weight
+            },
+        })
+        .collect::<Vec<_>>();
+    test_manager.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
+    assert_eq!(
+        test_manager
+            .mpc_config
+            .nodes
+            .weight_of(test_manager.party_id)
+            .unwrap(),
+        0
+    );
+
+    let other_managers: HashMap<_, _> = managers
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+        .collect();
+    let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+    let test_manager = Arc::new(RwLock::new(test_manager));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+    let metrics = test_metrics();
+
+    MpcManager::run_nonce_dealer_phase(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &metrics,
+    )
+    .await;
+
+    assert_eq!(
+        metrics
+            .mpc_dealer_crypto_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .get_sample_count(),
+        0
+    );
+    assert_eq!(mock_tob.published_count(), 0);
+}
+
+#[tokio::test]
 async fn test_run_nonce_generation_skips_dealer_phase() {
     let mut rng = rand::thread_rng();
     let weights: [u16; 5] = [1, 1, 1, 2, 2];
