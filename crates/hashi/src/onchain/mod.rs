@@ -48,9 +48,6 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
-const CERT_LISTING_ATTEMPTS: u32 = 3;
-const CERT_LISTING_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
-
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct InconsistentListing(String);
@@ -165,6 +162,13 @@ pub struct State {
 
 pub use hashi_types::move_types::TobKey;
 pub use versioned_decode::TobCertLayout;
+
+/// One mirror read of a TOB bucket: its layout plus the dealer
+/// submissions in TOB order, normalized to the stamped form.
+pub type TobBucketRead = (
+    TobCertLayout,
+    Vec<(Address, move_types::StampedDealerSubmissionV1)>,
+);
 
 /// One TOB bucket the leader's GC has selected for on-chain destruction.
 /// `KeyGen` covers both the Dkg and KeyRotation buckets of an epoch — the
@@ -506,26 +510,6 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
-    pub async fn read_side_checkpoint_timestamp_ms(&self) -> Result<u64> {
-        let info = self
-            .0
-            .client
-            .clone()
-            .ledger_client()
-            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
-            .await?
-            .into_inner();
-        let ts = info
-            .timestamp
-            .ok_or_else(|| anyhow!("service info carried no timestamp"))?;
-        let seconds = u64::try_from(ts.seconds)
-            .map_err(|_| anyhow!("service info timestamp is before the epoch: {}", ts.seconds))?;
-        let millis = seconds
-            .checked_mul(1_000)
-            .ok_or_else(|| anyhow!("service info timestamp overflows ms: {seconds}s"))?;
-        Ok(millis + u64::from(ts.nanos.max(0) as u32) / 1_000_000)
-    }
-
     pub fn package_id_original(&self) -> Address {
         self.0.ids.package_id
     }
@@ -599,32 +583,56 @@ impl OnchainState {
     /// order (the total order the TOB guarantees), read from the mirror.
     /// Submissions come back in the normalized stamped form (a bare
     /// bucket's carry `timestamp_ms: 0`), with the bucket's layout so
-    /// callers can insist on one. Returns `None` when the bucket does
-    /// not exist.
+    /// callers can insist on one. Returns `Ok(None)` when the bucket
+    /// does not exist; an incomplete link walk (a convergence gap while
+    /// a bootstrap replay catches up — retryable, recognized by
+    /// [`is_inconsistent_listing`]) or a stamped bucket whose stamps are
+    /// not monotone in TOB order is an error rather than a silent
+    /// truncation.
     pub fn tob_certs(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
-    ) -> Option<(
-        TobCertLayout,
-        Vec<(Address, move_types::StampedDealerSubmissionV1)>,
-    )> {
+    ) -> Result<Option<TobBucketRead>> {
         let key = move_types::TobKey {
             epoch,
             batch_index,
             protocol_type,
         };
         let state = self.state();
-        let bucket = state.hashi.tob.buckets.get(&key)?;
-        Some((
-            bucket.layout,
-            bucket
-                .certs_in_order()
-                .into_iter()
-                .map(|(dealer, submission)| (dealer, submission.clone()))
-                .collect(),
-        ))
+        let Some(bucket) = state.hashi.tob.buckets.get(&key) else {
+            return Ok(None);
+        };
+        let certs: Vec<(Address, move_types::StampedDealerSubmissionV1)> = bucket
+            .certs_in_order()
+            .into_iter()
+            .map(|(dealer, submission)| (dealer, submission.clone()))
+            .collect();
+        if certs.len() != bucket.nodes.len() {
+            return Err(inconsistent_listing(format!(
+                "mirrored TOB bucket {key:?} walks {} of its {} nodes",
+                certs.len(),
+                bucket.nodes.len()
+            )));
+        }
+        if bucket.layout == TobCertLayout::Stamped {
+            ensure_timestamp_ordered(&certs)?;
+        }
+        Ok(Some((bucket.layout, certs)))
+    }
+
+    /// True once the object mirror has applied every Hashi transaction
+    /// through a checkpoint whose timestamp is past `cutoff_ms`: any TOB
+    /// submission stamped at or before the cutoff is either already in
+    /// the mirror or will never land. `false` while the clock stream or
+    /// the mirror still trails the cutoff, and with no mirror running.
+    pub fn mirror_past_timestamp_ms(&self, cutoff_ms: u64) -> bool {
+        let clock = *self.0.checkpoint.borrow();
+        clock.timestamp_ms > cutoff_ms
+            && self
+                .state_watermark()
+                .is_some_and(|covered| covered >= clock.height)
     }
 
     /// Returns the current epoch.
@@ -995,55 +1003,6 @@ impl OnchainState {
             .map(|c| c.mpc_service_client())
     }
 
-    /// Returns None if no certs exist for this key. The two bucket structs are
-    /// BCS-identical, so one decode serves both; the layout selects the node
-    /// type, and callers must dispatch on it rather than on the package version
-    /// — a bucket created before a v1→v2 upgrade is still bare after it.
-    // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
-    async fn fetch_epoch_certs_with_layout(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<(versioned_decode::TobCertLayout, move_types::EpochCertsV1)>> {
-        let tob_id = self.tob_id();
-        let key = move_types::TobKey {
-            epoch,
-            batch_index,
-            protocol_type,
-        };
-        let key_bcs = bcs::to_bytes(&key)?;
-        let mut stream = self
-            .0
-            .client
-            .clone()
-            .list_dynamic_fields(
-                ListDynamicFieldsRequest::default()
-                    .with_parent(tob_id)
-                    .with_page_size(SCRAPE_PAGE_SIZE)
-                    .with_read_mask(FieldMask::from_paths([
-                        DynamicField::path_builder().name().finish(),
-                        DynamicField::path_builder().value().finish(),
-                        DynamicField::path_builder().value_type(),
-                    ])),
-            )
-            .pipe(Box::pin);
-        // Cloned once up front: the guard must not be held across the stream's
-        // await points, and identification below resolves defining addresses
-        // through this map.
-        let packages = self.state().package_versions().clone();
-        while let Some(field) = stream.try_next().await? {
-            if field.name().value() == key_bcs.as_slice() {
-                let value_type = versioned_decode::field_value_type(&field)?;
-                let layout =
-                    versioned_decode::TobCertLayout::from_struct_tag(&packages, &value_type)?;
-                let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
-                return Ok(Some((layout, epoch_certs)));
-            }
-        }
-        Ok(None)
-    }
-
     /// List every TOB bucket key in the on-chain bag, for the leader's GC.
     ///
     /// Decodes dynamic-field NAMES only — the `TobKey` layout is frozen — so
@@ -1081,162 +1040,6 @@ impl OnchainState {
         }
         Ok(keys)
     }
-
-    async fn collect_table_nodes<V: serde::de::DeserializeOwned>(
-        &self,
-        table_id: Address,
-    ) -> Result<std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>> {
-        let mut nodes = std::collections::HashMap::new();
-        let mut stream = self
-            .0
-            .client
-            .clone()
-            .list_dynamic_fields(
-                ListDynamicFieldsRequest::default()
-                    .with_parent(table_id)
-                    .with_page_size(SCRAPE_PAGE_SIZE)
-                    .with_read_mask(FieldMask::from_paths([
-                        DynamicField::path_builder().name().finish(),
-                        DynamicField::path_builder().value().finish(),
-                    ])),
-            )
-            .pipe(Box::pin);
-        while let Some(field) = stream.try_next().await? {
-            let dealer: Address = field.name().deserialize()?;
-            let node = field.value().deserialize()?;
-            nodes.insert(dealer, node);
-        }
-        Ok(nodes)
-    }
-
-    /// Bare buckets, written before the v1→v2 upgrade, report `timestamp_ms: 0`,
-    /// which never trips the window's cutoff. A bucket's layout is fixed by
-    /// whichever version created it and never converts, so the layout the chain
-    /// reports — not the active version — decides how to decode.
-    pub async fn fetch_nonce_certs_stamped_or_bare(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
-        let protocol_type = move_types::ProtocolType::NonceGeneration;
-        self.retry_inconsistent_listing(epoch, protocol_type, || async {
-            let Some((layout, epoch_certs)) = self
-                .fetch_epoch_certs_with_layout(epoch, batch_index, protocol_type)
-                .await?
-            else {
-                return Ok(None);
-            };
-            let Some(head) = epoch_certs.certs.head else {
-                return Ok(Some(vec![]));
-            };
-            let size = epoch_certs.certs.size;
-            let table_id = epoch_certs.certs.id;
-            let certs = match layout {
-                versioned_decode::TobCertLayout::Stamped => {
-                    let nodes = self.collect_table_nodes(table_id).await?;
-                    let stamped = walk_linked_table(head, size, nodes).map_err(|e| {
-                        inconsistent_listing(format!(
-                            "incomplete stamped cert listing for epoch {epoch} {protocol_type:?}: \
-                             {e}"
-                        ))
-                    })?;
-                    ensure_timestamp_ordered(&stamped)?;
-                    stamped
-                }
-                versioned_decode::TobCertLayout::Bare => {
-                    let nodes = self.collect_table_nodes(table_id).await?;
-                    walk_linked_table(head, size, nodes)
-                        .map_err(|e| {
-                            inconsistent_listing(format!(
-                                "incomplete cert listing for epoch {epoch} {protocol_type:?}: {e}"
-                            ))
-                        })?
-                        .into_iter()
-                        .map(|(dealer, submission)| {
-                            (
-                                dealer,
-                                move_types::StampedDealerSubmissionV1 {
-                                    submission,
-                                    timestamp_ms: 0,
-                                },
-                            )
-                        })
-                        .collect()
-                }
-            };
-            Ok(Some(certs))
-        })
-        .await
-    }
-
-    async fn retry_inconsistent_listing<T, F, Fut>(
-        &self,
-        epoch: u64,
-        protocol_type: move_types::ProtocolType,
-        read: F,
-    ) -> Result<T>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
-    {
-        for attempt in 1..CERT_LISTING_ATTEMPTS {
-            match read().await {
-                Ok(v) => return Ok(v),
-                Err(e) if is_inconsistent_listing(&e) => {
-                    tracing::debug!(
-                        "epoch {epoch} {protocol_type:?}: {e}; re-reading (attempt {attempt} of \
-                         {CERT_LISTING_ATTEMPTS})"
-                    );
-                    tokio::time::sleep(CERT_LISTING_RETRY_DELAY).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        read().await
-    }
-
-    pub async fn fetch_certs(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        self.retry_inconsistent_listing(epoch, protocol_type, || async {
-            self.fetch_certs_once(epoch, batch_index, protocol_type)
-                .await
-        })
-        .await
-    }
-
-    async fn fetch_certs_once(
-        &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        let Some((layout, epoch_certs)) = self
-            .fetch_epoch_certs_with_layout(epoch, batch_index, protocol_type)
-            .await?
-        else {
-            return Ok(None);
-        };
-        anyhow::ensure!(
-            layout == versioned_decode::TobCertLayout::Bare,
-            "TOB bucket (epoch {epoch}, batch {batch_index:?}, {protocol_type:?}) uses the \
-             {layout:?} cert layout, which this read path cannot decode"
-        );
-        let Some(head) = epoch_certs.certs.head else {
-            return Ok(Some(vec![]));
-        };
-        let nodes = self.collect_table_nodes(epoch_certs.certs.id).await?;
-        walk_linked_table(head, epoch_certs.certs.size, nodes)
-            .map_err(|e| {
-                inconsistent_listing(format!(
-                    "incomplete cert listing for epoch {epoch} {protocol_type:?}: {e}"
-                ))
-            })
-            .map(Some)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1267,31 +1070,6 @@ fn ensure_timestamp_ordered(
         .into());
     }
     Ok(())
-}
-
-fn walk_linked_table<V>(
-    head: Address,
-    size: u64,
-    mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>>,
-) -> Result<Vec<(Address, V)>> {
-    let mut entries = Vec::with_capacity(nodes.len());
-    let mut current = Some(head);
-    while let Some(key) = current {
-        let Some(node) = nodes.remove(&key) else {
-            return Err(anyhow!(
-                "the linked list references {key} but the dynamic-field listing did not return it"
-            ));
-        };
-        entries.push((key, node.value));
-        current = node.next;
-    }
-    if (entries.len() as u64) < size {
-        return Err(anyhow!(
-            "walked {} entries but the table reported {size}",
-            entries.len()
-        ));
-    }
-    Ok(entries)
 }
 
 impl State {
@@ -2807,68 +2585,10 @@ mod key_rotation_epoch_tests {
 }
 
 #[cfg(test)]
-mod walk_linked_table_tests {
-    use super::walk_linked_table;
-    use hashi_types::move_types::LinkedTableNode;
-    use std::collections::HashMap;
-    use sui_sdk_types::Address;
-
-    fn addr(byte: u8) -> Address {
-        Address::new([byte; 32])
-    }
-
-    fn chain(keys: &[u8]) -> HashMap<Address, LinkedTableNode<Address, u32>> {
-        keys.iter()
-            .enumerate()
-            .map(|(i, &k)| {
-                (
-                    addr(k),
-                    LinkedTableNode {
-                        prev: (i > 0).then(|| addr(keys[i - 1])),
-                        next: keys.get(i + 1).map(|&n| addr(n)),
-                        value: u32::from(k),
-                    },
-                )
-            })
-            .collect()
-    }
-
+mod inconsistent_listing_tests {
     #[test]
-    fn a_complete_listing_walks_in_insertion_order() {
-        let entries = walk_linked_table(addr(1), 3, chain(&[1, 2, 3])).unwrap();
-        assert_eq!(
-            entries,
-            vec![(addr(1), 1u32), (addr(2), 2u32), (addr(3), 3u32)]
-        );
-    }
-
-    #[test]
-    fn a_listing_missing_a_referenced_node_is_an_error() {
-        let mut nodes = chain(&[1, 2, 3]);
-        nodes.remove(&addr(2));
-        let err = walk_linked_table(addr(1), 3, nodes)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("did not return it"), "{err}");
-    }
-
-    #[test]
-    fn a_walk_shorter_than_the_reported_size_is_an_error() {
-        let err = walk_linked_table(addr(1), 5, chain(&[1, 2, 3]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("walked 3 entries"), "{err}");
-    }
-
-    #[test]
-    fn a_listing_newer_than_the_reported_size_is_accepted() {
-        let entries = walk_linked_table(addr(1), 1, chain(&[1, 2, 3])).unwrap();
-        assert_eq!(entries.len(), 3);
-    }
-
-    #[test]
-    fn an_inconsistent_listing_error_is_recognised_for_retry() {
-        let err = super::inconsistent_listing("walked 3 entries but the table reported 5".into());
+    fn an_inconsistent_listing_error_is_recognized_for_retry() {
+        let err = super::inconsistent_listing("walks 3 of its 5 nodes".into());
         assert!(super::is_inconsistent_listing(&err));
     }
 

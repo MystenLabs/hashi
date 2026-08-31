@@ -24,16 +24,13 @@ use tracing::warn;
 use crate::Hashi;
 use crate::communication::PrefetchedTobChannel;
 use crate::communication::SuiTobSessionChannel;
-use crate::communication::fetch_certificates;
-use crate::communication::fetch_key_generation_certificates;
+use crate::communication::key_generation_certificates;
+use crate::communication::tob_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::metrics::MPC_LABEL_DKG;
-use crate::metrics::MPC_LABEL_KEY_GENERATION;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
-use crate::metrics::STALL_OUTCOME_ABSORBED;
-use crate::metrics::STALL_OUTCOME_FAILED;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
@@ -66,13 +63,6 @@ const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
 const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
-const NONCE_CLOCK_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const _: () = assert!(
-    NONCE_CLOCK_READ_TIMEOUT.as_millis() < NONCE_WINDOW_WAIT_SLACK.as_millis(),
-    "the clock read runs inside the window wait, whose deadline is at least \
-     NONCE_WINDOW_WAIT_SLACK, so a read bound at or above it never fires from the loop and \
-     mpc_nonce_read_side_clock_errors_total goes unreachable there",
-);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_WAIT_TOTAL_BUDGET: Duration = Duration::from_secs(600);
@@ -343,31 +333,6 @@ impl MpcService {
         }
     }
 
-    async fn bounded_cert_read<T, E>(
-        &self,
-        protocol_label: &str,
-        what: &str,
-        fut: impl Future<Output = Result<T, E>>,
-    ) -> anyhow::Result<T>
-    where
-        anyhow::Error: From<E>,
-    {
-        match tokio::time::timeout(crate::communication::sui_tob::FETCH_STALL_TIMEOUT, fut).await {
-            Ok(result) => result.map_err(anyhow::Error::from),
-            Err(_) => {
-                self.inner
-                    .metrics
-                    .mpc_tob_fetch_stalls_total
-                    .with_label_values(&[protocol_label, STALL_OUTCOME_FAILED])
-                    .inc();
-                anyhow::bail!(
-                    "{what} stalled >{:?}",
-                    crate::communication::sui_tob::FETCH_STALL_TIMEOUT
-                )
-            }
-        }
-    }
-
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -397,17 +362,12 @@ impl MpcService {
     ) -> anyhow::Result<MpcOutput> {
         self.setup_initial_dkg(epoch)?;
         let onchain_state = self.inner.onchain_state().clone();
-        let certs: Vec<CertificateV1> = self
-            .bounded_cert_read(
-                MPC_LABEL_DKG,
-                &format!("DKG cert read for epoch {epoch}"),
-                fetch_certificates(&onchain_state, epoch, None, move_types::ProtocolType::Dkg),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to fetch DKG certs for epoch {epoch}: {e}"))?
-            .into_iter()
-            .map(|(_, cert)| cert)
-            .collect();
+        let certs: Vec<CertificateV1> =
+            tob_certificates(&onchain_state, epoch, None, move_types::ProtocolType::Dkg)
+                .map_err(|e| anyhow::anyhow!("failed to read DKG certs for epoch {epoch}: {e}"))?
+                .into_iter()
+                .map(|(_, cert)| cert)
+                .collect();
         let mpc_manager = self
             .inner
             .mpc_manager()
@@ -447,35 +407,24 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for rotation recovery"))?;
         let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
-        let current_certs: Vec<CertificateV1> = self
-            .bounded_cert_read(
-                MPC_LABEL_KEY_ROTATION,
-                &format!("rotation cert read for epoch {epoch}"),
-                fetch_certificates(
-                    &onchain_state,
-                    epoch,
-                    None,
-                    move_types::ProtocolType::KeyRotation,
-                ),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to fetch rotation certs for epoch {epoch}: {e}"))?
-            .into_iter()
-            .map(|(_, cert)| cert)
-            .collect();
-        let previous_certs: Vec<CertificateV1> = self
-            .bounded_cert_read(
-                MPC_LABEL_KEY_GENERATION,
-                &format!("previous-epoch cert read for epoch {previous_epoch}"),
-                fetch_key_generation_certificates(&onchain_state, previous_epoch),
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("failed to fetch certs for previous epoch {previous_epoch}: {e}")
-            })?
-            .into_iter()
-            .map(|(_, cert)| cert)
-            .collect();
+        let current_certs: Vec<CertificateV1> = tob_certificates(
+            &onchain_state,
+            epoch,
+            None,
+            move_types::ProtocolType::KeyRotation,
+        )
+        .map_err(|e| anyhow::anyhow!("failed to read rotation certs for epoch {epoch}: {e}"))?
+        .into_iter()
+        .map(|(_, cert)| cert)
+        .collect();
+        let previous_certs: Vec<CertificateV1> =
+            key_generation_certificates(&onchain_state, previous_epoch)
+                .map_err(|e| {
+                    anyhow::anyhow!("failed to read certs for previous epoch {previous_epoch}: {e}")
+                })?
+                .into_iter()
+                .map(|(_, cert)| cert)
+                .collect();
         let current_certs =
             verify_fetched_certificates(&mpc_manager, current_certs, &self.inner.metrics).await;
         let previous_certs =
@@ -525,17 +474,7 @@ impl MpcService {
             move_types::ProtocolType::Dkg,
             signer,
         )
-        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT)
-        .with_stall_counters(
-            self.inner
-                .metrics
-                .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_DKG, STALL_OUTCOME_ABSORBED]),
-            self.inner
-                .metrics
-                .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_DKG, STALL_OUTCOME_FAILED]),
-        );
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
         let output = MpcManager::run_dkg(
             &mpc_manager,
             &p2p_channel,
@@ -577,17 +516,7 @@ impl MpcService {
             move_types::ProtocolType::NonceGeneration,
             signer,
         )
-        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT)
-        .with_stall_counters(
-            self.inner
-                .metrics
-                .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_ABSORBED]),
-            self.inner
-                .metrics
-                .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION, STALL_OUTCOME_FAILED]),
-        );
+        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT);
         let metrics = &self.inner.metrics;
         let _timer = metrics
             .mpc_total_duration_seconds
@@ -930,16 +859,18 @@ impl MpcService {
         let onchain_state = self.inner.onchain_state().clone();
         let weight = match protocol {
             NonceGenerationProtocol::Vanilla => {
-                let Some(certs) = self
-                    .bounded_cert_read(
-                        MPC_LABEL_NONCE_GENERATION,
-                        &format!(
-                            "nonce cert read for epoch {epoch} batch {batch_index} \
-                             (boundary rebuild)"
-                        ),
-                        onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
+                let Some((_, certs)) = onchain_state
+                    .tob_certs(
+                        epoch,
+                        Some(batch_index),
+                        move_types::ProtocolType::NonceGeneration,
                     )
-                    .await?
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "nonce cert read for epoch {epoch} batch {batch_index} \
+                             (boundary rebuild): {e}"
+                        )
+                    })?
                 else {
                     return Ok(None);
                 };
@@ -955,21 +886,18 @@ impl MpcService {
                 certified_nonce_weight(mpc_manager, &certs)
             }
             NonceGenerationProtocol::Avid => {
-                let certs = self
-                    .bounded_cert_read(
-                        MPC_LABEL_NONCE_GENERATION,
-                        &format!(
-                            "nonce cert read for epoch {epoch} batch {batch_index} \
-                             (boundary rebuild)"
-                        ),
-                        fetch_certificates(
-                            &onchain_state,
-                            epoch,
-                            Some(batch_index),
-                            move_types::ProtocolType::NonceGeneration,
-                        ),
+                let certs = tob_certificates(
+                    &onchain_state,
+                    epoch,
+                    Some(batch_index),
+                    move_types::ProtocolType::NonceGeneration,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "nonce cert read for epoch {epoch} batch {batch_index} \
+                         (boundary rebuild): {e}"
                     )
-                    .await?;
+                })?;
                 if certs.is_empty() {
                     return Ok(None);
                 }
@@ -1235,7 +1163,6 @@ impl MpcService {
         let mut best_weight = 0u32;
         let mut cutoff_confirmed: Option<u64> = None;
         let mut adjudicated = HashMap::new();
-        let mut pending_fetch = None;
         loop {
             let (onchain_epoch, pending) = {
                 let state = onchain_state.state();
@@ -1253,75 +1180,20 @@ impl MpcService {
                      (onchain epoch {onchain_epoch}, pending epoch change {pending:?})"
                 );
             }
-            let fetched = {
-                let (fetch, started, stall_reported) = pending_fetch.get_or_insert_with(|| {
-                    (
-                        Box::pin(
-                            onchain_state
-                                .fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
-                        ),
-                        tokio::time::Instant::now(),
-                        false,
-                    )
-                });
-                let bound = if *stall_reported {
-                    wait_deadline
-                } else {
-                    (*started + crate::communication::sui_tob::FETCH_STALL_TIMEOUT)
-                        .min(wait_deadline)
-                };
-                match tokio::time::timeout_at(bound, fetch).await {
-                    Ok(res) => Ok(res),
-                    Err(_) => {
-                        *stall_reported = true;
-                        Err(tokio::time::Instant::now() >= wait_deadline)
-                    }
-                }
-            };
-            let certs = match fetched {
-                Err(expired) => {
-                    metrics
-                        .mpc_tob_fetch_stalls_total
-                        .with_label_values(&[
-                            MPC_LABEL_NONCE_GENERATION,
-                            if expired {
-                                STALL_OUTCOME_FAILED
-                            } else {
-                                STALL_OUTCOME_ABSORBED
-                            },
-                        ])
-                        .inc();
-                    warn!(
-                        "nonce cert fetch for epoch {epoch} batch {batch_index} stalled \
-                         >{:?}; {}",
-                        crate::communication::sui_tob::FETCH_STALL_TIMEOUT,
-                        if expired {
-                            "giving up"
-                        } else {
-                            "still waiting"
-                        },
-                    );
-                    if expired {
-                        anyhow::bail!(
-                            "nonce cert fetch never completed for epoch {epoch} batch \
-                             {batch_index}"
-                        );
-                    }
-                    continue;
-                }
-                Ok(Ok(certs)) => {
-                    pending_fetch = None;
-                    certs.unwrap_or_default()
-                }
-                Ok(Err(e)) if crate::onchain::is_inconsistent_listing(&e) => {
-                    pending_fetch = None;
+            let certs = match onchain_state.tob_certs(
+                epoch,
+                Some(batch_index),
+                move_types::ProtocolType::NonceGeneration,
+            ) {
+                Ok(certs) => certs.map(|(_, certs)| certs).unwrap_or_default(),
+                Err(e) if crate::onchain::is_inconsistent_listing(&e) => {
                     if tokio::time::Instant::now() >= wait_deadline {
                         return Err(e);
                     }
                     tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
                     continue;
                 }
-                Ok(Err(e)) => return Err(e),
+                Err(e) => return Err(e),
             };
             let certs = MpcManager::verified_nonce_certs(
                 mpc_manager,
@@ -1357,28 +1229,11 @@ impl MpcService {
                 tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
                 continue;
             }
-            let read_side_past_cutoff = |cutoff_ms: u64| async move {
-                let read = tokio::time::timeout(
-                    NONCE_CLOCK_READ_TIMEOUT,
-                    onchain_state.read_side_checkpoint_timestamp_ms(),
-                )
-                .await;
-                match read.unwrap_or_else(|_| {
-                    Err(anyhow::anyhow!(
-                        "read-side clock read stalled >{NONCE_CLOCK_READ_TIMEOUT:?}"
-                    ))
-                }) {
-                    Ok(ts) => ts > cutoff_ms,
-                    Err(e) => {
-                        metrics.mpc_nonce_read_side_clock_errors_total.inc();
-                        warn!(
-                            "read-side checkpoint clock unavailable for epoch {epoch} \
-                             batch {batch_index}: {e}"
-                        );
-                        false
-                    }
-                }
-            };
+            // The certs above came from the mirror, so the settling
+            // condition is the mirror's own clock: once it has applied
+            // everything through a checkpoint stamped past the cutoff,
+            // every submission at or before the cutoff is either in the
+            // read we just took or in the re-read the loop does next.
             let Some(cutoff_ms) = cutoff_ms else {
                 return Ok((certs, None));
             };
@@ -1392,21 +1247,20 @@ impl MpcService {
                      (last confirmed {cutoff_confirmed:?}, now {cutoff_ms})"
                 );
             }
-            if !read_side_past_cutoff(cutoff_ms).await {
+            if !onchain_state.mirror_past_timestamp_ms(cutoff_ms) {
                 let deadline = (Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK)
                     .min(overall_deadline.saturating_duration_since(tokio::time::Instant::now()));
                 let wait = async {
-                    while !read_side_past_cutoff(cutoff_ms).await {
+                    while !onchain_state.mirror_past_timestamp_ms(cutoff_ms) {
                         tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
                     }
                 };
                 if tokio::time::timeout(deadline, wait).await.is_err() {
                     metrics.mpc_nonce_window_cutoff_unreached_total.inc();
                     warn!(
-                        "fetch_final_nonce_certs: read side never observed past window cutoff \
+                        "fetch_final_nonce_certs: the mirror never advanced past window cutoff \
                          {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?} \
-                         (stalled chain clock, lagging read-side fullnode, or unresponsive clock \
-                         RPC); failing this batch"
+                         (stalled chain clock or a lagging mirror); failing this batch"
                     );
                     anyhow::bail!(
                         "nonce window did not close for epoch {epoch} batch {batch_index}"
@@ -1848,14 +1702,8 @@ impl MpcService {
             "run_key_rotation: target_epoch={target_epoch}, previous_epoch={previous_epoch}, \
              onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
         );
-        let previous_certs = self
-            .bounded_cert_read(
-                MPC_LABEL_KEY_GENERATION,
-                &format!("rotation previous-epoch cert read for epoch {previous_epoch}"),
-                fetch_key_generation_certificates(&onchain_state, previous_epoch),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
+        let previous_certs = key_generation_certificates(&onchain_state, previous_epoch)
+            .map_err(|e| anyhow::anyhow!("Failed to read previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
             previous_certs.into_iter().map(|(_, cert)| cert).collect();
         let fetched = previous_certs.len();
@@ -1876,17 +1724,7 @@ impl MpcService {
             move_types::ProtocolType::KeyRotation,
             signer,
         )
-        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT)
-        .with_stall_counters(
-            self.inner
-                .metrics
-                .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION, STALL_OUTCOME_ABSORBED]),
-            self.inner
-                .metrics
-                .mpc_tob_fetch_stalls_total
-                .with_label_values(&[MPC_LABEL_KEY_ROTATION, STALL_OUTCOME_FAILED]),
-        );
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
         let output = MpcManager::run_key_rotation(
             &mpc_manager,
             &previous_certs,
