@@ -12422,6 +12422,51 @@ async fn test_verified_nonce_certs_adjudicates_each_dealer_once() {
 }
 
 #[test]
+fn test_reconstruct_presignatures_skips_zero_weight_dealer() {
+    let mut rng = rand::thread_rng();
+    let weights: [u16; 4] = [25, 25, 25, 25];
+    let setup = TestSetup::with_weights(&weights);
+    let batch_index = 0u32;
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.max_faulty = 25;
+
+    for i in 0..weights.len() {
+        let nonce_msg = create_nonce_dealer_message(&setup, i, batch_index, &mut rng);
+        send_and_assert_ok(
+            &mut mgr,
+            setup.address(i),
+            &Messages::NonceGeneration(nonce_msg),
+        );
+    }
+    mgr.dealer_nonce_outputs.clear();
+
+    let zero_weighted = mgr
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == 3 { 0 } else { n.weight },
+        })
+        .collect::<Vec<_>>();
+    mgr.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
+    assert_eq!(mgr.mpc_config.nodes.weight_of(3).unwrap(), 0);
+
+    let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
+    let certs = VerifiedNonceCerts::unclassified(vec![cert(3), cert(0), cert(1)]);
+    let (certified, _) = mgr.window_certified_nonce_dealers(&certs);
+    assert!(certified.contains(&setup.address(3)));
+
+    let outcome = mgr.reconstruct_presignatures(batch_index, &certs).unwrap();
+
+    let NonceReconstructionOutcome::Success(outputs) = outcome else {
+        panic!("expected reconstruction to succeed");
+    };
+    assert_eq!(outputs.len(), 2);
+}
+
+#[test]
 fn test_reconstruct_presignatures_rejects_below_floor_certs() {
     let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mut mgr = setup.create_manager(0);
@@ -14513,6 +14558,81 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
             >= 1,
         "a confirm-kind consumption must be counted"
     );
+}
+
+#[tokio::test]
+async fn test_run_as_avid_nonce_party_skips_zero_weight_dealer_without_local_skip() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs.iter().take(6) {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
+            timestamp_ms: 0,
+        }
+    };
+
+    let unresolvable_target = AvssVoteMessagesHash {
+        dealer_address: setup.address(4),
+        messages_hash: MessagesHash::from([9u8; 32]),
+        batch_index,
+    };
+    let unresolvable_sigs: Vec<MemberSignature> = (0..6)
+        .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
+        .collect();
+
+    let mut party_manager = managers.remove(&setup.address(1)).unwrap();
+    let zero_weighted = party_manager
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == 4 { 0 } else { n.weight },
+        })
+        .collect::<Vec<_>>();
+    party_manager.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
+    assert_eq!(party_manager.mpc_config.nodes.weight_of(4).unwrap(), 0);
+
+    let party = Arc::new(RwLock::new(party_manager));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
+        make_cert(&unresolvable_target, &unresolvable_sigs),
+        make_cert(&confirm_target, &sigs),
+        make_cert(&second_target, &second_sigs),
+    ]);
+    let admission = MpcManager::run_as_avid_nonce_party(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        None,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        admission.certified,
+        HashSet::from([setup.address(0), setup.address(2)])
+    );
+    assert_eq!(admission.local_skips, 0);
 }
 
 #[tokio::test]

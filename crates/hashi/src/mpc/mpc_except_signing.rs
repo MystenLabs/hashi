@@ -1164,6 +1164,9 @@ impl MpcManager {
             if !certified_dealers.contains(&dealer) {
                 continue;
             }
+            if Self::dealer_deals_nothing(&self.committee, &self.mpc_config.nodes, &dealer) {
+                continue;
+            }
             if let Some(output) = self.dealer_nonce_outputs.get(&(batch_index, dealer)) {
                 outputs.insert(dealer, output.clone());
                 continue;
@@ -2186,6 +2189,12 @@ impl MpcManager {
                         .mpc_certs_rejected_total
                         .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
                         .inc();
+                    continue;
+                }
+            }
+            {
+                let mgr = mpc_manager.read().unwrap();
+                if Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, &dealer) {
                     continue;
                 }
             }
@@ -3406,6 +3415,17 @@ impl MpcManager {
         if f >= w { u32::MAX } else { w - f }
     }
 
+    fn dealer_deals_nothing(
+        committee: &Committee,
+        nodes: &Nodes<EncryptionGroupElement>,
+        dealer: &Address,
+    ) -> bool {
+        Self::certified_dealer_party_id(committee, dealer)
+            .ok()
+            .and_then(|id| nodes.weight_of(id).ok())
+            .is_some_and(|weight| weight == 0)
+    }
+
     fn certified_dealer_party_id(committee: &Committee, dealer: &Address) -> MpcResult<PartyId> {
         committee
             .index_of(dealer)
@@ -4025,6 +4045,12 @@ impl MpcManager {
                     }
                 }
             };
+            {
+                let mgr = mpc_manager.read().unwrap();
+                if Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, &dealer) {
+                    continue;
+                }
+            }
             let digest = nonce_cert.message().messages_hash;
             let material = {
                 let mgr = mpc_manager.read().unwrap();
@@ -6163,6 +6189,12 @@ impl MpcManager {
             let dealer = &cert.submission.message.dealer_address;
             if !certified_dealers.contains(dealer) {
                 continue;
+            }
+            {
+                let mgr = mpc_manager.read().unwrap();
+                if Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, dealer) {
+                    continue;
+                }
             }
             let expected_hash = sui_sdk_types::Digest::from_bytes(
                 &cert.submission.message.messages_hash,
