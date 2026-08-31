@@ -253,7 +253,8 @@ impl OnchainState {
             client = client.with_max_decoding_message_size(limit);
         }
 
-        let (mut state, checkpoint, seed) = State::scrape(client.clone(), ids, scope).await?;
+        let (mut state, checkpoint, seed) =
+            State::scrape(client.clone(), ids, scope, metrics.as_deref()).await?;
         if let Some(tls_private_key) = &tls_private_key {
             state
                 .hashi
@@ -1305,10 +1306,11 @@ impl State {
         client: Client,
         ids: HashiIds,
         scope: ScrapeScope,
+        metrics: Option<&crate::metrics::Metrics>,
     ) -> Result<(Self, CheckpointInfo, Option<route::MirrorSeed>)> {
         let (package_versions, (checkpoint_info, hashi, seed)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
-            scrape_hashi(client, ids.hashi_object_id, ids.package_id, scope),
+            scrape_hashi(client, ids.hashi_object_id, ids.package_id, scope, metrics),
         )?;
 
         Ok((
@@ -1355,9 +1357,13 @@ async fn scrape_dynamic_field_pages(
     client: &Client,
     parent: Address,
     mask: FieldMask,
+    container: &'static str,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(u64, Vec<DynamicField>)> {
+    let started = std::time::Instant::now();
     let mut fields = Vec::new();
     let mut min_height = u64::MAX;
+    let mut pages = 0u64;
     let mut page_token: Option<bytes::Bytes> = None;
     loop {
         let mut request = ListDynamicFieldsRequest::default()
@@ -1377,12 +1383,47 @@ async fn scrape_dynamic_field_pages(
             .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
         min_height = min_height.min(height);
         let page = response.into_inner();
+        pages += 1;
+        if let Some(metrics) = metrics {
+            metrics
+                .scrape_pages_total
+                .with_label_values(&[container])
+                .inc();
+            metrics
+                .scrape_entries_total
+                .with_label_values(&[container])
+                .inc_by(page.dynamic_fields.len() as u64);
+        }
         fields.extend(page.dynamic_fields);
+        // A multi-million-entry container walks thousands of pages; keep a
+        // heartbeat so a boot mid-scrape is distinguishable from a hang.
+        if pages.is_multiple_of(100) {
+            tracing::info!(
+                container,
+                pages,
+                entries = fields.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "On-chain scrape in progress"
+            );
+        }
         match page.next_page_token {
             Some(token) => page_token = Some(token),
             None => break,
         }
     }
+    if let Some(metrics) = metrics {
+        metrics
+            .scrape_container_duration_ms
+            .with_label_values(&[container])
+            .set(started.elapsed().as_millis() as i64);
+    }
+    tracing::info!(
+        container,
+        pages,
+        entries = fields.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "Scraped on-chain container"
+    );
     Ok((min_height, fields))
 }
 
@@ -1437,12 +1478,30 @@ async fn fetch_bitcoin_state(
     Ok((checkpoint_height, version, bitcoin_state_field.value))
 }
 
+/// Clears `scrape_in_progress` even when a scrape errors out mid-walk.
+struct ScrapeInProgressReset<'a>(Option<&'a crate::metrics::Metrics>);
+
+impl Drop for ScrapeInProgressReset<'_> {
+    fn drop(&mut self) {
+        if let Some(metrics) = self.0 {
+            metrics.scrape_in_progress.set(0);
+        }
+    }
+}
+
 async fn scrape_hashi(
     mut client: Client,
     hashi_object_id: Address,
     package_id: Address,
     scope: ScrapeScope,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(CheckpointInfo, types::Hashi, Option<route::MirrorSeed>)> {
+    let started = std::time::Instant::now();
+    if let Some(metrics) = metrics {
+        metrics.scrape_in_progress.set(1);
+    }
+    let _in_progress = ScrapeInProgressReset(metrics);
+    tracing::info!(?scope, "Scraping on-chain state");
     let response = client
         .ledger_client()
         .get_object(
@@ -1516,12 +1575,12 @@ async fn scrape_hashi(
         tob_seed,
         bitcoin,
     ) = tokio::try_join!(
-        scrape_all_member_info(client.clone(), committees.members.id),
-        scrape_committees(client.clone(), committees.committees.id),
-        scrape_treasury(client.clone(), treasury),
-        scrape_proposals(client.clone(), proposals),
-        scrape_tob_entries(client.clone(), tob.id),
-        scrape_bitcoin_collections(client.clone(), bitcoin_state),
+        scrape_all_member_info(client.clone(), committees.members.id, metrics),
+        scrape_committees(client.clone(), committees.committees.id, metrics),
+        scrape_treasury(client.clone(), treasury, metrics),
+        scrape_proposals(client.clone(), proposals, metrics),
+        scrape_tob_entries(client.clone(), tob.id, metrics),
+        scrape_bitcoin_collections(client.clone(), bitcoin_state, metrics),
     )?;
     for container_seed in [
         member_seed,
@@ -1556,6 +1615,17 @@ async fn scrape_hashi(
         .set_raw_committees(raw_committees_per_epoch)
         .set_committee_handoffs(committee_handoffs);
 
+    if let Some(metrics) = metrics {
+        metrics
+            .scrape_duration_ms
+            .set(started.elapsed().as_millis() as i64);
+    }
+    tracing::info!(
+        ?scope,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "On-chain state scrape complete"
+    );
+
     Ok((
         checkpoint_info,
         types::Hashi {
@@ -1575,13 +1645,18 @@ async fn scrape_hashi(
 /// Enumerate the tob bag's entries only to register each entry's inner
 /// `LinkedTable` UID (its children are dealer submission nodes) as a
 /// known-ignored container, and to seed the entry field ids.
-async fn scrape_tob_entries(client: Client, tob_id: Address) -> Result<route::ContainerSeed> {
+async fn scrape_tob_entries(
+    client: Client,
+    tob_id: Address,
+    metrics: Option<&crate::metrics::Metrics>,
+) -> Result<route::ContainerSeed> {
     let mask = FieldMask::from_paths([
         DynamicField::path_builder().field_id(),
         DynamicField::path_builder().value().finish(),
         DynamicField::path_builder().field_object().version(),
     ]);
-    let (height, fields) = scrape_dynamic_field_pages(&client, tob_id, mask).await?;
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics).await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -1607,6 +1682,7 @@ async fn scrape_tob_entries(client: Client, tob_id: Address) -> Result<route::Co
 async fn scrape_bitcoin_collections(
     client: Client,
     bitcoin_state: Option<move_types::BitcoinState>,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<Option<(route::ContainerSeed, types::BitcoinCollections)>> {
     let Some(bitcoin_state) = bitcoin_state else {
         return Ok(None);
@@ -1614,9 +1690,9 @@ async fn scrape_bitcoin_collections(
 
     let ((mut seed, deposit_queue), (withdrawal_seed, withdrawal_queue), (utxo_seed, utxo_pool)) =
         tokio::try_join!(
-            scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue),
-            scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
-            scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
+            scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue, metrics),
+            scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue, metrics),
+            scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool, metrics),
         )?;
     seed.merge(withdrawal_seed);
     seed.merge(utxo_seed);
@@ -1645,6 +1721,7 @@ fn convert_move_config(
 async fn scrape_treasury(
     client: Client,
     treasury: move_types::Treasury,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, types::Treasury)> {
     let container = treasury.objects.id;
     let mask = FieldMask::from_paths([
@@ -1659,7 +1736,8 @@ async fn scrape_treasury(
             .contents()
             .finish(),
     ]);
-    let (height, fields) = scrape_dynamic_field_pages(&client, container, mask).await?;
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, container, mask, "treasury", metrics).await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -1748,6 +1826,7 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
 async fn scrape_all_member_info(
     client: Client,
     member_info_id: Address,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, BTreeMap<Address, types::MemberInfo>)> {
     let mask = FieldMask::from_paths([
         DynamicField::path_builder().name().finish(),
@@ -1755,7 +1834,8 @@ async fn scrape_all_member_info(
         DynamicField::path_builder().field_id(),
         DynamicField::path_builder().field_object().version(),
     ]);
-    let (height, fields) = scrape_dynamic_field_pages(&client, member_info_id, mask).await?;
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, member_info_id, mask, "members", metrics).await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -1814,6 +1894,7 @@ pub(crate) async fn scrape_member_info(
 async fn scrape_committees(
     client: Client,
     committees_id: Address,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(
     route::ContainerSeed,
     (
@@ -1829,7 +1910,8 @@ async fn scrape_committees(
         DynamicField::path_builder().field_id(),
         DynamicField::path_builder().field_object().version(),
     ]);
-    let (height, fields) = scrape_dynamic_field_pages(&client, committees_id, mask).await?;
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, committees_id, mask, "committees", metrics).await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -1968,6 +2050,8 @@ async fn scrape_object_bag<T, F>(
     client: &Client,
     container: Address,
     kind_of: F,
+    label: &'static str,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, Vec<T>)>
 where
     T: serde::de::DeserializeOwned,
@@ -1984,7 +2068,8 @@ where
             .contents()
             .finish(),
     ]);
-    let (height, fields) = scrape_dynamic_field_pages(client, container, mask).await?;
+    let (height, fields) =
+        scrape_dynamic_field_pages(client, container, mask, label, metrics).await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -2013,13 +2098,17 @@ where
 async fn scrape_deposit_requests(
     client: Client,
     deposit_queue: move_types::DepositRequestQueue,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, types::DepositRequestQueue)> {
     let deposit_queue_id = deposit_queue.requests.id;
-    let (seed, values) =
-        scrape_object_bag::<types::DepositRequest, _>(&client, deposit_queue_id, |request| {
-            route::TrackedKind::DepositRequest(request.id)
-        })
-        .await?;
+    let (seed, values) = scrape_object_bag::<types::DepositRequest, _>(
+        &client,
+        deposit_queue_id,
+        |request| route::TrackedKind::DepositRequest(request.id),
+        "deposit_requests",
+        metrics,
+    )
+    .await?;
     Ok((
         seed,
         types::DepositRequestQueue {
@@ -2033,17 +2122,22 @@ async fn scrape_deposit_requests(
 async fn scrape_withdrawal_queue(
     client: Client,
     withdrawal_queue: move_types::WithdrawalRequestQueue,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, types::WithdrawalRequestQueue)> {
     let ((mut requests_seed, requests), (txns_seed, withdrawal_txns)) = tokio::try_join!(
         scrape_object_bag::<types::WithdrawalRequest, _>(
             &client,
             withdrawal_queue.requests.id,
             |request| route::TrackedKind::WithdrawalRequest(request.id),
+            "withdrawal_requests",
+            metrics,
         ),
         scrape_object_bag::<types::WithdrawalTransaction, _>(
             &client,
             withdrawal_queue.withdrawal_txns.id,
             |txn| route::TrackedKind::WithdrawalTxn(txn.id),
+            "withdrawal_txns",
+            metrics,
         ),
     )?;
     requests_seed.merge(txns_seed);
@@ -2064,10 +2158,11 @@ async fn scrape_withdrawal_queue(
 async fn scrape_utxo_pool(
     client: Client,
     utxo_pool: move_types::UtxoPool,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, types::UtxoPool)> {
     let ((mut records_seed, utxo_records), (spent_seed, spent_utxos)) = tokio::try_join!(
-        scrape_utxo_records(client.clone(), utxo_pool.utxo_records.id),
-        scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id),
+        scrape_utxo_records(client.clone(), utxo_pool.utxo_records.id, metrics),
+        scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id, metrics),
     )?;
     records_seed.merge(spent_seed);
 
@@ -2094,12 +2189,19 @@ fn plain_field_mask() -> FieldMask {
 async fn scrape_utxo_records(
     client: Client,
     utxo_records_id: Address,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(
     route::ContainerSeed,
     BTreeMap<types::UtxoId, types::UtxoRecord>,
 )> {
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, utxo_records_id, plain_field_mask()).await?;
+    let (height, fields) = scrape_dynamic_field_pages(
+        &client,
+        utxo_records_id,
+        plain_field_mask(),
+        "utxo_records",
+        metrics,
+    )
+    .await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -2124,9 +2226,16 @@ async fn scrape_utxo_records(
 async fn scrape_spent_utxos(
     client: Client,
     spent_utxos_id: Address,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, BTreeMap<types::UtxoId, u64>)> {
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, spent_utxos_id, plain_field_mask()).await?;
+    let (height, fields) = scrape_dynamic_field_pages(
+        &client,
+        spent_utxos_id,
+        plain_field_mask(),
+        "spent_utxos",
+        metrics,
+    )
+    .await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()
@@ -2155,12 +2264,13 @@ async fn scrape_spent_utxos(
 async fn scrape_proposals(
     client: Client,
     proposals: move_types::Proposals,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, types::Proposals)> {
     let active_id = proposals.active.id;
     let executed_id = proposals.executed.id;
     let ((mut active_seed, active), (executed_seed, executed)) = tokio::try_join!(
-        scrape_proposal_bag(client.clone(), proposals.active, false),
-        scrape_proposal_bag(client, proposals.executed, true),
+        scrape_proposal_bag(client.clone(), proposals.active, false, metrics),
+        scrape_proposal_bag(client, proposals.executed, true, metrics),
     )?;
     active_seed.merge(executed_seed);
     Ok((
@@ -2178,6 +2288,7 @@ async fn scrape_proposal_bag(
     client: Client,
     bag: move_types::ObjectBag,
     executed: bool,
+    metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, BTreeMap<Address, types::Proposal>)> {
     // Proposals live in a `0x2::object_bag::ObjectBag`, so each entry's
     // payload is a standalone child object. Read `child_object` directly —
@@ -2195,7 +2306,13 @@ async fn scrape_proposal_bag(
             .contents()
             .finish(),
     ]);
-    let (height, fields) = scrape_dynamic_field_pages(&client, bag.id, mask).await?;
+    let label = if executed {
+        "proposals_executed"
+    } else {
+        "proposals_active"
+    };
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, bag.id, mask, label, metrics).await?;
     let mut seed = route::ContainerSeed {
         height,
         ..Default::default()

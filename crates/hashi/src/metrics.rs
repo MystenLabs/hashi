@@ -64,6 +64,13 @@ pub struct Metrics {
     pub watcher_state_watermark: IntGauge,
     pub watcher_rebootstrap_total: IntCounter,
 
+    // Onchain boot-scrape metrics
+    pub scrape_in_progress: IntGauge,
+    pub scrape_pages_total: IntCounterVec,
+    pub scrape_entries_total: IntCounterVec,
+    pub scrape_container_duration_ms: IntGaugeVec,
+    pub scrape_duration_ms: IntGauge,
+
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
     pub kyoto_synced: IntGauge,
@@ -614,6 +621,41 @@ impl Metrics {
             kyoto_sync_percent: register_int_gauge_with_registry!(
                 "hashi_kyoto_sync_percent",
                 "Compact block filter sync progress (0-100)",
+                registry,
+            )
+            .unwrap(),
+
+            // Onchain boot-scrape metrics
+            scrape_in_progress: register_int_gauge_with_registry!(
+                "hashi_onchain_scrape_in_progress",
+                "Whether a full on-chain state scrape is currently running (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            scrape_pages_total: register_int_counter_vec_with_registry!(
+                "hashi_onchain_scrape_pages_total",
+                "Dynamic-field pages fetched by the on-chain state scrape, by container",
+                &["container"],
+                registry,
+            )
+            .unwrap(),
+            scrape_entries_total: register_int_counter_vec_with_registry!(
+                "hashi_onchain_scrape_entries_total",
+                "Dynamic-field entries fetched by the on-chain state scrape, by container",
+                &["container"],
+                registry,
+            )
+            .unwrap(),
+            scrape_container_duration_ms: register_int_gauge_vec_with_registry!(
+                "hashi_onchain_scrape_container_duration_ms",
+                "Wall-clock time of the last completed scrape walk, by container",
+                &["container"],
+                registry,
+            )
+            .unwrap(),
+            scrape_duration_ms: register_int_gauge_with_registry!(
+                "hashi_onchain_scrape_duration_ms",
+                "Wall-clock time of the last completed full on-chain scrape",
                 registry,
             )
             .unwrap(),

@@ -162,6 +162,7 @@ async fn ensure_bootstrapped(
         state.hashi_id(),
         state.package_id_original(),
         super::ScrapeScope::Full,
+        state.metrics().map(|m| m.as_ref()),
     )
     .await?;
     let seed = seed.context("a full scrape must produce a mirror seed")?;
