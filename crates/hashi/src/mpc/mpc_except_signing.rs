@@ -1026,6 +1026,10 @@ impl MpcManager {
             mgr.mpc_config.nonce_generation_protocol
         };
         if certified_reduced_weight < required_reduced_weight {
+            let own_reduced_weight = {
+                let mgr = mpc_manager.read().unwrap();
+                mgr.mpc_config.nodes.weight_of(mgr.party_id).ok()
+            };
             let dealer_result = match protocol {
                 NonceGenerationProtocol::Vanilla => {
                     Self::run_as_nonce_dealer(
@@ -1036,6 +1040,13 @@ impl MpcManager {
                         metrics,
                     )
                     .await
+                }
+                NonceGenerationProtocol::Avid if own_reduced_weight == Some(0) => {
+                    tracing::debug!(
+                        "Skipping AVID nonce dealing for batch {batch_index}: this node has zero \
+                         reduced weight"
+                    );
+                    Ok(())
                 }
                 NonceGenerationProtocol::Avid => {
                     Self::run_as_avid_nonce_dealer(
