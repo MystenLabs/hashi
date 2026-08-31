@@ -1989,6 +1989,33 @@ pub struct SignedSetupNewKeyResponse {
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub signature: ::core::option::Option<::prost::bytes::Bytes>,
 }
+/// One KP's signed confirmation of the exact ceremony state.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignedCeremonyConfirmationRequest {
+    /// Guardian session the KP authenticated before confirming.
+    #[prost(string, tag = "1")]
+    pub expected_session_id: ::prost::alloc::string::String,
+    /// Blake2b-256 digest of the BCS-encoded CeremonyState.
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub ceremony_digest: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Complete detached-signature envelope.
+    #[prost(string, tag = "3")]
+    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub kp_signature: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CeremonyConfirmationResponse {
+    /// Number of distinct assigned shares that have confirmed.
+    #[prost(uint32, optional, tag = "1")]
+    pub have: ::core::option::Option<u32>,
+    /// Total number of assigned shares required for completion.
+    #[prost(uint32, optional, tag = "2")]
+    pub need: ::core::option::Option<u32>,
+    /// True exactly when `have == need`.
+    #[prost(bool, optional, tag = "3")]
+    pub completed: ::core::option::Option<bool>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperatorInitRequest {
     #[prost(oneof = "operator_init_request::Request", tags = "1, 2")]
@@ -2325,7 +2352,8 @@ pub enum CeremonyStage {
     Unspecified = 0,
     Uninitialized = 1,
     OperatorInitialized = 2,
-    Completed = 3,
+    AwaitingKeyProvisioners = 3,
+    Completed = 4,
 }
 impl CeremonyStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2337,6 +2365,7 @@ impl CeremonyStage {
             Self::Unspecified => "CEREMONY_STAGE_UNSPECIFIED",
             Self::Uninitialized => "CEREMONY_STAGE_UNINITIALIZED",
             Self::OperatorInitialized => "CEREMONY_STAGE_OPERATOR_INITIALIZED",
+            Self::AwaitingKeyProvisioners => "CEREMONY_STAGE_AWAITING_KEY_PROVISIONERS",
             Self::Completed => "CEREMONY_STAGE_COMPLETED",
         }
     }
@@ -2346,6 +2375,9 @@ impl CeremonyStage {
             "CEREMONY_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
             "CEREMONY_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
             "CEREMONY_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
+            "CEREMONY_STAGE_AWAITING_KEY_PROVISIONERS" => {
+                Some(Self::AwaitingKeyProvisioners)
+            }
             "CEREMONY_STAGE_COMPLETED" => Some(Self::Completed),
             _ => None,
         }
@@ -2600,10 +2632,43 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Ceremony mode only: accept one KP's signed confirmation of the complete
+        /// ceremony state. The ceremony completes only after every assigned KP confirms.
+        pub async fn confirm_ceremony(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignedCeremonyConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CeremonyConfirmationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/ConfirmCeremony",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "ConfirmCeremony",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Ceremony mode only: rotate the KP set holding the existing BTC key. The
         /// operator relays threshold-many current-KP-signed contributions; the enclave
         /// verifies them, reconstructs the BTC key, re-splits it for the new KP set,
-        /// writes the new share state to ceremony/, and returns the encrypted shares.
+        /// and returns the encrypted shares. Returning does not complete the rotation:
+        /// keep this enclave running until every new KP confirms and its lifecycle is
+        /// CEREMONY_STAGE_COMPLETED.
         pub async fn rotate_kp_set(
             &mut self,
             request: impl tonic::IntoRequest<super::BatchProvisionerRotateKpSetRequest>,
@@ -2868,10 +2933,21 @@ pub mod guardian_service_server {
             tonic::Response<super::SignedSetupNewKeyResponse>,
             tonic::Status,
         >;
+        /// Ceremony mode only: accept one KP's signed confirmation of the complete
+        /// ceremony state. The ceremony completes only after every assigned KP confirms.
+        async fn confirm_ceremony(
+            &self,
+            request: tonic::Request<super::SignedCeremonyConfirmationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CeremonyConfirmationResponse>,
+            tonic::Status,
+        >;
         /// Ceremony mode only: rotate the KP set holding the existing BTC key. The
         /// operator relays threshold-many current-KP-signed contributions; the enclave
         /// verifies them, reconstructs the BTC key, re-splits it for the new KP set,
-        /// writes the new share state to ceremony/, and returns the encrypted shares.
+        /// and returns the encrypted shares. Returning does not complete the rotation:
+        /// keep this enclave running until every new KP confirms and its lifecycle is
+        /// CEREMONY_STAGE_COMPLETED.
         async fn rotate_kp_set(
             &self,
             request: tonic::Request<super::BatchProvisionerRotateKpSetRequest>,
@@ -3088,6 +3164,55 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SetupNewKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/ConfirmCeremony" => {
+                    #[allow(non_camel_case_types)]
+                    struct ConfirmCeremonySvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<
+                        super::SignedCeremonyConfirmationRequest,
+                    > for ConfirmCeremonySvc<T> {
+                        type Response = super::CeremonyConfirmationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignedCeremonyConfirmationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::confirm_ceremony(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ConfirmCeremonySvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

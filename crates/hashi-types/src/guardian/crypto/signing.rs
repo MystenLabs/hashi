@@ -8,6 +8,7 @@
 //! Both serialize a payload together with its signing intent so a signature for
 //! one payload type cannot be replayed as another.
 
+use crate::guardian::CeremonyConfirmationRequest;
 use crate::guardian::CryptoVerificationError;
 use crate::guardian::CryptoVerificationResult;
 use crate::guardian::GuardianError::InternalError;
@@ -73,6 +74,8 @@ pub enum KpSigningIntentType {
     ProvisionerRotateCertRequest = 1,
     /// Intent for ProvisionerRotateKpSetRequest.
     ProvisionerRotateKpSetRequest = 2,
+    /// Intent for CeremonyConfirmationRequest.
+    CeremonyConfirmationRequest = 3,
 }
 
 /// KP-signed payloads and their intent-based domain separation.
@@ -134,6 +137,10 @@ impl GuardianSigningIntent for GuardianResponse<RotateKpSetResponse> {
 impl GuardianSigningIntent for GuardianResponse<ProvisionerRotateCertResponse> {
     const INTENT: GuardianSigningIntentType =
         GuardianSigningIntentType::ProvisionerRotateCertResponse;
+}
+
+impl KpSigningIntent for CeremonyConfirmationRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::CeremonyConfirmationRequest;
 }
 
 impl KpSigningIntent for ProvisionerInitRequest {

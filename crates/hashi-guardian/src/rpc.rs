@@ -7,6 +7,7 @@ use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
+use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
@@ -106,6 +107,21 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         let resp = proto_conversions::setup_new_key_response_signed_to_pb(signed);
 
         Ok(Response::new(resp))
+    }
+
+    async fn confirm_ceremony(
+        &self,
+        request: Request<proto::SignedCeremonyConfirmationRequest>,
+    ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
+        let domain_req: KpSigned<CeremonyConfirmationRequest> =
+            request.into_inner().try_into().map_err(to_status)?;
+        let response = task_spawner::confirm_ceremony(self.enclave.clone(), domain_req)
+            .await
+            .map_err(to_status)?;
+
+        Ok(Response::new(
+            proto_conversions::ceremony_confirmation_response_to_pb(response),
+        ))
     }
 
     async fn rotate_kp_set(

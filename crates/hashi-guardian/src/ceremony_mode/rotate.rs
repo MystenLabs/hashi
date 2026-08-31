@@ -26,7 +26,8 @@ struct VerifiedRotationProposal {
 }
 
 /// Verify the current KPs' signed rotation submissions, reconstruct the BTC key,
-/// re-split it to the new KP set, and return the new encrypted shares.
+/// and re-split it to the new KP set. Returning the encrypted shares leaves this
+/// enclave awaiting confirmation from every new KP.
 pub async fn rotate_kp_set(
     enclave: Arc<Enclave>,
     request: BatchProvisionerRotateKpSetRequest,
@@ -77,8 +78,8 @@ async fn complete_rotation(
     )
     .await?;
     enclave
-        .advance_lifecycle_into(CeremonyStage::Completed.into())
-        .expect("rotate_kp_set should complete a ceremony lifecycle");
+        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisioners.into())
+        .expect("rotate_kp_set should await new key provisioner confirmations");
     Ok(response)
 }
 
@@ -231,19 +232,24 @@ async fn finalize_rotation(
         .log_kp_share_state(new_sharing_seq, 0, encrypted_shares.clone())
         .await?;
 
-    enclave
-        .log_ceremony(CeremonyLogMessage::Rotate {
-            old_instance: old_instance.clone(),
-            new_instance: new_instance.clone(),
-            btc_master_pubkey,
-        })
-        .await?;
+    let ceremony_log = CeremonyLogMessage::Rotate {
+        old_instance: old_instance.clone(),
+        new_instance: new_instance.clone(),
+        btc_master_pubkey,
+    };
+    enclave.log_ceremony(ceremony_log.clone()).await?;
 
-    info!("Rotation complete.");
-    Ok(enclave.sign(RotateKpSetResponse {
+    info!("Rotation complete; awaiting every new key provisioner's confirmation.");
+    let response = RotateKpSetResponse {
         encrypted_shares,
         new_instance,
-    }))
+    };
+    let pending_state = CeremonyState::new(
+        ceremony_log,
+        KpShareStateLogMessage::new(new_sharing_seq, 0, response.encrypted_shares.clone()),
+    )?;
+    enclave.install_pending_ceremony(pending_state)?;
+    Ok(enclave.sign(response))
 }
 
 #[cfg(test)]
@@ -553,6 +559,10 @@ mod tests {
         let req = ctx.request(&ctx.shares[..TEST_T], roster, TEST_T).unwrap();
         let response = rotate_and_verify(&ctx, req).await;
         assert_rotation_output(&ctx.captures, &response, &secret_keys, TEST_N, TEST_T);
+        assert_eq!(
+            ctx.enclave.lifecycle(),
+            CeremonyStage::AwaitingKeyProvisioners.into()
+        );
     }
 
     #[tokio::test]
@@ -566,10 +576,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_second_call_after_complete() {
+    async fn rejects_second_call_while_awaiting_confirmations() {
         let ctx = setup_rotation_enclave().await;
 
-        // First call reaches threshold and finalizes.
+        // First call reaches threshold, re-splits, and awaits the new KPs.
         let req = ctx
             .request(&ctx.shares[..TEST_T], mock_kp_certs_roster(TEST_N), TEST_T)
             .unwrap();

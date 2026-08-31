@@ -123,6 +123,13 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         Err(denied("SetupNewKey"))
     }
 
+    async fn confirm_ceremony(
+        &self,
+        _request: Request<proto::SignedCeremonyConfirmationRequest>,
+    ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
+        Err(denied("ConfirmCeremony"))
+    }
+
     async fn provisioner_init(
         &self,
         _request: Request<proto::BatchProvisionerInitRequest>,
@@ -199,6 +206,12 @@ mod tests {
             &self,
             _: Request<proto::SetupNewKeyRequest>,
         ) -> Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
+            unimplemented!("a real guardian would serve this; the proxy must never reach it")
+        }
+        async fn confirm_ceremony(
+            &self,
+            _: Request<proto::SignedCeremonyConfirmationRequest>,
+        ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
         async fn operator_init(
@@ -344,6 +357,14 @@ mod tests {
             .setup_new_key(Request::new(proto::SetupNewKeyRequest::default()))
             .await
             .expect_err("setup_new_key must be denied");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let denied = proxy
+            .confirm_ceremony(Request::new(
+                proto::SignedCeremonyConfirmationRequest::default(),
+            ))
+            .await
+            .expect_err("confirm_ceremony must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy

@@ -8,6 +8,8 @@
 use super::BatchProvisionerInitRequest;
 use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
+use super::CeremonyConfirmationRequest;
+use super::CeremonyConfirmationResponse;
 use super::CeremonyOperatorInitRequest;
 use super::CeremonyStage;
 use super::Ciphertext;
@@ -313,6 +315,51 @@ impl TryFrom<pb::SignedProvisionerInitRequest> for KpSigned<ProvisionerInitReque
             encrypted_share,
         );
         Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
+    }
+}
+impl TryFrom<pb::SignedCeremonyConfirmationRequest> for KpSigned<CeremonyConfirmationRequest> {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::SignedCeremonyConfirmationRequest) -> Result<Self, Self::Error> {
+        if req.expected_session_id.is_empty() {
+            return Err(missing("expected_session_id"));
+        }
+        if req.signer_cert.is_empty() {
+            return Err(missing("signer_cert"));
+        }
+        if req.kp_signature.is_empty() {
+            return Err(missing("kp_signature"));
+        }
+        let ceremony_digest = req
+            .ceremony_digest
+            .ok_or_else(|| missing("ceremony_digest"))?;
+        let ceremony_digest = <[u8; 32]>::try_from(ceremony_digest.as_ref())
+            .map_err(|_| InvalidInputs("ceremony_digest must be 32 bytes".into()))?;
+        let signer_cert =
+            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
+        let request =
+            CeremonyConfirmationRequest::new(req.expected_session_id.into(), ceremony_digest);
+        Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
+    }
+}
+
+impl TryFrom<pb::CeremonyConfirmationResponse> for CeremonyConfirmationResponse {
+    type Error = GuardianError;
+
+    fn try_from(response: pb::CeremonyConfirmationResponse) -> Result<Self, Self::Error> {
+        let have = response.have.ok_or_else(|| missing("have"))?;
+        let need = response.need.ok_or_else(|| missing("need"))?;
+        let completed = response.completed.ok_or_else(|| missing("completed"))?;
+        if completed != (have == need) {
+            return Err(InvalidInputs(
+                "completed must equal whether have equals need".into(),
+            ));
+        }
+        Ok(Self {
+            have,
+            need,
+            completed,
+        })
     }
 }
 
@@ -774,6 +821,34 @@ impl From<KpSigned<ProvisionerInitRequest>> for pb::SignedProvisionerInitRequest
         }
     }
 }
+pub fn signed_ceremony_confirmation_request_to_pb(
+    request: KpSigned<CeremonyConfirmationRequest>,
+) -> pb::SignedCeremonyConfirmationRequest {
+    request.into()
+}
+
+impl From<KpSigned<CeremonyConfirmationRequest>> for pb::SignedCeremonyConfirmationRequest {
+    fn from(signed: KpSigned<CeremonyConfirmationRequest>) -> Self {
+        let (request, signer_cert, kp_signature) = signed.into_parts();
+        let (expected_session_id, ceremony_digest) = request.into_parts();
+        Self {
+            expected_session_id: expected_session_id.into(),
+            ceremony_digest: Some(ceremony_digest.to_vec().into()),
+            signer_cert: signer_cert.armored().to_string(),
+            kp_signature,
+        }
+    }
+}
+
+pub fn ceremony_confirmation_response_to_pb(
+    response: CeremonyConfirmationResponse,
+) -> pb::CeremonyConfirmationResponse {
+    pb::CeremonyConfirmationResponse {
+        have: Some(response.have),
+        need: Some(response.need),
+        completed: Some(response.completed),
+    }
+}
 
 impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotateCertRequest {
     fn from(r: KpSigned<ProvisionerRotateCertRequest>) -> Self {
@@ -996,6 +1071,7 @@ impl TryFrom<i32> for CeremonyStage {
         match pb::CeremonyStage::try_from(stage) {
             Ok(pb::CeremonyStage::Uninitialized) => Ok(Self::Uninitialized),
             Ok(pb::CeremonyStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
+            Ok(pb::CeremonyStage::AwaitingKeyProvisioners) => Ok(Self::AwaitingKeyProvisioners),
             Ok(pb::CeremonyStage::Completed) => Ok(Self::Completed),
             Ok(pb::CeremonyStage::Unspecified) | Err(_) => {
                 Err(InvalidInputs(format!("invalid ceremony stage: {stage}")))
@@ -1008,6 +1084,7 @@ fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
     match stage {
         CeremonyStage::Uninitialized => pb::CeremonyStage::Uninitialized as i32,
         CeremonyStage::OperatorInitialized => pb::CeremonyStage::OperatorInitialized as i32,
+        CeremonyStage::AwaitingKeyProvisioners => pb::CeremonyStage::AwaitingKeyProvisioners as i32,
         CeremonyStage::Completed => pb::CeremonyStage::Completed as i32,
     }
 }
@@ -1842,6 +1919,35 @@ mod tests {
         let pb = batch_provisioner_rotate_kp_set_request_to_pb(req.clone());
         let back = BatchProvisionerRotateKpSetRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn signed_ceremony_confirmation_request_round_trip_and_verifies() {
+        use crate::pgp::test_utils::mock_pgp_keypair;
+        use crate::pgp::test_utils::sign_detached_in_process;
+
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let request = CeremonyConfirmationRequest::new("session-a".into(), [9; 32]);
+        let signature =
+            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
+        let signed = KpSigned::from_parts(request, cert, signature);
+
+        let pb = signed_ceremony_confirmation_request_to_pb(signed);
+        let round_trip = KpSigned::<CeremonyConfirmationRequest>::try_from(pb).unwrap();
+        let request = round_trip.verify_signature().unwrap();
+        assert_eq!(request.expected_session_id().as_str(), "session-a");
+        assert_eq!(request.ceremony_digest(), &[9; 32]);
+    }
+
+    #[test]
+    fn ceremony_confirmation_response_round_trip() {
+        let response = CeremonyConfirmationResponse::new(3, 3).unwrap();
+        let pb = ceremony_confirmation_response_to_pb(response);
+        assert_eq!(
+            CeremonyConfirmationResponse::try_from(pb).unwrap(),
+            response
+        );
     }
 
     #[test]

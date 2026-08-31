@@ -5,5 +5,6 @@
 //! (`setup_new_key`) and rotation (`rotate_kp_set`). The shared `operator_init`
 //! and `get_guardian_info` live at the crate root.
 
+pub mod confirm;
 pub mod rotate;
 pub mod setup;

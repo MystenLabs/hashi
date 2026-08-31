@@ -11,6 +11,9 @@ use crate::guardian::GuardianResult;
 use crate::guardian::KPEncryptedSharesRoster;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::SetupNewKeyResponse;
+use blake2::Blake2b;
+use blake2::Digest;
+use blake2::digest::consts::U32;
 use serde::Serialize;
 
 /// The current ceremony result together with its latest encrypted KP share state.
@@ -23,6 +26,12 @@ pub struct CeremonyState {
 }
 
 impl CeremonyState {
+    /// Blake2b-256 digest of the canonical BCS ceremony state.
+    pub fn digest(&self) -> [u8; 32] {
+        let bytes = bcs::to_bytes(self).expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
+    }
+
     /// Combine a ceremony log message with the KP share-state message for its
     /// resulting secret-sharing instance.
     pub fn new(

@@ -299,6 +299,68 @@ pub struct SetupNewKeyResponse {
     /// The Guardian BTC pubkey.
     pub btc_master_pubkey: BitcoinPubkey,
 }
+/// One KP's signed confirmation that it independently verified the complete
+/// ceremony state for a specific guardian session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CeremonyConfirmationRequest {
+    expected_session_id: SessionID,
+    #[serde(with = "hex::serde")]
+    ceremony_digest: [u8; 32],
+}
+
+/// Progress returned after accepting one ceremony confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CeremonyConfirmationResponse {
+    pub have: u32,
+    pub need: u32,
+    pub completed: bool,
+}
+
+impl CeremonyConfirmationRequest {
+    pub fn new(expected_session_id: SessionID, ceremony_digest: [u8; 32]) -> Self {
+        Self {
+            expected_session_id,
+            ceremony_digest,
+        }
+    }
+
+    pub fn expected_session_id(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+
+    pub fn ceremony_digest(&self) -> &[u8; 32] {
+        &self.ceremony_digest
+    }
+
+    pub fn into_parts(self) -> (SessionID, [u8; 32]) {
+        (self.expected_session_id, self.ceremony_digest)
+    }
+}
+
+impl SessionBoundRequest for CeremonyConfirmationRequest {
+    const REQUEST_CONTEXT: &'static str = "ceremony confirmation";
+
+    fn expected_session(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+}
+
+impl CeremonyConfirmationResponse {
+    pub fn new(have: usize, need: usize) -> GuardianResult<Self> {
+        let have = u32::try_from(have)
+            .map_err(|_| InvalidInputs(format!("confirmation count {have} exceeds u32::MAX")))?;
+        let need = u32::try_from(need).map_err(|_| {
+            InvalidInputs(format!(
+                "required confirmation count {need} exceeds u32::MAX"
+            ))
+        })?;
+        Ok(Self {
+            have,
+            need,
+            completed: have == need,
+        })
+    }
+}
 
 /// A batch of current-KP-authorized requests to rotate the KP set.
 #[derive(Debug, Clone, PartialEq)]

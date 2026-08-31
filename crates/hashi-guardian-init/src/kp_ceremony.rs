@@ -1,25 +1,33 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `key-provisioner ceremony` verifies and decrypts this KP's ceremony share.
+//! `key-provisioner ceremony` verifies, decrypts, saves, and confirms this KP's ceremony share.
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::guardian::CeremonyConfirmationRequest;
+use hashi_types::guardian::CeremonyConfirmationResponse;
+use hashi_types::guardian::CeremonyStage;
+use hashi_types::guardian::KpSigned;
+use hashi_types::guardian::proto_conversions::signed_ceremony_confirmation_request_to_pb;
+use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use std::path::Path;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::decrypt_kp_share_copies;
 use crate::kp_roster::load_kp_cert;
 
-/// Verify this KP can fetch and decrypt its ceremony share.
+/// Verify this KP can fetch and decrypt its ceremony share, then submit a
+/// signed confirmation to the live ceremony guardian.
 ///
-/// Trust is anchored entirely to the guardian's S3 attestation log: the
-/// `GuardianReader` resolves the session's attested signing pubkey through the
-/// reader cache, and both the `ceremony/` audit entry and `kp-shares/` recovery
-/// entry are verified under it. Each step is logged.
+/// The share state is anchored to the guardian's S3 attestation log. The live
+/// confirmation endpoint is independently attestation-verified and
+/// authoritatively matches the signed ceremony digest against its pending state.
 ///
 /// Security: the ceremony state containing the encrypted shares is saved to the
 /// requested path. Each ciphertext is piped into `gpg --decrypt` over stdin and
@@ -159,6 +167,45 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         share_count = state.encrypted_shares.share_count(),
         ciphertext_count = state.encrypted_shares.ciphertext_count(),
         "saved ceremony state with encrypted shares",
+    );
+
+    // 5. Submit a signed confirmation only after the verified recovery artifact
+    //    is safely stored locally.
+    info!(
+        phase = "confirmation",
+        endpoint = %cfg.guardian_endpoint,
+        "connecting to live ceremony guardian",
+    );
+    let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
+        .await
+        .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
+    let verified =
+        verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
+            .await?;
+    ensure!(
+        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisioners.into()
+            || verified.info.lifecycle == CeremonyStage::Completed.into(),
+        "guardian is not accepting key provisioner ceremony confirmations"
+    );
+    let confirmation = CeremonyConfirmationRequest::new(verified.session_id, state.digest());
+    let signed = KpSigned::sign(confirmation, kp_cert, None)
+        .map_err(anyhow::Error::msg)
+        .context("sign ceremony confirmation with the KP key")?;
+    let status = CeremonyConfirmationResponse::try_from(
+        client
+            .confirm_ceremony(signed_ceremony_confirmation_request_to_pb(signed))
+            .await
+            .context("ConfirmCeremony RPC failed")?
+            .into_inner(),
+    )
+    .map_err(|error| anyhow!("decode CeremonyConfirmationResponse: {error:?}"))?;
+    info!(
+        phase = "confirmation",
+        share_id = share_id.get(),
+        have = status.have,
+        need = status.need,
+        completed = status.completed,
+        "ceremony confirmation progress",
     );
 
     info!(
