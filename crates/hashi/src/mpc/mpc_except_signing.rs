@@ -1232,12 +1232,16 @@ impl MpcManager {
     pub(crate) fn avid_admitted_nonce_dealers(
         &self,
         certs: &VerifiedNonceCerts<CertificateV1>,
+        settled_cutoff_ms: Option<u64>,
     ) -> AdmittedNonceDealers {
-        let (_, window) = self.certified_nonce_dealers_in_window(
-            certs,
-            self.nonce_collection_window(),
-            self.avid_admission(),
-        );
+        let window = match settled_cutoff_ms {
+            Some(cutoff_ms) => {
+                NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), Some(cutoff_ms))
+            }
+            None => self.nonce_collection_window(),
+        };
+        let (_, window) =
+            self.certified_nonce_dealers_in_window(certs, window, self.avid_admission());
         AdmittedNonceDealers {
             weight: window.weight(),
             cutoff_ms: window.cutoff_ms(),

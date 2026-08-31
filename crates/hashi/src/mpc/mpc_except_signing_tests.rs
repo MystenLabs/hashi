@@ -15172,9 +15172,12 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
 
     assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), Some(1_800));
 
-    let admitted = mgr.avid_admitted_nonce_dealers(&certs);
+    let admitted = mgr.avid_admitted_nonce_dealers(&certs, None);
     assert_eq!(admitted.cutoff_ms, Some(2_000));
     assert_eq!(admitted.weight, mgr.required_nonce_weight());
+
+    let settled = mgr.avid_admitted_nonce_dealers(&certs, Some(1_800));
+    assert_eq!(settled.cutoff_ms, Some(1_800));
 }
 
 #[test]
