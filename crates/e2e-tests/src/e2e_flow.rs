@@ -28,6 +28,8 @@ mod tests {
     use crate::TestNetworksBuilder;
 
     use crate::test_helpers::BackgroundMiner;
+    use crate::test_helpers::assert_no_unrouted_objects;
+    use crate::test_helpers::assert_tob_mirror_parity;
     use crate::test_helpers::create_deposit_and_wait;
     use crate::test_helpers::extract_witness_program;
     use crate::test_helpers::get_hbtc_balance;
@@ -828,6 +830,9 @@ mod tests {
             local_state.last_updated_at,
             guardian_state.last_updated_at,
         );
+
+        assert_no_unrouted_objects(&networks);
+        assert_tob_mirror_parity(&networks).await?;
 
         info!("=== Bitcoin Withdrawal E2E Test Passed ===");
         Ok(())
@@ -2441,6 +2446,7 @@ mod tests {
             0,
             "the mirror re-bootstrapped from a scrape instead of replaying the gap"
         );
+        assert_no_unrouted_objects(&networks);
 
         info!("=== Watcher Kill-and-Reconnect Replay Test Passed ===");
         Ok(())
