@@ -63,12 +63,18 @@ pub(crate) fn tail_logs(files: &[(&str, &Path)]) -> String {
 }
 
 pub struct TestNetworks {
-    #[allow(unused)]
-    dir: TempDir,
     pub sui_network: SuiNetworkHandle,
     pub hashi_network: HashiNetwork,
     pub bitcoin_node: BitcoinNodeHandle,
     pub guardian_harness: Option<guardian_harness::GuardianHarness>,
+    /// The environment directory (node DBs, Sui and Bitcoin data). Declared
+    /// LAST on purpose: fields drop in declaration order, and deleting the
+    /// directory while a node is still running crashes its storage workers,
+    /// which can wedge a queued blocking compaction and hang the test past
+    /// nextest's terminate-after. Every process and node handle above must be
+    /// torn down first (see `HashiNodeHandle`'s `Drop`).
+    #[allow(unused)]
+    dir: TempDir,
 }
 
 impl TestNetworks {
