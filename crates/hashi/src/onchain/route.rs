@@ -39,15 +39,17 @@ pub(super) enum Slot {
     Treasury,
     ProposalsActive,
     ProposalsExecuted,
+    /// The root's `tob` bag: certificate buckets keyed by
+    /// `(epoch, batch_index, protocol_type)`, mirrored per bucket.
+    Tob,
+    /// The `LinkedTable` inside a `tob` bag entry (`EpochCertsV1.certs`);
+    /// its children are the mirrored dealer submission nodes.
+    TobCerts,
     // Known containers that are deliberately not mirrored. Routing an
     // object here is not an error; it just doesn't update the mirror.
     DepositProcessed,
     WithdrawalProcessed,
     ConfirmedTxns,
-    Tob,
-    /// The `LinkedTable` inside a `tob` bag entry (`EpochCertsV1.certs`);
-    /// its children are dealer submission nodes.
-    TobCerts,
     /// The `BitcoinState.user_requests` table of per-user request bags.
     UserRequests,
     /// One per-user `Bag` stored as a `user_requests` value.
@@ -68,6 +70,11 @@ pub(super) struct RoutingTable {
     /// needed to route values. Maintained from wrapper writes/deletes
     /// in the stream and populated wholesale by the scrape.
     wrapper_parents: BTreeMap<Address, Address>,
+    /// TOB bucket `LinkedTable` UID -> the bucket's key, so a dealer
+    /// submission node (owned by the table UID) lands in the right
+    /// bucket. Maintained from bucket writes/deletes in the stream and
+    /// populated wholesale by the scrape.
+    tob_tables: BTreeMap<Address, move_types::TobKey>,
 }
 
 impl RoutingTable {
@@ -77,6 +84,7 @@ impl RoutingTable {
             bitcoin_state_field_id,
             containers: BTreeMap::new(),
             wrapper_parents: BTreeMap::new(),
+            tob_tables: BTreeMap::new(),
         }
     }
 
@@ -135,10 +143,30 @@ impl RoutingTable {
 
     /// Register an interior container discovered while applying a
     /// routed write (e.g. the `LinkedTable` inside a tob entry), so its
-    /// children route to a known-ignored slot instead of tripping the
-    /// unrouted counter.
+    /// children resolve to a slot instead of tripping the unrouted
+    /// counter.
     pub(super) fn register_interior(&mut self, id: Address, slot: Slot) {
         self.containers.insert(id, slot);
+    }
+
+    /// Retire an interior container (e.g. a destroyed tob bucket's
+    /// `LinkedTable`), so the routing table doesn't grow with GC churn.
+    pub(super) fn remove_interior(&mut self, id: &Address) {
+        self.containers.remove(id);
+    }
+
+    pub(super) fn register_tob_table(&mut self, table: Address, key: move_types::TobKey) {
+        self.tob_tables.insert(table, key);
+    }
+
+    pub(super) fn remove_tob_table(&mut self, table: &Address) {
+        self.tob_tables.remove(table);
+    }
+
+    /// The bucket key a dealer submission node belongs to, resolved
+    /// from its owning `LinkedTable` UID.
+    pub(super) fn tob_key_of_table(&self, table: &Address) -> Option<move_types::TobKey> {
+        self.tob_tables.get(table).copied()
     }
 
     pub(super) fn register_wrapper(&mut self, wrapper: Address, container: Address) {
@@ -189,6 +217,13 @@ pub(super) enum TrackedKind {
     Proposal {
         executed: bool,
         id: Address,
+    },
+    /// A TOB bucket Field (`Field<TobKey, EpochCertsV1>`).
+    TobBucket(move_types::TobKey),
+    /// A dealer submission node inside a TOB bucket's `LinkedTable`.
+    TobCert {
+        key: move_types::TobKey,
+        dealer: Address,
     },
     /// Routed to a known-unmirrored slot; tracked only for versioning.
     Ignored,
@@ -276,6 +311,9 @@ impl MirrorSeed {
         for (id, slot) in seed.interior {
             self.routing.register_interior(id, slot);
         }
+        for (table, key) in seed.tob_tables {
+            self.routing.register_tob_table(table, key);
+        }
     }
 }
 
@@ -288,6 +326,8 @@ pub(super) struct ContainerSeed {
     pub entries: Vec<(Address, u64, TrackedKind)>,
     /// Interior containers discovered inside mirrored values.
     pub interior: Vec<(Address, Slot)>,
+    /// TOB bucket `LinkedTable` UIDs and their bucket keys.
+    pub tob_tables: Vec<(Address, move_types::TobKey)>,
 }
 
 impl Default for ContainerSeed {
@@ -298,6 +338,7 @@ impl Default for ContainerSeed {
             height: u64::MAX,
             entries: Vec::new(),
             interior: Vec::new(),
+            tob_tables: Vec::new(),
         }
     }
 }
@@ -307,6 +348,7 @@ impl ContainerSeed {
         self.height = self.height.min(other.height);
         self.entries.extend(other.entries);
         self.interior.extend(other.interior);
+        self.tob_tables.extend(other.tob_tables);
     }
 }
 

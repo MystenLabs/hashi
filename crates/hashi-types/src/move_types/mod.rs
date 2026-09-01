@@ -868,11 +868,40 @@ pub struct UtxoPool {
 }
 
 /// Rust version of the Move hashi::tob::ProtocolType enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde_derive::Deserialize,
+    serde_derive::Serialize,
+)]
 pub enum ProtocolType {
     Dkg,
     KeyRotation,
     NonceGeneration,
+}
+
+/// Rust version of the Move hashi::tob::TobKey type: the key of one
+/// certificate bucket in the root's `tob` bag.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde_derive::Deserialize,
+    serde_derive::Serialize,
+)]
+pub struct TobKey {
+    pub epoch: u64,
+    pub batch_index: Option<u32>,
+    pub protocol_type: ProtocolType,
 }
 
 /// Rust version of the Move struct `hashi::reconfig::ReconfigCompletionMessage`.
@@ -1038,7 +1067,7 @@ impl MoveType for StampedEpochCertsV1 {
 }
 
 /// Rust version of the Move sui::linked_table::LinkedTable type.
-#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct LinkedTable<K> {
     pub id: Address,
     pub size: u64,
@@ -1048,7 +1077,7 @@ pub struct LinkedTable<K> {
 
 /// Rust version of the Move sui::linked_table::Node type.
 /// This is the value stored in each dynamic field entry of a LinkedTable.
-#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct LinkedTableNode<K, V> {
     pub prev: Option<K>,
     pub next: Option<K>,
@@ -1056,7 +1085,7 @@ pub struct LinkedTableNode<K, V> {
 }
 
 /// Rust version of the Move hashi::tob::DealerMessagesHashV1 type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct DealerMessagesHashV1 {
     pub dealer_address: Address,
     pub messages_hash: Vec<u8>,
@@ -1079,17 +1108,27 @@ pub struct CertifiedMessage<T> {
 }
 
 /// Rust version of the Move hashi::tob::DealerSubmissionV1 type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct DealerSubmissionV1 {
     pub message: DealerMessagesHashV1,
     pub signature: CommitteeSignature,
 }
 
+impl MoveType for DealerSubmissionV1 {
+    const MODULE: &'static str = "tob";
+    const NAME: &'static str = "DealerSubmissionV1";
+}
+
 /// Rust version of the Move hashi::tob::StampedDealerSubmissionV1 type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct StampedDealerSubmissionV1 {
     pub submission: DealerSubmissionV1,
     pub timestamp_ms: u64,
+}
+
+impl MoveType for StampedDealerSubmissionV1 {
+    const MODULE: &'static str = "tob";
+    const NAME: &'static str = "StampedDealerSubmissionV1";
 }
 
 #[derive(Debug)]

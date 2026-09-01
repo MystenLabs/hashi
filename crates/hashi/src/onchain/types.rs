@@ -56,7 +56,7 @@ pub struct Hashi {
     /// empty collections so a scope mistake can't read as "no withdrawals".
     pub(super) bitcoin: Option<BitcoinCollections>,
     pub proposals: Proposals,
-    pub tob_id: Address,
+    pub tob: Tob,
     pub num_consumed_presigs: u64,
 }
 
@@ -75,6 +75,73 @@ impl Hashi {
     #[track_caller]
     pub(super) fn bitcoin_mut(&mut self) -> &mut BitcoinCollections {
         self.bitcoin.as_mut().expect(NOT_SCRAPED)
+    }
+}
+
+/// The mirrored TOB certificate store: one bucket per
+/// `(epoch, batch_index, protocol_type)`.
+#[derive(Debug)]
+pub struct Tob {
+    /// Id of the root's `tob` bag.
+    pub id: Address,
+    pub buckets: BTreeMap<move_types::TobKey, TobBucket>,
+}
+
+impl Tob {
+    pub fn id(&self) -> Address {
+        self.id
+    }
+
+    pub fn buckets(&self) -> &BTreeMap<move_types::TobKey, TobBucket> {
+        &self.buckets
+    }
+}
+
+/// One mirrored `EpochCertsV1`/`StampedEpochCertsV1` bucket. The dealer
+/// submissions live in an on-chain `LinkedTable` whose insertion order
+/// is the TOB order, so the mirror keeps each node's links and walks
+/// them on read.
+#[derive(Debug)]
+pub struct TobBucket {
+    /// The bucket's on-chain layout family (bare or stamped), fixed at
+    /// bucket creation. Nodes are stored uniformly in stamped form; a
+    /// bare bucket's submissions carry `timestamp_ms: 0`, which never
+    /// trips a nonce accumulation window's cutoff.
+    pub layout: super::TobCertLayout,
+    /// UID of the bucket's `LinkedTable` — the parent of its dealer
+    /// submission node Fields.
+    pub certs_id: Address,
+    /// The `LinkedTable` head: the first dealer in insertion order.
+    pub head: Option<Address>,
+    pub nodes: BTreeMap<
+        Address,
+        move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1>,
+    >,
+}
+
+impl TobBucket {
+    /// Dealer submissions in on-chain insertion order — the total order
+    /// the TOB guarantees. Bounded by the node count, so a link pointing
+    /// at a missing node (a mirror gap) terminates the walk early rather
+    /// than looping; callers get the longest consistent prefix.
+    pub fn certs_in_order(&self) -> Vec<(Address, &move_types::StampedDealerSubmissionV1)> {
+        let mut ordered = Vec::with_capacity(self.nodes.len());
+        let mut current = self.head;
+        while let Some(dealer) = current
+            && ordered.len() < self.nodes.len()
+        {
+            let Some(node) = self.nodes.get(&dealer) else {
+                tracing::error!(
+                    %dealer,
+                    certs_id = %self.certs_id,
+                    "TOB bucket link points at a node the mirror does not hold"
+                );
+                break;
+            };
+            ordered.push((dealer, &node.value));
+            current = node.next;
+        }
+        ordered
     }
 }
 

@@ -155,6 +155,14 @@ async fn ensure_bootstrapped(
     if mirror.is_some() {
         return Ok(());
     }
+    // The package history is re-scraped rather than taken from local
+    // state: the TOB scrape identifies bucket layouts through it, and a
+    // bucket created by a package published during the gap would
+    // otherwise stay undecodable by the very scrape that would learn of
+    // the upgrade.
+    let package_versions = hashi_types::move_types::PackageVersions::new(
+        super::scrape_package_versions(client.clone(), state.package_id_original()).await?,
+    );
     // Always `Full` — this replaces the authoritative snapshot, and only
     // a full scrape yields a seed to rebuild the mirror from.
     let (_, hashi, seed) = super::scrape_hashi(
@@ -162,6 +170,7 @@ async fn ensure_bootstrapped(
         state.hashi_id(),
         state.package_id_original(),
         super::ScrapeScope::Full,
+        &package_versions,
         state.metrics().map(|m| m.as_ref()),
     )
     .await?;
@@ -179,6 +188,7 @@ async fn ensure_bootstrapped(
         .upgrade_cap
         .as_ref()
         .map(|cap| (cap.version, cap.package));
+    state.replace_package_versions(package_versions);
     state.replace_hashi_state(hashi);
     state.reconcile_deposit_tracker();
     if let Some((version, package)) = latest_package {

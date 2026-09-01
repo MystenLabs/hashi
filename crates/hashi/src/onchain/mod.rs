@@ -163,13 +163,8 @@ pub struct State {
     withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
 
-/// Rust mirror of the Move `hashi::tob::TobKey` dynamic-field name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Serialize, serde_derive::Deserialize)]
-pub struct TobKey {
-    pub epoch: u64,
-    pub batch_index: Option<u32>,
-    pub protocol_type: move_types::ProtocolType,
-}
+pub use hashi_types::move_types::TobKey;
+pub use versioned_decode::TobCertLayout;
 
 /// One TOB bucket the leader's GC has selected for on-chain destruction.
 /// `KeyGen` covers both the Dkg and KeyRotation buckets of an epoch — the
@@ -563,6 +558,12 @@ impl OnchainState {
             .insert(version, package_id);
     }
 
+    /// Install a freshly scraped package history wholesale; the
+    /// re-bootstrap path replaces the state snapshot the same way.
+    fn replace_package_versions(&self, package_versions: move_types::PackageVersions) {
+        self.state_mut().package_versions = package_versions;
+    }
+
     pub fn client(&self) -> Client {
         self.0.client.clone()
     }
@@ -577,7 +578,53 @@ impl OnchainState {
     }
 
     pub fn tob_id(&self) -> Address {
-        self.state().hashi.tob_id
+        self.state().hashi.tob.id
+    }
+
+    /// Every TOB bucket key the mirror holds, with each bucket's
+    /// submission count. This is the cert GC's work list: a bucket is
+    /// destroyable once the current epoch is at least two past its
+    /// `key.epoch`.
+    pub fn tob_bucket_keys(&self) -> Vec<(move_types::TobKey, u64)> {
+        self.state()
+            .hashi
+            .tob
+            .buckets
+            .iter()
+            .map(|(key, bucket)| (*key, bucket.nodes.len() as u64))
+            .collect()
+    }
+
+    /// The dealer submissions for one TOB bucket, in on-chain insertion
+    /// order (the total order the TOB guarantees), read from the mirror.
+    /// Submissions come back in the normalized stamped form (a bare
+    /// bucket's carry `timestamp_ms: 0`), with the bucket's layout so
+    /// callers can insist on one. Returns `None` when the bucket does
+    /// not exist.
+    pub fn tob_certs(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Option<(
+        TobCertLayout,
+        Vec<(Address, move_types::StampedDealerSubmissionV1)>,
+    )> {
+        let key = move_types::TobKey {
+            epoch,
+            batch_index,
+            protocol_type,
+        };
+        let state = self.state();
+        let bucket = state.hashi.tob.buckets.get(&key)?;
+        Some((
+            bucket.layout,
+            bucket
+                .certs_in_order()
+                .into_iter()
+                .map(|(dealer, submission)| (dealer, submission.clone()))
+                .collect(),
+        ))
     }
 
     /// Returns the current epoch.
@@ -960,7 +1007,7 @@ impl OnchainState {
         protocol_type: move_types::ProtocolType,
     ) -> Result<Option<(versioned_decode::TobCertLayout, move_types::EpochCertsV1)>> {
         let tob_id = self.tob_id();
-        let key = TobKey {
+        let key = move_types::TobKey {
             epoch,
             batch_index,
             protocol_type,
@@ -1274,14 +1321,25 @@ impl State {
         scope: ScrapeScope,
         metrics: Option<&crate::metrics::Metrics>,
     ) -> Result<(Self, CheckpointInfo, Option<route::MirrorSeed>)> {
-        let (package_versions, (checkpoint_info, hashi, seed)) = tokio::try_join!(
-            scrape_package_versions(client.clone(), ids.package_id),
-            scrape_hashi(client, ids.hashi_object_id, ids.package_id, scope, metrics),
-        )?;
+        // Sequenced before the state scrape rather than joined with it:
+        // the TOB scrape identifies each bucket's layout from its
+        // on-chain value type, which resolves through this history.
+        let package_versions = move_types::PackageVersions::new(
+            scrape_package_versions(client.clone(), ids.package_id).await?,
+        );
+        let (checkpoint_info, hashi, seed) = scrape_hashi(
+            client,
+            ids.hashi_object_id,
+            ids.package_id,
+            scope,
+            &package_versions,
+            metrics,
+        )
+        .await?;
 
         Ok((
             State {
-                package_versions: move_types::PackageVersions::new(package_versions),
+                package_versions,
                 hashi,
                 withdrawal_signed_at_ms: BTreeMap::new(),
             },
@@ -1463,6 +1521,7 @@ async fn scrape_hashi(
     hashi_object_id: Address,
     package_id: Address,
     scope: ScrapeScope,
+    packages: &move_types::PackageVersions,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(CheckpointInfo, types::Hashi, Option<route::MirrorSeed>)> {
     let started = std::time::Instant::now();
@@ -1541,14 +1600,14 @@ async fn scrape_hashi(
         (committee_seed, (committees_per_epoch, raw_committees_per_epoch, committee_handoffs)),
         (treasury_seed, treasury),
         (proposal_seed, proposals),
-        tob_seed,
+        (tob_seed, tob_buckets),
         bitcoin,
     ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id, metrics),
         scrape_committees(client.clone(), committees.committees.id, metrics),
         scrape_treasury(client.clone(), treasury, metrics),
         scrape_proposals(client.clone(), proposals, metrics),
-        scrape_tob_entries(client.clone(), tob.id, metrics),
+        scrape_tob_entries(client.clone(), tob.id, packages, metrics),
         scrape_bitcoin_collections(client.clone(), bitcoin_state, metrics),
     )?;
     for container_seed in [
@@ -1604,35 +1663,54 @@ async fn scrape_hashi(
             treasury,
             bitcoin,
             proposals,
-            tob_id: tob.id,
+            tob: types::Tob {
+                id: tob.id,
+                buckets: tob_buckets,
+            },
             num_consumed_presigs,
         },
         seed,
     ))
 }
 
-/// Enumerate the tob bag's entries only to register each entry's inner
-/// `LinkedTable` UID (its children are dealer submission nodes) as a
-/// known-ignored container, and to seed the entry field ids.
+/// Scrape the tob bag: every bucket Field plus each bucket's dealer
+/// submission nodes. Until the cert GC has drained pre-GC history this
+/// walks one page-listing per accumulated bucket; at steady state the
+/// live set is a couple of epochs' worth of buckets.
 async fn scrape_tob_entries(
     client: Client,
     tob_id: Address,
+    packages: &move_types::PackageVersions,
     metrics: Option<&crate::metrics::Metrics>,
-) -> Result<route::ContainerSeed> {
+) -> Result<(
+    route::ContainerSeed,
+    BTreeMap<move_types::TobKey, types::TobBucket>,
+)> {
     let mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
         DynamicField::path_builder().field_id(),
         DynamicField::path_builder().value().finish(),
+        DynamicField::path_builder().value_type(),
         DynamicField::path_builder().field_object().version(),
     ]);
     let mut seed = route::ContainerSeed::default();
+    // Bucket pages stream in, but each bucket's node listing is its own
+    // paged scrape, so bucket descriptors are collected first and their
+    // interiors walked after the bag listing completes. At steady state
+    // the bag holds a couple of epochs' worth of buckets, so the
+    // collection stays small.
+    let mut to_scrape: Vec<(
+        move_types::TobKey,
+        versioned_decode::TobCertLayout,
+        move_types::LinkedTable<Address>,
+    )> = Vec::new();
     seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
         for field in fields {
             // The leader's TOB GC destroys dead buckets concurrently with this
             // scan, and the RPC's defaulting accessor hands back an EMPTY value
             // for an entry that vanished between page assembly and read (which
             // would decode as "unexpected end of input"). A destroyed bucket
-            // needs no seeding; skip it. Bare and stamped buckets share one BCS
-            // layout, so a present value decodes through the bare mirror.
+            // needs no seeding; skip it — the replay covers its deletion.
             let Some(value) = field.value_opt().filter(|bcs| !bcs.value().is_empty()) else {
                 tracing::warn!(
                     field_id = field.field_id(),
@@ -1640,6 +1718,16 @@ async fn scrape_tob_entries(
                 );
                 continue;
             };
+            let key: move_types::TobKey = field
+                .name()
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize TobKey: {e}"))?;
+            // The two bucket structs are BCS-identical, so one decode serves
+            // both; the chain-reported value type selects the node layout.
+            let layout = versioned_decode::TobCertLayout::from_struct_tag(
+                packages,
+                &versioned_decode::field_value_type(&field)?,
+            )?;
             let certs: move_types::EpochCertsV1 = value
                 .deserialize()
                 .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
@@ -1647,14 +1735,97 @@ async fn scrape_tob_entries(
             seed.entries.push((
                 field_id,
                 field.field_object().version(),
-                route::TrackedKind::Ignored,
+                route::TrackedKind::TobBucket(key),
             ));
             seed.interior.push((certs.certs.id, route::Slot::TobCerts));
+            seed.tob_tables.push((certs.certs.id, key));
+            to_scrape.push((key, layout, certs.certs));
         }
         Ok(())
     })
     .await?;
-    Ok(seed)
+
+    let mut buckets = BTreeMap::new();
+    for (key, layout, certs) in to_scrape {
+        let node_mask = FieldMask::from_paths([
+            DynamicField::path_builder().name().finish(),
+            DynamicField::path_builder().field_id(),
+            DynamicField::path_builder().value().finish(),
+            DynamicField::path_builder().field_object().version(),
+        ]);
+        let mut nodes = BTreeMap::new();
+        let node_height = scrape_dynamic_field_pages(
+            &client,
+            certs.id,
+            node_mask,
+            "tob",
+            metrics,
+            |node_fields| {
+                for node_field in node_fields {
+                    // Same race as the bag listing: a destroy that lands
+                    // mid-walk deletes the nodes with the bucket.
+                    let Some(value) = node_field.value_opt().filter(|bcs| !bcs.value().is_empty())
+                    else {
+                        tracing::warn!(
+                            field_id = node_field.field_id(),
+                            "tob node vanished mid-scrape; skipping"
+                        );
+                        continue;
+                    };
+                    let dealer: Address = node_field
+                        .name()
+                        .deserialize()
+                        .map_err(|e| anyhow!("failed to deserialize a tob node dealer: {e}"))?;
+                    let node: move_types::LinkedTableNode<
+                        Address,
+                        move_types::StampedDealerSubmissionV1,
+                    > = match layout {
+                        versioned_decode::TobCertLayout::Stamped => {
+                            value.deserialize().map_err(|e| {
+                                anyhow!("failed to deserialize a stamped tob node: {e}")
+                            })?
+                        }
+                        versioned_decode::TobCertLayout::Bare => {
+                            let bare: move_types::LinkedTableNode<
+                                Address,
+                                move_types::DealerSubmissionV1,
+                            > = value
+                                .deserialize()
+                                .map_err(|e| anyhow!("failed to deserialize a tob node: {e}"))?;
+                            move_types::LinkedTableNode {
+                                prev: bare.prev,
+                                next: bare.next,
+                                value: move_types::StampedDealerSubmissionV1 {
+                                    submission: bare.value,
+                                    timestamp_ms: 0,
+                                },
+                            }
+                        }
+                    };
+                    let node_id: Address = node_field.field_id().parse()?;
+                    seed.entries.push((
+                        node_id,
+                        node_field.field_object().version(),
+                        route::TrackedKind::TobCert { key, dealer },
+                    ));
+                    nodes.insert(dealer, node);
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        seed.height = seed.height.min(node_height);
+        buckets.insert(
+            key,
+            types::TobBucket {
+                layout,
+                certs_id: certs.id,
+                head: certs.head,
+                nodes,
+            },
+        );
+    }
+    Ok((seed, buckets))
 }
 
 /// `None` when the caller skipped the `BitcoinState` lookup, which exists only
