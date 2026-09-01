@@ -1130,17 +1130,26 @@ impl MpcManager {
                 )
             }
         };
+        let expected = admission
+            .certified
+            .iter()
+            .filter(|dealer| {
+                !Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, dealer)
+            })
+            .count();
+        let unmaterialised = expected.saturating_sub(dealers.len()) as u32;
+        let local_skips = admission.local_skips.saturating_add(unmaterialised);
         tracing::info!(
             "run_nonce_party_phase: epoch={}, batch_index={batch_index}, \
              cutoff_ms={cutoff_ms:?}, {pre_filter} outputs before filter, {} after, \
-             local_skips={}. dealers={dealers:?}",
+             local_skips={local_skips} ({unmaterialised} certified without an output). \
+             dealers={dealers:?}",
             mgr.mpc_config.epoch,
             dealers.len(),
-            admission.local_skips,
         );
         Ok(NoncePartyOutcome {
             outputs,
-            local_skips: admission.local_skips,
+            local_skips,
         })
     }
 

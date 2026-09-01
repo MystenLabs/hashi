@@ -14737,6 +14737,64 @@ async fn test_run_as_avid_nonce_party_skips_zero_weight_dealer_without_local_ski
 }
 
 #[tokio::test]
+async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs.iter().take(6) {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
+                .as_dealer_messages_hash()
+                .unwrap(),
+            timestamp_ms: 0,
+        }
+    };
+
+    let unresolvable_target = AvssVoteMessagesHash {
+        dealer_address: setup.address(4),
+        messages_hash: MessagesHash::from([9u8; 32]),
+        batch_index,
+    };
+    let unresolvable_sigs: Vec<MemberSignature> = (0..6)
+        .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
+        .collect();
+
+    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![
+        make_cert(&unresolvable_target, &unresolvable_sigs),
+        make_cert(&confirm_target, &sigs),
+        make_cert(&second_target, &second_sigs),
+    ]);
+    let outcome = MpcManager::run_nonce_party_phase(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        None,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.outputs.len(), 2);
+    assert_eq!(outcome.local_skips, 1);
+}
+
+#[tokio::test]
 async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_state() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
