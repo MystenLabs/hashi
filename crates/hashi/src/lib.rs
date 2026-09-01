@@ -72,8 +72,6 @@ pub struct Hashi {
     guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
-    /// Committee handoff member signatures by outgoing epoch.
-    committee_handoff_signatures: RwLock<HashMap<u64, hashi_types::proto::MemberSignature>>,
 }
 
 impl Hashi {
@@ -106,7 +104,6 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
-            committee_handoff_signatures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -140,7 +137,6 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
-            committee_handoff_signatures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -241,28 +237,6 @@ impl Hashi {
             .read()
             .unwrap()
             .get(&epoch)
-            .cloned()
-    }
-
-    pub fn store_committee_handoff_signature(
-        &self,
-        from_epoch: u64,
-        signature: hashi_types::proto::MemberSignature,
-    ) {
-        self.committee_handoff_signatures
-            .write()
-            .unwrap()
-            .insert(from_epoch, signature);
-    }
-
-    pub fn get_committee_handoff_signature(
-        &self,
-        from_epoch: u64,
-    ) -> Option<hashi_types::proto::MemberSignature> {
-        self.committee_handoff_signatures
-            .read()
-            .unwrap()
-            .get(&from_epoch)
             .cloned()
     }
 
