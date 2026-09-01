@@ -526,7 +526,9 @@ impl MpcManager {
             Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         }
         .map(|signature| SendMessagesResponse { signature });
-        self.message_responses.insert(cache_key, result.clone());
+        if !matches!(result, Err(MpcError::InvalidConfig(_))) {
+            self.message_responses.insert(cache_key, result.clone());
+        }
         result
     }
 
@@ -4339,7 +4341,11 @@ impl MpcManager {
                 continue;
             }
             let session_id = base_sid.rotation_session_id(dealer, share_index);
-            let commitment = previous_dkg_output.commitments.get(&share_index).copied();
+            let commitment = Some(required_previous_commitment(
+                previous_dkg_output,
+                dealer,
+                share_index,
+            )?);
             self.process_and_store_message(
                 self.mpc_config.nodes.clone(),
                 self.party_id,
@@ -5178,7 +5184,11 @@ impl MpcManager {
                 });
             }
             let session_id = base_sid.rotation_session_id(&dealer, share_index);
-            let commitment = previous_dkg_output.commitments.get(&share_index).copied();
+            let commitment = Some(required_previous_commitment(
+                previous_dkg_output,
+                &dealer,
+                share_index,
+            )?);
             match process_avss_message(
                 &self.encryption_key,
                 self.mpc_config.nodes.clone(),
@@ -6929,6 +6939,23 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
         }
         round_size = round_size.saturating_mul(HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR);
     }
+}
+
+fn required_previous_commitment(
+    previous_dkg_output: &MpcOutput,
+    dealer: &Address,
+    share_index: ShareIndex,
+) -> MpcResult<G> {
+    previous_dkg_output
+        .commitments
+        .get(&share_index)
+        .copied()
+        .ok_or_else(|| {
+            MpcError::InvalidConfig(format!(
+                "local previous-epoch output has no commitment for share index {share_index} \
+                 (owned by dealer {dealer}); cannot verify the dealt share reshares the existing key"
+            ))
+        })
 }
 
 fn process_avss_message(

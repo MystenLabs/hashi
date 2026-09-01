@@ -6742,6 +6742,40 @@ fn test_try_sign_rotation_messages_all_or_nothing() {
 }
 
 #[test]
+fn try_sign_rotation_messages_rejects_a_share_with_no_previous_commitment() {
+    let rotation_setup = RotationTestSetup::new();
+    let (mut receiver_manager, mut receiver_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(2);
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+    let rotation_dealer_addr = rotation_setup.setup.address(0);
+
+    let Messages::Rotation(rotation_map) = &rotation_messages else {
+        panic!("Expected rotation messages")
+    };
+    let dealt_index = *rotation_map
+        .keys()
+        .next()
+        .expect("dealer deals at least one share");
+    assert!(
+        receiver_dkg_output
+            .commitments
+            .remove(&dealt_index)
+            .is_some()
+    );
+
+    let result = receiver_manager.try_sign_rotation_messages(
+        &receiver_dkg_output,
+        rotation_dealer_addr,
+        &rotation_messages,
+    );
+
+    assert!(
+        matches!(result, Err(MpcError::InvalidConfig(_))),
+        "a dealt share with no previous-epoch commitment must be rejected, got {result:?}"
+    );
+}
+
+#[test]
 fn test_try_sign_rotation_messages_re_acks_identical_re_deal() {
     let rotation_setup = RotationTestSetup::new();
     let (mut receiver_manager, receiver_dkg_output) =
