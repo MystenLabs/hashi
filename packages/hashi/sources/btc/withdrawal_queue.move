@@ -313,6 +313,11 @@ public(package) fun approve_withdrawal(
     // already drained. Before deferred archival this protection came from
     // the request having left the bag.
     assert!(request.status.is_active(), ECannotApproveCommittedRequest);
+    // `withdrawal_txn_id` is written together with the Processing status at
+    // commit; assert it separately so approval can never touch a request a
+    // withdrawal transaction already references, even if the status were
+    // ever to fall out of sync with the link.
+    assert!(request.withdrawal_txn_id.is_none(), ECannotApproveCommittedRequest);
     // Re-approval is only allowed with a cert from a strictly later epoch
     // than the stored one: a new committee refreshing a cert left stale by
     // reconfiguration. A same-epoch cert is a replay that would only reset
