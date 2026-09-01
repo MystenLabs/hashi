@@ -383,13 +383,6 @@ where
         Ok(Response::new(response_inner))
     }
 
-    async fn update_committee(
-        &self,
-        request: Request<proto::SignedCommitteeTransition>,
-    ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.inner.update_committee(request).await
-    }
-
     async fn update_committee_chain(
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
@@ -511,12 +504,6 @@ mod tests {
         ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             (self.result)().map(Response::new)
-        }
-        async fn update_committee(
-            &self,
-            _: Request<proto::SignedCommitteeTransition>,
-        ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
         }
         async fn update_committee_chain(
             &self,

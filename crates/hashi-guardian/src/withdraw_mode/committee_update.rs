@@ -3,300 +3,486 @@
 
 use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
+use hashi_types::guardian::CommitteeActivationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
-use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
 use std::sync::Arc;
-use tracing::error;
 use tracing::info;
 
-/// Advance the committee to a future epoch with a cert from the outgoing
-/// committee. Hashi epochs can skip values (reconfig is sparse), so the
-/// proposed epoch is only required to be strictly greater than the
-/// current one; sequentiality is not enforced.
-/// Idempotent on already-applied or older transitions.
-pub async fn update_committee(
+pub(crate) struct CommitteeUpdateRequest {
+    pub(crate) transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
+    pub(crate) activation: HashiSigned<CommitteeActivationRequest>,
+}
+
+fn verify_committee_update_cert<T: hashi_types::intent::IntentMessage>(
+    committee: &HashiCommittee,
+    signed: &HashiSigned<T>,
+) -> GuardianResult<()> {
+    signed
+        .weight(committee)
+        .map_err(|error| InvalidInputs(format!("malformed committee certificate: {error}")))?;
+    verify_hashi_cert(committee, signed)
+}
+
+/// Validate the complete transition chain and final activation certificate
+/// before one durable write and one committee replacement.
+pub(crate) async fn update_committee_chain(
     enclave: Arc<Enclave>,
-    signed: HashiSigned<CommitteeTransitionRequest>,
+    request: CommitteeUpdateRequest,
 ) -> GuardianResult<u64> {
     enclave.require_fully_initialized()?;
-
-    let current = enclave.state.get_committee()?;
-    let current_epoch = current.epoch();
-    let proposed_epoch = signed.message().new_committee.epoch;
-
-    if proposed_epoch <= current_epoch {
-        info!(current_epoch, proposed_epoch, "update_committee: no-op");
-        return Ok(current_epoch);
+    let CommitteeUpdateRequest {
+        transitions,
+        activation,
+    } = request;
+    let final_transition = transitions
+        .last()
+        .ok_or_else(|| InvalidInputs("committee transition chain is empty".to_string()))?;
+    if activation.message().new_committee != final_transition.message().new_committee {
+        return Err(InvalidInputs(
+            "activation payload does not match final transition payload".to_string(),
+        ));
     }
 
-    if let Err(e) = verify_hashi_cert(&current, &signed) {
-        log_failure(&enclave, current_epoch, &signed, &e).await?;
-        return Err(e);
-    }
-
-    let new_committee: HashiCommittee = signed
+    let final_epoch = activation.message().new_committee.epoch;
+    let final_committee: HashiCommittee = activation
         .message()
         .new_committee
         .clone()
         .try_into()
-        .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
-
-    if new_committee.epoch() != proposed_epoch {
-        let err = InvalidInputs(format!(
-            "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
-            new_committee.epoch()
-        ));
-        log_failure(&enclave, current_epoch, &signed, &err).await?;
-        return Err(err);
-    }
-
-    // Log before the in-memory swap so failed S3 writes don't advance the committee.
-    log_success(&enclave, current_epoch, &signed).await?;
-    enclave
-        .state
-        .replace_committee(new_committee, current_epoch)
-        .expect("committee initialized at current_epoch under the update lock");
-
-    info!(
-        from_epoch = current_epoch,
-        to_epoch = proposed_epoch,
-        "Committee updated"
-    );
-    Ok(proposed_epoch)
-}
-
-pub async fn update_committee_chain(
-    enclave: Arc<Enclave>,
-    transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
-) -> GuardianResult<u64> {
-    let mut current_epoch = enclave.state.get_committee()?.epoch();
-    for signed in transitions {
-        current_epoch = update_committee(enclave.clone(), signed).await?;
-    }
-    Ok(current_epoch)
-}
-
-async fn log_success(
-    enclave: &Enclave,
-    from_epoch: u64,
-    signed: &HashiSigned<CommitteeTransitionRequest>,
-) -> GuardianResult<()> {
-    let msg = CommitteeUpdateLogMessage::Success {
-        from_epoch,
-        new_committee: signed.message().new_committee.clone(),
-        request_sign: signed.committee_signature().clone(),
-    };
-    enclave.log_committee_update(msg).await
-}
-
-async fn log_failure(
-    enclave: &Enclave,
-    from_epoch: u64,
-    signed: &HashiSigned<CommitteeTransitionRequest>,
-    err: &GuardianError,
-) -> GuardianResult<()> {
-    let msg = CommitteeUpdateLogMessage::Failure {
-        from_epoch,
-        new_committee: signed.message().new_committee.clone(),
-        request_sign: signed.committee_signature().clone(),
-        error: err.to_string(),
-    };
-    if let Err(log_err) = enclave.log_committee_update(msg).await {
-        error!(
-            from_epoch,
-            "failed to log committee update failure to S3: {log_err:?}"
-        );
-        return Err(InternalError(format!(
-            "Failed to log committee update error {err} due to S3 logging error {log_err}"
+        .map_err(|error| {
+            InvalidInputs(format!(
+                "invalid final committee in activation certificate: {error}"
+            ))
+        })?;
+    if activation.epoch() != final_epoch {
+        return Err(InvalidInputs(format!(
+            "activation signature epoch ({}) does not match final committee epoch ({final_epoch})",
+            activation.epoch()
         )));
     }
-    Ok(())
+    verify_committee_update_cert(&final_committee, &activation)?;
+
+    let installed_committee = enclave.state.get_committee()?;
+    let installed_epoch = installed_committee.epoch();
+    if final_epoch == installed_epoch {
+        if final_committee == *installed_committee {
+            return Ok(installed_epoch);
+        }
+        return Err(InvalidInputs(format!(
+            "activation targets a different committee at installed epoch {installed_epoch}"
+        )));
+    }
+    if final_epoch < installed_epoch {
+        return Err(InvalidInputs(format!(
+            "activation target epoch {final_epoch} is older than installed epoch {installed_epoch}"
+        )));
+    }
+
+    let mut preceding_committee = (*installed_committee).clone();
+    for transition in &transitions {
+        let raw_committee = &transition.message().new_committee;
+        let target_epoch = raw_committee.epoch;
+        let source_epoch = preceding_committee.epoch();
+        if target_epoch <= source_epoch {
+            return Err(InvalidInputs(format!(
+                "committee transition does not advance: {source_epoch}->{target_epoch}"
+            )));
+        }
+        let target_committee: HashiCommittee =
+            raw_committee.clone().try_into().map_err(|error| {
+                InvalidInputs(format!(
+                    "invalid committee in transition to epoch {target_epoch}: {error}"
+                ))
+            })?;
+        verify_committee_update_cert(&preceding_committee, transition)?;
+        preceding_committee = target_committee;
+    }
+
+    let (request_sign, activation) = activation.into_parts();
+    let message = CommitteeUpdateLogMessage::Success {
+        from_epoch: installed_epoch,
+        new_committee: activation.new_committee,
+        request_sign,
+    };
+    enclave.log_committee_update(message).await?;
+    enclave
+        .state
+        .replace_committee(final_committee, installed_epoch)
+        .expect("committee initialized at installed_epoch under the update lock");
+    info!(
+        from_epoch = installed_epoch,
+        to_epoch = final_epoch,
+        "Committee updated"
+    );
+    Ok(final_epoch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::create_fully_initialized_enclave;
-    use crate::test_utils::FullyInitializedArgs;
-    use bitcoin::Network;
-    use hashi_types::bitcoin::create_btc_keypair_for_test;
-    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+    use crate::test_utils::activate_enclave_for_testing;
+    use crate::test_utils::finalize_enclave;
+    use crate::test_utils::mock_logger_capturing;
+    use crate::test_utils::CapturedPuts;
+    use crate::OperatorInitTestArgs;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
+    use hashi_types::committee::CommitteeSignature;
+    use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
     use hashi_types::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
+    use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommitteeMember;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::LogMessageV2;
+    use hashi_types::guardian::LogRecord;
+    use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::guardian::WithdrawalID as SuiAddress;
+    use hashi_types::intent::IntentMessage;
+    use rand::SeedableRng;
 
-    fn mock_signer_address() -> SuiAddress {
-        SuiAddress::new([1u8; 32])
+    struct Fixture {
+        committee: HashiCommittee,
+        address: SuiAddress,
+        key: Bls12381PrivateKey,
     }
 
-    fn mock_bls_sk() -> Bls12381PrivateKey {
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x000C_0FFE_EBAD_F00D);
-        Bls12381PrivateKey::generate(&mut rng)
+    fn committee(epoch: u64, id: u8) -> Fixture {
+        let address = SuiAddress::new([id; 32]);
+        let mut key_rng = rand::rngs::StdRng::seed_from_u64(0x510000 + u64::from(id));
+        let key = Bls12381PrivateKey::generate(&mut key_rng);
+        let mut enc_rng = rand::rngs::StdRng::seed_from_u64(0xE10000 + u64::from(id));
+        let enc_key = EncryptionPrivateKey::new(&mut enc_rng);
+        let member = HashiCommitteeMember::new(
+            address,
+            key.public_key(),
+            EncryptionPublicKey::from_private_key(&enc_key),
+            10,
+        );
+        Fixture {
+            committee: HashiCommittee::new(
+                vec![member],
+                epoch,
+                DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+                DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+                VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+            ),
+            address,
+            key,
+        }
     }
 
-    fn mock_encryption_pk() -> EncryptionPublicKey {
-        use rand::SeedableRng;
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0xDEAD_BEEF);
-        let sk = hashi_types::committee::EncryptionPrivateKey::new(&mut rng);
-        EncryptionPublicKey::from_private_key(&sk)
+    fn sign<T: IntentMessage + Clone>(signer: &Fixture, message: T) -> HashiSigned<T> {
+        let epoch = signer.committee.epoch();
+        let signature = signer.key.sign(epoch, signer.address, &message);
+        let mut aggregator = BlsSignatureAggregator::new(&signer.committee, message);
+        aggregator.add_signature(signature).unwrap();
+        aggregator.finish().unwrap()
     }
 
-    fn committee_at(epoch: u64) -> HashiCommittee {
-        let pk = mock_bls_sk().public_key();
-        let member = HashiCommitteeMember::new(mock_signer_address(), pk, mock_encryption_pk(), 10);
-        HashiCommittee::new(
-            vec![member],
-            epoch,
-            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
-            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
-            VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+    fn transition(signer: &Fixture, target: &Fixture) -> HashiSigned<CommitteeTransitionRequest> {
+        sign(
+            signer,
+            CommitteeTransitionRequest {
+                new_committee: (&target.committee).into(),
+            },
         )
     }
 
-    fn sign_transition_at(
-        signing_epoch: u64,
-        new_committee: HashiCommittee,
-    ) -> HashiSigned<CommitteeTransitionRequest> {
-        let outgoing = committee_at(signing_epoch);
-        let transition = CommitteeTransitionRequest {
-            new_committee: hashi_types::move_types::Committee::from(&new_committee),
-        };
-        let sk = mock_bls_sk();
-        let sig = sk.sign(signing_epoch, mock_signer_address(), &transition);
-        let mut agg = BlsSignatureAggregator::new(&outgoing, transition);
-        agg.add_signature(sig).expect("member sig should verify");
-        agg.finish().expect("threshold should be met")
+    fn activation(signer: &Fixture, payload: &Fixture) -> HashiSigned<CommitteeActivationRequest> {
+        sign(
+            signer,
+            CommitteeActivationRequest {
+                new_committee: (&payload.committee).into(),
+            },
+        )
     }
 
-    async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
-        let kp = create_btc_keypair_for_test(&[1u8; 32]);
-        let master_pubkey = hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
-        create_fully_initialized_enclave(FullyInitializedArgs {
-            network: Network::Regtest,
-            committee: committee_at(epoch),
-            master_pubkey,
-            limiter_config: LimiterConfig {
+    fn request(
+        transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
+        activation: HashiSigned<CommitteeActivationRequest>,
+    ) -> CommitteeUpdateRequest {
+        CommitteeUpdateRequest {
+            transitions,
+            activation,
+        }
+    }
+
+    fn reuse_transition(
+        signed: &HashiSigned<CommitteeTransitionRequest>,
+    ) -> HashiSigned<CommitteeActivationRequest> {
+        HashiSigned::new(
+            signed.epoch(),
+            CommitteeActivationRequest {
+                new_committee: signed.message().new_committee.clone(),
+            },
+            signed.signature_bytes(),
+            signed.signers_bitmap_bytes(),
+        )
+        .unwrap()
+    }
+
+    fn at_epoch<T: IntentMessage + Clone>(signed: &HashiSigned<T>, epoch: u64) -> HashiSigned<T> {
+        HashiSigned::new(
+            epoch,
+            signed.message().clone(),
+            signed.signature_bytes(),
+            signed.signers_bitmap_bytes(),
+        )
+        .unwrap()
+    }
+
+    async fn enclave(installed: &Fixture) -> (Arc<Enclave>, CapturedPuts, usize) {
+        let (logger, captures) = mock_logger_capturing();
+        let enclave = Enclave::create_operator_initialized_with(
+            OperatorInitTestArgs::default().with_s3_logger(logger),
+        )
+        .await;
+        finalize_enclave(&enclave).unwrap();
+        activate_enclave_for_testing(
+            &enclave,
+            installed.committee.clone(),
+            LimiterConfig {
                 refill_rate: 0,
                 max_bucket_capacity: 1_000,
             },
-            limiter_state: LimiterState {
+            LimiterState {
                 num_tokens_available: 1_000,
                 last_updated_at: 0,
                 next_seq: 0,
             },
-        })
+        )
+        .unwrap();
+        let baseline = captures.lock().unwrap().len();
+        (enclave, captures, baseline)
+    }
+
+    #[derive(Clone, Copy)]
+    enum ErrorClass {
+        Invalid,
+        Unauthenticated,
+    }
+
+    async fn rejected(
+        label: &str,
+        installed: &Fixture,
+        request: CommitteeUpdateRequest,
+        class: ErrorClass,
+    ) {
+        let (enclave, captures, baseline) = enclave(installed).await;
+        let error = match update_committee_chain(enclave.clone(), request).await {
+            Ok(epoch) => panic!("{label}: request unexpectedly succeeded at epoch {epoch}"),
+            Err(error) => error,
+        };
+        match class {
+            ErrorClass::Invalid => assert!(
+                matches!(error, GuardianError::InvalidInputs(_)),
+                "{label}: expected invalid inputs, got {error:?}"
+            ),
+            ErrorClass::Unauthenticated => assert!(
+                matches!(error, GuardianError::Unauthenticated(_)),
+                "{label}: expected unauthenticated, got {error:?}"
+            ),
+        }
+        assert_eq!(
+            enclave.state.get_committee().unwrap().as_ref(),
+            &installed.committee,
+            "{label}: installed committee changed"
+        );
+        assert_eq!(
+            captures.lock().unwrap().len(),
+            baseline,
+            "{label}: rejection wrote a committee update record"
+        );
+    }
+
+    fn assert_record(
+        captures: &CapturedPuts,
+        baseline: usize,
+        from: u64,
+        to: u64,
+        signature: &CommitteeSignature,
+    ) {
+        let captured = captures.lock().unwrap();
+        assert_eq!(captured.len(), baseline + 1);
+        let record: LogRecord = serde_json::from_slice(&captured[baseline].1).unwrap();
+        let VersionedLogMessage::V2(LogMessageV2::CommitteeUpdate(message)) = record.message()
+        else {
+            panic!("expected committee update log");
+        };
+        let CommitteeUpdateLogMessage::Success {
+            from_epoch,
+            new_committee,
+            request_sign,
+        } = message.as_ref()
+        else {
+            panic!("expected success log");
+        };
+        assert_eq!((*from_epoch, new_committee.epoch), (from, to));
+        assert_eq!(request_sign.epoch(), signature.epoch());
+        assert_eq!(request_sign.signature_bytes(), signature.signature_bytes());
+        assert_eq!(
+            request_sign.signers_bitmap_bytes(),
+            signature.signers_bitmap_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_single_hop() {
+        let old = committee(5, 1);
+        let new = committee(7, 2);
+        let active = activation(&new, &new);
+        let signature = active.committee_signature().clone();
+        let (enclave, captures, baseline) = enclave(&old).await;
+        let epoch = update_committee_chain(
+            enclave.clone(),
+            request(vec![transition(&old, &new)], active),
+        )
         .await
+        .unwrap();
+        assert_eq!(epoch, 7);
+        assert_eq!(
+            enclave.state.get_committee().unwrap().as_ref(),
+            &new.committee
+        );
+        assert_record(&captures, baseline, 5, 7, &signature);
     }
 
     #[tokio::test]
-    async fn happy_path_advances_committee() {
-        let enclave = enclave_at_epoch(5).await;
-        let signed = sign_transition_at(5, committee_at(6));
-
-        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
-        assert_eq!(new_epoch, 6);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 6);
+    async fn valid_sparse_multi_hop_writes_one_final_record() {
+        let old = committee(5, 1);
+        let middle = committee(8, 2);
+        let new = committee(13, 3);
+        let active = activation(&new, &new);
+        let signature = active.committee_signature().clone();
+        let (enclave, captures, baseline) = enclave(&old).await;
+        let epoch = update_committee_chain(
+            enclave.clone(),
+            request(
+                vec![transition(&old, &middle), transition(&middle, &new)],
+                active,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(epoch, 13);
+        assert_eq!(
+            enclave.state.get_committee().unwrap().as_ref(),
+            &new.committee
+        );
+        assert_record(&captures, baseline, 5, 13, &signature);
     }
 
     #[tokio::test]
-    async fn already_applied_is_noop() {
-        let enclave = enclave_at_epoch(5).await;
-        let signed = sign_transition_at(5, committee_at(5));
-
-        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
-        assert_eq!(new_epoch, 5);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+    async fn exact_retry_is_a_noop() {
+        let old = committee(5, 1);
+        let new = committee(7, 2);
+        let outgoing = transition(&old, &new);
+        let active = activation(&new, &new);
+        let (enclave, captures, baseline) = enclave(&old).await;
+        update_committee_chain(
+            enclave.clone(),
+            request(vec![outgoing.clone()], active.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(captures.lock().unwrap().len(), baseline + 1);
+        assert_eq!(
+            update_committee_chain(enclave.clone(), request(vec![outgoing], active))
+                .await
+                .unwrap(),
+            7
+        );
+        assert_eq!(captures.lock().unwrap().len(), baseline + 1);
     }
 
     #[tokio::test]
-    async fn forward_skip_advances_committee() {
-        // Hashi committee epochs can skip values (sparse reconfig). A cert
-        // signed by the current committee for a future non-adjacent epoch
-        // is legitimate and must be accepted.
-        let enclave = enclave_at_epoch(5).await;
-        let signed = sign_transition_at(5, committee_at(7));
-
-        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
-        assert_eq!(new_epoch, 7);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
-    }
-
-    #[tokio::test]
-    async fn update_committee_chain_advances_multiple_handoffs() {
-        let enclave = enclave_at_epoch(5).await;
-        let transitions = vec![
-            sign_transition_at(5, committee_at(7)),
-            sign_transition_at(7, committee_at(9)),
+    async fn invalid_requests_have_no_side_effects() {
+        let old = committee(5, 1);
+        let middle = committee(8, 2);
+        let new = committee(13, 3);
+        let wrong_old = committee(5, 9);
+        let wrong_middle = committee(8, 9);
+        let wrong_new = committee(13, 9);
+        let other_payload = committee(13, 4);
+        let same_epoch = committee(5, 5);
+        let older = committee(3, 6);
+        let outgoing = transition(&old, &new);
+        let valid_activation = activation(&new, &new);
+        let cases = vec![
+            (
+                "empty chain",
+                request(vec![], activation(&new, &new)),
+                ErrorClass::Invalid,
+            ),
+            (
+                "bad first transition",
+                request(vec![transition(&wrong_old, &new)], activation(&new, &new)),
+                ErrorClass::Unauthenticated,
+            ),
+            (
+                "transition wrong epoch",
+                request(vec![at_epoch(&outgoing, 4)], activation(&new, &new)),
+                ErrorClass::Invalid,
+            ),
+            (
+                "bad middle transition",
+                request(
+                    vec![transition(&old, &middle), transition(&wrong_middle, &new)],
+                    activation(&new, &new),
+                ),
+                ErrorClass::Unauthenticated,
+            ),
+            (
+                "outgoing certificate reused as activation",
+                request(vec![outgoing.clone()], reuse_transition(&outgoing)),
+                ErrorClass::Invalid,
+            ),
+            (
+                "activation wrong epoch",
+                request(
+                    vec![transition(&old, &new)],
+                    at_epoch(&valid_activation, 12),
+                ),
+                ErrorClass::Invalid,
+            ),
+            (
+                "activation wrong committee",
+                request(vec![transition(&old, &new)], activation(&wrong_new, &new)),
+                ErrorClass::Unauthenticated,
+            ),
+            (
+                "activation different payload",
+                request(
+                    vec![transition(&old, &new)],
+                    activation(&other_payload, &other_payload),
+                ),
+                ErrorClass::Invalid,
+            ),
+            (
+                "same-epoch different committee",
+                request(
+                    vec![transition(&old, &same_epoch)],
+                    activation(&same_epoch, &same_epoch),
+                ),
+                ErrorClass::Invalid,
+            ),
+            (
+                "older target",
+                request(vec![transition(&old, &older)], activation(&older, &older)),
+                ErrorClass::Invalid,
+            ),
         ];
-
-        let new_epoch = update_committee_chain(enclave.clone(), transitions)
-            .await
-            .unwrap();
-
-        assert_eq!(new_epoch, 9);
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 9);
-    }
-
-    #[tokio::test]
-    async fn update_committee_chain_rejects_bad_middle_handoff() {
-        let enclave = enclave_at_epoch(5).await;
-        let transitions = vec![
-            sign_transition_at(5, committee_at(7)),
-            sign_transition_at(6, committee_at(9)),
-        ];
-
-        let err = update_committee_chain(enclave.clone(), transitions)
-            .await
-            .expect_err("bad middle handoff must error");
-
-        assert!(
-            matches!(err, GuardianError::Unauthenticated(_)),
-            "expected Unauthenticated, got {err:?}"
-        );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
-    }
-
-    #[tokio::test]
-    async fn wrong_signing_epoch_rejected() {
-        let enclave = enclave_at_epoch(5).await;
-        let signed = sign_transition_at(4, committee_at(6));
-
-        let err = update_committee(enclave.clone(), signed)
-            .await
-            .expect_err("mismatched signing epoch must error");
-        assert!(
-            matches!(err, GuardianError::Unauthenticated(_)),
-            "expected Unauthenticated, got {err:?}"
-        );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
-    }
-
-    #[tokio::test]
-    async fn replace_committee_rejects_stale_expected_epoch() {
-        let enclave = enclave_at_epoch(5).await;
-
-        let err = enclave
-            .state
-            .replace_committee(committee_at(6), 4)
-            .expect_err("stale expected_current_epoch must error");
-        assert!(
-            matches!(err, GuardianError::InvalidInputs(_)),
-            "expected InvalidInputs, got {err:?}"
-        );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+        for (label, request, class) in cases {
+            rejected(label, &old, request, class).await;
+        }
     }
 }

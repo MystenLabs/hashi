@@ -709,12 +709,6 @@ mod tests {
         ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
-        async fn update_committee(
-            &self,
-            _: Request<proto::SignedCommitteeTransition>,
-        ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
-        }
         async fn update_committee_chain(
             &self,
             _: Request<proto::UpdateCommitteeChainRequest>,

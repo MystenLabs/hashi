@@ -33,10 +33,8 @@ service GuardianService {
   // Standard withdrawal: request withdrawal signature.
   rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
 
-  // Advance the guardian's committee one handoff (signed by the outgoing committee). Idempotent.
-  rpc UpdateCommittee(SignedCommitteeTransition) returns (UpdateCommitteeResponse);
-
-  // Advance the guardian by replaying a chain of stored committee handoffs.
+  // Advance the guardian by replaying stored outgoing-committee handoffs and
+  // proving that the final committee is active.
   rpc UpdateCommitteeChain(UpdateCommitteeChainRequest) returns (UpdateCommitteeResponse);
 }
 
@@ -510,7 +508,7 @@ message StandardWithdrawalResponseData {
 }
 
 // ============================
-//      UpdateCommittee
+//      UpdateCommitteeChain
 // ============================
 
 // Handoff payload. Hashi committee epochs are sparse, so `new_committee.epoch`
@@ -522,12 +520,17 @@ message CommitteeTransition {
 message SignedCommitteeTransition {
   CommitteeTransition data = 1;
 
-  // Outgoing committee's signature; `epoch` is `new_committee.epoch - 1`.
+  // Signature epoch and intent depend on this certificate's role.
   CommitteeSignature committee_signature = 2;
 }
 
 message UpdateCommitteeChainRequest {
+  // Each transition is signed by the outgoing committee.
   repeated SignedCommitteeTransition transitions = 1;
+
+  // The final committee's post-activation signature, under the committee
+  // activation intent, over the exact final transition payload at its epoch.
+  SignedCommitteeTransition activation = 2;
 }
 
 message UpdateCommitteeResponse {

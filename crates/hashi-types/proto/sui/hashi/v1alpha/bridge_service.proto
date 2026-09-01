@@ -29,8 +29,10 @@ service BridgeService {
   rpc SignWithdrawalTxSigning(SignWithdrawalTxSigningRequest) returns (SignWithdrawalTxSigningResponse);
   // Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
   rpc SignWithdrawalConfirmation(SignWithdrawalConfirmationRequest) returns (SignWithdrawalConfirmationResponse);
-  // Sign a committee transition for the guardian's `UpdateCommittee`.
+  // Sign a committee transition for the guardian's stored outgoing handoff.
   rpc SignCommitteeTransition(SignCommitteeTransitionRequest) returns (SignCommitteeTransitionResponse);
+  // Sign the exact current committee payload after observing its activation.
+  rpc SignCommitteeActivation(SignCommitteeActivationRequest) returns (SignCommitteeActivationResponse);
 }
 
 message GetServiceInfoRequest {}
@@ -236,5 +238,13 @@ message SignCommitteeTransitionRequest {
 }
 
 message SignCommitteeTransitionResponse {
+  MemberSignature member_signature = 1;
+}
+
+message SignCommitteeActivationRequest {
+  uint64 committee_epoch = 1;
+}
+
+message SignCommitteeActivationResponse {
   MemberSignature member_signature = 1;
 }

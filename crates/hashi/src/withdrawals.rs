@@ -423,6 +423,31 @@ impl hashi_types::intent::IntentMessage for WithdrawalConfirmation {
     const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalConfirmation;
 }
 
+fn committee_activation_message(
+    committees: &crate::onchain::types::CommitteeSet,
+    validator_address: Address,
+    committee_epoch: u64,
+) -> anyhow::Result<hashi_types::guardian::CommitteeActivationRequest> {
+    anyhow::ensure!(
+        committees.epoch() == committee_epoch,
+        "committee epoch {committee_epoch} is not active; current epoch is {}",
+        committees.epoch()
+    );
+    let committee = committees
+        .current_committee()
+        .ok_or_else(|| anyhow!("no current committee for epoch {committee_epoch}"))?;
+    anyhow::ensure!(
+        committee.index_of(&validator_address).is_some(),
+        "not a member of the committee at epoch {committee_epoch}"
+    );
+    let new_committee = committees
+        .raw_committee(committee_epoch)
+        .cloned()
+        .ok_or_else(|| anyhow!("no raw committee for epoch {committee_epoch}"))?;
+
+    Ok(hashi_types::guardian::CommitteeActivationRequest { new_committee })
+}
+
 impl Hashi {
     // --- Step 1: Request approval (lightweight) ---
 
@@ -1078,11 +1103,7 @@ impl Hashi {
             .onchain_state()
             .committee_transition(from_epoch)
             .ok_or_else(|| anyhow!("no on-chain committee transition from epoch {from_epoch}"))?;
-        if !from_committee
-            .members()
-            .iter()
-            .any(|m| m.validator_address() == validator_address)
-        {
+        if from_committee.index_of(&validator_address).is_none() {
             anyhow::bail!("not a member of the committee at epoch {from_epoch}");
         }
 
@@ -1093,6 +1114,27 @@ impl Hashi {
         let transition = hashi_types::guardian::CommitteeTransitionRequest { new_committee };
 
         self.sign_message_proto_at_epoch(&transition, from_epoch)
+    }
+
+    /// Sign the exact locally active committee at its own epoch.
+    #[tracing::instrument(level = "info", skip_all, fields(committee_epoch))]
+    pub fn validate_and_sign_committee_activation(
+        &self,
+        committee_epoch: u64,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let validator_address = self
+            .config
+            .validator_address()
+            .map_err(|e| anyhow!("No validator address configured: {e}"))?;
+        let state = self.onchain_state().state();
+        let activation = committee_activation_message(
+            &state.hashi().committees,
+            validator_address,
+            committee_epoch,
+        )?;
+        drop(state);
+
+        self.sign_message_proto_at_epoch(&activation, committee_epoch)
     }
 
     // --- MPC BTC tx signing ---
@@ -2191,6 +2233,11 @@ mod tests {
     use crate::utxo_pool::CoinSelectionParams;
     use bitcoin::hashes::Hash as _;
     use hashi_types::bitcoin_txid::BitcoinTxid;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
+    use hashi_types::committee::EncryptionPublicKey;
 
     fn a_signature() -> SchnorrSignature {
         let bytes = hex::decode(
@@ -2199,6 +2246,59 @@ mod tests {
         )
         .unwrap();
         SchnorrSignature::from_byte_array(&bytes.try_into().unwrap()).unwrap()
+    }
+
+    fn one_member_committee(epoch: u64, address: Address) -> Committee {
+        let bls_public_key = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let encryption_public_key = EncryptionPublicKey::from_private_key(
+            &EncryptionPrivateKey::new(&mut rand::thread_rng()),
+        );
+        Committee::new(
+            vec![CommitteeMember::new(
+                address,
+                bls_public_key,
+                encryption_public_key,
+                1,
+            )],
+            epoch,
+            0,
+            5_000,
+            0,
+        )
+    }
+
+    fn committee_set_with_pending_successor() -> crate::onchain::types::CommitteeSet {
+        let mut committees = BTreeMap::new();
+        committees.insert(5, one_member_committee(5, Address::new([5; 32])));
+        committees.insert(9, one_member_committee(9, Address::new([9; 32])));
+        let mut set = crate::onchain::types::CommitteeSet::new(Address::ZERO, Address::ZERO);
+        set.set_epoch(5)
+            .set_pending_epoch_change(Some(9))
+            .set_committees(committees);
+        set
+    }
+
+    #[test]
+    fn committee_activation_message_requires_active_member_and_raw_payload() {
+        let committees = committee_set_with_pending_successor();
+        let activation =
+            committee_activation_message(&committees, Address::new([5; 32]), 5).unwrap();
+        assert_eq!(
+            activation.new_committee,
+            committees.raw_committee(5).unwrap().clone()
+        );
+        assert_ne!(
+            activation.new_committee,
+            committees.raw_committee(9).unwrap().clone()
+        );
+
+        let wrong_epoch = committee_activation_message(&committees, Address::new([9; 32]), 9)
+            .expect_err("pending committee must not sign activation");
+        assert!(wrong_epoch.to_string().contains("is not active"));
+
+        let non_member = committee_activation_message(&committees, Address::new([7; 32]), 5)
+            .expect_err("non-member must not sign activation");
+        assert!(non_member.to_string().contains("not a member"));
     }
 
     #[tokio::test]

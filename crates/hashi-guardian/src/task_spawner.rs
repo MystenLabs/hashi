@@ -24,7 +24,6 @@ use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
 use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
-use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::HashiSigned;
@@ -106,21 +105,12 @@ pub async fn standard_withdrawal(
         .await
 }
 
-pub async fn update_committee(
+pub(crate) async fn update_committee_chain(
     enclave: Arc<Enclave>,
-    signed: HashiSigned<CommitteeTransitionRequest>,
+    request: committee_update::CommitteeUpdateRequest,
 ) -> GuardianResult<u64> {
     enclave
-        .spawn_control_task(signed, committee_update::update_committee)
-        .await
-}
-
-pub async fn update_committee_chain(
-    enclave: Arc<Enclave>,
-    transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
-) -> GuardianResult<u64> {
-    enclave
-        .spawn_control_task(transitions, committee_update::update_committee_chain)
+        .spawn_control_task(request, committee_update::update_committee_chain)
         .await
 }
 

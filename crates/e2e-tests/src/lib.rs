@@ -874,6 +874,29 @@ mod tests {
         }
     }
 
+    async fn wait_for_guardian_epoch(test_networks: &TestNetworks, target_epoch: u64) {
+        let Some(guardian) = test_networks.guardian_harness.as_ref() else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + ROTATION_TIMEOUT;
+        loop {
+            let epoch = guardian
+                .enclave()
+                .state
+                .get_committee()
+                .expect("guardian committee should remain initialized")
+                .epoch();
+            if epoch >= target_epoch {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Timed out waiting for Guardian to reach epoch {target_epoch}; installed epoch is {epoch}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
     async fn force_rotate_and_assert_key_agreement(
         test_networks: &mut TestNetworks,
         target_epoch: u64,
@@ -1999,9 +2022,11 @@ mod tests {
         // First key rotation
         let epoch =
             force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+        wait_for_guardian_epoch(&test_networks, epoch).await;
 
         // Second key rotation
-        force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+        let epoch = force_rotate_and_assert_key_agreement(&mut test_networks, epoch + 1).await;
+        wait_for_guardian_epoch(&test_networks, epoch).await;
 
         Ok(())
     }

@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Domain-separation intents for everything signed by Hashi member BLS keys.
+/// Domain-separation intents for Hashi member BLS signatures verified by Move.
 ///
 /// The signing preimage is `intent (u16 LE) || bcs(epoch) || bcs(message)`.
 /// Every message type signed under the committee's keys carries a unique
@@ -9,8 +9,8 @@
 /// verify as another — regardless of whether two types happen to share a BCS
 /// layout.
 ///
-/// This registry mirrors `crates/hashi-types/src/intent.rs`; the two MUST stay
-/// in sync. Allocation blocks, one per domain, with room to grow within each:
+/// Values shared with `crates/hashi-types/src/intent.rs` must match; Rust-only
+/// intents may be absent. Allocation blocks, one per domain:
 /// - `0x0000..=0x00FF`: core protocol (committee lifecycle, MPC ceremonies)
 /// - `0x0100..=0x01FF`: Bitcoin
 /// - `0x0200..`: reserved for future chains, one block each

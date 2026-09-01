@@ -249,6 +249,18 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
     const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
 }
 
+/// Post-activation proof over the exact active committee payload. This has the
+/// same BCS layout as [`CommitteeTransitionRequest`] but a distinct intent so
+/// pre-activation reconfiguration certificates cannot be replayed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommitteeActivationRequest {
+    pub new_committee: crate::move_types::Committee,
+}
+
+impl crate::intent::IntentMessage for CommitteeActivationRequest {
+    const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeActivation;
+}
+
 /// `KpSigned<ProvisionerRotateCertRequest>`.
 /// Replaces one certificate in a KP roster entry. Request must be signed
 /// with a certificate assigned to the same KP (including the to-be-deleted one).

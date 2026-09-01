@@ -6,16 +6,20 @@ use super::parse_member_signature;
 use crate::Hashi;
 use crate::onchain::types::WithdrawalTransaction;
 use hashi_types::committee::BlsSignatureAggregator;
+use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::committee::certificate_threshold;
+use hashi_types::guardian::CommitteeActivationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
+use hashi_types::guardian::proto_conversions::signed_committee_activation_to_pb;
 use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
 use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
+use hashi_types::proto::SignCommitteeActivationRequest;
 use hashi_types::proto::SignCommitteeTransitionRequest;
 use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
 use hashi_types::proto::UpdateCommitteeChainRequest;
@@ -251,14 +255,12 @@ impl LeaderService {
     // Guardian: committee handoff (post-rotation)
     // ========================================================================
 
-    /// Replay stored guardian handoffs until the guardian matches the chain.
+    /// Replay stored guardian handoffs and prove the final committee is active.
     async fn reconcile_guardian_committee(inner: &Arc<Hashi>) -> anyhow::Result<()> {
         let Some(guardian) = inner.guardian_client() else {
             return Ok(());
         };
 
-        // Seed `guardian_epoch` once from `GetGuardianInfo`, then build the
-        // full stored handoff chain and submit it to the guardian in one RPC.
         let info = inner.fetch_guardian_info_data().await?;
         let Some(mut guardian_epoch) = info.current_committee_epoch else {
             // ProvisionerInit hasn't run yet; the bootstrap CLI seeds it.
@@ -270,24 +272,13 @@ impl LeaderService {
             .set(guardian_epoch as i64);
 
         let hashi_epoch = inner.onchain_state().epoch();
+        if guardian_epoch == hashi_epoch {
+            return Ok(());
+        }
+
         let initial_guardian_epoch = guardian_epoch;
         let mut transitions = Vec::new();
-        let mut final_to_epoch = guardian_epoch;
-        loop {
-            if guardian_epoch > hashi_epoch {
-                // The guardian only advances via certs that hashi signs, so
-                // it should never run ahead of the hashi chain. If we see
-                // this, something is wrong (e.g., a stale onchain read).
-                warn!(
-                    guardian_epoch,
-                    hashi_epoch, "guardian is ahead of hashi — unexpected"
-                );
-                return Ok(());
-            }
-            if guardian_epoch == hashi_epoch {
-                break;
-            }
-
+        while guardian_epoch < hashi_epoch {
             let from_epoch = guardian_epoch;
             info!(
                 from_epoch,
@@ -302,20 +293,57 @@ impl LeaderService {
                     )
                 })?;
             let to_epoch = signed.message().new_committee.epoch;
-            if to_epoch <= from_epoch {
-                anyhow::bail!("stored guardian handoff did not advance: {from_epoch}->{to_epoch}");
-            }
-            transitions.push(signed_committee_transition_to_pb(&signed));
-            final_to_epoch = to_epoch;
+            anyhow::ensure!(
+                to_epoch > from_epoch,
+                "stored guardian handoff did not advance: {from_epoch}->{to_epoch}"
+            );
+            transitions.push(signed);
             guardian_epoch = to_epoch;
         }
 
-        if transitions.is_empty() {
-            return Ok(());
-        }
+        anyhow::ensure!(
+            guardian_epoch == hashi_epoch,
+            "stored guardian handoff chain ended at {guardian_epoch}, expected {hashi_epoch}"
+        );
+        let activation_message = CommitteeActivationRequest {
+            new_committee: transitions
+                .last()
+                .expect("guardian epoch differs, so the handoff chain is non-empty")
+                .message()
+                .new_committee
+                .clone(),
+        };
+        let final_committee = inner
+            .onchain_state()
+            .current_committee()
+            .ok_or_else(|| anyhow::anyhow!("no current committee at epoch {hashi_epoch}"))?;
+        anyhow::ensure!(
+            final_committee.epoch() == hashi_epoch,
+            "current committee epoch {} changed while reconciling captured epoch {hashi_epoch}",
+            final_committee.epoch()
+        );
 
+        let activation = Self::collect_committee_activation_signatures(
+            inner,
+            &final_committee,
+            activation_message,
+        )
+        .await?;
+        anyhow::ensure!(
+            inner.onchain_state().epoch() == hashi_epoch,
+            "hashi epoch changed while collecting activation for epoch {hashi_epoch}"
+        );
+
+        let transitions = transitions
+            .iter()
+            .map(signed_committee_transition_to_pb)
+            .collect();
+        let activation = Some(signed_committee_activation_to_pb(&activation));
         let resp = guardian
-            .update_committee_chain(UpdateCommitteeChainRequest { transitions })
+            .update_committee_chain(UpdateCommitteeChainRequest {
+                transitions,
+                activation,
+            })
             .await
             .map_err(|status| {
                 anyhow::anyhow!("UpdateCommitteeChain failed: {}", status.message())
@@ -327,19 +355,62 @@ impl LeaderService {
             .metrics
             .guardian_current_committee_epoch
             .set(new_guardian_epoch as i64);
+        anyhow::ensure!(
+            new_guardian_epoch == hashi_epoch,
+            "guardian ended at epoch {new_guardian_epoch}, expected {hashi_epoch}"
+        );
         info!(
             from_epoch = initial_guardian_epoch,
             to_epoch = new_guardian_epoch,
             "Advanced guardian committee"
         );
 
-        if new_guardian_epoch < final_to_epoch {
-            anyhow::bail!(
-                "guardian failed to advance to {final_to_epoch}: ended at {new_guardian_epoch}"
-            );
+        Ok(())
+    }
+
+    async fn collect_committee_activation_signatures(
+        inner: &Arc<Hashi>,
+        committee: &Committee,
+        activation: CommitteeActivationRequest,
+    ) -> anyhow::Result<SignedMessage<CommitteeActivationRequest>> {
+        let committee_epoch = committee.epoch();
+        let required_weight = certificate_threshold(committee.total_weight());
+        let mut sig_tasks = JoinSet::new();
+        for member in committee.members() {
+            let inner = inner.clone();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
+                Self::request_committee_activation_signature(
+                    &inner,
+                    SignCommitteeActivationRequest { committee_epoch },
+                    &member,
+                )
+                .await
+            });
         }
 
-        Ok(())
+        let mut aggregator = BlsSignatureAggregator::new(committee, activation);
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(signature)) = result else {
+                continue;
+            };
+            if let Err(error) = aggregator.add_signature(signature) {
+                error!(
+                    committee_epoch,
+                    "Failed to add committee activation signature: {error}"
+                );
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+
+        let weight = aggregator.weight();
+        anyhow::ensure!(
+            weight >= required_weight,
+            "insufficient committee activation signatures for epoch {committee_epoch}: weight {weight} < {required_weight}"
+        );
+        Ok(aggregator.finish()?)
     }
 
     pub(crate) async fn collect_committee_transition_signatures(
@@ -391,6 +462,49 @@ impl LeaderService {
             );
         }
         Ok(aggregator.finish()?)
+    }
+
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(validator = %member.validator_address())
+    )]
+    async fn request_committee_activation_signature(
+        inner: &Arc<Hashi>,
+        proto_request: SignCommitteeActivationRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        let mut rpc_client = inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+        let response = rpc_client
+            .sign_committee_activation(proto_request)
+            .await
+            .inspect_err(|error| {
+                error!(
+                    "Failed to get committee activation signature from {validator_address}: {error}"
+                );
+            })
+            .ok()?;
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|error| {
+                error!(
+                    "Failed to parse committee activation signature from {validator_address}: {error}"
+                );
+            })
+            .ok()
     }
 
     #[tracing::instrument(

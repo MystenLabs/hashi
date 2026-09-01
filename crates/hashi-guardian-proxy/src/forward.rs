@@ -76,13 +76,6 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         self.client.clone().standard_withdrawal(request).await
     }
 
-    async fn update_committee(
-        &self,
-        request: Request<proto::SignedCommitteeTransition>,
-    ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.client.clone().update_committee(request).await
-    }
-
     async fn update_committee_chain(
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
@@ -168,6 +161,8 @@ mod tests {
     struct StubGuardian {
         standard_withdrawal_calls: Arc<AtomicUsize>,
         get_guardian_info_calls: Arc<AtomicUsize>,
+        update_committee_chain_request:
+            Arc<tokio::sync::Mutex<Option<proto::UpdateCommitteeChainRequest>>>,
     }
 
     #[tonic::async_trait]
@@ -225,17 +220,14 @@ mod tests {
         ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
-        async fn update_committee(
-            &self,
-            _: Request<proto::SignedCommitteeTransition>,
-        ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
-        }
         async fn update_committee_chain(
             &self,
-            _: Request<proto::UpdateCommitteeChainRequest>,
+            request: Request<proto::UpdateCommitteeChainRequest>,
         ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-            unimplemented!("not exercised by tests")
+            *self.update_committee_chain_request.lock().await = Some(request.into_inner());
+            Ok(Response::new(proto::UpdateCommitteeResponse {
+                current_committee_epoch: Some(9),
+            }))
         }
         async fn rotate_kp_set(
             &self,
@@ -314,6 +306,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn forwards_complete_committee_chain_request_unchanged() {
+        let (stub, proxy) = spawn_stub_proxy().await;
+        let request = proto::UpdateCommitteeChainRequest {
+            transitions: vec![proto::SignedCommitteeTransition {
+                data: Some(Default::default()),
+                ..Default::default()
+            }],
+            activation: Some(proto::SignedCommitteeTransition {
+                committee_signature: Some(Default::default()),
+                ..Default::default()
+            }),
+        };
+
+        let response = proxy
+            .update_committee_chain(Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.current_committee_epoch, Some(9));
+        assert_eq!(
+            stub.update_committee_chain_request.lock().await.as_ref(),
+            Some(&request)
+        );
     }
 
     // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic

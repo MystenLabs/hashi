@@ -15,11 +15,9 @@
 //! The wire value is the discriminant, taken via `as u16` — never serde's enum
 //! encoding (which is the variant index, not the discriminant).
 //!
-//! This registry mirrors `packages/hashi/sources/core/intent.move`; the two
-//! MUST stay in sync — `intent_values_are_stable` below pins the on-wire
-//! values so the Rust side cannot drift silently, and the e2e suite is the
-//! true cross-language check. Allocation blocks, one per domain, with room to
-//! grow within each:
+//! Values shared with `packages/hashi/sources/core/intent.move` MUST stay in sync.
+//! Rust-only intents may be absent. Explicit values below pin Rust's wire format.
+//! Allocation blocks:
 //! - `0x0000..=0x00FF`: core protocol (committee lifecycle, MPC ceremonies)
 //! - `0x0100..=0x01FF`: Bitcoin
 //! - `0x0200..`: reserved for future chains, one block each
@@ -42,6 +40,8 @@ pub enum Intent {
     AvssVoteMessagesHash = 0x0004,
     /// AVID nonce pessimistic-path certificate (`CertKind::AvidVote`).
     AvidVoteMessagesHash = 0x0005,
+    /// Post-activation proof signed only after members observe the epoch advance.
+    CommitteeActivation = 0x0006,
 
     // ==== Bitcoin (0x0100..=0x01FF) ====
     /// Deposit confirmation over (request_id, utxo).
@@ -87,9 +87,8 @@ impl<T: IntentMessage> IntentMessage for &T {
 mod tests {
     use super::Intent;
 
-    /// The intent discriminants are the on-wire signing domain and MUST match
-    /// `packages/hashi/sources/core/intent.move` exactly. Renumbering here (or
-    /// there) breaks every committee signature across the language boundary.
+    /// Shared intent discriminants MUST match `packages/hashi/sources/core/intent.move`.
+    /// Renumbering a shared value breaks cross-language committee signatures.
     #[test]
     fn intent_values_are_stable() {
         assert_eq!(Intent::ProofOfPossession as u16, 0x0000);
@@ -98,6 +97,7 @@ mod tests {
         assert_eq!(Intent::DealerMessagesHash as u16, 0x0003);
         assert_eq!(Intent::AvssVoteMessagesHash as u16, 0x0004);
         assert_eq!(Intent::AvidVoteMessagesHash as u16, 0x0005);
+        assert_eq!(Intent::CommitteeActivation as u16, 0x0006);
         assert_eq!(Intent::DepositConfirmation as u16, 0x0100);
         assert_eq!(Intent::WithdrawalRequestApproval as u16, 0x0101);
         assert_eq!(Intent::WithdrawalCommitment as u16, 0x0102);

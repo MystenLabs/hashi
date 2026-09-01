@@ -225,6 +225,16 @@ pub struct SignCommitteeTransitionResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignCommitteeActivationRequest {
+    #[prost(uint64, tag = "1")]
+    pub committee_epoch: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignCommitteeActivationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
 /// Generated client implementations.
 pub mod bridge_service_client {
     #![allow(
@@ -589,7 +599,7 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign a committee transition for the guardian's `UpdateCommittee`.
+        /// Sign a committee transition for the guardian's stored outgoing handoff.
         pub async fn sign_committee_transition(
             &mut self,
             request: impl tonic::IntoRequest<super::SignCommitteeTransitionRequest>,
@@ -615,6 +625,36 @@ pub mod bridge_service_client {
                     GrpcMethod::new(
                         "sui.hashi.v1alpha.BridgeService",
                         "SignCommitteeTransition",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Sign the exact current committee payload after observing its activation.
+        pub async fn sign_committee_activation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignCommitteeActivationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignCommitteeActivationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignCommitteeActivation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignCommitteeActivation",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -719,12 +759,20 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalConfirmationResponse>,
             tonic::Status,
         >;
-        /// Sign a committee transition for the guardian's `UpdateCommittee`.
+        /// Sign a committee transition for the guardian's stored outgoing handoff.
         async fn sign_committee_transition(
             &self,
             request: tonic::Request<super::SignCommitteeTransitionRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignCommitteeTransitionResponse>,
+            tonic::Status,
+        >;
+        /// Sign the exact current committee payload after observing its activation.
+        async fn sign_committee_activation(
+            &self,
+            request: tonic::Request<super::SignCommitteeActivationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignCommitteeActivationResponse>,
             tonic::Status,
         >;
     }
@@ -1302,6 +1350,57 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SignCommitteeTransitionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignCommitteeActivation" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignCommitteeActivationSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SignCommitteeActivationRequest>
+                    for SignCommitteeActivationSvc<T> {
+                        type Response = super::SignCommitteeActivationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignCommitteeActivationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_committee_activation(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignCommitteeActivationSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -2304,14 +2403,19 @@ pub struct CommitteeTransition {
 pub struct SignedCommitteeTransition {
     #[prost(message, optional, tag = "1")]
     pub data: ::core::option::Option<CommitteeTransition>,
-    /// Outgoing committee's signature; `epoch` is `new_committee.epoch - 1`.
+    /// Signature epoch and intent depend on this certificate's role.
     #[prost(message, optional, tag = "2")]
     pub committee_signature: ::core::option::Option<CommitteeSignature>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateCommitteeChainRequest {
+    /// Each transition is signed by the outgoing committee.
     #[prost(message, repeated, tag = "1")]
     pub transitions: ::prost::alloc::vec::Vec<SignedCommitteeTransition>,
+    /// The final committee's post-activation signature, under the committee
+    /// activation intent, over the exact final transition payload at its epoch.
+    #[prost(message, optional, tag = "2")]
+    pub activation: ::core::option::Option<SignedCommitteeTransition>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateCommitteeResponse {
@@ -2777,37 +2881,8 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Advance the guardian's committee one handoff (signed by the outgoing committee). Idempotent.
-        pub async fn update_committee(
-            &mut self,
-            request: impl tonic::IntoRequest<super::SignedCommitteeTransition>,
-        ) -> std::result::Result<
-            tonic::Response<super::UpdateCommitteeResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.GuardianService/UpdateCommittee",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.GuardianService",
-                        "UpdateCommittee",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        /// Advance the guardian by replaying a chain of stored committee handoffs.
+        /// Advance the guardian by replaying stored outgoing-committee handoffs and
+        /// proving that the final committee is active.
         pub async fn update_committee_chain(
             &mut self,
             request: impl tonic::IntoRequest<super::UpdateCommitteeChainRequest>,
@@ -2919,15 +2994,8 @@ pub mod guardian_service_server {
             tonic::Response<super::SignedStandardWithdrawalResponse>,
             tonic::Status,
         >;
-        /// Advance the guardian's committee one handoff (signed by the outgoing committee). Idempotent.
-        async fn update_committee(
-            &self,
-            request: tonic::Request<super::SignedCommitteeTransition>,
-        ) -> std::result::Result<
-            tonic::Response<super::UpdateCommitteeResponse>,
-            tonic::Status,
-        >;
-        /// Advance the guardian by replaying a chain of stored committee handoffs.
+        /// Advance the guardian by replaying stored outgoing-committee handoffs and
+        /// proving that the final committee is active.
         async fn update_committee_chain(
             &self,
             request: tonic::Request<super::UpdateCommitteeChainRequest>,
@@ -3373,52 +3441,6 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = StandardWithdrawalSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sui.hashi.v1alpha.GuardianService/UpdateCommittee" => {
-                    #[allow(non_camel_case_types)]
-                    struct UpdateCommitteeSvc<T: GuardianService>(pub Arc<T>);
-                    impl<
-                        T: GuardianService,
-                    > tonic::server::UnaryService<super::SignedCommitteeTransition>
-                    for UpdateCommitteeSvc<T> {
-                        type Response = super::UpdateCommitteeResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::SignedCommitteeTransition>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as GuardianService>::update_committee(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = UpdateCommitteeSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

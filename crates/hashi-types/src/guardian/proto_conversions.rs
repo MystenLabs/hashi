@@ -11,6 +11,7 @@ use super::BuildPcrs;
 use super::CeremonyOperatorInitRequest;
 use super::CeremonyStage;
 use super::Ciphertext;
+use super::CommitteeActivationRequest;
 use super::CommitteeTransitionRequest;
 use super::EnclaveLifecycle;
 use super::GenesisState;
@@ -1739,6 +1740,47 @@ impl TryFrom<pb::SignedCommitteeTransition> for HashiSigned<CommitteeTransitionR
     }
 }
 
+pub fn signed_committee_activation_to_pb(
+    signed: &HashiSigned<CommitteeActivationRequest>,
+) -> pb::SignedCommitteeTransition {
+    pb::SignedCommitteeTransition {
+        data: Some(pb::CommitteeTransition {
+            new_committee: Some(move_committee_to_pb(&signed.message().new_committee)),
+        }),
+        committee_signature: Some(pb::CommitteeSignature {
+            epoch: Some(signed.epoch()),
+            signature: Some(signed.signature_bytes().to_vec().into()),
+            bitmap: Some(signed.signers_bitmap_bytes().to_vec().into()),
+        }),
+    }
+}
+
+impl TryFrom<pb::SignedCommitteeTransition> for HashiSigned<CommitteeActivationRequest> {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::SignedCommitteeTransition) -> Result<Self, Self::Error> {
+        let data_pb = req.data.ok_or_else(|| missing("data"))?;
+        let new_committee_pb = data_pb
+            .new_committee
+            .ok_or_else(|| missing("new_committee"))?;
+        let activation = CommitteeActivationRequest {
+            new_committee: crate::move_types::Committee::try_from(new_committee_pb)?,
+        };
+        let committee_signature_pb = req
+            .committee_signature
+            .ok_or_else(|| missing("committee_signature"))?;
+        let signature = CommitteeSignature::try_from(committee_signature_pb)?;
+
+        Self::new(
+            signature.epoch,
+            activation,
+            &signature.signature,
+            &signature.signers_bitmap,
+        )
+        .map_err(|e| InvalidInputs(format!("invalid signed committee activation: {e}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::AddressValidation;
@@ -2003,7 +2045,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_committee_transition_round_trip() {
+    fn signed_committee_activation_and_transition_round_trip() {
         use crate::committee::Bls12381PrivateKey;
         use crate::committee::BlsSignatureAggregator;
         use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
@@ -2046,6 +2088,40 @@ mod tests {
         assert_eq!(signed.signature_bytes(), back.signature_bytes());
         assert_eq!(signed.signers_bitmap_bytes(), back.signers_bitmap_bytes());
         assert_eq!(signed.message().new_committee, back.message().new_committee);
+
+        let raw_committee = crate::move_types::Committee::from(&new_committee);
+        let activation = CommitteeActivationRequest {
+            new_committee: raw_committee.clone(),
+        };
+        let sig = sk.sign(new_committee.epoch(), addr, &activation);
+        let mut agg = BlsSignatureAggregator::new(&new_committee, activation.clone());
+        agg.add_signature(sig).expect("member sig should verify");
+        let signed = agg.finish().expect("threshold met");
+
+        let pb = signed_committee_activation_to_pb(&signed);
+        let back = HashiSigned::<CommitteeActivationRequest>::try_from(pb).expect("round-trip");
+        assert_eq!(signed.epoch(), back.epoch());
+        assert_eq!(raw_committee, back.message().new_committee);
+        assert_eq!(signed.signature_bytes(), back.signature_bytes());
+        assert_eq!(signed.signers_bitmap_bytes(), back.signers_bitmap_bytes());
+
+        let transition = CommitteeTransitionRequest {
+            new_committee: raw_committee,
+        };
+        let sig = sk.sign(new_committee.epoch(), addr, &transition);
+        let mut agg = BlsSignatureAggregator::new(&new_committee, transition);
+        agg.add_signature(sig).expect("member sig should verify");
+        let signed_transition = agg.finish().expect("threshold met");
+        let transition_as_activation = HashiSigned::<CommitteeActivationRequest>::try_from(
+            signed_committee_transition_to_pb(&signed_transition),
+        )
+        .expect("the wire shape is shared");
+        assert!(
+            new_committee
+                .verify_signature_any_weight(&transition_as_activation)
+                .is_err(),
+            "a transition signature must not verify under the activation intent"
+        );
     }
 
     /// The wire decode must be verbatim: committee-transition certs are

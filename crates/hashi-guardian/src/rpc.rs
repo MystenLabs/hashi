@@ -3,10 +3,12 @@
 
 use crate::info;
 use crate::task_spawner;
+use crate::withdraw_mode::committee_update::CommitteeUpdateRequest;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
+use hashi_types::guardian::CommitteeActivationRequest;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
@@ -204,36 +206,32 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(resp_pb))
     }
 
-    async fn update_committee(
-        &self,
-        request: Request<proto::SignedCommitteeTransition>,
-    ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        let signed = HashiSigned::<CommitteeTransitionRequest>::try_from(request.into_inner())
-            .map_err(to_status)?;
-        let current_committee_epoch = task_spawner::update_committee(self.enclave.clone(), signed)
-            .await
-            .map_err(to_status)?;
-
-        Ok(Response::new(proto::UpdateCommitteeResponse {
-            current_committee_epoch: Some(current_committee_epoch),
-        }))
-    }
-
     async fn update_committee_chain(
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+        let request = request.into_inner();
+        let activation = request
+            .activation
+            .ok_or_else(|| to_status(InvalidInputs("missing activation".to_string())))
+            .and_then(|activation| {
+                HashiSigned::<CommitteeActivationRequest>::try_from(activation).map_err(to_status)
+            })?;
         let transitions = request
-            .into_inner()
             .transitions
             .into_iter()
             .map(HashiSigned::<CommitteeTransitionRequest>::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(to_status)?;
-        let current_committee_epoch =
-            task_spawner::update_committee_chain(self.enclave.clone(), transitions)
-                .await
-                .map_err(to_status)?;
+        let current_committee_epoch = task_spawner::update_committee_chain(
+            self.enclave.clone(),
+            CommitteeUpdateRequest {
+                transitions,
+                activation,
+            },
+        )
+        .await
+        .map_err(to_status)?;
 
         Ok(Response::new(proto::UpdateCommitteeResponse {
             current_committee_epoch: Some(current_committee_epoch),
@@ -244,6 +242,41 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn update_committee_chain_status(request: proto::UpdateCommitteeChainRequest) -> Status {
+        let service = GuardianGrpc {
+            enclave: Enclave::create_with_random_keys(),
+        };
+        proto::guardian_service_server::GuardianService::update_committee_chain(
+            &service,
+            Request::new(request),
+        )
+        .await
+        .expect_err("malformed request must fail before dispatch")
+    }
+
+    #[tokio::test]
+    async fn update_committee_chain_rejects_invalid_activation_before_dispatch() {
+        let cases = [
+            ("missing activation", None),
+            (
+                "malformed activation",
+                Some(proto::SignedCommitteeTransition::default()),
+            ),
+        ];
+        for (label, activation) in cases {
+            let status = update_committee_chain_status(proto::UpdateCommitteeChainRequest {
+                transitions: vec![],
+                activation,
+            })
+            .await;
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "{label} must be invalid"
+            );
+        }
+    }
 
     #[test]
     fn heartbeat_readiness_errors_have_actionable_status_codes() {
