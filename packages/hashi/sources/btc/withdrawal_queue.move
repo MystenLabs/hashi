@@ -51,6 +51,9 @@ const EWithdrawalNotFullySigned: vector<u8> =
 const ECannotApproveCommittedRequest: vector<u8> =
     b"Withdrawal request has already been committed to a transaction";
 #[error]
+const EApprovalCertNotNewer: vector<u8> =
+    b"Approval certificate must be from a later epoch than the stored certificate";
+#[error]
 const ERequestNotCancellable: vector<u8> =
     b"Withdrawal request has already been committed and cannot be destroyed";
 #[error]
@@ -296,6 +299,7 @@ public(package) fun insert_withdrawal(
 }
 
 /// Approve a withdrawal request. Updates status in the requests bag.
+/// The caller must have verified `cert` against the current committee.
 public(package) fun approve_withdrawal(
     self: &mut WithdrawalRequestQueue,
     request_id: address,
@@ -309,6 +313,15 @@ public(package) fun approve_withdrawal(
     // already drained. Before deferred archival this protection came from
     // the request having left the bag.
     assert!(request.status.is_active(), ECannotApproveCommittedRequest);
+    // Re-approval is only allowed with a cert from a strictly later epoch
+    // than the stored one: a new committee refreshing a cert left stale by
+    // reconfiguration. A same-epoch cert is a replay that would only reset
+    // `approved_timestamp_ms`.
+    assert!(
+        request.approval_cert.is_none() ||
+            request.approval_cert.borrow().signature_epoch() < cert.signature_epoch(),
+        EApprovalCertNotNewer,
+    );
     request.status = WithdrawalStatus::Approved;
     request.approval_cert = option::some(cert);
     request.approved_timestamp_ms = option::some(clock.timestamp_ms());
