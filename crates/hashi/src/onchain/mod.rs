@@ -616,17 +616,28 @@ impl OnchainState {
         Ok(Some((bucket.layout, certs)))
     }
 
-    /// True once the object mirror has applied every Hashi transaction
+    /// Wait until the object mirror has applied every Hashi transaction
     /// through a checkpoint whose timestamp is past `cutoff_ms`: any TOB
-    /// submission stamped at or before the cutoff is either already in
-    /// the mirror or will never land. `false` while the clock stream or
-    /// the mirror still trails the cutoff, and with no mirror running.
-    pub fn mirror_past_timestamp_ms(&self, cutoff_ms: u64) -> bool {
-        let clock = *self.0.checkpoint.borrow();
-        clock.timestamp_ms > cutoff_ms
-            && self
-                .state_watermark()
-                .is_some_and(|covered| covered >= clock.height)
+    /// submission stamped at or before the cutoff is then either in the
+    /// mirror or will never land. The first checkpoint the clock stream
+    /// shows past the cutoff is latched and the wait resolves once the
+    /// state watermark covers that fixed height — comparing against the
+    /// live tip instead would starve a mirror that trails the clock
+    /// stream by even one checkpoint, which is its steady state. Caller
+    /// wraps with `tokio::time::timeout` for a bound; with no mirror
+    /// running this blocks until that timeout.
+    pub async fn wait_mirror_past_timestamp_ms(&self, cutoff_ms: u64) {
+        let mut clock = self.0.checkpoint.subscribe();
+        let target = loop {
+            let info = *clock.borrow_and_update();
+            if info.timestamp_ms > cutoff_ms {
+                break info.height;
+            }
+            if clock.changed().await.is_err() {
+                return;
+            }
+        };
+        self.wait_until_checkpoint(target).await;
     }
 
     /// Returns the current epoch.

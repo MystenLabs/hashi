@@ -1247,25 +1247,22 @@ impl MpcService {
                      (last confirmed {cutoff_confirmed:?}, now {cutoff_ms})"
                 );
             }
-            if !onchain_state.mirror_past_timestamp_ms(cutoff_ms) {
-                let deadline = (Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK)
-                    .min(overall_deadline.saturating_duration_since(tokio::time::Instant::now()));
-                let wait = async {
-                    while !onchain_state.mirror_past_timestamp_ms(cutoff_ms) {
-                        tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
-                    }
-                };
-                if tokio::time::timeout(deadline, wait).await.is_err() {
-                    metrics.mpc_nonce_window_cutoff_unreached_total.inc();
-                    warn!(
-                        "fetch_final_nonce_certs: the mirror never advanced past window cutoff \
-                         {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?} \
-                         (stalled chain clock or a lagging mirror); failing this batch"
-                    );
-                    anyhow::bail!(
-                        "nonce window did not close for epoch {epoch} batch {batch_index}"
-                    );
-                }
+            let deadline = (Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK)
+                .min(overall_deadline.saturating_duration_since(tokio::time::Instant::now()));
+            if tokio::time::timeout(
+                deadline,
+                onchain_state.wait_mirror_past_timestamp_ms(cutoff_ms),
+            )
+            .await
+            .is_err()
+            {
+                metrics.mpc_nonce_window_cutoff_unreached_total.inc();
+                warn!(
+                    "fetch_final_nonce_certs: the mirror never advanced past window cutoff \
+                     {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?} \
+                     (stalled chain clock or a lagging mirror); failing this batch"
+                );
+                anyhow::bail!("nonce window did not close for epoch {epoch} batch {batch_index}");
             }
             if cutoff_confirmed.is_some() {
                 tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
