@@ -27,13 +27,16 @@ use sui_sdk_types::Owner;
 use sui_sdk_types::TypeTag;
 
 use hashi_types::move_types;
+use hashi_types::move_types::MoveType;
 use hashi_types::move_types::is_dof_wrapper;
+use hashi_types::move_types::is_dynamic_field;
 
 use super::route::ObjectIndex;
 use super::route::RoutingTable;
 use super::route::Slot;
 use super::route::TrackedKind;
 use super::types;
+use super::versioned_decode::TobCertLayout;
 
 /// One successful transaction's object changes, decoded from the gRPC
 /// payload into `sui_sdk_types` values.
@@ -689,14 +692,57 @@ fn apply_write(
             })
         }
         Slot::Tob => {
-            // Not mirrored, but the entry's LinkedTable UID owns dealer
-            // submission nodes; register it so they route as ignored.
-            decode::<move_types::Field<super::TobKey, move_types::EpochCertsV1>>(contents, &id).map(
-                |field| {
-                    routing.register_interior(field.value.certs.id, Slot::TobCerts);
-                    TrackedKind::Ignored
-                },
-            )
+            // A bucket Field is rewritten on every submission (the
+            // embedded LinkedTable's head/tail/size live in it); the
+            // nodes themselves arrive as TobCerts writes. The two
+            // bucket structs are BCS-identical, so one decode serves
+            // both; the Field's value-side type selects the node
+            // layout, and an unrecognized one falls through to the
+            // unrouted tripwire rather than misdecoding.
+            tob_bucket_layout(packages, tag).and_then(|layout| {
+                decode::<move_types::Field<move_types::TobKey, move_types::EpochCertsV1>>(
+                    contents, &id,
+                )
+                .map(|field| {
+                    let key = field.name;
+                    let certs_id = field.value.certs.id;
+                    routing.register_interior(certs_id, Slot::TobCerts);
+                    routing.register_tob_table(certs_id, key);
+                    let bucket = hashi
+                        .tob
+                        .buckets
+                        .entry(key)
+                        .or_insert_with(|| types::TobBucket {
+                            layout,
+                            certs_id,
+                            head: None,
+                            nodes: std::collections::BTreeMap::new(),
+                        });
+                    bucket.layout = layout;
+                    bucket.certs_id = certs_id;
+                    bucket.head = field.value.certs.head;
+                    TrackedKind::TobBucket(key)
+                })
+            })
+        }
+        Slot::TobCerts => {
+            // The owner is the bucket's LinkedTable UID; a node write is
+            // a new dealer submission, or a neighbor's prev/next link
+            // update from a same-transaction insertion. The node's own
+            // value type says whether the submission is bare or stamped;
+            // both are stored in the normalized stamped form.
+            let parent = match obj.owner() {
+                Owner::Object(parent) => *parent,
+                _ => return,
+            };
+            routing.tob_key_of_table(&parent).and_then(|key| {
+                decode_tob_node(packages, tag, contents, &id).map(|(dealer, node)| {
+                    if let Some(bucket) = hashi.tob.buckets.get_mut(&key) {
+                        bucket.nodes.insert(dealer, node);
+                    }
+                    TrackedKind::TobCert { key, dealer }
+                })
+            })
         }
         Slot::UserRequests => {
             // Same shape: each per-user value is a Bag with its own UID.
@@ -708,7 +754,6 @@ fn apply_write(
         Slot::DepositProcessed
         | Slot::WithdrawalProcessed
         | Slot::ConfirmedTxns
-        | Slot::TobCerts
         | Slot::UserRequestBag => Some(TrackedKind::Ignored),
     };
 
@@ -830,6 +875,22 @@ fn retire(
             };
             bucket.remove(id);
         }
+        TrackedKind::TobBucket(key) => {
+            // A destroyed bucket takes its LinkedTable's routing entries
+            // with it; the node deletions in the same transaction then
+            // resolve through the index alone.
+            if let Some(bucket) = hashi.tob.buckets.remove(key) {
+                routing.remove_tob_table(&bucket.certs_id);
+                routing.remove_interior(&bucket.certs_id);
+            }
+        }
+        TrackedKind::TobCert { key, dealer } => {
+            // The bucket may already be retired if its deletion was
+            // processed first within the same transaction.
+            if let Some(bucket) = hashi.tob.buckets.get_mut(key) {
+                bucket.nodes.remove(dealer);
+            }
+        }
         TrackedKind::Ignored => {}
     }
 }
@@ -854,6 +915,8 @@ fn slot_for_kind(kind: &TrackedKind) -> Option<Slot> {
         } else {
             Slot::ProposalsActive
         }),
+        TrackedKind::TobBucket(_) => Some(Slot::Tob),
+        TrackedKind::TobCert { .. } => Some(Slot::TobCerts),
         TrackedKind::Ignored => None,
     }
 }
@@ -867,6 +930,87 @@ fn decode<T: serde::de::DeserializeOwned>(contents: &[u8], id: &Address) -> Opti
             tracing::error!("failed to BCS-decode routed object {id}: {e}");
             None
         }
+    }
+}
+
+/// The value-side type parameter of a `0x2::dynamic_field::Field<K, V>`
+/// struct tag.
+fn dynamic_field_value_tag(tag: &sui_sdk_types::StructTag) -> Option<&sui_sdk_types::StructTag> {
+    if !is_dynamic_field(tag) {
+        return None;
+    }
+    match tag.type_params().get(1) {
+        Some(TypeTag::Struct(value)) => Some(value),
+        _ => None,
+    }
+}
+
+/// The layout family of a TOB bucket write, identified from the Field's
+/// value-side type. `None` (an unknown layout) surfaces the write as
+/// unrouted — loud, never a misdecode.
+fn tob_bucket_layout(
+    packages: &move_types::PackageVersions,
+    tag: &sui_sdk_types::StructTag,
+) -> Option<TobCertLayout> {
+    let value = dynamic_field_value_tag(tag)?;
+    TobCertLayout::from_struct_tag(packages, value).ok()
+}
+
+/// Decode a TOB dealer submission node in whichever layout its own
+/// value type reports — the value side of a linked-table entry is
+/// `0x2::linked_table::Node<address, V>` and `V` is the submission
+/// type — normalized to the stamped form (`timestamp_ms: 0` for bare
+/// submissions). `None` surfaces the write as unrouted.
+fn decode_tob_node(
+    packages: &move_types::PackageVersions,
+    tag: &sui_sdk_types::StructTag,
+    contents: &[u8],
+    id: &Address,
+) -> Option<(
+    Address,
+    move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1>,
+)> {
+    let node_tag = dynamic_field_value_tag(tag)?;
+    if node_tag.address() != &Address::TWO
+        || node_tag.module() != "linked_table"
+        || node_tag.name() != "Node"
+    {
+        return None;
+    }
+    let submission_tag = match node_tag.type_params().get(1) {
+        Some(TypeTag::Struct(value)) => value,
+        _ => return None,
+    };
+    if move_types::DealerSubmissionV1::matches(packages, submission_tag) {
+        decode::<
+            move_types::Field<
+                Address,
+                move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>,
+            >,
+        >(contents, id)
+        .map(|field| {
+            (
+                field.name,
+                move_types::LinkedTableNode {
+                    prev: field.value.prev,
+                    next: field.value.next,
+                    value: move_types::StampedDealerSubmissionV1 {
+                        submission: field.value.value,
+                        timestamp_ms: 0,
+                    },
+                },
+            )
+        })
+    } else if move_types::StampedDealerSubmissionV1::matches(packages, submission_tag) {
+        decode::<
+            move_types::Field<
+                Address,
+                move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1>,
+            >,
+        >(contents, id)
+        .map(|field| (field.name, field.value))
+    } else {
+        None
     }
 }
 
@@ -1049,7 +1193,10 @@ mod tests {
                     active: BTreeMap::new(),
                     executed: BTreeMap::new(),
                 },
-                tob_id: tob_id(),
+                tob: types::Tob {
+                    id: tob_id(),
+                    buckets: BTreeMap::new(),
+                },
                 num_consumed_presigs: 0,
             };
 
@@ -1786,6 +1933,386 @@ mod tests {
         ))]));
         assert!(out.unrouted.is_empty());
         assert_eq!(fixture.index.len(), 0);
+    }
+
+    // ---- TOB fixtures ------------------------------------------------
+
+    fn tob_certs_table_id() -> Address {
+        addr(0x80)
+    }
+
+    fn tob_key(epoch: u64) -> move_types::TobKey {
+        move_types::TobKey {
+            epoch,
+            batch_index: None,
+            protocol_type: move_types::ProtocolType::Dkg,
+        }
+    }
+
+    fn dealer_submission(dealer: Address) -> move_types::DealerSubmissionV1 {
+        move_types::DealerSubmissionV1 {
+            message: move_types::DealerMessagesHashV1 {
+                dealer_address: dealer,
+                messages_hash: vec![0xAB; 32],
+            },
+            signature: move_types::CommitteeSignature {
+                epoch: 7,
+                signature: vec![0xCD; 96],
+                signers_bitmap: vec![0b1111],
+            },
+        }
+    }
+
+    /// The two bucket structs are BCS-identical, so one payload builder
+    /// serves both; `value_tag` selects the layout the tag advertises.
+    fn tob_bucket_object_with_value_tag(
+        field_id: Address,
+        version: u64,
+        key: move_types::TobKey,
+        head: Option<Address>,
+        tail: Option<Address>,
+        size: u64,
+        value_tag: TypeTag,
+    ) -> Object {
+        let value = move_types::EpochCertsV1 {
+            epoch: key.epoch,
+            protocol_type: key.protocol_type,
+            certs: move_types::LinkedTable {
+                id: tob_certs_table_id(),
+                size,
+                head,
+                tail,
+            },
+        };
+        let contents = bcs::to_bytes(&FieldEnc {
+            id: field_id,
+            name: key,
+            value,
+        })
+        .unwrap();
+        obj(
+            field_tag(hashi_struct("tob", "TobKey", vec![]), value_tag),
+            version,
+            Owner::Object(tob_id()),
+            contents,
+        )
+    }
+
+    fn tob_bucket_object(
+        field_id: Address,
+        version: u64,
+        key: move_types::TobKey,
+        head: Option<Address>,
+        tail: Option<Address>,
+        size: u64,
+    ) -> Object {
+        tob_bucket_object_with_value_tag(
+            field_id,
+            version,
+            key,
+            head,
+            tail,
+            size,
+            hashi_struct("tob", "EpochCertsV1", vec![]),
+        )
+    }
+
+    fn tob_node_object(
+        node_id: Address,
+        version: u64,
+        dealer: Address,
+        prev: Option<Address>,
+        next: Option<Address>,
+    ) -> Object {
+        let value = move_types::LinkedTableNode {
+            prev,
+            next,
+            value: dealer_submission(dealer),
+        };
+        let node_type = TypeTag::Struct(Box::new(tag(
+            Address::TWO,
+            "linked_table",
+            "Node",
+            vec![
+                TypeTag::Address,
+                hashi_struct("tob", "DealerSubmissionV1", vec![]),
+            ],
+        )));
+        let contents = bcs::to_bytes(&FieldEnc {
+            id: node_id,
+            name: dealer,
+            value,
+        })
+        .unwrap();
+        obj(
+            field_tag(TypeTag::Address, node_type),
+            version,
+            Owner::Object(tob_certs_table_id()),
+            contents,
+        )
+    }
+
+    fn stamped_tob_node_object(
+        node_id: Address,
+        version: u64,
+        dealer: Address,
+        prev: Option<Address>,
+        next: Option<Address>,
+        timestamp_ms: u64,
+    ) -> Object {
+        let value = move_types::LinkedTableNode {
+            prev,
+            next,
+            value: move_types::StampedDealerSubmissionV1 {
+                submission: dealer_submission(dealer),
+                timestamp_ms,
+            },
+        };
+        let node_type = TypeTag::Struct(Box::new(tag(
+            Address::TWO,
+            "linked_table",
+            "Node",
+            vec![
+                TypeTag::Address,
+                hashi_struct("tob", "StampedDealerSubmissionV1", vec![]),
+            ],
+        )));
+        let contents = bcs::to_bytes(&FieldEnc {
+            id: node_id,
+            name: dealer,
+            value,
+        })
+        .unwrap();
+        obj(
+            field_tag(TypeTag::Address, node_type),
+            version,
+            Owner::Object(tob_certs_table_id()),
+            contents,
+        )
+    }
+
+    #[test]
+    fn tob_submissions_mirror_in_insertion_order() {
+        let mut fixture = Fixture::new();
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let (node1, node2, node3) = (addr(0x82), addr(0x83), addr(0x84));
+        // Dealers whose BTreeMap order differs from insertion order, so
+        // the test fails if the mirror loses the linked-list order.
+        let (d1, d2, d3) = (addr(0xE1), addr(0xA2), addr(0xC3));
+
+        // First submission creates the bucket and its first node.
+        let out = fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d1),
+                1,
+            )),
+            written(tob_node_object(node1, 1, d1, None, None)),
+        ]));
+        assert!(out.unrouted.is_empty());
+
+        // Each later submission rewrites the bucket (head/tail/size) and
+        // the previous tail's next link.
+        let out = fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                2,
+                key,
+                Some(d1),
+                Some(d2),
+                2,
+            )),
+            written(tob_node_object(node1, 2, d1, None, Some(d2))),
+            written(tob_node_object(node2, 2, d2, Some(d1), None)),
+        ]));
+        assert!(out.unrouted.is_empty());
+        let out = fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                3,
+                key,
+                Some(d1),
+                Some(d3),
+                3,
+            )),
+            written(tob_node_object(node2, 3, d2, Some(d1), Some(d3))),
+            written(tob_node_object(node3, 3, d3, Some(d2), None)),
+        ]));
+        assert!(out.unrouted.is_empty());
+
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        assert_eq!(bucket.layout, TobCertLayout::Bare);
+        let order: Vec<Address> = bucket
+            .certs_in_order()
+            .into_iter()
+            .map(|(dealer, stamped)| {
+                assert_eq!(stamped.submission.message.dealer_address, dealer);
+                // Bare submissions normalize to a zero stamp.
+                assert_eq!(stamped.timestamp_ms, 0);
+                dealer
+            })
+            .collect();
+        assert_eq!(order, vec![d1, d2, d3]);
+    }
+
+    #[test]
+    fn tob_stamped_bucket_mirrors_layout_and_timestamps() {
+        let mut fixture = Fixture::new();
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let (node1, node2) = (addr(0x82), addr(0x83));
+        let (d1, d2) = (addr(0xE1), addr(0xA2));
+
+        let stamped_bucket_tag = hashi_struct("tob", "StampedEpochCertsV1", vec![]);
+        let out = fixture.apply(&tx(vec![
+            written(tob_bucket_object_with_value_tag(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d1),
+                1,
+                stamped_bucket_tag.clone(),
+            )),
+            written(stamped_tob_node_object(node1, 1, d1, None, None, 1_000)),
+        ]));
+        assert!(out.unrouted.is_empty());
+        let out = fixture.apply(&tx(vec![
+            written(tob_bucket_object_with_value_tag(
+                bucket_field,
+                2,
+                key,
+                Some(d1),
+                Some(d2),
+                2,
+                stamped_bucket_tag,
+            )),
+            written(stamped_tob_node_object(node1, 2, d1, None, Some(d2), 1_000)),
+            written(stamped_tob_node_object(node2, 2, d2, Some(d1), None, 2_000)),
+        ]));
+        assert!(out.unrouted.is_empty());
+
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        assert_eq!(bucket.layout, TobCertLayout::Stamped);
+        let stamps: Vec<(Address, u64)> = bucket
+            .certs_in_order()
+            .into_iter()
+            .map(|(dealer, stamped)| {
+                assert_eq!(stamped.submission.message.dealer_address, dealer);
+                (dealer, stamped.timestamp_ms)
+            })
+            .collect();
+        assert_eq!(stamps, vec![(d1, 1_000), (d2, 2_000)]);
+    }
+
+    #[test]
+    fn tob_bucket_of_unknown_layout_trips_the_tripwire() {
+        let mut fixture = Fixture::new();
+        let key = tob_key(7);
+
+        // A bucket type this binary does not implement (a hypothetical
+        // v3 layout) must surface as unrouted, never misdecode.
+        let out = fixture.apply(&tx(vec![written(tob_bucket_object_with_value_tag(
+            addr(0x81),
+            1,
+            key,
+            None,
+            None,
+            0,
+            hashi_struct("tob", "EpochCertsV3", vec![]),
+        ))]));
+        assert_eq!(out.unrouted.len(), 1);
+        assert!(fixture.hashi.tob.buckets.is_empty());
+    }
+
+    #[test]
+    fn tob_stale_replay_does_not_clobber_newer_links() {
+        let mut fixture = Fixture::new();
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let (node1, node2) = (addr(0x82), addr(0x83));
+        let (d1, d2) = (addr(0xE1), addr(0xA2));
+
+        fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                2,
+                key,
+                Some(d1),
+                Some(d2),
+                2,
+            )),
+            written(tob_node_object(node1, 2, d1, None, Some(d2))),
+            written(tob_node_object(node2, 2, d2, Some(d1), None)),
+        ]));
+        // A replayed first-submission frame must not truncate the list.
+        let out = fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d1),
+                1,
+            )),
+            written(tob_node_object(node1, 1, d1, None, None)),
+        ]));
+        assert!(out.unrouted.is_empty());
+
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let order: Vec<Address> = bucket
+            .certs_in_order()
+            .into_iter()
+            .map(|(dealer, _)| dealer)
+            .collect();
+        assert_eq!(order, vec![d1, d2]);
+    }
+
+    #[test]
+    fn tob_destroy_retires_bucket_nodes_and_routing() {
+        let mut fixture = Fixture::new();
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let (node1, node2) = (addr(0x82), addr(0x83));
+        let (d1, d2) = (addr(0xE1), addr(0xA2));
+
+        fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d2),
+                2,
+            )),
+            written(tob_node_object(node1, 1, d1, None, Some(d2))),
+            written(tob_node_object(node2, 1, d2, Some(d1), None)),
+        ]));
+        assert_eq!(fixture.hashi.tob.buckets.len(), 1);
+
+        // destroy_all_certs deletes the nodes and the bucket Field in
+        // one transaction; the bucket deletion is listed first here to
+        // exercise the nodes-after-bucket retirement path.
+        let out = fixture.apply(&tx(vec![
+            TxChange::Deleted { id: bucket_field },
+            TxChange::Deleted { id: node1 },
+            TxChange::Deleted { id: node2 },
+        ]));
+        assert!(out.unrouted.is_empty());
+        assert!(fixture.hashi.tob.buckets.is_empty());
+        assert!(fixture.index.get(&bucket_field).is_none());
+        assert!(fixture.index.get(&node1).is_none());
+        assert!(fixture.index.get(&node2).is_none());
+        // The table's routing entries are gone: a fresh bucket for a new
+        // epoch re-registers cleanly rather than colliding.
+        assert_eq!(
+            fixture.routing.tob_key_of_table(&tob_certs_table_id()),
+            None
+        );
     }
 
     #[test]
