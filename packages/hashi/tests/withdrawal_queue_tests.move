@@ -17,6 +17,7 @@ use hashi::{
         EOutputAddressMismatch,
         EMinerFeeExceedsMax,
         ECannotApproveCommittedRequest,
+        EApprovalCertNotNewer,
         ERequestNotCancellable,
         EWithdrawalNotConfirmed,
         EWithdrawalAlreadyConfirmed,
@@ -194,6 +195,47 @@ fun test_approve_multiple_requests() {
 
     btc_balance.destroy_for_testing();
     std::unit_test::destroy(txn);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+#[expected_failure(abort_code = EApprovalCertNotNewer)]
+fun test_reapprove_in_same_epoch_aborts() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let request_id = setup_request(&mut queue, &clock, 10_000, ctx);
+
+    queue.approve_withdrawal(request_id, dummy_cert(), &clock);
+
+    // A second approval under the same epoch is a replay — should abort.
+    queue.approve_withdrawal(request_id, dummy_cert(), &clock);
+
+    // Cleanup (won't be reached)
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_reapprove_in_later_epoch_replaces_cert() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let request_id = setup_request(&mut queue, &clock, 10_000, ctx);
+
+    // Approved in epoch 0; a reconfiguration then leaves the cert stale.
+    queue.approve_withdrawal(request_id, dummy_cert(), &clock);
+
+    // The epoch-1 committee refreshes the approval.
+    let epoch1_cert = hashi::committee::new_committee_signature(1, vector[], vector[]);
+    queue.approve_withdrawal(request_id, epoch1_cert, &clock);
+
+    let cert = queue.borrow_request(request_id).request_approval_cert();
+    assert!(cert.destroy_some().signature_epoch() == 1);
+
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
 }
