@@ -2190,8 +2190,6 @@ dependencies = [
  "hashi-guardian",
  "hashi-screener",
  "hashi-types",
- "move-binary-format",
- "move-core-types",
  "nix",
  "prometheus",
  "rand 0.8.5",

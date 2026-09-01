@@ -4,11 +4,10 @@
 //! Parse `packages/hashi/Published.toml` — the Move tooling's record of
 //! where (and at what version) the package is deployed per network.
 //!
-//! This file is the source of truth both the upgrade-compatibility CI gate
-//! (`crates/hashi/tests/move_upgrade_compat.rs`) and the e2e bytecode-snapshot
-//! tests (`crates/e2e-tests/src/snapshot.rs`) derive their snapshot locations
+//! This file is the source of truth the upgrade-compatibility CI gate
+//! (`crates/hashi/tests/move_upgrade_compat.rs`) derives its snapshot locations
 //! from, so a version bump there without a matching snapshot capture fails
-//! those checks instead of silently exercising an obsolete package.
+//! that check instead of silently exercising an obsolete package.
 
 use std::collections::BTreeMap;
 use std::path::Path;
