@@ -993,7 +993,11 @@ mod tests {
             .map(|node| {
                 let mpc_mgr = node.hashi().mpc_manager().unwrap();
                 let mgr = mpc_mgr.read().unwrap();
-                let share_ids = mgr.mpc_config.nodes.share_ids_of(mgr.party_id).unwrap();
+                let share_ids = mgr
+                    .mpc_config
+                    .nodes
+                    .share_ids_of(mgr.party_id().unwrap())
+                    .unwrap();
                 NodeDkgInfo {
                     address: mgr.address,
                     share_ids,
