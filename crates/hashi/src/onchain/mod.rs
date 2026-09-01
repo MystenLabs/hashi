@@ -1349,19 +1349,20 @@ async fn scrape_package_versions(
     Ok(package_versions)
 }
 
-/// Page through `list_dynamic_fields` manually, collecting every field
-/// and the minimum checkpoint height across the responses. The height
-/// feeds the mirror's replay floor, which the auto-paginating stream
-/// helper cannot surface.
+/// Page through `list_dynamic_fields` manually, handing each response page
+/// to the caller immediately and returning the minimum checkpoint height.
+/// The height feeds the mirror's replay floor, which the auto-paginating
+/// stream helper cannot surface.
 async fn scrape_dynamic_field_pages(
     client: &Client,
     parent: Address,
     mask: FieldMask,
     container: &'static str,
     metrics: Option<&crate::metrics::Metrics>,
-) -> Result<(u64, Vec<DynamicField>)> {
+    mut consume_page: impl FnMut(Vec<DynamicField>) -> Result<()>,
+) -> Result<u64> {
     let started = std::time::Instant::now();
-    let mut fields = Vec::new();
+    let mut entries = 0u64;
     let mut min_height = u64::MAX;
     let mut pages = 0u64;
     let mut page_token: Option<bytes::Bytes> = None;
@@ -1394,19 +1395,21 @@ async fn scrape_dynamic_field_pages(
                 .with_label_values(&[container])
                 .inc_by(page.dynamic_fields.len() as u64);
         }
-        fields.extend(page.dynamic_fields);
+        entries += page.dynamic_fields.len() as u64;
+        let next_page_token = page.next_page_token;
+        consume_page(page.dynamic_fields)?;
         // A multi-million-entry container walks thousands of pages; keep a
         // heartbeat so a boot mid-scrape is distinguishable from a hang.
         if pages.is_multiple_of(100) {
             tracing::info!(
                 container,
                 pages,
-                entries = fields.len(),
+                entries,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "On-chain scrape in progress"
             );
         }
-        match page.next_page_token {
+        match next_page_token {
             Some(token) => page_token = Some(token),
             None => break,
         }
@@ -1420,11 +1423,11 @@ async fn scrape_dynamic_field_pages(
     tracing::info!(
         container,
         pages,
-        entries = fields.len(),
+        entries,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Scraped on-chain container"
     );
-    Ok((min_height, fields))
+    Ok(min_height)
 }
 
 /// The derived object id of the `BitcoinState` dynamic field hanging
@@ -1655,25 +1658,24 @@ async fn scrape_tob_entries(
         DynamicField::path_builder().value().finish(),
         DynamicField::path_builder().field_object().version(),
     ]);
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics).await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
-    for field in &fields {
-        let certs: move_types::EpochCertsV1 = field
-            .value()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
-        let field_id: Address = field.field_id().parse()?;
-        seed.entries.push((
-            field_id,
-            field.field_object().version(),
-            route::TrackedKind::Ignored,
-        ));
-        seed.interior.push((certs.certs.id, route::Slot::TobCerts));
-    }
+    let mut seed = route::ContainerSeed::default();
+    seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
+        for field in fields {
+            let certs: move_types::EpochCertsV1 = field
+                .value()
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
+            let field_id: Address = field.field_id().parse()?;
+            seed.entries.push((
+                field_id,
+                field.field_object().version(),
+                route::TrackedKind::Ignored,
+            ));
+            seed.interior.push((certs.certs.id, route::Slot::TobCerts));
+        }
+        Ok(())
+    })
+    .await?;
     Ok(seed)
 }
 
@@ -1736,55 +1738,55 @@ async fn scrape_treasury(
             .contents()
             .finish(),
     ]);
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, container, mask, "treasury", metrics).await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
-
+    let mut seed = route::ContainerSeed::default();
     let mut treasury_caps: BTreeMap<TypeTag, types::TreasuryCap> = BTreeMap::new();
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
 
-    for field in &fields {
-        let object_type = field.child_object().object_type();
-        let type_tag: TypeTag = match object_type.parse() {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(
-                    "skipping treasury dynamic field with unparseable type {object_type:?}: {e}"
-                );
-                continue;
-            }
-        };
-        let contents = field.child_object().contents().value();
-        let wrapper_id: Address = field.field_id().parse()?;
-        let child_id: Address = field.child_object().object_id().parse()?;
-        let child_version = field.child_object().version();
+    seed.height =
+        scrape_dynamic_field_pages(&client, container, mask, "treasury", metrics, |fields| {
+            for field in fields {
+                let object_type = field.child_object().object_type();
+                let type_tag: TypeTag = match object_type.parse() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(
+                            "skipping treasury dynamic field with unparseable type \
+                             {object_type:?}: {e}"
+                        );
+                        continue;
+                    }
+                };
+                let contents = field.child_object().contents().value();
+                let wrapper_id: Address = field.field_id().parse()?;
+                let child_id: Address = field.child_object().object_id().parse()?;
+                let child_version = field.child_object().version();
 
-        let kind = if let Some(treasury_cap) =
-            types::TreasuryCap::try_from_contents(&type_tag, contents)
-        {
-            let coin_type = treasury_cap.coin_type.clone();
-            treasury_caps.insert(coin_type.clone(), treasury_cap);
-            route::TrackedKind::TreasuryCap(coin_type)
-        } else if let Some(metadata_cap) =
-            types::MetadataCap::try_from_contents(&type_tag, contents)
-        {
-            let coin_type = metadata_cap.coin_type.clone();
-            metadata_caps.insert(coin_type.clone(), metadata_cap);
-            route::TrackedKind::MetadataCap(coin_type)
-        } else {
-            tracing::warn!("unknown type stored in treasury");
-            continue;
-        };
-        seed.entries.push((
-            wrapper_id,
-            field.field_object().version(),
-            route::TrackedKind::DofWrapper { container },
-        ));
-        seed.entries.push((child_id, child_version, kind));
-    }
+                let kind = if let Some(treasury_cap) =
+                    types::TreasuryCap::try_from_contents(&type_tag, contents)
+                {
+                    let coin_type = treasury_cap.coin_type.clone();
+                    treasury_caps.insert(coin_type.clone(), treasury_cap);
+                    route::TrackedKind::TreasuryCap(coin_type)
+                } else if let Some(metadata_cap) =
+                    types::MetadataCap::try_from_contents(&type_tag, contents)
+                {
+                    let coin_type = metadata_cap.coin_type.clone();
+                    metadata_caps.insert(coin_type.clone(), metadata_cap);
+                    route::TrackedKind::MetadataCap(coin_type)
+                } else {
+                    tracing::warn!("unknown type stored in treasury");
+                    continue;
+                };
+                seed.entries.push((
+                    wrapper_id,
+                    field.field_object().version(),
+                    route::TrackedKind::DofWrapper { container },
+                ));
+                seed.entries.push((child_id, child_version, kind));
+            }
+            Ok(())
+        })
+        .await?;
 
     Ok((
         seed,
@@ -1834,27 +1836,33 @@ async fn scrape_all_member_info(
         DynamicField::path_builder().field_id(),
         DynamicField::path_builder().field_object().version(),
     ]);
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, member_info_id, mask, "members", metrics).await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
+    let mut seed = route::ContainerSeed::default();
     let mut member_info = BTreeMap::new();
-    for field in &fields {
-        let info: move_types::MemberInfo = field
-            .value()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
-        let info = convert_move_member_info(info);
-        let field_id: Address = field.field_id().parse()?;
-        seed.entries.push((
-            field_id,
-            field.field_object().version(),
-            route::TrackedKind::Member(info.validator_address),
-        ));
-        member_info.insert(info.validator_address, info);
-    }
+    seed.height = scrape_dynamic_field_pages(
+        &client,
+        member_info_id,
+        mask,
+        "members",
+        metrics,
+        |fields| {
+            for field in fields {
+                let info: move_types::MemberInfo = field
+                    .value()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
+                let info = convert_move_member_info(info);
+                let field_id: Address = field.field_id().parse()?;
+                seed.entries.push((
+                    field_id,
+                    field.field_object().version(),
+                    route::TrackedKind::Member(info.validator_address),
+                ));
+                member_info.insert(info.validator_address, info);
+            }
+            Ok(())
+        },
+    )
+    .await?;
     Ok((seed, member_info))
 }
 
@@ -1910,58 +1918,63 @@ async fn scrape_committees(
         DynamicField::path_builder().field_id(),
         DynamicField::path_builder().field_object().version(),
     ]);
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, committees_id, mask, "committees", metrics).await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
-
+    let mut seed = route::ContainerSeed::default();
     let mut move_committees = BTreeMap::new();
     let mut raw_handoffs = BTreeMap::new();
-    for field in &fields {
-        let value_type: TypeTag = field
-            .value_type_opt()
-            .ok_or_else(|| anyhow!("missing dynamic field value_type"))?
-            .parse()
-            .map_err(|e| anyhow!("invalid value_type: {e}"))?;
-        let TypeTag::Struct(struct_tag) = &value_type else {
-            anyhow::bail!("unexpected committee bag value type: {value_type:?}");
-        };
-        let field_id: Address = field.field_id().parse()?;
-        let field_version = field.field_object().version();
-        match struct_tag.name().as_str() {
-            "Committee" => {
-                let committee: move_types::Committee = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize Committee: {e}"))?;
-                seed.entries.push((
-                    field_id,
-                    field_version,
-                    route::TrackedKind::Committee(committee.epoch),
-                ));
-                move_committees.insert(committee.epoch, committee);
+    seed.height = scrape_dynamic_field_pages(
+        &client,
+        committees_id,
+        mask,
+        "committees",
+        metrics,
+        |fields| {
+            for field in fields {
+                let value_type: TypeTag = field
+                    .value_type_opt()
+                    .ok_or_else(|| anyhow!("missing dynamic field value_type"))?
+                    .parse()
+                    .map_err(|e| anyhow!("invalid value_type: {e}"))?;
+                let TypeTag::Struct(struct_tag) = &value_type else {
+                    anyhow::bail!("unexpected committee bag value type: {value_type:?}");
+                };
+                let field_id: Address = field.field_id().parse()?;
+                let field_version = field.field_object().version();
+                match struct_tag.name().as_str() {
+                    "Committee" => {
+                        let committee: move_types::Committee = field
+                            .value()
+                            .deserialize()
+                            .map_err(|e| anyhow!("failed to deserialize Committee: {e}"))?;
+                        seed.entries.push((
+                            field_id,
+                            field_version,
+                            route::TrackedKind::Committee(committee.epoch),
+                        ));
+                        move_committees.insert(committee.epoch, committee);
+                    }
+                    "CommitteeHandoff" => {
+                        let key: move_types::CommitteeHandoffKey =
+                            field.name().deserialize().map_err(|e| {
+                                anyhow!("failed to deserialize CommitteeHandoffKey: {e}")
+                            })?;
+                        let handoff: move_types::CommitteeHandoff = field
+                            .value()
+                            .deserialize()
+                            .map_err(|e| anyhow!("failed to deserialize CommitteeHandoff: {e}"))?;
+                        seed.entries.push((
+                            field_id,
+                            field_version,
+                            route::TrackedKind::CommitteeHandoff(key.epoch),
+                        ));
+                        raw_handoffs.insert(key.epoch, handoff);
+                    }
+                    _ => anyhow::bail!("unexpected committee bag value type: {value_type:?}"),
+                }
             }
-            "CommitteeHandoff" => {
-                let key: move_types::CommitteeHandoffKey = field
-                    .name()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize CommitteeHandoffKey: {e}"))?;
-                let handoff: move_types::CommitteeHandoff = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize CommitteeHandoff: {e}"))?;
-                seed.entries.push((
-                    field_id,
-                    field_version,
-                    route::TrackedKind::CommitteeHandoff(key.epoch),
-                ));
-                raw_handoffs.insert(key.epoch, handoff);
-            }
-            _ => anyhow::bail!("unexpected committee bag value type: {value_type:?}"),
-        }
-    }
+            Ok(())
+        },
+    )
+    .await?;
 
     let handoffs = raw_handoffs
         .into_iter()
@@ -2068,30 +2081,29 @@ where
             .contents()
             .finish(),
     ]);
-    let (height, fields) =
-        scrape_dynamic_field_pages(client, container, mask, label, metrics).await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
-    let mut values = Vec::with_capacity(fields.len());
-    for field in &fields {
-        let value: T = field
-            .child_object()
-            .contents()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize ObjectBag child: {e}"))?;
-        let wrapper_id: Address = field.field_id().parse()?;
-        let child_id: Address = field.child_object().object_id().parse()?;
-        seed.entries.push((
-            wrapper_id,
-            field.field_object().version(),
-            route::TrackedKind::DofWrapper { container },
-        ));
-        seed.entries
-            .push((child_id, field.child_object().version(), kind_of(&value)));
-        values.push(value);
-    }
+    let mut seed = route::ContainerSeed::default();
+    let mut values = Vec::new();
+    seed.height = scrape_dynamic_field_pages(client, container, mask, label, metrics, |fields| {
+        for field in fields {
+            let value: T = field
+                .child_object()
+                .contents()
+                .deserialize()
+                .map_err(|e| anyhow!("failed to deserialize ObjectBag child: {e}"))?;
+            let wrapper_id: Address = field.field_id().parse()?;
+            let child_id: Address = field.child_object().object_id().parse()?;
+            seed.entries.push((
+                wrapper_id,
+                field.field_object().version(),
+                route::TrackedKind::DofWrapper { container },
+            ));
+            seed.entries
+                .push((child_id, field.child_object().version(), kind_of(&value)));
+            values.push(value);
+        }
+        Ok(())
+    })
+    .await?;
     Ok((seed, values))
 }
 
@@ -2194,32 +2206,32 @@ async fn scrape_utxo_records(
     route::ContainerSeed,
     BTreeMap<types::UtxoId, types::UtxoRecord>,
 )> {
-    let (height, fields) = scrape_dynamic_field_pages(
+    let mut seed = route::ContainerSeed::default();
+    let mut utxo_records = BTreeMap::new();
+    seed.height = scrape_dynamic_field_pages(
         &client,
         utxo_records_id,
         plain_field_mask(),
         "utxo_records",
         metrics,
+        |fields| {
+            for field in fields {
+                let record: types::UtxoRecord = field
+                    .value()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
+                let field_id: Address = field.field_id().parse()?;
+                seed.entries.push((
+                    field_id,
+                    field.field_object().version(),
+                    route::TrackedKind::UtxoRecord(record.utxo.id),
+                ));
+                utxo_records.insert(record.utxo.id, record);
+            }
+            Ok(())
+        },
     )
     .await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
-    let mut utxo_records = BTreeMap::new();
-    for field in &fields {
-        let record: types::UtxoRecord = field
-            .value()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
-        let field_id: Address = field.field_id().parse()?;
-        seed.entries.push((
-            field_id,
-            field.field_object().version(),
-            route::TrackedKind::UtxoRecord(record.utxo.id),
-        ));
-        utxo_records.insert(record.utxo.id, record);
-    }
     Ok((seed, utxo_records))
 }
 
@@ -2228,36 +2240,36 @@ async fn scrape_spent_utxos(
     spent_utxos_id: Address,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, BTreeMap<types::UtxoId, u64>)> {
-    let (height, fields) = scrape_dynamic_field_pages(
+    let mut seed = route::ContainerSeed::default();
+    let mut spent_utxos = BTreeMap::new();
+    seed.height = scrape_dynamic_field_pages(
         &client,
         spent_utxos_id,
         plain_field_mask(),
         "spent_utxos",
         metrics,
+        |fields| {
+            for field in fields {
+                let utxo_id: types::UtxoId = field
+                    .name()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize UtxoId: {e}"))?;
+                let spent_epoch: u64 = field
+                    .value()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize spent epoch: {e}"))?;
+                let field_id: Address = field.field_id().parse()?;
+                seed.entries.push((
+                    field_id,
+                    field.field_object().version(),
+                    route::TrackedKind::SpentUtxo(utxo_id),
+                ));
+                spent_utxos.insert(utxo_id, spent_epoch);
+            }
+            Ok(())
+        },
     )
     .await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
-    let mut spent_utxos = BTreeMap::new();
-    for field in &fields {
-        let utxo_id: types::UtxoId = field
-            .name()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize UtxoId: {e}"))?;
-        let spent_epoch: u64 = field
-            .value()
-            .deserialize()
-            .map_err(|e| anyhow!("failed to deserialize spent epoch: {e}"))?;
-        let field_id: Address = field.field_id().parse()?;
-        seed.entries.push((
-            field_id,
-            field.field_object().version(),
-            route::TrackedKind::SpentUtxo(utxo_id),
-        ));
-        spent_utxos.insert(utxo_id, spent_epoch);
-    }
     Ok((seed, spent_utxos))
 }
 
@@ -2311,50 +2323,50 @@ async fn scrape_proposal_bag(
     } else {
         "proposals_active"
     };
-    let (height, fields) =
-        scrape_dynamic_field_pages(&client, bag.id, mask, label, metrics).await?;
-    let mut seed = route::ContainerSeed {
-        height,
-        ..Default::default()
-    };
+    let mut seed = route::ContainerSeed::default();
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
-    for field in &fields {
-        // `child_object.object_type` is the fully-qualified type, e.g.
-        //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
-        let object_type = field.child_object().object_type();
-        let type_tag: TypeTag = match object_type.parse() {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(
-                    "skipping proposal dynamic object field with unparseable type \
-                     {object_type:?}: {e}"
-                );
-                continue;
+    seed.height = scrape_dynamic_field_pages(&client, bag.id, mask, label, metrics, |fields| {
+        for field in fields {
+            // `child_object.object_type` is the fully-qualified type, e.g.
+            //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
+            let object_type = field.child_object().object_type();
+            let type_tag: TypeTag = match object_type.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping proposal dynamic object field with unparseable type \
+                             {object_type:?}: {e}"
+                    );
+                    continue;
+                }
+            };
+            if let Some(proposal) =
+                decode_proposal(&type_tag, field.child_object().contents().value())
+            {
+                let wrapper_id: Address = field.field_id().parse()?;
+                let child_id: Address = field.child_object().object_id().parse()?;
+                seed.entries.push((
+                    wrapper_id,
+                    field.field_object().version(),
+                    route::TrackedKind::DofWrapper { container: bag.id },
+                ));
+                seed.entries.push((
+                    child_id,
+                    field.child_object().version(),
+                    route::TrackedKind::Proposal {
+                        executed,
+                        id: proposal.id,
+                    },
+                ));
+                proposals.insert(proposal.id, proposal);
+            } else {
+                tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
             }
-        };
-        if let Some(proposal) = decode_proposal(&type_tag, field.child_object().contents().value())
-        {
-            let wrapper_id: Address = field.field_id().parse()?;
-            let child_id: Address = field.child_object().object_id().parse()?;
-            seed.entries.push((
-                wrapper_id,
-                field.field_object().version(),
-                route::TrackedKind::DofWrapper { container: bag.id },
-            ));
-            seed.entries.push((
-                child_id,
-                field.child_object().version(),
-                route::TrackedKind::Proposal {
-                    executed,
-                    id: proposal.id,
-                },
-            ));
-            proposals.insert(proposal.id, proposal);
-        } else {
-            tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
         }
-    }
+        Ok(())
+    })
+    .await?;
 
     Ok((seed, proposals))
 }
