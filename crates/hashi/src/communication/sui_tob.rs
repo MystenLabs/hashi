@@ -31,6 +31,16 @@ use crate::sui_tx_executor::SuiTxExecutor;
 /// stream into the mirror.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound for the post-race settled read: how long publish waits for the
+/// mirror to show the certificate that beat ours before classifying the
+/// race from whatever it holds.
+const SETTLED_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const _: () = assert!(
+    SETTLED_READ_TIMEOUT.as_millis() < super::timeout_and_retry::CALL_TIMEOUT.as_millis(),
+    "publish runs inside with_timeout_and_retry, so a settled-read bound at or above \
+     CALL_TIMEOUT never fires and the deadline arm becomes dead code — the outer timeout \
+     cancels first and every retry resubmits a paid on-chain no-op",
+);
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -335,7 +345,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobSessionChannel {
         // holds the slot on-chain, but the mirror may not have applied
         // the transaction that beat ours yet — poll briefly for it
         // rather than misreading the lag as divergence.
-        let settled_deadline = tokio::time::Instant::now() + TX_CONFIRMATION_TIMEOUT;
+        let settled_deadline = tokio::time::Instant::now() + SETTLED_READ_TIMEOUT;
         let classified = loop {
             match tob_certificates(
                 &self.onchain_state,
