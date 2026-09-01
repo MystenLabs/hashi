@@ -11,7 +11,6 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use e2e_tests::TestNetworksBuilder;
-use e2e_tests::snapshot;
 use e2e_tests::test_helpers::BackgroundMiner;
 use e2e_tests::test_helpers::create_deposit_and_wait;
 use e2e_tests::test_helpers::extract_witness_program;
@@ -106,7 +105,7 @@ async fn test_upgrade_v2_exclusive_via_proposal() -> Result<()> {
 /// Explicit upgrade via governance proposal, exercising real cascading effects.
 ///
 /// The builder's default boot already lands the chain at the current source
-/// (snapshot v1 auto-upgraded at build), so the upgrade driven *by this test*
+/// (fresh v1 auto-upgraded at build), so the upgrade driven *by this test*
 /// goes one version further (vN -> vN+1) through the full proposal flow:
 ///
 /// 1. Watcher picks up new package — PackageUpgraded updates OnchainState
@@ -296,43 +295,34 @@ async fn test_upgrade_via_proposal() -> Result<()> {
     Ok(())
 }
 
-/// The real "deployed bytecode → current source" upgrade test.
+/// The end-to-end governance upgrade test on a fresh chain.
 ///
-/// Bootstraps the local net by publishing the checked-in **bytecode snapshot**
-/// of the deployed testnet package as v1 (via
-/// [`TestNetworksBuilder::with_v1_from_snapshot`]), then runs the ordinary
-/// governance-gated upgrade flow ([`upgrade_flow::execute_full_upgrade`]) to
-/// upgrade it to the current `packages/hashi` source. This proves — end to
-/// end, against a running Sui net — that the deployed bytecode can actually be
-/// upgraded to what's in the tree today, a strictly stronger claim than the
-/// static compatibility gate (which only normalizes-and-diffs the modules).
+/// Publishes the current source as v1 and runs the ordinary governance-gated
+/// upgrade flow ([`upgrade_flow::execute_full_upgrade`]) to a const-patched
+/// v2 of the same source. This proves — end to end, against a running Sui
+/// net — that the published package can be upgraded through governance, a
+/// strictly stronger claim than any static compatibility check.
 ///
 /// Asserts:
-/// - v1 publishes from the snapshot and forms a committee (DKG completes).
-/// - a deposit confirms against the snapshot bytecode, establishing real
-///   v1-initialized on-chain state before the upgrade.
-/// - the governance upgrade to current source succeeds (effects success).
+/// - v1 publishes and forms a committee (DKG completes).
+/// - a deposit confirms against v1, establishing real v1-initialized
+///   on-chain state before the upgrade.
+/// - the governance upgrade succeeds (effects success).
 /// - the new package id differs from v1's.
 /// - all nodes' watchers pick up the new package version.
 /// - a post-upgrade deposit confirms through the full validator path, on top
-///   of the state the snapshot bytecode initialized.
+///   of the state v1 initialized.
 /// - a v2-only module (`upgrade_canary::version`) is callable post-upgrade.
 #[tokio::test]
-async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
+async fn fresh_v1_upgrades_via_governance() -> Result<()> {
     init_test_logging();
 
-    // v1 = the checked-in deployed bytecode snapshot, NOT a source build.
-    // `without_upgrade` so the pre-upgrade deposit really runs against the
-    // deployed bytecode; this test drives the upgrade itself.
-    let mut networks = TestNetworksBuilder::new()
-        .with_nodes(4)
-        .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
-        .without_upgrade()
-        .build()
-        .await?;
+    // Default boot: fresh v1 from the current source, no auto-upgrade — the
+    // pre-upgrade deposit runs against v1, and this test drives the upgrade.
+    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
 
     let hashi_ids = networks.hashi_network.ids();
-    info!("snapshot-published v1 package ID: {}", hashi_ids.package_id);
+    info!("fresh v1 package ID: {}", hashi_ids.package_id);
 
     // Committee must be formed (DKG done) before the upgrade proposal can be
     // voted through at the required 100% quorum.
@@ -340,13 +330,12 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
         .wait_for_mpc_key(Duration::from_secs(120))
         .await?;
 
-    // ── Pre-upgrade: deposit against the snapshot bytecode ──────────────
+    // ── Pre-upgrade: deposit against v1 ──────────────
     //
-    // Establishes real on-chain state *initialized by the deployed v1
-    // bytecode* (UTXO pool entries, deposit records, hBTC supply), so the
+    // Establishes real on-chain state *initialized by v1* (UTXO pool entries, deposit records, hBTC supply), so the
     // post-upgrade assertions below exercise the upgraded package against
     // v1-created state — not a fresh object graph.
-    info!("depositing 100k sats against the snapshot bytecode...");
+    info!("depositing 100k sats against v1...");
     let hbtc_recipient = create_deposit_and_wait(&mut networks, 100_000).await?;
     let balance_before = get_hbtc_balance(
         &mut networks.sui_network.client,
@@ -359,7 +348,7 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
 
     // ── Upgrade the deployed bytecode to the current source ─────────────
     let new_package_id = upgrade_flow::execute_full_upgrade(&mut networks).await?;
-    info!("upgraded snapshot v1 -> current source: new package {new_package_id}");
+    info!("upgraded fresh v1 -> patched source: new package {new_package_id}");
     assert_ne!(
         new_package_id, hashi_ids.package_id,
         "upgrade should mint a new package id"
@@ -373,7 +362,7 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     //
     // The full validator confirmation path (observe DepositRequested, build
     // the BLS certificate, approve, time-delay, confirm) must work against
-    // the upgraded package operating on state the snapshot bytecode created.
+    // the upgraded package operating on state v1 created.
     info!("depositing 50k sats post-upgrade (full validator confirmation path)...");
     create_deposit_and_wait(&mut networks, 50_000).await?;
     let balance_after = get_hbtc_balance(
@@ -384,7 +373,7 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     .await?;
     assert_eq!(
         balance_after, 150_000,
-        "post-upgrade deposit should confirm on top of snapshot-initialized state"
+        "post-upgrade deposit should confirm on top of v1-initialized state"
     );
     info!("post-upgrade deposit confirmed, balance: {balance_after} sats");
 
@@ -415,11 +404,11 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
     );
     info!("v2 canary module call succeeded");
 
-    info!("=== SNAPSHOT UPGRADE TEST PASSED ===");
+    info!("=== GOVERNANCE UPGRADE TEST PASSED ===");
     Ok(())
 }
 
-/// A withdrawal committed and fully signed under the deployed **v1 bytecode**
+/// A withdrawal committed and fully signed under **v1**
 /// must complete after the governance upgrade to the current source AND the
 /// DisableVersion(1) that closes the bootstrap window: with v1 still enabled
 /// the withdrawal flow stays dormant at v1 semantics, so the disable is what
@@ -444,17 +433,12 @@ async fn snapshot_v1_upgrades_to_current_source() -> Result<()> {
 async fn test_withdrawal_committed_under_v1_completes_after_upgrade() -> Result<()> {
     init_test_logging();
 
-    // v1 = the checked-in deployed bytecode snapshot; no auto-upgrade — this
-    // test drives the upgrade itself, mid-withdrawal.
-    let mut networks = TestNetworksBuilder::new()
-        .with_nodes(4)
-        .with_v1_from_snapshot(snapshot::default_snapshot_dir()?)
-        .without_upgrade()
-        .build()
-        .await?;
+    // Default boot: fresh v1, no auto-upgrade — this test drives the upgrade
+    // itself, mid-withdrawal.
+    let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
 
     let hashi_ids = networks.hashi_network.ids();
-    info!("snapshot-published v1 package ID: {}", hashi_ids.package_id);
+    info!("fresh v1 package ID: {}", hashi_ids.package_id);
 
     // Committee/DKG must complete before anything can be signed (and before
     // the upgrade proposal can pass at its 100% quorum).
@@ -645,17 +629,14 @@ fn assert_version_gate_abort<T>(result: Result<T>, v1_package_id: Address, what:
 
 /// Direct v1 entries against a v2-committed request must abort at the gate.
 ///
-/// The deferred-archival commit (v2) flips the request to `Processing` *in
-/// place*: it stays in the hot `requests` bag with its balance drained. The
-/// deployed v1 bytecode predates that layout — its `cancel_withdrawal` guard
-/// (`is_request_processing`, per the bytecode snapshot) only consults the
-/// `processed` bag v1 itself moved requests into at commit time. Aimed at a
-/// v2-committed request the v1 guard passes, and with v1 still enabled the
-/// entry would destroy the request and mint a refund out of a balance the
-/// in-flight WithdrawalTransaction already drained; v1's `approve_request`
-/// (replaying a cert) would similarly reset the committed request to
-/// `Approved` for a second commit. `DisableVersion(1)` is what closes this
-/// hazard: both entries assert the version gate as their first statement.
+/// Historically this pinned a real hazard: the deployed testnet v1 bytecode
+/// predated the deferred-archival in-place layout, so its `cancel_withdrawal`
+/// guard passed against a v2-committed request and could destroy it (burned
+/// hBTC, no BTC out). On this fresh cycle v1 is a build of the same source,
+/// but the invariant the test pins is layout-independent: after
+/// `DisableVersion(1)`, the retired version's entries abort at the version
+/// gate — the FIRST statement of both entries — before any argument-semantic
+/// check could run.
 ///
 /// This test pins that closure by calling the deployed v1 bytecode directly
 /// at its package id, against a live v2-committed withdrawal:
@@ -676,8 +657,8 @@ fn assert_version_gate_abort<T>(result: Result<T>, v1_package_id: Address, what:
 async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
     init_test_logging();
 
-    // Boot with `keep_v1_enabled`: the deployed-v1 snapshot auto-upgraded to
-    // the current source with both versions left enabled; running
+    // Boot with `keep_v1_enabled`: fresh v1 auto-upgraded to a
+    // const-patched v2 with both versions left enabled; running
     // DisableVersion(1) is this test's move.
     let mut networks = TestNetworksBuilder::new()
         .with_nodes(4)
@@ -792,7 +773,7 @@ async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
 
     // ── Direct v1 `withdraw::cancel_withdrawal` on the committed id ─────
     //
-    // Deployed v1 signature (from the bytecode snapshot):
+    // v1 signature:
     //   public fun cancel_withdrawal(&mut Hashi, address, &Clock, &mut TxContext): Balance<BTC>
     // A `public fun` return must be consumed, so the PTB wraps it through
     // `coin::from_balance` and transfers the coin to the sender — with BTC
@@ -841,7 +822,7 @@ async fn test_v1_entries_abort_against_v2_committed_request() -> Result<()> {
 
     // ── Direct v1 `withdraw::approve_request` with a garbage cert ───────
     //
-    // Deployed v1 signature:
+    // v1 signature:
     //   entry fun approve_request(&mut Hashi, address, CommitteeSignature, &Clock)
     // The gate is asserted before certificate verification, and v1's
     // `committee::new_committee_signature` is a bare struct pack (verified in
