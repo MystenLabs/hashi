@@ -1627,8 +1627,20 @@ async fn scrape_tob_entries(
     let mut seed = route::ContainerSeed::default();
     seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
         for field in fields {
-            let certs: move_types::EpochCertsV1 = field
-                .value()
+            // The leader's TOB GC destroys dead buckets concurrently with this
+            // scan, and the RPC's defaulting accessor hands back an EMPTY value
+            // for an entry that vanished between page assembly and read (which
+            // would decode as "unexpected end of input"). A destroyed bucket
+            // needs no seeding; skip it. Bare and stamped buckets share one BCS
+            // layout, so a present value decodes through the bare mirror.
+            let Some(value) = field.value_opt().filter(|bcs| !bcs.value().is_empty()) else {
+                tracing::warn!(
+                    field_id = field.field_id(),
+                    "tob entry vanished mid-scrape; skipping"
+                );
+                continue;
+            };
+            let certs: move_types::EpochCertsV1 = value
                 .deserialize()
                 .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
             let field_id: Address = field.field_id().parse()?;
