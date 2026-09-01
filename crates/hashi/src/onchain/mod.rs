@@ -605,17 +605,11 @@ impl OnchainState {
             return Ok(None);
         };
         let certs: Vec<(Address, move_types::StampedDealerSubmissionV1)> = bucket
-            .certs_in_order()
+            .complete_certs_in_order()
+            .map_err(|e| inconsistent_listing(format!("mirrored TOB bucket {key:?}: {e}")))?
             .into_iter()
             .map(|(dealer, submission)| (dealer, submission.clone()))
             .collect();
-        if certs.len() != bucket.nodes.len() {
-            return Err(inconsistent_listing(format!(
-                "mirrored TOB bucket {key:?} walks {} of its {} nodes",
-                certs.len(),
-                bucket.nodes.len()
-            )));
-        }
         if bucket.layout == TobCertLayout::Stamped {
             ensure_timestamp_ordered(&certs)?;
         }
@@ -1599,6 +1593,7 @@ async fn scrape_tob_entries(
                 layout,
                 certs_id: certs.id,
                 head: certs.head,
+                size: certs.size,
                 nodes,
             },
         );

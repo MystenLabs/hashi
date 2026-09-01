@@ -113,13 +113,48 @@ pub struct TobBucket {
     pub certs_id: Address,
     /// The `LinkedTable` head: the first dealer in insertion order.
     pub head: Option<Address>,
+    /// The `LinkedTable`'s on-chain size, the census a complete walk
+    /// must match. Held nodes alone cannot certify completeness: a
+    /// bucket Field can arrive ahead of its nodes mid-convergence, and
+    /// a walk over what the mirror holds would then look internally
+    /// consistent while missing the tail — or the entire list.
+    pub size: u64,
     pub nodes: BTreeMap<
         Address,
         move_types::LinkedTableNode<Address, move_types::StampedDealerSubmissionV1>,
     >,
 }
 
+/// A mirror walk that did not cover the bucket's full on-chain census —
+/// a convergence gap between the bucket Field and its node writes;
+/// retryable once the replay catches up.
+#[derive(Debug, thiserror::Error)]
+#[error("the mirror walks {walked} of the bucket's {size} on-chain nodes")]
+pub struct IncompleteTobWalk {
+    pub walked: usize,
+    pub size: u64,
+}
+
 impl TobBucket {
+    /// Dealer submissions in on-chain insertion order, verified
+    /// complete: the walk must cover exactly the `LinkedTable`'s
+    /// on-chain size. Comparing against held nodes instead would pass a
+    /// walk that reaches every node the mirror holds while the chain
+    /// holds more (a missing tail, or a head with no nodes applied
+    /// yet).
+    pub fn complete_certs_in_order(
+        &self,
+    ) -> Result<Vec<(Address, &move_types::StampedDealerSubmissionV1)>, IncompleteTobWalk> {
+        let certs = self.certs_in_order();
+        if certs.len() as u64 != self.size {
+            return Err(IncompleteTobWalk {
+                walked: certs.len(),
+                size: self.size,
+            });
+        }
+        Ok(certs)
+    }
+
     /// Dealer submissions in on-chain insertion order — the total order
     /// the TOB guarantees. Bounded by the node count, so a link pointing
     /// at a missing node (a mirror gap) terminates the walk early rather

@@ -716,11 +716,13 @@ fn apply_write(
                             layout,
                             certs_id,
                             head: None,
+                            size: 0,
                             nodes: std::collections::BTreeMap::new(),
                         });
                     bucket.layout = layout;
                     bucket.certs_id = certs_id;
                     bucket.head = field.value.certs.head;
+                    bucket.size = field.value.certs.size;
                     TrackedKind::TobBucket(key)
                 })
             })
@@ -2227,6 +2229,64 @@ mod tests {
         ))]));
         assert_eq!(out.unrouted.len(), 1);
         assert!(fixture.hashi.tob.buckets.is_empty());
+    }
+
+    #[test]
+    fn tob_gap_states_fail_the_complete_walk() {
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let (node1, d1, d2) = (addr(0x82), addr(0xE1), addr(0xA2));
+
+        // A bucket Field ahead of its tail node: the walk covers every
+        // node the mirror holds, so a held-nodes comparison would pass
+        // it; only the on-chain size exposes the missing tail.
+        let mut fixture = Fixture::new();
+        fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                2,
+                key,
+                Some(d1),
+                Some(d2),
+                2,
+            )),
+            written(tob_node_object(node1, 2, d1, None, Some(d2))),
+        ]));
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        assert_eq!(bucket.size, 2);
+        let err = bucket.complete_certs_in_order().unwrap_err();
+        assert_eq!((err.walked, err.size), (1, 2));
+
+        // A bucket Field with no nodes applied yet: the walk is empty,
+        // which must not read as an empty bucket.
+        let mut fixture = Fixture::new();
+        fixture.apply(&tx(vec![written(tob_bucket_object(
+            bucket_field,
+            1,
+            key,
+            Some(d1),
+            Some(d1),
+            1,
+        ))]));
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        let err = bucket.complete_certs_in_order().unwrap_err();
+        assert_eq!((err.walked, err.size), (0, 1));
+
+        // The converged state passes.
+        let mut fixture = Fixture::new();
+        fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d1),
+                1,
+            )),
+            written(tob_node_object(node1, 1, d1, None, None)),
+        ]));
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        assert_eq!(bucket.complete_certs_in_order().unwrap().len(), 1);
     }
 
     #[test]
