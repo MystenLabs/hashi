@@ -85,18 +85,12 @@ public(package) fun authorize_upgrade(self: &mut Versioning, digest: vector<u8>)
     )
 }
 
-public(package) fun commit_upgrade(self: &mut Versioning, receipt: UpgradeReceipt) {
-    package::commit_upgrade(self.upgrade_cap.borrow_mut(), receipt);
-    let version = self.upgrade_cap.borrow().version();
-    self.enabled_versions.insert(version);
-}
-
 /// Commit an upgrade and apply the version policy approved with it.
 ///
 /// Exclusive upgrades atomically retire every previously enabled package
-/// version as the new version is committed. Non-exclusive upgrades retain the
-/// legacy behavior and add the new version alongside the existing set.
-public(package) fun commit_upgrade_v2(
+/// version as the new version is committed. Non-exclusive upgrades add the
+/// new version alongside the existing set.
+public(package) fun commit_upgrade(
     self: &mut Versioning,
     receipt: UpgradeReceipt,
     exclusive: bool,

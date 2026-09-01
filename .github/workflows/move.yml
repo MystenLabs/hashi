@@ -49,7 +49,6 @@ jobs:
               - '.github/workflows/move.yml'
             compat:
               - 'crates/hashi/tests/move_upgrade_compat.rs'
-              - 'crates/hashi/tests/move_upgrade_snapshots/**'
               - 'crates/hashi/src/publish.rs'
               - 'crates/hashi/Cargo.toml'
               - 'Cargo.lock'
@@ -86,8 +85,8 @@ jobs:
       - run: ls -d ./*/ | xargs -I {} bash -c "sui move test --path '{}'"
 
   # Verifies the current packages/hashi source is a *compatible upgrade* of the
-  # deployed package. The deployed package's bytecode is a checked-in snapshot
-  # (crates/hashi/tests/move_upgrade_snapshots/), so this runs hermetically with
+  # deployed package. When a deployment is recorded, its bytecode is a
+  # checked-in snapshot under crates/hashi/tests/, so this runs hermetically with
   # NO network access — it needs only the `sui` CLI to build the current source.
   # See crates/hashi/tests/move_upgrade_compat.rs.
   move-compat:
@@ -103,7 +102,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: sui --version; mvr --version
-      # Runs the snapshot-based gate plus the network-free machinery self-tests.
+      # Runs the Published.toml-derived gate plus the network-free machinery
+  # self-tests; on a fresh cycle (no recorded deployments) the gate has
+  # nothing to compare and reports OK.
       # SUI_BINARY / HASHI_COMPAT_SNAPSHOT_DIR can be overridden here if the
       # defaults ever need to change.
       - name: Run upgrade compatibility check

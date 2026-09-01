@@ -22,7 +22,6 @@ use crate::cli::types::Proposal;
 use crate::cli::types::display;
 use crate::cli::upgrade::build_upgrade_execution_transaction;
 use crate::cli::upgrade::build_upgrade_package;
-use crate::cli::upgrade::build_upgrade_v2_execution_transaction;
 use crate::cli::upgrade::extract_new_package_id_from_response;
 use crate::onchain::types::ProposalType;
 
@@ -242,7 +241,7 @@ pub async fn vote(
 
     // Upgrade proposals require the dedicated upgrade flow — the generic
     // `<module>::execute` path can't construct an UpgradeTicket.
-    if upgrade_proposal_kind(&proposal.proposal_type).is_some() {
+    if is_upgrade_proposal(&proposal.proposal_type) {
         print_warning(
             "--execute is not supported for Upgrade proposals; run \
              `proposal execute-upgrade` once quorum is reached.",
@@ -351,7 +350,7 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     let proposal_type = &proposal.proposal_type;
     let proposal_type_str = display::format_proposal_type(proposal_type);
 
-    if upgrade_proposal_kind(proposal_type).is_some() {
+    if is_upgrade_proposal(proposal_type) {
         anyhow::bail!(
             "Upgrade proposals publish a package as part of their execution; \
              use `proposal execute-upgrade {proposal_id} --package-path <dir>` instead."
@@ -377,34 +376,10 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
 }
 
 /// Which upgrade proposal module an approved proposal executes through.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpgradeProposalKind {
-    /// `hashi::upgrade`: the legacy proposal, which leaves every previously
-    /// enabled package version enabled.
-    Legacy,
-    /// `hashi::upgrade_v2`: carries the committee-approved exclusive or
-    /// non-exclusive version policy.
-    V2,
-}
-
-impl UpgradeProposalKind {
-    /// The Move module whose `execute` and `finalize_upgrade` the PTB calls.
-    pub fn module(self) -> &'static str {
-        match self {
-            UpgradeProposalKind::Legacy => "upgrade",
-            UpgradeProposalKind::V2 => "upgrade_v2",
-        }
-    }
-}
-
-/// The upgrade module an approved proposal executes through, or `None` for
-/// every proposal type that goes through the generic `proposal execute` path.
-pub fn upgrade_proposal_kind(proposal_type: &ProposalType) -> Option<UpgradeProposalKind> {
-    match proposal_type {
-        ProposalType::Upgrade => Some(UpgradeProposalKind::Legacy),
-        ProposalType::UpgradeV2 => Some(UpgradeProposalKind::V2),
-        _ => None,
-    }
+/// Whether an approved proposal executes through the upgrade flow
+/// (execute + publish + finalize) rather than the generic `proposal execute`.
+pub fn is_upgrade_proposal(proposal_type: &ProposalType) -> bool {
+    matches!(proposal_type, ProposalType::Upgrade)
 }
 
 /// Inputs for [`execute_upgrade`]: where to build the package from and which
@@ -449,14 +424,13 @@ pub async fn execute_upgrade(
         .fetch_proposal(&proposal_addr)
         .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
 
-    let kind = upgrade_proposal_kind(&proposal.proposal_type).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{} is a {} proposal, not an upgrade; use `proposal execute` instead",
-            proposal_id,
-            display::format_proposal_type(&proposal.proposal_type)
-        )
-    })?;
-    let module = kind.module();
+    anyhow::ensure!(
+        is_upgrade_proposal(&proposal.proposal_type),
+        "{} is a {} proposal, not an upgrade; use `proposal execute` instead",
+        proposal_id,
+        display::format_proposal_type(&proposal.proposal_type)
+    );
+    let module = "upgrade";
 
     let current_version = client.highest_package_version().context(
         "could not determine current package version from on-chain state; \
@@ -507,20 +481,8 @@ pub async fn execute_upgrade(
     .await?;
 
     let hashi_ids = *client.hashi_ids();
-    let tx = match kind {
-        UpgradeProposalKind::Legacy => build_upgrade_execution_transaction(
-            hashi_ids,
-            current_package_id,
-            proposal_addr,
-            compiled,
-        ),
-        UpgradeProposalKind::V2 => build_upgrade_v2_execution_transaction(
-            hashi_ids,
-            current_package_id,
-            proposal_addr,
-            compiled,
-        ),
-    };
+    let tx =
+        build_upgrade_execution_transaction(hashi_ids, current_package_id, proposal_addr, compiled);
 
     print_info(&format!(
         "Transaction: {module}::execute + Upgrade + {module}::finalize_upgrade on {}",
@@ -555,11 +517,11 @@ pub async fn execute_upgrade(
     if let Some(latest) = refreshed.highest_package_version() {
         println!("  {} v{latest}", "Latest package:".bold());
     }
-    if kind == UpgradeProposalKind::Legacy && enabled.contains(&current_version) {
+    if enabled.contains(&current_version) {
         print_warning(&format!(
-            "v{current_version} stays enabled: the legacy upgrade proposal never retires \
-             versions. Execute the DisableVersion({current_version}) proposal through \
-             the new package when the fleet is ready."
+            "v{current_version} stays enabled (non-exclusive upgrade): execute a \
+             DisableVersion({current_version}) proposal through the new package when \
+             the fleet is ready."
         ));
     }
     Ok(())
@@ -579,7 +541,7 @@ pub struct CreateUpgradeProposalArgs<'a> {
     pub package_path: Option<&'a std::path::Path>,
     pub sui_binary: &'a std::path::Path,
     pub sui_client_config: Option<&'a std::path::Path>,
-    pub upgrade_v2_exclusive: Option<bool>,
+    pub exclusive: bool,
     pub allow_unverified_exclusive: bool,
     pub metadata: Vec<(String, String)>,
 }
@@ -590,10 +552,10 @@ pub struct CreateUpgradeProposalArgs<'a> {
 /// acknowledged the bypass.
 fn check_exclusive_digest_acknowledged(
     digest: Option<&str>,
-    upgrade_v2_exclusive: Option<bool>,
+    exclusive: bool,
     allow_unverified_exclusive: bool,
 ) -> Result<()> {
-    if digest.is_some() && upgrade_v2_exclusive == Some(true) && !allow_unverified_exclusive {
+    if digest.is_some() && exclusive && !allow_unverified_exclusive {
         anyhow::bail!(
             "--digest skips the PACKAGE_VERSION pre-flight, and an exclusive upgrade \
              publishing a package whose PACKAGE_VERSION does not match the new \
@@ -617,11 +579,11 @@ pub async fn create_upgrade_proposal(
         package_path,
         sui_binary,
         sui_client_config,
-        upgrade_v2_exclusive,
+        exclusive,
         allow_unverified_exclusive,
         metadata,
     } = args;
-    check_exclusive_digest_acknowledged(digest, upgrade_v2_exclusive, allow_unverified_exclusive)?;
+    check_exclusive_digest_acknowledged(digest, exclusive, allow_unverified_exclusive)?;
     let mut client = HashiClient::new(config).await?;
 
     let digest_bytes = match (digest, package_path) {
@@ -657,41 +619,19 @@ pub async fn create_upgrade_proposal(
         (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
     };
 
-    let proposal_name = if upgrade_v2_exclusive.is_some() {
-        "UpgradeV2"
-    } else {
-        "Upgrade"
-    };
-    print_detail(&format!(
-        "\n{}",
-        format!("Creating {proposal_name} Proposal:").bold()
-    ));
+    print_detail(&format!("\n{}", "Creating Upgrade Proposal:".bold()));
     print_detail(&format!("  Digest: 0x{}", hex::encode(&digest_bytes)));
-    if let Some(exclusive) = upgrade_v2_exclusive {
-        print_detail(&format!("  Exclusive: {exclusive}"));
-    }
+    print_detail(&format!("  Exclusive: {exclusive}"));
     print_metadata(&metadata);
 
     prompt_continue("create this upgrade proposal", tx_opts).await?;
 
-    let (tx, module) = if let Some(exclusive) = upgrade_v2_exclusive {
-        (
-            client.build_create_proposal_transaction(CreateProposalParams::UpgradeV2 {
-                digest: digest_bytes,
-                exclusive,
-                metadata,
-            })?,
-            "upgrade_v2",
-        )
-    } else {
-        (
-            client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
-                digest: digest_bytes,
-                metadata,
-            })?,
-            "upgrade",
-        )
-    };
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
+        digest: digest_bytes,
+        exclusive,
+        metadata,
+    })?;
+    let module = "upgrade";
 
     print_info(&format!("Transaction: {module}::propose"));
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
@@ -1146,7 +1086,7 @@ mod tests {
 
     #[test]
     fn exclusive_digest_is_refused_without_acknowledgement() {
-        let err = check_exclusive_digest_acknowledged(Some("ab"), Some(true), false).unwrap_err();
+        let err = check_exclusive_digest_acknowledged(Some("ab"), true, false).unwrap_err();
         // Pin both remedies the message offers: the verified path and the
         // explicit acknowledgement.
         assert!(err.to_string().contains("--package-path"));
@@ -1155,16 +1095,14 @@ mod tests {
 
     #[test]
     fn exclusive_digest_is_allowed_with_acknowledgement() {
-        check_exclusive_digest_acknowledged(Some("ab"), Some(true), true).unwrap();
+        check_exclusive_digest_acknowledged(Some("ab"), true, true).unwrap();
     }
 
     #[test]
     fn other_flag_combinations_are_unaffected() {
-        // Legacy upgrade proposals carry no exclusivity policy.
-        check_exclusive_digest_acknowledged(Some("ab"), None, false).unwrap();
-        // A non-exclusive upgrade_v2 digest stays recoverable on-chain.
-        check_exclusive_digest_acknowledged(Some("ab"), Some(false), false).unwrap();
+        // A non-exclusive upgrade digest stays recoverable on-chain.
+        check_exclusive_digest_acknowledged(Some("ab"), false, false).unwrap();
         // --package-path runs the pre-flight, so nothing needs acknowledging.
-        check_exclusive_digest_acknowledged(None, Some(true), false).unwrap();
+        check_exclusive_digest_acknowledged(None, true, false).unwrap();
     }
 }

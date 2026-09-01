@@ -1011,7 +1011,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<Address> {
         let builder = build_create_withdrawal_request(
             self.hashi_ids,
-            self.withdrawal_call_package(),
+            self.active_call_package_id(),
             withdrawal_amount_sats,
             destination_bytes,
         );
@@ -1048,7 +1048,7 @@ impl SuiTxExecutor {
         let total_sats = total_sats as u64;
 
         let mut builder = TransactionBuilder::new();
-        let package_id = self.withdrawal_call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1129,20 +1129,6 @@ impl SuiTxExecutor {
 
     pub(crate) fn active_call_package_id(&self) -> Address {
         self.call_target().0
-    }
-
-    /// Package id the withdrawal entry calls route through:
-    /// [`Self::active_call_package_id`] held at v1 while the bootstrap
-    /// window keeps v1 enabled (see
-    /// [`crate::withdrawals::withdrawal_effective_version`]), so this
-    /// binary's withdrawal writes always execute the bytecode generation
-    /// whose commit layout the chain is operating under. Falls back like
-    /// [`Self::call_target`] when no version resolves.
-    pub(crate) fn withdrawal_call_package(&self) -> Address {
-        self.onchain_state
-            .as_ref()
-            .and_then(OnchainState::withdrawal_package)
-            .map_or(self.hashi_ids.package_id, |(id, _)| id)
     }
 
     #[tracing::instrument(level = "info", skip_all)]
@@ -1268,7 +1254,7 @@ impl SuiTxExecutor {
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         builder.move_call(
             Function::new(
-                self.withdrawal_call_package(),
+                self.active_call_package_id(),
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("reallocate_presigs"),
             ),
@@ -1435,7 +1421,7 @@ impl SuiTxExecutor {
         approvals: &[(Address, &CommitteeSignature)],
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.withdrawal_call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1488,7 +1474,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.withdrawal_call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1610,7 +1596,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.withdrawal_call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1668,7 +1654,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.withdrawal_call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1732,7 +1718,7 @@ impl SuiTxExecutor {
     ) -> anyhow::Result<()> {
         let builder = build_cancel_withdrawal(
             self.hashi_ids,
-            self.withdrawal_call_package(),
+            self.active_call_package_id(),
             withdrawal_id,
             self.sender(),
         );
@@ -1766,7 +1752,7 @@ impl SuiTxExecutor {
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
-        let package_id = self.withdrawal_call_package();
+        let package_id = self.active_call_package_id();
 
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1825,7 +1811,7 @@ impl SuiTxExecutor {
         let mut max_checkpoint = 0;
         for chunk in utxo_ids.chunks(MAX_PER_TX) {
             let mut builder = TransactionBuilder::new();
-            let package_id = self.withdrawal_call_package();
+            let package_id = self.active_call_package_id();
             let hashi_arg = builder.object(
                 ObjectInput::new(self.hashi_ids.hashi_object_id)
                     .as_shared()
@@ -1881,21 +1867,18 @@ impl SuiTxExecutor {
         Ok(max_checkpoint)
     }
 
-    /// Package id of the version the withdrawal flow operates at (the
-    /// dormancy-gated [`OnchainState::withdrawal_package`]). Entry functions
-    /// introduced by an upgrade only exist in the upgraded bytecode, so
-    /// callers targeting such entries must gate on the effective version
-    /// first; a dormant flow resolving here targets v1, where a v2-only
-    /// entry fails loudly instead of running the wrong bytecode.
+    /// Package id the withdrawal GC entries route through: the active
+    /// package. Errors when no version has resolved yet, so callers fail
+    /// loudly instead of targeting a fallback package.
     fn withdrawal_version_package(&self) -> anyhow::Result<Address> {
         let onchain_state = self
             .onchain_state
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("executor has no onchain state to resolve versions"))?;
         onchain_state
-            .withdrawal_package()
+            .active_package()
             .map(|(id, _)| id)
-            .ok_or_else(|| anyhow::anyhow!("no withdrawal-effective package version resolved"))
+            .ok_or_else(|| anyhow::anyhow!("no active package version resolved"))
     }
 
     /// Archive the given confirmed withdrawal txns, packed into a plan of

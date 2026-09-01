@@ -12,7 +12,7 @@ use hashi::{
     proposal,
     test_utils,
     update_config::UpdateConfig,
-    upgrade_v2
+    upgrade
 };
 use sui::{bls12381, clock, package, vec_map};
 
@@ -862,7 +862,7 @@ fun test_upgrade_cap_at_v2(ctx: &mut TxContext): sui::package::UpgradeCap {
 
 #[test]
 /// An exclusive upgrade atomically retires every previously enabled version.
-fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
+fun test_upgrade_exclusive_replaces_enabled_versions() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
@@ -870,7 +870,7 @@ fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
     hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_v2(ctx));
     hashi.versioning_mut().enable_version(2);
 
-    let proposal_id = upgrade_v2::propose(
+    let proposal_id = upgrade::propose(
         &mut hashi,
         VOTER1,
         b"exclusive v3",
@@ -879,8 +879,8 @@ fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
         &clock,
         ctx,
     );
-    let (ticket, authorization) = upgrade_v2::execute(&mut hashi, proposal_id, &clock);
-    upgrade_v2::finalize_upgrade(&mut hashi, ticket.test_upgrade(), authorization);
+    let (ticket, authorization) = upgrade::execute(&mut hashi, proposal_id, &clock);
+    upgrade::finalize_upgrade(&mut hashi, ticket.test_upgrade(), authorization);
 
     assert!(!hashi.versioning().is_version_enabled(1));
     assert!(!hashi.versioning().is_version_enabled(2));
@@ -892,7 +892,7 @@ fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
 
 #[test]
 /// A non-exclusive upgrade preserves the legacy multi-version behavior.
-fun test_upgrade_v2_non_exclusive_preserves_enabled_versions() {
+fun test_upgrade_non_exclusive_preserves_enabled_versions() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
@@ -900,7 +900,7 @@ fun test_upgrade_v2_non_exclusive_preserves_enabled_versions() {
     hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_v2(ctx));
     hashi.versioning_mut().enable_version(2);
 
-    let proposal_id = upgrade_v2::propose(
+    let proposal_id = upgrade::propose(
         &mut hashi,
         VOTER1,
         b"non-exclusive v3",
@@ -909,8 +909,8 @@ fun test_upgrade_v2_non_exclusive_preserves_enabled_versions() {
         &clock,
         ctx,
     );
-    let (ticket, authorization) = upgrade_v2::execute(&mut hashi, proposal_id, &clock);
-    upgrade_v2::finalize_upgrade(&mut hashi, ticket.test_upgrade(), authorization);
+    let (ticket, authorization) = upgrade::execute(&mut hashi, proposal_id, &clock);
+    upgrade::finalize_upgrade(&mut hashi, ticket.test_upgrade(), authorization);
 
     assert!(hashi.versioning().is_version_enabled(1));
     assert!(hashi.versioning().is_version_enabled(2));

@@ -924,12 +924,6 @@ pub struct DisableVersion {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Upgrade {
     pub digest: Vec<u8>,
-}
-
-/// Rust version of the Move hashi::upgrade_v2::Upgrade type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct UpgradeV2 {
-    pub digest: Vec<u8>,
     pub exclusive: bool,
 }
 
@@ -1180,7 +1174,6 @@ impl HashiEvent {
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
             ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
             PackageUpgraded::MODULE_NAME => PackageUpgraded::from_bcs(bcs.value())?.into(),
-            ("upgrade_v2", "PackageUpgraded") => PackageUpgraded::from_bcs(bcs.value())?.into(),
             _ => {
                 return Ok(None);
             }

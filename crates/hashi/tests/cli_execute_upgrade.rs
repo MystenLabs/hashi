@@ -1,26 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `proposal execute-upgrade` dispatches on the proposal's type: the two
-//! upgrade payloads go through their own module's `execute` and
-//! `finalize_upgrade`; everything else belongs to `proposal execute`.
+//! `proposal execute-upgrade` accepts exactly the upgrade payload (which needs
+//! the execute + publish + finalize PTB); everything else belongs to
+//! `proposal execute`.
 
-use hashi::cli::commands::proposal::UpgradeProposalKind;
-use hashi::cli::commands::proposal::upgrade_proposal_kind;
+use hashi::cli::commands::proposal::is_upgrade_proposal;
 use hashi::onchain::types::ProposalType;
 
 #[test]
-fn upgrade_payloads_map_to_their_module() {
-    assert_eq!(
-        upgrade_proposal_kind(&ProposalType::Upgrade),
-        Some(UpgradeProposalKind::Legacy)
-    );
-    assert_eq!(
-        upgrade_proposal_kind(&ProposalType::UpgradeV2),
-        Some(UpgradeProposalKind::V2)
-    );
-    assert_eq!(UpgradeProposalKind::Legacy.module(), "upgrade");
-    assert_eq!(UpgradeProposalKind::V2.module(), "upgrade_v2");
+fn the_upgrade_payload_reaches_the_upgrade_flow() {
+    assert!(is_upgrade_proposal(&ProposalType::Upgrade));
 }
 
 #[test]
@@ -35,9 +25,8 @@ fn non_upgrade_payloads_are_refused() {
         ProposalType::IgnoreMember,
         ProposalType::Unknown("something_new".to_string()),
     ] {
-        assert_eq!(
-            upgrade_proposal_kind(&proposal_type),
-            None,
+        assert!(
+            !is_upgrade_proposal(&proposal_type),
             "{proposal_type:?} must not reach the upgrade flow"
         );
     }

@@ -1,18 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Package upgrade governance module.
+/// Package-upgrade governance with an atomic version policy.
 ///
-/// ## Upgrade Flow
+/// The proposal records whether the new version must be exclusive. The
+/// approved choice is carried from `execute` to `finalize_upgrade` in a hot
+/// potato, so the transaction sender cannot substitute a different policy
+/// while publishing the package.
 ///
-/// 1. A committee member calls `upgrade::propose()` with the new package digest
-/// 2. Committee members vote on the `Proposal<Upgrade>` until quorum is reached
-/// 3. `upgrade::execute(Proposal<Upgrade>, &mut Hashi)` -> `UpgradeTicket`
-///    - Authorizes the upgrade using the stored `UpgradeCap`
-/// 4. `sui::package::upgrade(UpgradeTicket, ...)` -> `UpgradeReceipt`
-///    - Performed by the Sui runtime during package publish transaction
-/// 5. `versioning::commit_upgrade(UpgradeReceipt)`
-///    - Commits the upgrade to the `UpgradeCap` and auto-enables the new version
+/// An exclusive upgrade commits the new package and replaces the enabled set
+/// with the new version in the same programmable transaction. A non-exclusive
+/// upgrade preserves every enabled version and adds the new one.
 module hashi::upgrade;
 
 use hashi::{hashi::Hashi, proposal};
@@ -27,6 +25,15 @@ const THRESHOLD_BPS: u64 = 6667;
 
 public struct Upgrade has copy, drop, store {
     digest: vector<u8>,
+    exclusive: bool,
+}
+
+/// Binds the committee-approved version policy to the upgrade transaction.
+///
+/// No abilities are intentional: callers cannot forge, copy, drop, or store
+/// this value and must consume it in `finalize_upgrade` in the same PTB.
+public struct UpgradeAuthorization {
+    exclusive: bool,
 }
 
 // ~~~~~~~ Events ~~~~~~~
@@ -42,6 +49,7 @@ public fun propose(
     hashi: &mut Hashi,
     validator_address: address,
     digest: vector<u8>,
+    exclusive: bool,
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -50,7 +58,7 @@ public fun propose(
     proposal::create(
         hashi,
         validator_address,
-        Upgrade { digest },
+        Upgrade { digest, exclusive },
         THRESHOLD_BPS,
         metadata,
         clock,
@@ -58,20 +66,27 @@ public fun propose(
     )
 }
 
-/// Executes an approved upgrade proposal.
-///
-/// Returns an `UpgradeTicket` that must be used in the same transaction
-/// to publish the new package. The Sui runtime will return an `UpgradeReceipt`
-/// which must then be passed to `finalize_upgrade()` to finalize the upgrade.
-public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): UpgradeTicket {
-    let Upgrade { digest } = proposal::execute(hashi, proposal_id, clock);
-    hashi.versioning_mut().authorize_upgrade(digest)
+/// Execute an approved proposal and bind its version policy to the ticket.
+public fun execute(
+    hashi: &mut Hashi,
+    proposal_id: ID,
+    clock: &Clock,
+): (UpgradeTicket, UpgradeAuthorization) {
+    let Upgrade { digest, exclusive } = proposal::execute(hashi, proposal_id, clock);
+    let ticket = hashi.versioning_mut().authorize_upgrade(digest);
+    (ticket, UpgradeAuthorization { exclusive })
 }
 
-public fun finalize_upgrade(hashi: &mut Hashi, receipt: UpgradeReceipt) {
+/// Commit the package and its approved version policy atomically.
+public fun finalize_upgrade(
+    hashi: &mut Hashi,
+    receipt: UpgradeReceipt,
+    authorization: UpgradeAuthorization,
+) {
     hashi.versioning().assert_version_enabled();
+    let UpgradeAuthorization { exclusive } = authorization;
     let upgrade_package = receipt.package();
-    hashi.versioning_mut().commit_upgrade(receipt);
+    hashi.versioning_mut().commit_upgrade(receipt, exclusive);
     let version = hashi.versioning().upgrade_cap().version();
     sui::event::emit(PackageUpgraded { package: upgrade_package, version });
 }

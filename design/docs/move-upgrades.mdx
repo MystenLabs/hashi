@@ -77,7 +77,7 @@ cross-version tests for state both versions can mutate. A desire to let old
 validator binaries keep working is not, by itself, enough: binary rollout is an
 operational concern and must not weaken an onchain safety invariant.
 
-The `upgrade_v2::Upgrade` proposal records this decision in its `exclusive`
+The `upgrade::Upgrade` proposal records this decision in its `exclusive`
 field. Execution returns the Sui `UpgradeTicket` together with a non-droppable
 authorization carrying the approved setting. Finalization consumes both in the
 same programmable transaction, binding the committee vote to the version policy
@@ -173,7 +173,6 @@ through the flip without draining: committed batches sign, confirm, and
 archive from their v1 locations, and approved or requested entries commit
 v2-style afterward.
 
-Before the first mainnet publish, remove the legacy `upgrade` module, rename
-`upgrade_v2` to `upgrade`, and squash testnet-only package-version and storage
-assumptions. Mainnet should begin with the atomic proposal type as its only
-upgrade path.
+The pre-mainnet tree ships this way already: the legacy module is deleted,
+the atomic proposal type is named `upgrade`, and it is the only upgrade path.
+Mainnet begins with it from genesis.

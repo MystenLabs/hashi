@@ -147,11 +147,10 @@ pub struct TestNetworksBuilder {
     /// [`Self::with_upgraded_chain`] (or [`Self::keep_v1_enabled`]) for tests
     /// that exercise the upgrade lifecycle itself.
     upgrade_to_current_source: bool,
-    /// When true, the auto-upgrade boot leaves v1 in the enabled set (the raw
-    /// legacy-upgrade outcome) instead of running DisableVersion(1). With v1
-    /// enabled the node-side withdrawal flow is dormant at v1 semantics, so
-    /// this is only for tests that deliberately exercise the both-enabled
-    /// bootstrap window. See [`Self::keep_v1_enabled`].
+    /// When true, the upgraded-chain boot leaves v1 in the enabled set
+    /// instead of running DisableVersion(1), for tests that exercise the
+    /// both-enabled window or drive the disable themselves. See
+    /// [`Self::keep_v1_enabled`].
     keep_v1_enabled: bool,
 }
 
@@ -188,11 +187,8 @@ impl TestNetworksBuilder {
     }
 
     /// Leave v1 in the enabled set after the upgraded-chain boot (which this
-    /// call opts into), skipping the DisableVersion(1) step. The node-side withdrawal flow
-    /// stays dormant at v1 semantics while v1 is enabled (see
-    /// `hashi::withdrawals::withdrawal_effective_version`), so only tests
-    /// that deliberately exercise the both-enabled bootstrap window (or that
-    /// drive DisableVersion(1) themselves) should opt in.
+    /// call opts into), skipping the DisableVersion(1) step. For tests that
+    /// exercise the both-enabled window or drive the disable themselves.
     pub fn keep_v1_enabled(mut self) -> Self {
         self.upgrade_to_current_source = true;
         self.keep_v1_enabled = true;
@@ -424,7 +420,8 @@ impl TestNetworksBuilder {
         // the upgraded package id, types defined at the v1 address).
         if nodes_started && self.upgrade_to_current_source {
             tracing::info!("upgrading the chain past the fresh v1 publish...");
-            let new_package_id = upgrade_flow::execute_full_upgrade(&mut test_networks).await?;
+            let new_package_id =
+                upgrade_flow::execute_full_upgrade(&mut test_networks, false).await?;
             upgrade_flow::wait_for_package_convergence(
                 &test_networks,
                 new_package_id,
@@ -433,15 +430,10 @@ impl TestNetworksBuilder {
             .await?;
             tracing::info!("chain upgraded; the network runs the post-upgrade state");
 
-            // The legacy v1 -> v2 upgrade leaves BOTH versions enabled, and
-            // the node-side withdrawal flow stays dormant at v1 semantics
-            // while v1 is enabled (see
-            // `hashi::withdrawals::withdrawal_effective_version`). Close the
-            // bootstrap window through governance so the default boot hands
-            // tests a chain whose v2 withdrawal semantics are actually live;
-            // a withdrawal e2e running against the both-enabled window would
-            // silently exercise v1 and pass vacuously. Tests that need the
-            // window opt out via `keep_v1_enabled`.
+            // A non-exclusive upgrade leaves BOTH versions enabled. Retire
+            // v1 through governance so the boot hands tests a single-version
+            // chain; tests that need the both-enabled window opt out via
+            // `keep_v1_enabled`.
             if !self.keep_v1_enabled {
                 let hashi_ids = test_networks.hashi_network.ids();
                 let mut executors: Vec<hashi::sui_tx_executor::SuiTxExecutor> = test_networks
@@ -487,11 +479,6 @@ impl TestNetworksBuilder {
                     anyhow::ensure!(
                         onchain.active_package_version() == Some(2),
                         "node {i}: active version 2 must resolve after DisableVersion(1)"
-                    );
-                    anyhow::ensure!(
-                        onchain.withdrawal_effective_version() == Some(2),
-                        "node {i}: the withdrawal dormancy gate must be open (effective v2) \
-                         after DisableVersion(1)"
                     );
                 }
                 tracing::info!(

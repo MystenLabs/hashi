@@ -716,13 +716,14 @@ mod tests {
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
 
-        // The archival assertion below is v2 behavior; a dormant flow (v1
-        // still enabled) would run v1 semantics and time it out. Pin that
-        // the default boot's DisableVersion(1) actually opened the gate.
+        // The archival assertion below needs the deferred-archival flow,
+        // which the squashed package carries from v1. Pin that the fresh
+        // boot resolves it.
         assert_eq!(
-            hashi.onchain_state().withdrawal_effective_version(),
-            Some(2),
-            "the withdrawal dormancy gate must be open under the default boot"
+            hashi.onchain_state().active_package_version(),
+            Some(1),
+            "the fresh v1 boot must resolve the active version the archival \
+             flow runs at"
         );
 
         let user_key = networks.sui_network.user_keys.first().unwrap();
@@ -883,9 +884,6 @@ mod tests {
         )
         .await?;
         rotate_into_avid(&mut networks).await?;
-        // No in-test DisableVersion(1): the default builder boot already
-        // disables v1 (a second disable would abort on-chain). The
-        // assertion below still pins the layout precondition.
         {
             let hashi = networks.hashi_network.nodes()[0].hashi();
             let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
@@ -902,20 +900,9 @@ mod tests {
                  whether or not governance ever set it. Governance tuning of this key is \
                  not covered by any test — see the update_config insert gap."
             );
-            assert!(
-                !hashi
-                    .onchain_state()
-                    .state()
-                    .hashi()
-                    .config
-                    .enabled_versions
-                    .contains(&1),
-                "while the bare-only version is enabled every nonce bucket is created bare and \
-                 certs carry timestamp 0, which collapses the window to the floor-only rule — \
-                 this test would then pass while exercising the legacy path it exists to \
-                 distinguish from. The active package version does not establish this: the \
-                 layout is decided by whether the bare-only version is still enabled"
-            );
+            // On the squashed package every nonce bucket is stamped from
+            // genesis, so the window path is the only one that exists; no
+            // bare-only version guard is needed.
         }
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
@@ -3305,14 +3292,14 @@ mod tests {
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
 
-        // The drain-mode cap this test fills is the v2 cap; a dormant flow
-        // (v1 still enabled) would trim the batch to 298 and never fire at
-        // the configured capacity. Pin that the default boot's
-        // DisableVersion(1) actually opened the gate.
+        // The drain-mode cap this test fills is the deferred-archival cap,
+        // which the squashed package resolves from v1. Pin that the fresh
+        // boot resolves it.
         assert_eq!(
-            hashi.onchain_state().withdrawal_effective_version(),
-            Some(2),
-            "the withdrawal dormancy gate must be open under the default boot"
+            hashi.onchain_state().active_package_version(),
+            Some(1),
+            "the fresh v1 boot must resolve the active version the batch cap \
+             follows"
         );
 
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
