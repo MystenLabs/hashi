@@ -20,8 +20,10 @@ use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{
 /// CI pins this (`version_policy_tests`). The tree must reach a chain as an
 /// upgrade (snapshot v1 + upgrade in every dev harness), never as a fresh
 /// publish — `create` enables this constant, and a fresh publish is Sui
-/// sequence version 1, so a mid-cycle fresh publish can never activate.
-const PACKAGE_VERSION: u64 = 2;
+/// sequence version 1, so a mid-cycle fresh publish can never activate. The
+/// one exception is the cycle start: the wipe-day publish of a tree declaring
+/// 1 is exactly Sui sequence version 1.
+const PACKAGE_VERSION: u64 = 1;
 
 // ~~~~~~~ Errors ~~~~~~~
 
@@ -83,18 +85,12 @@ public(package) fun authorize_upgrade(self: &mut Versioning, digest: vector<u8>)
     )
 }
 
-public(package) fun commit_upgrade(self: &mut Versioning, receipt: UpgradeReceipt) {
-    package::commit_upgrade(self.upgrade_cap.borrow_mut(), receipt);
-    let version = self.upgrade_cap.borrow().version();
-    self.enabled_versions.insert(version);
-}
-
 /// Commit an upgrade and apply the version policy approved with it.
 ///
 /// Exclusive upgrades atomically retire every previously enabled package
-/// version as the new version is committed. Non-exclusive upgrades retain the
-/// legacy behavior and add the new version alongside the existing set.
-public(package) fun commit_upgrade_v2(
+/// version as the new version is committed. Non-exclusive upgrades add the
+/// new version alongside the existing set.
+public(package) fun commit_upgrade(
     self: &mut Versioning,
     receipt: UpgradeReceipt,
     exclusive: bool,

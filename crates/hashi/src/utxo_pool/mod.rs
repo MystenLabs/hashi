@@ -383,12 +383,9 @@ impl CoinSelectionParams {
     /// commit budget in `safe_withdrawal_flow_max_inputs` automatically
     /// squeezes the input side down toward the funding reserve (optimizing
     /// withdrawal throughput).
-    /// The v2 (deferred-archival) cap: with commit writing request status in
-    /// place, each request costs 2 runtime objects instead of the 3 the
-    /// v1 bag move paid, and the archival GC chunks oversized txns, so the
-    /// commit budget alone binds. Chains still operating at package v1 are
-    /// capped at `LEGACY_MAX_WITHDRAWAL_REQUESTS` (298, in `withdrawals.rs`) via
-    /// `max_withdrawal_requests`.
+    /// The deferred-archival cap: commit writes request status in place
+    /// (2 runtime objects per request) and the archival GC chunks oversized
+    /// txns, so the commit budget alone binds.
     pub const MAX_WITHDRAWAL_REQUESTS: usize = 447;
 
     /// Default minimum fee rate floor (3 sat/vB), deliberately above

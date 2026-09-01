@@ -50,7 +50,6 @@ pub mod display {
     pub fn format_proposal_type(proposal_type: &ProposalType) -> String {
         match proposal_type {
             ProposalType::Upgrade => "Upgrade".to_string(),
-            ProposalType::UpgradeV2 => "UpgradeV2".to_string(),
             ProposalType::UpdateConfig => "UpdateConfig".to_string(),
             ProposalType::EnableVersion => "EnableVersion".to_string(),
             ProposalType::DisableVersion => "DisableVersion".to_string(),

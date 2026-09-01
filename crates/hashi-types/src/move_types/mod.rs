@@ -924,12 +924,6 @@ pub struct DisableVersion {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Upgrade {
     pub digest: Vec<u8>,
-}
-
-/// Rust version of the Move hashi::upgrade_v2::Upgrade type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct UpgradeV2 {
-    pub digest: Vec<u8>,
     pub exclusive: bool,
 }
 
@@ -959,8 +953,6 @@ pub struct IgnoreMember {
 }
 
 impl MoveType for IgnoreMember {
-    /// Introduced by the v2 upgrade; the defining address is v2's forever.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "ignore_member";
     const NAME: &'static str = "IgnoreMember";
 }
@@ -980,8 +972,6 @@ pub struct ValidatorResigned {
 }
 
 impl MoveType for ValidatorResigned {
-    /// Introduced by the v2 upgrade.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "validator";
     const NAME: &'static str = "ValidatorResigned";
 }
@@ -993,8 +983,6 @@ pub struct ValidatorResignationWithdrawn {
 }
 
 impl MoveType for ValidatorResignationWithdrawn {
-    /// Introduced by the v2 upgrade.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "validator";
     const NAME: &'static str = "ValidatorResignationWithdrawn";
 }
@@ -1006,8 +994,6 @@ pub struct ValidatorDeregistered {
 }
 
 impl MoveType for ValidatorDeregistered {
-    /// Introduced by the v2 upgrade.
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "validator";
     const NAME: &'static str = "ValidatorDeregistered";
 }
@@ -1040,14 +1026,13 @@ impl MoveType for EpochCertsV1 {
     const NAME: &'static str = "EpochCertsV1";
 }
 
-/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, which the v2
-/// package introduces. Identification only: it is BCS-identical to
+/// Marker for the Move hashi::tob::StampedEpochCertsV1 type, the nonce-cert
+/// bucket layout. Identification only: it is BCS-identical to
 /// `EpochCertsV1`, which is what the bucket is decoded as; the layout it names
 /// selects the linked-table node type.
 pub struct StampedEpochCertsV1;
 
 impl MoveType for StampedEpochCertsV1 {
-    const PACKAGE_VERSION: u64 = 2;
     const MODULE: &'static str = "tob";
     const NAME: &'static str = "StampedEpochCertsV1";
 }
@@ -1189,7 +1174,6 @@ impl HashiEvent {
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
             ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
             PackageUpgraded::MODULE_NAME => PackageUpgraded::from_bcs(bcs.value())?.into(),
-            ("upgrade_v2", "PackageUpgraded") => PackageUpgraded::from_bcs(bcs.value())?.into(),
             _ => {
                 return Ok(None);
             }

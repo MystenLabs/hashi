@@ -337,40 +337,6 @@ impl OnchainState {
         Some((id, version))
     }
 
-    /// The package version the withdrawal flow operates at:
-    /// [`Self::active_package_version`] held down to v1 while the bootstrap
-    /// window keeps v1 in the enabled set (see
-    /// [`crate::withdrawals::withdrawal_effective_version`]). Resolved from a
-    /// single read guard: pairing the active version with an enabled set from
-    /// a different snapshot could open the dormancy gate early.
-    pub fn withdrawal_effective_version(&self) -> Option<u64> {
-        let state = self.state();
-        let active = state
-            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
-            .active_version()?;
-        Some(crate::withdrawals::withdrawal_effective_version(
-            active,
-            &state.hashi().config.enabled_versions,
-        ))
-    }
-
-    /// The package the withdrawal flow's entry calls route through, paired
-    /// with its version: [`Self::active_package`] under the
-    /// [`Self::withdrawal_effective_version`] gate, from one read guard for
-    /// the same torn-read reason.
-    pub fn withdrawal_package(&self) -> Option<(Address, u64)> {
-        let state = self.state();
-        let active = state
-            .version_support(crate::constants::SUPPORTED_PACKAGE_VERSIONS)
-            .active_version()?;
-        let version = crate::withdrawals::withdrawal_effective_version(
-            active,
-            &state.hashi().config.enabled_versions,
-        );
-        let id = state.package_versions.get(version)?;
-        Some((id, version))
-    }
-
     /// Reason autonomous on-chain work must halt (governance pause, or an
     /// unsupported on-chain version), or `None` to proceed. Reads state once so
     /// callers get a single consistent snapshot. Mirrors — and subsumes — the
@@ -1661,8 +1627,20 @@ async fn scrape_tob_entries(
     let mut seed = route::ContainerSeed::default();
     seed.height = scrape_dynamic_field_pages(&client, tob_id, mask, "tob", metrics, |fields| {
         for field in fields {
-            let certs: move_types::EpochCertsV1 = field
-                .value()
+            // The leader's TOB GC destroys dead buckets concurrently with this
+            // scan, and the RPC's defaulting accessor hands back an EMPTY value
+            // for an entry that vanished between page assembly and read (which
+            // would decode as "unexpected end of input"). A destroyed bucket
+            // needs no seeding; skip it. Bare and stamped buckets share one BCS
+            // layout, so a present value decodes through the bare mirror.
+            let Some(value) = field.value_opt().filter(|bcs| !bcs.value().is_empty()) else {
+                tracing::warn!(
+                    field_id = field.field_id(),
+                    "tob entry vanished mid-scrape; skipping"
+                );
+                continue;
+            };
+            let certs: move_types::EpochCertsV1 = value
                 .deserialize()
                 .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
             let field_id: Address = field.field_id().parse()?;
@@ -2387,7 +2365,6 @@ fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposa
         types::ProposalType::EnableVersion => parse::<move_types::EnableVersion>(contents),
         types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
         types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
-        types::ProposalType::UpgradeV2 => parse::<move_types::UpgradeV2>(contents),
         types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
         types::ProposalType::AbortReconfig => parse::<move_types::AbortReconfig>(contents),
         types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
@@ -2424,7 +2401,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
-        ("upgrade_v2", "Upgrade") => types::ProposalType::UpgradeV2,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
         ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
@@ -2434,12 +2410,12 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 }
 
 #[cfg(test)]
-mod upgrade_v2_proposal_tests {
+mod upgrade_proposal_tests {
     use super::*;
 
     fn proposal_tag(module: &str) -> TypeTag {
         let v1_package = Address::from_static("0x41");
-        let payload_package = if module == "upgrade_v2" {
+        let payload_package = if module == "upgrade" {
             Address::from_static("0x42")
         } else {
             v1_package
@@ -2458,10 +2434,10 @@ mod upgrade_v2_proposal_tests {
     }
 
     #[test]
-    fn upgrade_v2_proposal_type_and_layout_decode() {
-        let tag = proposal_tag("upgrade_v2");
-        assert_eq!(parse_proposal_type(&tag), types::ProposalType::UpgradeV2);
-        assert_eq!(types::ProposalType::UpgradeV2.package_version(), Some(2));
+    fn upgrade_proposal_type_and_layout_decode() {
+        let tag = proposal_tag("upgrade");
+        assert_eq!(parse_proposal_type(&tag), types::ProposalType::Upgrade);
+        assert_eq!(types::ProposalType::Upgrade.package_version(), Some(1));
 
         let proposal = move_types::Proposal {
             id: Address::from_static("0x11"),
@@ -2471,7 +2447,7 @@ mod upgrade_v2_proposal_tests {
             created_timestamp_ms: 123,
             executed_timestamp_ms: None,
             metadata: move_types::VecMap { contents: vec![] },
-            data: move_types::UpgradeV2 {
+            data: move_types::Upgrade {
                 digest: vec![1, 2, 3],
                 exclusive: true,
             },
@@ -2481,28 +2457,6 @@ mod upgrade_v2_proposal_tests {
 
         assert_eq!(decoded.id, proposal.id);
         assert_eq!(decoded.timestamp_ms, 123);
-        assert_eq!(decoded.proposal_type, types::ProposalType::UpgradeV2);
-    }
-
-    #[test]
-    fn legacy_upgrade_proposal_still_decodes_with_its_original_layout() {
-        let tag = proposal_tag("upgrade");
-        let proposal = move_types::Proposal {
-            id: Address::from_static("0x33"),
-            creator: Address::from_static("0x44"),
-            votes: vec![],
-            quorum_threshold_bps: 6667,
-            created_timestamp_ms: 456,
-            executed_timestamp_ms: None,
-            metadata: move_types::VecMap { contents: vec![] },
-            data: move_types::Upgrade {
-                digest: vec![4, 5, 6],
-            },
-        };
-        let bytes = bcs::to_bytes(&proposal).unwrap();
-        let decoded = decode_proposal(&tag, &bytes).unwrap();
-
-        assert_eq!(decoded.id, proposal.id);
         assert_eq!(decoded.proposal_type, types::ProposalType::Upgrade);
     }
 }

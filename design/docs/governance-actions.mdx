@@ -48,11 +48,6 @@ The following is the current set of available proposal types.
 
 ## `Upgrade`
 
-Authorizes a package upgrade through the legacy testnet proposal type. It does
-not retire earlier package versions atomically.
-
-## `UpgradeV2`
-
 Authorizes a package upgrade and records whether it is exclusive. An exclusive
 upgrade atomically disables all previous versions as the new package is
 committed; a non-exclusive upgrade deliberately leaves them callable. Every

@@ -34,10 +34,6 @@ use super::config::CliConfig;
 pub enum CreateProposalParams {
     Upgrade {
         digest: Vec<u8>,
-        metadata: Vec<(String, String)>,
-    },
-    UpgradeV2 {
-        digest: Vec<u8>,
         exclusive: bool,
         metadata: Vec<(String, String)>,
     },
@@ -385,11 +381,6 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize Upgrade")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
-                    ProposalType::UpgradeV2 => {
-                        let p: move_types::Proposal<move_types::UpgradeV2> =
-                            bcs::from_bytes(value_bytes).context("deserialize UpgradeV2")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                    }
                     ProposalType::EmergencyPause => {
                         let p: move_types::Proposal<move_types::EmergencyPause> =
                             bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
@@ -596,7 +587,7 @@ impl HashiClient {
             ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
             ProposalType::IgnoreMember => "ignore_member",
-            ProposalType::Upgrade | ProposalType::UpgradeV2 => {
+            ProposalType::Upgrade => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
                 );
@@ -694,25 +685,7 @@ pub fn build_create_proposal_transaction(
     let validator_address_arg = builder.pure(&validator_address);
 
     match params {
-        CreateProposalParams::Upgrade { digest, metadata } => {
-            let digest_arg = builder.pure(&digest);
-            let metadata_arg = build_metadata(&mut builder, &metadata);
-            builder.move_call(
-                Function::new(
-                    call_package,
-                    Identifier::from_static("upgrade"),
-                    Identifier::from_static("propose"),
-                ),
-                vec![
-                    hashi_arg,
-                    validator_address_arg,
-                    digest_arg,
-                    metadata_arg,
-                    clock_arg,
-                ],
-            );
-        }
-        CreateProposalParams::UpgradeV2 {
+        CreateProposalParams::Upgrade {
             digest,
             exclusive,
             metadata,
@@ -723,7 +696,7 @@ pub fn build_create_proposal_transaction(
             builder.move_call(
                 Function::new(
                     call_package,
-                    Identifier::from_static("upgrade_v2"),
+                    Identifier::from_static("upgrade"),
                     Identifier::from_static("propose"),
                 ),
                 vec![
@@ -898,7 +871,7 @@ pub fn build_create_proposal_transaction(
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
-                    // The ignore_member module exists only from v2 on.
+                    // Upgrade-introduced modules route through the active package.
                     call_package,
                     Identifier::from_static("ignore_member"),
                     Identifier::from_static("propose"),
@@ -1041,8 +1014,8 @@ fn build_metadata(
 }
 
 impl HashiClient {
-    /// Build a `validator::resign` transaction. The entry function is
-    /// introduced by v2, so the call targets the latest package, and the
+    /// Build a `validator::resign` transaction. The call targets the latest
+    /// package (the rule for every entry an upgrade may introduce), and the
     /// shared inputs are fully resolved (see
     /// `build_create_proposal_transaction`).
     pub fn build_resign_transaction(&self) -> anyhow::Result<TransactionBuilder> {
@@ -1180,7 +1153,6 @@ pub fn get_proposal_type_arg(
 
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),
-        ProposalType::UpgradeV2 => ("upgrade_v2", "Upgrade"),
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),

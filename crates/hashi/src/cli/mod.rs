@@ -167,7 +167,7 @@ pub enum ProposalCommands {
     /// `PACKAGE_VERSION` constant is exactly +1 of the currently published
     /// version. Build from the same commit, with the same `sui`, that produced
     /// the proposal's digest: the chain rejects the publish otherwise. Works
-    /// for both `upgrade` and `upgrade-v2` proposals.
+    /// for upgrade proposals.
     ExecuteUpgrade {
         /// The proposal object ID to execute
         proposal_id: String,
@@ -194,42 +194,11 @@ pub enum ProposalCommands {
 
 #[derive(Subcommand)]
 pub enum CreateProposalCommands {
-    /// Propose a package upgrade
-    ///
-    /// Exactly one of `--digest` or `--package-path` must be provided.
-    /// `--package-path` is recommended: the CLI builds the package, verifies
-    /// that its `PACKAGE_VERSION` constant is exactly +1 of the currently
-    /// published version, and derives the digest for the proposal.
-    Upgrade {
-        /// The digest of a pre-built package (hex encoded). Skips pre-flight
-        /// checks — prefer `--package-path`.
-        #[clap(long, conflicts_with = "package_path")]
-        digest: Option<String>,
-
-        /// Path to the upgrade package source. The CLI will run `sui move
-        /// build` and verify the `PACKAGE_VERSION` constant before submitting.
-        #[clap(long, value_name = "PATH")]
-        package_path: Option<std::path::PathBuf>,
-
-        /// Path to the `sui` CLI binary. Only used with `--package-path`.
-        #[clap(long, env = "SUI_BINARY", default_value = "sui")]
-        sui_binary: std::path::PathBuf,
-
-        /// Optional path to a sui `client.yaml` for dependency resolution.
-        /// Only used with `--package-path`.
-        #[clap(long)]
-        sui_client_config: Option<std::path::PathBuf>,
-
-        #[clap(flatten)]
-        metadata: MetadataArgs,
-    },
-
     /// Propose a package upgrade with an explicit version-retirement policy
     ///
-    /// This proposal type is available starting with package v2.
     /// `--exclusive true` atomically disables every previous package version;
     /// `--exclusive false` deliberately leaves them callable.
-    UpgradeV2 {
+    Upgrade {
         /// The digest of a pre-built package (hex encoded). Skips pre-flight
         /// checks — prefer `--package-path`.
         #[clap(long, conflicts_with = "package_path")]
@@ -1070,28 +1039,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     package_path,
                     sui_binary,
                     sui_client_config,
-                    metadata,
-                } => {
-                    commands::proposal::create_upgrade_proposal(
-                        &config,
-                        commands::proposal::CreateUpgradeProposalArgs {
-                            digest: digest.as_deref(),
-                            package_path: package_path.as_deref(),
-                            sui_binary: &sui_binary,
-                            sui_client_config: sui_client_config.as_deref(),
-                            upgrade_v2_exclusive: None,
-                            allow_unverified_exclusive: false,
-                            metadata: parse_metadata(metadata.metadata),
-                        },
-                        &tx_opts,
-                    )
-                    .await?;
-                }
-                CreateProposalCommands::UpgradeV2 {
-                    digest,
-                    package_path,
-                    sui_binary,
-                    sui_client_config,
                     exclusive,
                     allow_unverified_exclusive,
                     metadata,
@@ -1103,7 +1050,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                             package_path: package_path.as_deref(),
                             sui_binary: &sui_binary,
                             sui_client_config: sui_client_config.as_deref(),
-                            upgrade_v2_exclusive: Some(exclusive),
+                            exclusive,
                             allow_unverified_exclusive,
                             metadata: parse_metadata(metadata.metadata),
                         },

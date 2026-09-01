@@ -146,82 +146,18 @@ pub fn build_upgrade_package(
     ))
 }
 
-/// Build the PTB that executes an `Upgrade` proposal in a single transaction:
+/// Build the PTB that executes an `upgrade::Upgrade` proposal:
 /// `upgrade::execute` → `builder.upgrade(...)` → `upgrade::finalize_upgrade`.
 ///
-/// The three steps must be in one PTB so the `UpgradeTicket` and
-/// `UpgradeReceipt` hot potatoes can be consumed without leaving the
-/// transaction.
-/// `current_package_id` is the chain's LATEST published package id: the
-/// `Upgrade` command checks it against the ticket (an upgrade of v2 with the
-/// original v1 id fails `PackageIDDoesNotMatch`), and the entry calls should
-/// run the newest code.
-pub fn build_upgrade_execution_transaction(
-    hashi_ids: HashiIds,
-    current_package_id: Address,
-    proposal_id: Address,
-    compiled: Publish,
-) -> TransactionBuilder {
-    let mut builder = TransactionBuilder::new();
-    let hashi_arg = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    let proposal_id_arg = builder.pure(&proposal_id);
-    let clock_arg = builder.object(
-        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-            .as_shared()
-            .with_mutable(false),
-    );
-
-    // Step A: upgrade::execute → UpgradeTicket
-    let ticket = builder.move_call(
-        Function::new(
-            current_package_id,
-            Identifier::from_static("upgrade"),
-            Identifier::from_static("execute"),
-        ),
-        vec![hashi_arg, proposal_id_arg, clock_arg],
-    );
-
-    // Step B: publish upgrade → UpgradeReceipt
-    let receipt = builder.upgrade(
-        compiled.modules,
-        compiled.dependencies,
-        current_package_id,
-        ticket,
-    );
-
-    // Step C: finalize_upgrade — takes the receipt and swaps the package in-place.
-    // Needs a second mutable reference to the hashi object since the first one
-    // was consumed by `upgrade::execute`.
-    let hashi_arg2 = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    builder.move_call(
-        Function::new(
-            current_package_id,
-            Identifier::from_static("upgrade"),
-            Identifier::from_static("finalize_upgrade"),
-        ),
-        vec![hashi_arg2, receipt],
-    );
-
-    builder
-}
-
-/// Build the PTB that executes an `upgrade_v2::Upgrade` proposal:
-/// `upgrade_v2::execute` → `builder.upgrade(...)` →
-/// `upgrade_v2::finalize_upgrade`.
+/// The three steps must be in one PTB so the ticket, the authorization and
+/// the receipt hot potatoes are consumed without leaving the transaction.
+/// `current_package_id` is the chain's LATEST published package id.
 ///
 /// `execute` returns two values. The first is the Sui `UpgradeTicket`; the
 /// second is a hot-potato authorization carrying the committee-approved
 /// `exclusive` setting. Passing both results through the same PTB prevents the
 /// publisher from changing the version policy after voting has completed.
-pub fn build_upgrade_v2_execution_transaction(
+pub fn build_upgrade_execution_transaction(
     hashi_ids: HashiIds,
     current_package_id: Address,
     proposal_id: Address,
@@ -244,7 +180,7 @@ pub fn build_upgrade_v2_execution_transaction(
         .move_call(
             Function::new(
                 current_package_id,
-                Identifier::from_static("upgrade_v2"),
+                Identifier::from_static("upgrade"),
                 Identifier::from_static("execute"),
             ),
             vec![hashi_arg, proposal_id_arg, clock_arg],
@@ -268,7 +204,7 @@ pub fn build_upgrade_v2_execution_transaction(
     builder.move_call(
         Function::new(
             current_package_id,
-            Identifier::from_static("upgrade_v2"),
+            Identifier::from_static("upgrade"),
             Identifier::from_static("finalize_upgrade"),
         ),
         vec![hashi_arg2, receipt, authorization],

@@ -31,20 +31,18 @@ pub struct PublishedEntry {
 
 #[derive(serde_derive::Deserialize)]
 struct PublishedFile {
+    #[serde(default)]
     published: BTreeMap<String, PublishedEntry>,
 }
 
 /// Parse the `Published.toml` at `path` into its per-network entries.
-/// Fails on a missing/unparsable file or one declaring no environments.
+/// Fails on a missing/unparsable file. An empty map is a legal result: a
+/// fresh cycle (nothing deployed from this tree) declares no environments,
+/// and the consumers treat it as "nothing to check".
 pub fn published_entries(path: &Path) -> Result<BTreeMap<String, PublishedEntry>> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: PublishedFile =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    anyhow::ensure!(
-        !parsed.published.is_empty(),
-        "{} declares no published environments",
-        path.display()
-    );
     Ok(parsed.published)
 }

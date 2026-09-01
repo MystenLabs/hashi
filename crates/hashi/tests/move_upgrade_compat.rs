@@ -24,9 +24,10 @@
 //! check is derived from `packages/hashi/Published.toml`: the gate checks the
 //! current source against every published environment at its recorded
 //! version, and cross-validates the snapshot's manifest and bytecode ids
-//! against that entry. When a new version is deployed on chain (Published.toml
-//! is bumped), capture a new snapshot — see
-//! `tests/move_upgrade_snapshots/README.md`.
+//! against that entry. A fresh cycle (no deployments recorded in
+//! Published.toml) has no snapshots and nothing to check; recording a
+//! deployment re-arms the gate, and the capture recipe lives with the
+//! record-PR runbook.
 //!
 //! ## What runs where
 //!
@@ -379,7 +380,7 @@ fn load_snapshot(dir: &Path) -> Result<(SnapshotManifest, Vec<CompiledModule>)> 
     anyhow::ensure!(
         dir.is_dir(),
         "snapshot directory does not exist: {} (regenerate the snapshot — see \
-         tests/move_upgrade_snapshots/README.md)",
+         the record-PR runbook)",
         dir.display()
     );
 
@@ -424,14 +425,14 @@ fn load_snapshot(dir: &Path) -> Result<(SnapshotManifest, Vec<CompiledModule>)> 
         missing.is_empty(),
         "snapshot {} is INCOMPLETE: manifest lists module(s) with no `.mv` file: {missing:?}. An \
          omitted module would be treated as newly added and skip compatibility checking entirely \
-         (regenerate the snapshot — see tests/move_upgrade_snapshots/README.md)",
+         (regenerate the snapshot — see the record-PR runbook)",
         dir.display()
     );
     let unlisted: Vec<&String> = file_names.difference(&manifest_names).collect();
     anyhow::ensure!(
         unlisted.is_empty(),
         "snapshot {} contains `.mv` file(s) not listed in its manifest: {unlisted:?} (regenerate \
-         the snapshot — see tests/move_upgrade_snapshots/README.md)",
+         the snapshot — see the record-PR runbook)",
         dir.display()
     );
 
@@ -501,7 +502,14 @@ fn current_source_is_compatible_upgrade_of_deployed() -> Result<()> {
         return check_snapshot_compat(Path::new(&dir), &built, None);
     }
 
-    for (network, entry) in published_entries()? {
+    let entries = published_entries()?;
+    if entries.is_empty() {
+        eprintln!(
+            "OK: Published.toml records no deployments (fresh cycle) — nothing to check against"
+        );
+        return Ok(());
+    }
+    for (network, entry) in entries {
         let dir = snapshots_root()
             .join(&network)
             .join(format!("v{}", entry.version));
@@ -681,13 +689,6 @@ fn synthetic_existing_module_keeping_init_is_accepted() {
         .expect("an existing module keeping its `init` must be a compatible upgrade");
 }
 
-/// The committed testnet/v1 snapshot location, ignoring the
-/// `HASHI_COMPAT_SNAPSHOT_DIR` override — the manifest self-tests below must
-/// always exercise the real committed snapshot.
-fn checked_in_snapshot_dir() -> PathBuf {
-    snapshots_root().join("testnet").join("v1")
-}
-
 /// Every deployment recorded in `Published.toml` must have a checked-in
 /// snapshot whose manifest and bytecode agree with it. Network-free and does
 /// not build the package, so it runs everywhere — this is what forces a
@@ -701,7 +702,7 @@ fn every_published_deployment_has_a_valid_snapshot() -> Result<()> {
         let (manifest, modules) = load_snapshot(&dir).with_context(|| {
             format!(
                 "Published.toml records a `{network}` v{} deployment but its snapshot is missing \
-                 or invalid — capture it per tests/move_upgrade_snapshots/README.md",
+                 or invalid — capture it per the record-PR runbook",
                 entry.version
             )
         })?;
@@ -712,49 +713,5 @@ fn every_published_deployment_has_a_valid_snapshot() -> Result<()> {
         );
         validate_snapshot_against_published(&manifest, self_address, &network, &entry)?;
     }
-    Ok(())
-}
-
-/// The committed snapshot must satisfy its own manifest — files, names and
-/// counts all agree. Network-free; runs everywhere.
-#[test]
-fn checked_in_snapshot_passes_manifest_validation() -> Result<()> {
-    let (manifest, modules) = load_snapshot(&checked_in_snapshot_dir())?;
-    assert_eq!(manifest.module_count, modules.len());
-    Ok(())
-}
-
-/// Proves the manifest cross-check catches an incomplete capture: copy the
-/// real snapshot minus one `.mv` file (keeping the manifest) and assert
-/// loading fails. Without this check the omitted module would silently be
-/// treated as newly added and skip compatibility checking.
-#[test]
-fn snapshot_missing_module_file_is_detected() -> Result<()> {
-    let src = checked_in_snapshot_dir();
-    let tmp = tempfile::tempdir().context("creating temp snapshot dir")?;
-
-    let mut dropped: Option<String> = None;
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&src)?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<std::io::Result<_>>()?;
-    entries.sort();
-    for path in entries {
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if dropped.is_none() && path.extension().and_then(|e| e.to_str()) == Some("mv") {
-            dropped = Some(name.trim_end_matches(".mv").to_string());
-            continue;
-        }
-        std::fs::copy(&path, tmp.path().join(name))?;
-    }
-    let dropped = dropped.expect("checked-in snapshot should contain at least one .mv file");
-
-    let err = load_snapshot(tmp.path())
-        .err()
-        .expect("a snapshot missing a manifest-listed .mv file MUST fail to load");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("INCOMPLETE") && msg.contains(&dropped),
-        "error should name the missing module `{dropped}`, got: {msg}"
-    );
     Ok(())
 }
