@@ -23,8 +23,10 @@ name: Guardian Enclave Build
 #     from source, so a change that stops reproducing must not merge — the last
 #     one that did was found at a testnet rotation.
 #
-#   schedule — the same gate on main, nightly, so drift from anything the path
-#     filter misses shows up within a day rather than at the next rotation.
+#   push to main — the same gate on the merge result. A PR passes on its own
+#     merge ref and main can move under it before it lands (the resolve check
+#     runs on push for the same reason), and the commit a stack pins as
+#     hashi-commit is a main commit: this leaves it a result on record.
 #
 # Both runners must agree, or the build is not reproducible and no measurement
 # from it can be trusted.
@@ -39,8 +41,16 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/guardian-enclave.yml
-  schedule:
-    - cron: '20 4 * * *'
+  push:
+    branches: [main]
+    paths:
+      - docker/hashi-guardian/**
+      - crates/hashi-guardian/**
+      - crates/hashi-types/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/guardian-enclave.yml
   workflow_dispatch:
     inputs:
       bucket_name:
@@ -72,7 +82,7 @@ permissions:
   contents: read
 
 # A newer push to the same PR supersedes the build in flight; dispatch and
-# nightly runs never share a group.
+# main-push runs never share a group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -84,9 +94,9 @@ jobs:
         os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    # Dispatch inputs are empty on pull_request and schedule; these are the
-    # gate's canonical values (the bucket is the Makefile's default, the region
-    # every deployed stack's).
+    # Dispatch inputs are empty on pull_request and push; these are the gate's
+    # canonical values (the bucket is the Makefile's default, the region every
+    # deployed stack's).
     env:
       BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
       AWS_REGION: ${{ inputs.aws_region || 'us-west-2' }}
@@ -258,29 +268,3 @@ jobs:
           echo "suspect something the kernel build absorbs from its environment — a clock"
           echo "reaching the built-in initramfs is the failure mode that has happened before."
           exit 1
-
-  # A failed nightly otherwise reaches only the workflow file's last committer,
-  # by email. Open an issue, or bump the open one, so it is visible in the repo.
-  report:
-    needs: [build, verify]
-    if: always() && github.event_name == 'schedule' && (needs.build.result == 'failure' || needs.verify.result == 'failure')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - name: Open or bump the tracking issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: Nightly EIF reproducibility build failed
-        run: |
-          body="The nightly guardian EIF build on main failed: $RUN_URL
-
-          Either the two runners disagreed on the PCRs or the build itself broke. Until it is fixed no new PCR0 can be measured, and every enclave host rebuild of main is suspect."
-          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')"
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label bug --body "$body"
-          fi
