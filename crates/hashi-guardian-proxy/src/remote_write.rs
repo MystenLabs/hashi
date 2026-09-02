@@ -26,6 +26,8 @@ use tracing::warn;
 
 const USER_AGENT: &str = concat!("hashi-guardian-proxy/", env!("CARGO_PKG_VERSION"));
 const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longer than Mimir's 5m query lookback and instant queries go blank.
+pub const MAX_INTERVAL: Duration = Duration::from_secs(300);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(16);
 const NAME_LABEL: &str = "__name__";
@@ -42,10 +44,7 @@ pub struct RemoteWriteConfig {
 /// Spawn the push task. A failing push is retried until the next one is due,
 /// then dropped for the fresh snapshot; metrics never take the proxy down.
 pub fn start(config: RemoteWriteConfig, registry: Registry) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(PUSH_TIMEOUT)
-        .build()
-        .context("remote-write client build")?;
+    let client = client()?;
     let authorization = basic_auth(&config.username, &config.password)?;
 
     tokio::spawn(async move {
@@ -53,14 +52,25 @@ pub fn start(config: RemoteWriteConfig, registry: Registry) -> Result<()> {
         let mut ticker = tokio::time::interval(config.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            ticker.tick().await;
-            let deadline = Instant::now() + config.interval;
+            // `tick()` yields the tick's scheduled instant, so this is the next
+            // tick even when this one fired late.
+            let deadline = ticker.tick().await + config.interval;
             if let Err(e) = push(&client, &config, &authorization, &registry, deadline).await {
                 warn!("unable to push metrics: {e:#}");
             }
         }
     });
     Ok(())
+}
+
+/// No redirects: reqwest would turn the POST into a bodyless GET whose 2xx
+/// reads as a successful push.
+fn client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(PUSH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("remote-write client build")
 }
 
 /// Gather the registry into one write request and send it, retrying the same
@@ -106,7 +116,8 @@ enum PushError {
 }
 
 /// Retry `attempt` with exponential backoff until it succeeds, fails
-/// permanently, or the next retry would land past `deadline`.
+/// permanently, or `deadline` passes; an attempt still in flight at the
+/// deadline is cut off.
 async fn retry_until<F, Fut>(deadline: Instant, mut attempt: F) -> Result<()>
 where
     F: FnMut() -> Fut,
@@ -114,10 +125,11 @@ where
 {
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        let error = match attempt().await {
-            Ok(()) => return Ok(()),
-            Err(PushError::Permanent(e)) => return Err(e),
-            Err(PushError::Transient(e)) => e,
+        let error = match tokio::time::timeout_at(deadline, attempt()).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(PushError::Permanent(e))) => return Err(e),
+            Ok(Err(PushError::Transient(e))) => e,
+            Err(_) => anyhow::anyhow!("attempt timed out"),
         };
         if Instant::now() + backoff >= deadline {
             return Err(error.context("gave up, the next push is due"));
@@ -144,7 +156,15 @@ async fn send(
         .body(body)
         .send()
         .await
-        .map_err(|e| PushError::Transient(anyhow::Error::new(e).context("HTTP send")))?;
+        .map_err(|e| {
+            // A builder error is the request itself (scheme, header); resending cannot fix it.
+            let class = if e.is_builder() {
+                PushError::Permanent
+            } else {
+                PushError::Transient
+            };
+            class(anyhow::Error::new(e).context("HTTP send"))
+        })?;
 
     let status = response.status();
     if status.is_success() {
@@ -157,6 +177,17 @@ async fn send(
     } else {
         Err(PushError::Permanent(error))
     }
+}
+
+/// Parse the endpoint, requiring a scheme reqwest can send to: any other
+/// fails only inside `send`, on every tick.
+pub fn parse_url(raw: &str) -> Result<Url> {
+    let url: Url = raw.parse().context("not a valid URL")?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "must be an http(s) URL"
+    );
+    Ok(url)
 }
 
 /// Parse comma-separated `name=value` labels pinned on every pushed series.
@@ -206,14 +237,18 @@ fn to_timeseries(
     for family in families {
         let name = family.name();
         for metric in family.get_metric() {
-            // External labels win; a series may not carry a label name twice.
             let mut common: Vec<Label> = metric
                 .get_label()
                 .iter()
-                .filter(|l| !external_labels.iter().any(|(k, _)| k == l.name()))
                 .map(|l| Label::new(l.name(), l.value()))
                 .collect();
-            common.extend(external_labels.iter().map(|(k, v)| Label::new(k, v)));
+            // Prometheus's rule: a metric's own label wins over an external one
+            // of the same name, so its children stay distinct series.
+            for (name, value) in external_labels {
+                if !common.iter().any(|l| &l.name == name) {
+                    common.push(Label::new(name, value));
+                }
+            }
 
             let mut push = |name: &str, extra: Option<Label>, value: f64| {
                 let mut labels = common.clone();
@@ -310,6 +345,7 @@ struct Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header::LOCATION;
     use prometheus::Histogram;
     use prometheus::HistogramOpts;
     use prometheus::IntCounterVec;
@@ -362,22 +398,37 @@ mod tests {
         assert!(series.iter().all(|s| s.samples[0].timestamp == 42));
     }
 
+    /// An external label that a metric also carries must not collapse the
+    /// metric's children into one series of same-timestamp samples.
     #[test]
-    fn counters_keep_their_labels_and_external_labels_win() {
+    fn metric_labels_win_over_external_labels() {
         let registry = Registry::new();
         let requests =
-            IntCounterVec::new(Opts::new("requests_total", "help"), &["outcome", "network"])
-                .unwrap();
+            IntCounterVec::new(Opts::new("requests_total", "help"), &["outcome"]).unwrap();
         registry.register(Box::new(requests.clone())).unwrap();
-        requests
-            .with_label_values(&["l1_hit", "from-the-metric"])
-            .inc();
+        requests.with_label_values(&["l1_hit"]).inc();
+        requests.with_label_values(&["s3_hit"]).inc_by(2);
 
-        let series = to_timeseries(&registry.gather(), &network_label(), 42);
+        let external = vec![
+            ("outcome".to_string(), "external".to_string()),
+            ("network".to_string(), "testnet".to_string()),
+        ];
+        let series = to_timeseries(&registry.gather(), &external, 42);
         assert_eq!(
             series.iter().map(rendered).collect::<Vec<_>>(),
-            vec![r#"requests_total{network="testnet",outcome="l1_hit"} 1"#]
+            vec![
+                r#"requests_total{network="testnet",outcome="l1_hit"} 1"#,
+                r#"requests_total{network="testnet",outcome="s3_hit"} 2"#,
+            ]
         );
+    }
+
+    #[test]
+    fn urls_need_a_scheme_reqwest_can_send_to() {
+        assert!(parse_url("https://mimir.example/api/v1/push").is_ok());
+        assert!(parse_url("http://127.0.0.1:9009/api/v1/push").is_ok());
+        assert!(parse_url("ftp://mimir.example/api/v1/push").is_err());
+        assert!(parse_url("mimir.example/api/v1/push").is_err());
     }
 
     #[test]
@@ -471,9 +522,31 @@ mod tests {
         assert_eq!(attempts, 3);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_still_in_flight_is_cut_off_at_the_deadline() {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(5);
+        let attempts = Cell::new(0);
+        let result = retry_until(deadline, || {
+            attempts.set(attempts.get() + 1);
+            std::future::pending::<Result<(), PushError>>()
+        })
+        .await;
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("next push is due"), "{error:#}");
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+    }
+
+    /// A receiver answering `/push` with `status`, plus a `/moved` route a
+    /// redirect could land on.
     async fn receiver(status: StatusCode) -> Url {
-        let app =
-            axum::Router::new().route("/push", axum::routing::post(move || async move { status }));
+        let app = axum::Router::new()
+            .route(
+                "/push",
+                axum::routing::post(move || async move { (status, [(LOCATION, "/moved")]) }),
+            )
+            .route("/moved", axum::routing::get(|| async { StatusCode::OK }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/push", listener.local_addr().unwrap())
             .parse()
@@ -483,7 +556,7 @@ mod tests {
     }
 
     async fn send_to(url: Url) -> Result<(), PushError> {
-        let client = reqwest::Client::new();
+        let client = client().unwrap();
         let authorization = basic_auth("u", "p").unwrap();
         send(&client, &url, &authorization, Bytes::from_static(b"body")).await
     }
@@ -502,7 +575,13 @@ mod tests {
                 "{status}"
             );
         }
-        for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
+        // A redirect must not be followed into a bodyless GET that "succeeds".
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::SEE_OTHER,
+        ] {
             assert!(
                 matches!(
                     send_to(receiver(status).await).await,

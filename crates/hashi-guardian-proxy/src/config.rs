@@ -86,19 +86,27 @@ impl Config {
         let remote_write = match std::env::var("MIMIR_URL").ok().filter(|u| !u.is_empty()) {
             None => None,
             Some(url) => {
-                let interval_secs = parse_env_u64("MIMIR_PUSH_INTERVAL_SECS", 60)?;
-                // `tokio::time::interval` panics on zero, and a panic aborts this binary.
+                let username = std::env::var("MIMIR_USERNAME")
+                    .unwrap_or_else(|_| "incoming_metrics".to_string());
+                let password = std::env::var("MIMIR_PASSWORD")
+                    .context("MIMIR_PASSWORD must be set when MIMIR_URL is")?;
                 anyhow::ensure!(
-                    interval_secs > 0,
-                    "MIMIR_PUSH_INTERVAL_SECS must be at least 1"
+                    !username.is_empty() && !username.contains(':') && !password.is_empty(),
+                    "MIMIR_USERNAME and MIMIR_PASSWORD must be non-empty (no ':' in the name)"
+                );
+                // Zero panics `tokio::time::interval` (a panic aborts this binary);
+                // huge values overflow the deadline arithmetic.
+                let interval = Duration::from_secs(parse_env_u64("MIMIR_PUSH_INTERVAL_SECS", 60)?);
+                anyhow::ensure!(
+                    interval >= Duration::from_secs(1) && interval <= remote_write::MAX_INTERVAL,
+                    "MIMIR_PUSH_INTERVAL_SECS must be between 1 and {}",
+                    remote_write::MAX_INTERVAL.as_secs()
                 );
                 Some(RemoteWriteConfig {
-                    url: url.parse().context("MIMIR_URL must be a valid URL")?,
-                    username: std::env::var("MIMIR_USERNAME")
-                        .unwrap_or_else(|_| "incoming_metrics".to_string()),
-                    password: std::env::var("MIMIR_PASSWORD")
-                        .context("MIMIR_PASSWORD must be set when MIMIR_URL is")?,
-                    interval: Duration::from_secs(interval_secs),
+                    url: remote_write::parse_url(&url).context("MIMIR_URL")?,
+                    username,
+                    password,
+                    interval,
                     external_labels: remote_write::parse_external_labels(
                         &std::env::var("MIMIR_EXTERNAL_LABELS").unwrap_or_default(),
                     )
