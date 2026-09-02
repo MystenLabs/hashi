@@ -1410,16 +1410,21 @@ impl SuiTxExecutor {
         Ok(created_any(effects.changed_objects()))
     }
 
-    /// Execute `withdraw::approve_request` to approve withdrawal requests on-chain.
+    /// Execute `withdraw::approve_request` to approve one withdrawal request
+    /// on-chain. One request per transaction (matching `execute_approve_deposit`)
+    /// so a duplicate approval aborting on-chain cannot take unrelated
+    /// approvals down with it. Returns the checkpoint the transaction landed
+    /// in, for the caller's object-mirror wait.
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(batch_size = approvals.len()),
+        fields(request_id = %request_id),
     )]
-    pub async fn execute_approve_withdrawal_requests(
+    pub async fn execute_approve_withdrawal_request(
         &mut self,
-        approvals: &[(Address, &CommitteeSignature)],
-    ) -> anyhow::Result<()> {
+        request_id: Address,
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
         let package_id = self.active_call_package_id();
 
@@ -1428,34 +1433,34 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
+        let request_id_arg = builder.pure(&request_id);
+        let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
         let clock_arg = builder.object(
             ObjectInput::new(SUI_CLOCK_OBJECT_ID)
                 .as_shared()
                 .with_mutable(false),
         );
 
-        for (request_id, cert) in approvals {
-            let request_id_arg = builder.pure(request_id);
-            let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
-
-            builder.move_call(
-                Function::new(
-                    package_id,
-                    Identifier::from_static("withdraw"),
-                    Identifier::from_static("approve_request"),
-                ),
-                vec![hashi_arg, request_id_arg, cert_arg, clock_arg],
-            );
-        }
+        builder.move_call(
+            Function::new(
+                package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("approve_request"),
+            ),
+            vec![hashi_arg, request_id_arg, cert_arg, clock_arg],
+        );
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "approve_request failed: {:?}",
+                "approve_request failed for request {request_id:?}: {:?}",
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("approve_request response missing checkpoint"))
     }
 
     /// Execute `withdraw::commit_withdrawal_tx` to commit to a withdrawal on-chain.

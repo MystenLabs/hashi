@@ -89,8 +89,14 @@ pub(crate) struct LeaderService {
     // Singleton task that deletes expired or spent deposit-related on-chain state.
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
 
-    // Singleton task that batches withdrawal request approval work.
-    withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    // Background tasks currently approving withdrawal requests, one
+    // transaction per request (mirroring the deposit approval pool). Each
+    // task holds its request in `inflight_withdrawal_approvals` until the
+    // object mirror has applied the approval, so a later cycle cannot
+    // re-approve it, while other requests keep flowing.
+    withdrawal_approval_tasks: JoinSet<Address>,
+    // Withdrawal request IDs currently running in the approval task pool.
+    inflight_withdrawal_approvals: HashSet<Address>,
     // Per-withdrawal retry state for collecting withdrawal approval signatures.
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     // Singleton task that commits approved withdrawal requests into withdrawal txns.
@@ -189,7 +195,8 @@ impl LeaderService {
             spent_deposit_outpoints: HashMap::new(),
             last_reload_confirmation_threshold: None,
             inflight_deposits: HashSet::new(),
-            withdrawal_approval_task: None,
+            withdrawal_approval_tasks: JoinSet::new(),
+            inflight_withdrawal_approvals: HashSet::new(),
             withdrawal_commitment_task: None,
             withdrawal_signing_tasks: JoinSet::new(),
             inflight_withdrawal_signings: HashSet::new(),
@@ -370,9 +377,11 @@ impl LeaderService {
                 Some(result) = self.withdrawal_btc_block_check_tasks.join_next() => {
                     self.handle_completed_withdrawal_btc_block_check_task(result);
                 }
-                Some(result) = OptionFuture::from(self.withdrawal_approval_task.as_mut()) => {
-                    self.withdrawal_approval_task = None;
-                    Self::log_task_result("withdrawal_approval", result);
+                Some(result) = self.withdrawal_approval_tasks.join_next() => {
+                    self.handle_completed_withdrawal_approval_task(result);
+                    while let Some(result) = self.withdrawal_approval_tasks.try_join_next() {
+                        self.handle_completed_withdrawal_approval_task(result);
+                    }
                 }
                 Some(result) = OptionFuture::from(self.withdrawal_commitment_task.as_mut()) => {
                     self.withdrawal_commitment_task = None;
