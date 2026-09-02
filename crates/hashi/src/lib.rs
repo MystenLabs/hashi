@@ -352,43 +352,33 @@ impl Hashi {
             .await
     }
 
-    /// True while this validator is exiting: its on-chain registration is
-    /// flagged resigned, or a resignation was previously observed and the
-    /// registration has since been removed. Tracked by a marker file in the
-    /// node's db directory so the latch survives both the registry removal
-    /// (after which there is no MemberInfo left to read the flag from) and
-    /// node restarts.
-    ///
-    /// Self-clearing: when the chain shows the member registered and not
-    /// resigned again (`withdraw_resignation`, or an explicit operator
-    /// re-registration via the CLI), the marker is removed and normal
-    /// registration maintenance resumes.
+    pub(crate) fn note_resignation_if_flagged(&self) -> anyhow::Result<()> {
+        self.resignation_latch_engaged().map(drop)
+    }
+
     fn resignation_latch_engaged(&self) -> anyhow::Result<bool> {
-        let own_address = self
-            .config
-            .operator_private_key()?
-            .verifying_key()
-            .derive_address();
+        let own_address = self.config.validator_address()?;
         let marker = self.resignation_marker_path()?;
-        match self.onchain_state().committee_member(&own_address) {
-            Some(member) if member.resigned => {
+        match self.onchain_state().last_known_resigned(&own_address) {
+            Some(true) => {
                 if !marker.exists() {
                     std::fs::write(&marker, b"resigned\n")?;
                     tracing::warn!(
                         marker = %marker.display(),
                         "on-chain resignation observed for this validator; \
                          suppressing auto-registration and key uploads until \
-                         it is withdrawn"
+                         the resignation is withdrawn, or `hashi register` \
+                         rejoins after removal"
                     );
                 }
                 Ok(true)
             }
-            Some(_) => {
+            Some(false) => {
                 if marker.exists() {
                     std::fs::remove_file(&marker)?;
                     tracing::info!(
-                        "validator is registered and not resigned; clearing \
-                         the resignation latch"
+                        "validator is not resigned as of its latest registry \
+                         record; clearing the resignation latch"
                     );
                 }
                 Ok(false)
@@ -398,12 +388,9 @@ impl Hashi {
     }
 
     fn resignation_marker_path(&self) -> anyhow::Result<PathBuf> {
-        let db_path = self
-            .config
-            .db
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
-        Ok(db_path.join("resigned.marker"))
+        self.config.resignation_marker_path().ok_or_else(|| {
+            anyhow::anyhow!("node config has no `db`, or its path has no final component")
+        })
     }
 
     pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
@@ -910,19 +897,33 @@ impl Hashi {
             }
         };
 
-        // Register validator (if not already registered) and update any stale metadata.
-        match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
-            .execute_register_or_update_validator(
-                &self.config,
-                None,
-                next_epoch_keys.as_ref().map(|k| &k.encryption_public_key),
-                next_epoch_keys.as_ref().map(|k| &k.signing_private_key),
-            )
-            .await
-        {
-            Ok(Some(_)) => tracing::info!("Validator registered/updated on-chain"),
-            Ok(None) => tracing::debug!("Validator metadata is already up-to-date"),
-            Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
+        match self.resignation_latch_engaged() {
+            Ok(false) => {
+                match sui_tx_executor::SuiTxExecutor::from_config(
+                    &self.config,
+                    self.onchain_state(),
+                )?
+                .execute_register_or_update_validator(
+                    &self.config,
+                    None,
+                    next_epoch_keys.as_ref().map(|k| &k.encryption_public_key),
+                    next_epoch_keys.as_ref().map(|k| &k.signing_private_key),
+                )
+                .await
+                {
+                    Ok(Some(_)) => tracing::info!("Validator registered/updated on-chain"),
+                    Ok(None) => tracing::debug!("Validator metadata is already up-to-date"),
+                    Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
+                }
+            }
+            Ok(true) => {
+                tracing::warn!(
+                    "resignation latch engaged; skipping validator registration at start"
+                )
+            }
+            Err(e) => tracing::warn!(
+                "cannot evaluate the resignation latch: {e}; skipping validator registration at start"
+            ),
         }
 
         if self.is_in_current_committee() {

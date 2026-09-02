@@ -391,6 +391,12 @@ impl Config {
         self.backup_dir.as_deref().unwrap_or(Path::new("/tmp"))
     }
 
+    pub fn resignation_marker_path(&self) -> Option<PathBuf> {
+        let db = self.db.as_deref()?;
+        let name = db.file_name()?;
+        Some(db.with_file_name(format!("{}.resigned.marker", name.to_string_lossy())))
+    }
+
     pub fn test_weight_divisor(&self) -> u16 {
         self.test_weight_divisor.unwrap_or(1)
     }

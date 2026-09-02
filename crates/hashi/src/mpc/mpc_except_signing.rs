@@ -1066,13 +1066,15 @@ impl MpcManager {
                 .keys()
                 .filter_map(|d| {
                     let messages = mgr.current_rotation_messages.get(d)?;
-                    if messages.is_empty() {
-                        return None;
-                    }
                     let party_id = prev_committee.index_of(d)? as u16;
-                    prev_nodes.share_ids_of(party_id).ok()
+                    let owned = prev_nodes.share_ids_of(party_id).ok()?;
+                    Some(
+                        owned
+                            .iter()
+                            .filter(|index| messages.contains_key(index))
+                            .count(),
+                    )
                 })
-                .map(|ids| ids.len())
                 .sum();
             tracing::info!(
                 "run_key_rotation: certified_share_count={certified_share_count}, \

@@ -194,6 +194,7 @@ pub struct CommitteeSet {
     members_id: Address,
     members: BTreeMap<Address, MemberInfo>,
     tls_public_key_to_address: BTreeMap<[u8; 32], Address>,
+    resigned_at_removal: BTreeMap<Address, bool>,
     /// The current epoch.
     epoch: u64,
     pending_epoch_change: Option<u64>,
@@ -269,6 +270,7 @@ impl CommitteeSet {
             members_id,
             members: BTreeMap::new(),
             tls_public_key_to_address: BTreeMap::new(),
+            resigned_at_removal: BTreeMap::new(),
             epoch: 0,
             pending_epoch_change: None,
             mpc_public_key: Vec::new(),
@@ -289,6 +291,33 @@ impl CommitteeSet {
 
     pub fn members(&self) -> &BTreeMap<Address, MemberInfo> {
         &self.members
+    }
+
+    pub fn last_known_resigned(&self, validator: &Address) -> Option<bool> {
+        self.members
+            .get(validator)
+            .map(|m| m.resigned)
+            .or_else(|| self.resigned_at_removal.get(validator).copied())
+    }
+
+    pub fn carry_over_resignations(&mut self, prior: &Self) {
+        let resigned = prior
+            .resigned_at_removal
+            .iter()
+            .filter(|(_, resigned)| **resigned)
+            .map(|(validator, _)| *validator)
+            .chain(
+                prior
+                    .members
+                    .iter()
+                    .filter(|(_, info)| info.resigned)
+                    .map(|(validator, _)| *validator),
+            );
+        for validator in resigned {
+            if !self.members.contains_key(&validator) {
+                self.resigned_at_removal.insert(validator, true);
+            }
+        }
     }
 
     pub fn committees_id(&self) -> Address {
@@ -422,6 +451,7 @@ impl CommitteeSet {
 
     pub fn update_validator(&mut self, info: MemberInfo) {
         let validator = info.validator_address;
+        self.resigned_at_removal.remove(&validator);
         let info_entry = self.members.entry(validator);
 
         // remove old tls public key mapping
@@ -472,15 +502,13 @@ impl CommitteeSet {
         }
     }
 
-    /// Remove a member entirely: its info, TLS reverse mapping, and
-    /// cached client. Members are not removed by any current Move path,
-    /// but the object-driven watcher mirrors deletions faithfully.
     pub fn remove_validator(&mut self, validator: &Address) {
-        if let Some(info) = self.members.remove(validator)
-            && let Some(tls_public_key) = &info.tls_public_key
-        {
-            self.tls_public_key_to_address
-                .remove(tls_public_key.as_bytes());
+        if let Some(info) = self.members.remove(validator) {
+            self.resigned_at_removal.insert(*validator, info.resigned);
+            if let Some(tls_public_key) = &info.tls_public_key {
+                self.tls_public_key_to_address
+                    .remove(tls_public_key.as_bytes());
+            }
         }
         self.clients.remove(validator);
     }
