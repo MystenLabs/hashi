@@ -64,10 +64,11 @@ const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT: usize = 100;
 // and overflowing it fails calls outright ("Work queue depth exceeded").
 const UTXO_HEIGHT_LOOKUP_CONCURRENCY: usize = 16;
 
-/// Ceiling on a single round-trip through the monitor loop. Above the 60s
-/// timeout corepc puts on its RPC transport, so this only fires when the loop
-/// never picked the request up — never on an RPC that is still in flight.
-const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// Ceiling on a round trip through the monitor loop: corepc's 60s transport
+/// timeout plus the longest stretch the loop is alive but not receiving (a
+/// Kyoto restart, up to 35s), with margin. It can only fire on a request the
+/// loop never dispatched, which the workers' `is_closed` guards then drop.
+const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
@@ -292,7 +293,9 @@ pub struct Monitor {
 }
 
 /// bitcoind is still catching up (-8 out of range, -28 warming up), overloaded,
-/// or briefly unreachable; anything else will not clear by waiting.
+/// or briefly unreachable; anything else will not clear by waiting. Transport
+/// blips are safe to wait out because `verify_bitcoind_network` already proved
+/// a reachable node with working credentials before the loop starts.
 fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
     use jsonrpc::http::minreq_http::Error as TransportError;
 
@@ -302,10 +305,10 @@ fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
     match e {
         jsonrpc::error::Error::Rpc(e) => matches!(e.code, -8 | -28),
         jsonrpc::error::Error::Transport(e) => match e.downcast_ref::<TransportError>() {
-            // A refused connection and an HTTP error status arrive alike, but
-            // only 503 (bitcoind's RPC work queue is full) is worth waiting
-            // out; 401 and 403 mean the credentials are wrong.
-            Some(TransportError::Http(e)) => e.status_code == 503,
+            // A refused connection and an HTTP error status arrive alike. A 5xx
+            // is the server's problem (503: bitcoind's RPC work queue is full);
+            // a 4xx is ours: wrong credentials or an RPC whitelist.
+            Some(TransportError::Http(e)) => e.status_code >= 500,
             Some(_) => true,
             None => false,
         },
@@ -2478,22 +2481,26 @@ mod tests {
         );
     }
 
-    fn rpc_id(req: &str) -> &str {
-        req.rsplit_once("\"id\":")
-            .and_then(|(_, rest)| rest.split([',', '}']).next())
-            .unwrap_or("0")
+    /// Answer a JSON-RPC request, echoing its id.
+    fn rpc_reply(req: &str, result: serde_json::Value, error: serde_json::Value) -> String {
+        let body = req.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let id = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|req| req.get("id").cloned())
+            .unwrap_or_default();
+        serde_json::json!({ "result": result, "error": error, "id": id }).to_string()
     }
 
     fn rpc_error(req: &str, code: i32, message: &str) -> String {
-        let id = rpc_id(req);
-        format!(r#"{{"result":null,"error":{{"code":{code},"message":"{message}"}},"id":{id}}}"#)
+        rpc_reply(
+            req,
+            serde_json::Value::Null,
+            serde_json::json!({ "code": code, "message": message }),
+        )
     }
 
     fn rpc_ok(req: &str, result: &str) -> String {
-        format!(
-            r#"{{"result":"{result}","error":null,"id":{}}}"#,
-            rpc_id(req)
-        )
+        rpc_reply(req, serde_json::json!(result), serde_json::Value::Null)
     }
 
     /// Serve JSON-RPC over loopback, answering each request body with `reply`.
@@ -2602,6 +2609,7 @@ mod tests {
             )))
         };
         assert!(is_transient_rpc_error(&http(503)));
+        assert!(is_transient_rpc_error(&http(502)));
         assert!(!is_transient_rpc_error(&http(401)));
         assert!(!is_transient_rpc_error(&http(403)));
 
