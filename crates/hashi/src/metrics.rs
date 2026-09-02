@@ -164,10 +164,9 @@ pub struct Metrics {
     /// per input before its eval set is inspected, so an empty eval set still
     /// counts; an input the peer omitted entirely is never reached.
     pub mpc_partial_sig_nonce_mismatch_total: IntCounterVec,
-    /// Provably bad partial signatures by contributing peer, identified by
-    /// re-evaluating the RS-recovered polynomial at each contributed share
-    /// index.
-    pub mpc_bad_partial_sigs_total: IntCounterVec,
+    /// Partial signatures that disagreed with the RS-recovered polynomial,
+    /// by owner.
+    pub mpc_partial_sig_mismatch_total: IntCounterVec,
     /// Reader-side rejections of certificates read from TOB.
     pub mpc_certs_rejected_total: IntCounterVec,
     /// Writer-side outcome of publishing a dealer certificate to the TOB.
@@ -986,10 +985,10 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            mpc_bad_partial_sigs_total: register_int_counter_vec_with_registry!(
-                "hashi_mpc_bad_partial_sigs_total",
-                "Provably bad partial signatures by contributing peer (the peer is then \
-                 excluded from polling for one hour)",
+            mpc_partial_sig_mismatch_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_partial_sig_mismatch_total",
+                "Partial signatures that disagreed with the RS-recovered polynomial, by owner \
+                 (does not establish which side is wrong; nobody is excluded)",
                 &["peer"],
                 registry,
             )
