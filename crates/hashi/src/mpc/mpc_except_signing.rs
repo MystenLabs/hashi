@@ -780,7 +780,7 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key()?.clone(),
+                    self.encryption_key_for_epoch(request.epoch)?.clone(),
                 )?;
                 let ProtocolComplaint::Avss(complaint) = &request.complaint else {
                     return Err(MpcError::InvalidMessage {
@@ -826,7 +826,7 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key()?.clone(),
+                    self.encryption_key_for_epoch(request.epoch)?.clone(),
                 )?;
                 let ProtocolComplaint::Avss(complaint) = &request.complaint else {
                     return Err(MpcError::InvalidMessage {
@@ -4828,7 +4828,7 @@ impl MpcManager {
                 params,
                 dealer_session_id.to_vec(),
                 None,
-                mgr.encryption_key()?.clone(),
+                mgr.encryption_key_for_epoch(epoch)?.clone(),
             )?;
             (complaint_request, receiver, committee)
         };
@@ -4931,7 +4931,7 @@ impl MpcManager {
                 dealer_party_id,
                 params.t,
                 dealer_sid.to_vec(),
-                mgr.encryption_key()?.clone(),
+                mgr.encryption_key_for_epoch(epoch)?.clone(),
                 mgr.batch_size_per_weight,
             )
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
