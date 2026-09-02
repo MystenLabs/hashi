@@ -728,6 +728,13 @@ impl OnchainState {
         self.state().hashi.committees.pending_epoch_change()
     }
 
+    pub(crate) fn pending_committee_handoff_epoch(&self) -> Option<u64> {
+        self.state()
+            .hashi
+            .committees
+            .pending_committee_handoff_epoch()
+    }
+
     pub fn current_committee_members(&self) -> Option<Vec<CommitteeMember>> {
         self.state()
             .hashi()
@@ -1577,7 +1584,7 @@ async fn scrape_hashi(
         types::CommitteeSet::new(committees.members.id, committees.committees.id);
     committee_set
         .set_epoch(committees.epoch)
-        .set_pending_epoch_change(committees.pending_epoch_change.map(|pending| pending.epoch))
+        .set_pending_epoch_change_from_onchain(committees.pending_epoch_change.as_ref())
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
         .set_committees(committees_per_epoch)

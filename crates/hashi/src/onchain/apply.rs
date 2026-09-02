@@ -421,7 +421,7 @@ fn apply_root(
     hashi
         .committees
         .set_epoch(committees.epoch)
-        .set_pending_epoch_change(new_pending)
+        .set_pending_epoch_change_from_onchain(committees.pending_epoch_change.as_ref())
         .set_mpc_public_key(committees.mpc_public_key);
 
     index.record(id, obj.version(), TrackedKind::HashiRoot);
@@ -1070,6 +1070,15 @@ mod tests {
                 tx,
             )
         }
+
+        fn apply_root(&mut self, version: u64, contents: Vec<u8>) -> ApplyOutcome {
+            self.apply(&tx(vec![written(obj(
+                tag(addr(PACKAGE), "hashi", "Hashi", vec![]),
+                version,
+                Owner::Shared(1),
+                contents,
+            ))]))
+        }
     }
 
     fn bag(id: Address) -> move_types::Bag {
@@ -1085,7 +1094,8 @@ mod tests {
         // the nested structs only derive Deserialize.
         bcs::from_bytes(&root_bytes(
             num_consumed_presigs,
-            pending_epoch,
+            7,
+            pending_epoch.map(|epoch| (epoch, false)),
             upgrade_cap,
         ))
         .unwrap()
@@ -1226,18 +1236,27 @@ mod tests {
 
     fn root_bytes(
         num_consumed_presigs: u64,
-        pending_epoch: Option<u64>,
+        epoch: u64,
+        pending_epoch: Option<(u64, bool)>,
         upgrade_cap: Option<(Address, u64)>,
     ) -> Vec<u8> {
         bcs::to_bytes(&HashiEnc {
             id: hashi_id(),
             committees: CommitteeSetEnc {
                 members: BagEnc::new(members_id()),
-                epoch: 7,
+                epoch,
                 committees: BagEnc::new(committees_id()),
-                pending_epoch_change: pending_epoch.map(|epoch| PendingEnc {
-                    epoch,
-                    committee_handoff_cert: None,
+                pending_epoch_change: pending_epoch.map(|(epoch, has_committee_handoff)| {
+                    PendingEnc {
+                        epoch,
+                        committee_handoff_cert: has_committee_handoff.then(|| {
+                            move_types::CommitteeSignature {
+                                epoch: epoch - 1,
+                                signature: vec![],
+                                signers_bitmap: vec![],
+                            }
+                        }),
+                    }
                 }),
                 mpc_public_key: vec![9u8; 4],
             },
@@ -1606,28 +1625,17 @@ mod tests {
     #[test]
     fn root_write_updates_scalars_and_emits_transition_effects() {
         let mut fixture = Fixture::new();
-        let root_tag = tag(addr(PACKAGE), "hashi", "Hashi", vec![]);
         let pkg_a = addr(0x60);
         let pkg_b = addr(0x61);
 
-        let out = fixture.apply(&tx(vec![written(obj(
-            root_tag.clone(),
-            1,
-            Owner::Shared(1),
-            root_bytes(5, None, Some((pkg_a, 1))),
-        ))]));
+        let out = fixture.apply_root(1, root_bytes(5, 7, None, Some((pkg_a, 1))));
         assert!(out.effects.is_empty());
         assert_eq!(fixture.hashi.num_consumed_presigs, 5);
         assert_eq!(fixture.hashi.committees.epoch(), 7);
         assert_eq!(fixture.hashi.committees.pending_epoch_change(), None);
 
         // Pending epoch change appears: exactly one ReconfigStarted.
-        let out = fixture.apply(&tx(vec![written(obj(
-            root_tag.clone(),
-            2,
-            Owner::Shared(1),
-            root_bytes(6, Some(8), Some((pkg_a, 1))),
-        ))]));
+        let out = fixture.apply_root(2, root_bytes(6, 7, Some((8, false)), Some((pkg_a, 1))));
         assert!(matches!(
             out.effects.as_slice(),
             [Effect::ReconfigStarted(8)]
@@ -1635,21 +1643,53 @@ mod tests {
         assert_eq!(fixture.hashi.committees.pending_epoch_change(), Some(8));
 
         // Same pending value again: no repeat notification.
-        let out = fixture.apply(&tx(vec![written(obj(
-            root_tag.clone(),
-            3,
-            Owner::Shared(1),
-            root_bytes(6, Some(8), Some((pkg_a, 1))),
-        ))]));
+        let out = fixture.apply_root(3, root_bytes(6, 7, Some((8, false)), Some((pkg_a, 1))));
         assert!(out.effects.is_empty());
+        assert_eq!(
+            fixture.hashi.committees.pending_committee_handoff_epoch(),
+            None
+        );
+
+        // Watcher catch-up records a handoff submitted by another node.
+        let out = fixture.apply_root(4, root_bytes(6, 7, Some((8, true)), Some((pkg_a, 1))));
+        assert!(out.effects.is_empty());
+        assert_eq!(
+            fixture.hashi.committees.pending_committee_handoff_epoch(),
+            Some(8)
+        );
+
+        // Aborting the reconfiguration clears both pending fields.
+        let out = fixture.apply_root(5, root_bytes(6, 7, None, Some((pkg_a, 1))));
+        assert!(out.effects.is_empty());
+        assert_eq!(fixture.hashi.committees.pending_epoch_change(), None);
+        assert_eq!(
+            fixture.hashi.committees.pending_committee_handoff_epoch(),
+            None
+        );
+
+        // A later reconfiguration cannot inherit the stale handoff state.
+        let out = fixture.apply_root(6, root_bytes(6, 7, Some((9, false)), Some((pkg_a, 1))));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::ReconfigStarted(9)]
+        ));
+        assert_eq!(
+            fixture.hashi.committees.pending_committee_handoff_epoch(),
+            None
+        );
+
+        // Successful end_reconfig advances the epoch and clears pending state.
+        let out = fixture.apply_root(7, root_bytes(6, 9, None, Some((pkg_a, 1))));
+        assert!(out.effects.is_empty());
+        assert_eq!(fixture.hashi.committees.epoch(), 9);
+        assert_eq!(fixture.hashi.committees.pending_epoch_change(), None);
+        assert_eq!(
+            fixture.hashi.committees.pending_committee_handoff_epoch(),
+            None
+        );
 
         // The upgrade cap now points at a new package.
-        let out = fixture.apply(&tx(vec![written(obj(
-            root_tag,
-            4,
-            Owner::Shared(1),
-            root_bytes(6, Some(8), Some((pkg_b, 2))),
-        ))]));
+        let out = fixture.apply_root(8, root_bytes(6, 9, None, Some((pkg_b, 2))));
         assert!(
             matches!(out.effects.as_slice(), [Effect::PackageUpgraded { package, version: 2 }] if *package == pkg_b)
         );

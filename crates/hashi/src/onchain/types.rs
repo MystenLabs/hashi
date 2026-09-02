@@ -86,6 +86,8 @@ pub struct CommitteeSet {
     /// The current epoch.
     epoch: u64,
     pending_epoch_change: Option<u64>,
+    /// The pending epoch whose reconfiguration already has a committee handoff certificate.
+    pending_committee_handoff_epoch: Option<u64>,
 
     /// The MPC committee's threshold public key.
     mpc_public_key: Vec<u8>,
@@ -136,6 +138,10 @@ impl fmt::Debug for CommitteeSet {
             .field("epoch", &self.epoch)
             .field("pending_epoch_change", &self.pending_epoch_change)
             .field(
+                "pending_committee_handoff_epoch",
+                &self.pending_committee_handoff_epoch,
+            )
+            .field(
                 "mpc_public_key",
                 &Base64("MpcPublicKey", &self.mpc_public_key),
             )
@@ -160,6 +166,7 @@ impl CommitteeSet {
             tls_public_key_to_address: BTreeMap::new(),
             epoch: 0,
             pending_epoch_change: None,
+            pending_committee_handoff_epoch: None,
             mpc_public_key: Vec::new(),
             committees_id,
             committees: BTreeMap::new(),
@@ -226,6 +233,10 @@ impl CommitteeSet {
 
     pub fn pending_epoch_change(&self) -> Option<u64> {
         self.pending_epoch_change
+    }
+
+    pub(super) fn pending_committee_handoff_epoch(&self) -> Option<u64> {
+        self.pending_committee_handoff_epoch
     }
 
     pub fn previous_committee_for_target(&self, target: u64) -> Option<(u64, &Committee)> {
@@ -381,6 +392,18 @@ impl CommitteeSet {
 
     pub fn set_pending_epoch_change(&mut self, pending_epoch_change: Option<u64>) -> &mut Self {
         self.pending_epoch_change = pending_epoch_change;
+        self.pending_committee_handoff_epoch = None;
+        self
+    }
+
+    pub(super) fn set_pending_epoch_change_from_onchain(
+        &mut self,
+        pending_epoch_change: Option<&move_types::PendingEpochChange>,
+    ) -> &mut Self {
+        self.pending_epoch_change = pending_epoch_change.map(|pending| pending.epoch);
+        self.pending_committee_handoff_epoch = pending_epoch_change
+            .filter(|pending| pending.committee_handoff_cert.is_some())
+            .map(|pending| pending.epoch);
         self
     }
 
@@ -969,6 +992,26 @@ mod tests {
             .collect();
         set.set_committees(committees);
         set
+    }
+
+    #[test]
+    fn plain_pending_setter_clears_handoff_epoch() {
+        let mut set = CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
+        let pending = move_types::PendingEpochChange {
+            epoch: 8,
+            committee_handoff_cert: Some(move_types::CommitteeSignature {
+                epoch: 7,
+                signature: vec![],
+                signers_bitmap: vec![],
+            }),
+        };
+
+        set.set_pending_epoch_change_from_onchain(Some(&pending));
+        assert_eq!(set.pending_epoch_change(), Some(8));
+        assert_eq!(set.pending_committee_handoff_epoch(), Some(8));
+
+        set.set_pending_epoch_change(Some(8));
+        assert_eq!(set.pending_committee_handoff_epoch(), None);
     }
 
     #[test]

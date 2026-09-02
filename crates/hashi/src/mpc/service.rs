@@ -1991,6 +1991,10 @@ impl MpcService {
     }
 
     async fn submit_committee_handoff_if_needed(&self, epoch: u64) -> anyhow::Result<()> {
+        if self.inner.onchain_state().pending_committee_handoff_epoch() == Some(epoch) {
+            return Ok(());
+        }
+
         let from_epoch = self.inner.onchain_state().epoch();
         let requires_committee_handoff = !self
             .inner
@@ -2007,6 +2011,9 @@ impl MpcService {
         let committee_handoff = loop {
             if self.get_pending_epoch_change() != Some(epoch) {
                 return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            }
+            if self.inner.onchain_state().pending_committee_handoff_epoch() == Some(epoch) {
+                return Ok(());
             }
             match crate::leader::LeaderService::collect_committee_transition_signatures(
                 &self.inner,
@@ -2027,6 +2034,9 @@ impl MpcService {
         loop {
             if self.get_pending_epoch_change() != Some(epoch) {
                 return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            }
+            if self.inner.onchain_state().pending_committee_handoff_epoch() == Some(epoch) {
+                return Ok(());
             }
             let result = async {
                 let mut executor =
