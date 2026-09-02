@@ -44,6 +44,10 @@ proto: ## Build proto files
 clippy: ## run cargo clippy
 	cargo clippy --workspace --all-features --all-targets
 
+.PHONY: clippy-enclave
+clippy-enclave: ## clippy the guardian crates with default features: the real-attestation arm, which --all-features never compiles
+	cargo clippy -p hashi-guardian -p hashi-guardian-init -p hashi-types
+
 .PHONY: doc
 doc: ## Generate documentation
 	RUSTDOCFLAGS="-Dwarnings --cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --workspace --all-features --no-deps
