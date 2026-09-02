@@ -3698,4 +3698,165 @@ mod tests {
         info!("=== Drain Mode Max Batch Test Passed ===");
         Ok(())
     }
+
+    /// `hashi register` (the CLI path through
+    /// `build_register_or_update_validator_tx`) must target a live package:
+    /// every `validator::*` entry gates on the called package's
+    /// `assert_version_enabled`, so the original publish id aborts once its
+    /// version is retired. The node's startup registration already routes
+    /// past it; this pins the CLI resolver to the highest enabled published
+    /// version on a chain where v1 is disabled (IOP-558). The disable is
+    /// driven here rather than by the harness boot because the fresh-cycle
+    /// binary supports v1 only, and the resolver must not depend on that.
+    #[tokio::test]
+    async fn test_cli_register_targets_the_enabled_package() -> Result<()> {
+        use sui_crypto::SuiSigner as _;
+        use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
+
+        init_test_logging();
+
+        let networks =
+            setup_test_networks(TestNetworksBuilder::new().with_nodes(4).keep_v1_enabled()).await?;
+        let hashi_ids = networks.hashi_network.ids();
+        let sui_rpc_url = networks.sui_network.rpc_url.clone();
+        let mut client = networks.sui_network.client.clone();
+        let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
+            &mut client,
+            hashi_ids.hashi_object_id,
+        )
+        .await?;
+
+        // Retire v1 through governance, executed through the upgraded
+        // package, so the configured (original) id is a dead target.
+        let upgraded_package_id = {
+            let nodes = networks.hashi_network.nodes();
+            let upgraded_package_id = nodes[0]
+                .hashi()
+                .onchain_state()
+                .package_id()
+                .ok_or_else(|| anyhow!("no package versions known"))?;
+            assert_ne!(upgraded_package_id, hashi_ids.package_id);
+            let mut executors: Vec<SuiTxExecutor> = nodes
+                .iter()
+                .map(|node| {
+                    let hashi = node.hashi();
+                    SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
+                })
+                .collect::<Result<_>>()?;
+            crate::upgrade_flow::disable_version(
+                &mut executors,
+                hashi_ids,
+                hashi_isv,
+                1,
+                upgraded_package_id,
+            )
+            .await?;
+            upgraded_package_id
+        };
+        crate::upgrade_flow::wait_for_version_disabled(&networks, 1, Duration::from_secs(30))
+            .await?;
+        info!(%upgraded_package_id, "v1 retired; exercising the CLI register path");
+
+        // The runbook's operator-key rotation: a validator points its member
+        // record at a new operator address. In e2e the node signs with its
+        // validator key, so the rotation never locks the node out.
+        let node = networks.hashi_network.nodes()[3].hashi().clone();
+        let config = &node.config;
+        let signer = config.operator_private_key()?;
+        let new_operator = Address::new(rand::random::<[u8; 32]>());
+
+        // Against the configured (original) id the build's simulation must
+        // abort inside `versioning::assert_version_enabled`.
+        let err = hashi::sui_tx_executor::build_register_or_update_validator_tx(
+            &mut client,
+            &hashi_ids,
+            hashi_ids.package_id,
+            config,
+            Some(new_operator),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a v1-targeted update_operator_address must not build");
+        let simulation = err
+            .chain()
+            .find_map(
+                |e| match e.downcast_ref::<sui_transaction_builder::Error>() {
+                    Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
+                        Some(failure)
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap_or_else(|| panic!("expected a simulation failure, got: {err:#}"));
+        let abort = simulation
+            .execution_error()
+            .abort_opt()
+            .expect("the retired package must abort, not fail some other way");
+        assert_eq!(
+            abort.location().module_opt(),
+            Some("versioning"),
+            "abort must come from assert_version_enabled"
+        );
+        if let Some(constant) = abort
+            .clever_error
+            .as_ref()
+            .and_then(|clever| clever.constant_name.as_deref())
+        {
+            assert_eq!(constant, "EVersionDisabled");
+        }
+
+        // The CLI's resolver picks the highest enabled published version
+        // (the upgraded package), and the same transaction lands through it.
+        let call_package =
+            hashi::cli::commands::resolve_latest_enabled_package(&sui_rpc_url, hashi_ids).await?;
+        assert_eq!(call_package, upgraded_package_id);
+        let tx = hashi::sui_tx_executor::build_register_or_update_validator_tx(
+            &mut client,
+            &hashi_ids,
+            call_package,
+            config,
+            Some(new_operator),
+            None,
+            None,
+            None,
+        )
+        .await?
+        .expect("the rotation is a real metadata change");
+        let signature = signer.sign_transaction(&tx)?;
+        let response = client
+            .execute_transaction_and_wait_for_checkpoint(
+                ExecuteTransactionRequest::new(tx.into())
+                    .with_signatures(vec![signature.into()])
+                    .with_read_mask(FieldMask::from_str("*")),
+                Duration::from_secs(30),
+            )
+            .await?
+            .into_inner();
+        anyhow::ensure!(
+            response.transaction().effects().status().success(),
+            "update_operator_address through the enabled package failed: {:?}",
+            response.transaction().effects().status()
+        );
+
+        // The member record now carries the rotation: a second build against
+        // the same config has nothing left to send.
+        let again = hashi::sui_tx_executor::build_register_or_update_validator_tx(
+            &mut client,
+            &hashi_ids,
+            call_package,
+            config,
+            Some(new_operator),
+            None,
+            None,
+            None,
+        )
+        .await?;
+        assert!(
+            again.is_none(),
+            "member record must already reflect the rotated operator address"
+        );
+        Ok(())
+    }
 }

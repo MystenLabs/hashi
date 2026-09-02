@@ -39,3 +39,43 @@ pub(crate) async fn resolve_active_call_package(
     )?;
     Ok((state, package))
 }
+
+/// The package `hashi register` calls: the highest version that is both
+/// governance-enabled and published on-chain, resolved from a one-shot
+/// governance read and deliberately NOT intersected with this binary's
+/// [`crate::constants::SUPPORTED_PACKAGE_VERSIONS`]. That list gates what a
+/// node may decode and mutate autonomously; the registration transaction is a
+/// fixed set of `validator::*` entry calls whose only version dependency is
+/// the called package's `assert_version_enabled`, so the live package is the
+/// correct target even for a CLI built before the chain's latest upgrade. A
+/// chain with no enabled+published version is a hard error, never a fallback
+/// to the original package id (`hashi_ids.package_id`), whose entries abort
+/// once its version is retired.
+pub async fn resolve_latest_enabled_package(
+    sui_rpc_url: &str,
+    hashi_ids: crate::config::HashiIds,
+) -> anyhow::Result<sui_sdk_types::Address> {
+    let state = crate::onchain::OnchainState::new_reader(
+        sui_rpc_url,
+        hashi_ids,
+        None,
+        crate::onchain::ScrapeScope::GovernanceOnly,
+    )
+    .await
+    .context("failed to read on-chain governance state to resolve the enabled package")?;
+    let state = state.state();
+    let published: Vec<u64> = state
+        .package_versions()
+        .versions()
+        .keys()
+        .copied()
+        .collect();
+    let version = state
+        .version_support(&published)
+        .active_version()
+        .context("no on-chain package version is both enabled and published")?;
+    state
+        .package_versions()
+        .get(version)
+        .with_context(|| format!("package id for enabled version {version} is not known"))
+}
