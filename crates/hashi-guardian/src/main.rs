@@ -12,7 +12,6 @@ use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::sync::Arc;
 use tonic::transport::Server;
-use tonic_health::server::health_reporter;
 use tracing::info;
 
 /// Enclave initialization.
@@ -54,12 +53,6 @@ async fn main() -> Result<()> {
     let addr = "0.0.0.0:3000".parse()?;
     info!("gRPC server listening on {}.", addr);
 
-    // gRPC health reporter — used by the K8s gRPC probe and GKE HealthCheckPolicy.
-    let (health_reporter, health_service) = health_reporter();
-    health_reporter
-        .set_serving::<GuardianServiceServer<GuardianGrpc>>()
-        .await;
-
     // Don't emit heartbeats in ceremony mode: their primary function is
     // to allow KPs to detect old sessions that might still be running
     // in order to bypass limiter. Not a concern for ceremony mode.
@@ -70,7 +63,6 @@ async fn main() -> Result<()> {
     }
 
     Server::builder()
-        .add_service(health_service)
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr)
         .await

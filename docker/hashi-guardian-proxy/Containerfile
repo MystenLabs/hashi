@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 
-# Plain (non-enclave) build of hashi-guardian-proxy. Mirrors
-# docker/hashi-guardian-k8s/Containerfile. The sibling
-# docker/hashi-guardian/Containerfile is the Nitro enclave build and produces
-# an EIF, not a runnable OCI image — do not conflate the two.
+# The out-of-enclave guardian proxy (wid cache, restricted forwarding,
+# provisioning relay, /info), deployed as an ECS Fargate task in front of the
+# enclave host. Same stage layout as docker/hashi-screener/Containerfile. The
+# enclave itself is built by docker/hashi-guardian/Containerfile into an EIF,
+# not an OCI image.
 
 FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
 FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
@@ -56,7 +57,9 @@ RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-gu
 # Package stage: minimal runtime image
 #
 FROM core-filesystem
-# CA bundle in case the proxy is pointed at an https:// guardian backend.
+# CA bundle for the AWS SDK's S3 client: aws-smithy verifies TLS through
+# rustls-native-certs and core-filesystem ships no root store. The tonic
+# channel to the guardian embeds webpki roots and needs none.
 COPY --from=build /etc/ssl/cert.pem /etc/ssl/cert.pem
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi-guardian-proxy /usr/bin/hashi-guardian-proxy
 ENTRYPOINT ["/usr/bin/hashi-guardian-proxy"]

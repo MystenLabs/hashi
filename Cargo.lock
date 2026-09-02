@@ -3043,7 +3043,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tonic",
- "tonic-health",
  "tracing",
 ]
 
