@@ -95,6 +95,11 @@ impl Client {
         self
     }
 
+    pub fn tighten_max_decoding_message_size(self, limit: usize) -> Self {
+        let tightened = limit.min(self.max_decoding_message_size);
+        self.max_decoding_message_size(tightened)
+    }
+
     /// Attach the metrics registry so outbound RPCs are observed by
     /// [`RpcMetricsMakeCallbackHandler`] via `sui_http`'s callback layer.
     /// Without this, the client emits no RPC traffic metrics.

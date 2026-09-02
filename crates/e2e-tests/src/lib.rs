@@ -1149,7 +1149,8 @@ mod tests {
                     node.hashi().onchain_state().clone(),
                     epoch,
                     hashi::metrics::MPC_LABEL_SIGNING,
-                );
+                )
+                .with_max_owned_shares(signing_manager.max_owned_count());
                 let beacon = beacon_value;
                 let metrics = node.hashi().metrics.clone();
                 let requests: Vec<hashi::mpc::SignInput> = inputs
