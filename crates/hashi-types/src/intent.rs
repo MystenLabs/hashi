@@ -15,9 +15,11 @@
 //! The wire value is the discriminant, taken via `as u16` — never serde's enum
 //! encoding (which is the variant index, not the discriminant).
 //!
-//! Values shared with `packages/hashi/sources/core/intent.move` MUST stay in sync.
-//! Rust-only intents may be absent. Explicit values below pin Rust's wire format.
-//! Allocation blocks:
+//! This registry mirrors `packages/hashi/sources/core/intent.move`; the two
+//! MUST stay in sync — `intent_values_are_stable` below pins the on-wire
+//! values so the Rust side cannot drift silently, and the e2e suite is the
+//! true cross-language check. Allocation blocks, one per domain, with room to
+//! grow within each:
 //! - `0x0000..=0x00FF`: core protocol (committee lifecycle, MPC ceremonies)
 //! - `0x0100..=0x01FF`: Bitcoin
 //! - `0x0200..`: reserved for future chains, one block each
@@ -87,8 +89,9 @@ impl<T: IntentMessage> IntentMessage for &T {
 mod tests {
     use super::Intent;
 
-    /// Shared intent discriminants MUST match `packages/hashi/sources/core/intent.move`.
-    /// Renumbering a shared value breaks cross-language committee signatures.
+    /// The intent discriminants are the on-wire signing domain and MUST match
+    /// `packages/hashi/sources/core/intent.move` exactly. Renumbering here (or
+    /// there) breaks every committee signature across the language boundary.
     #[test]
     fn intent_values_are_stable() {
         assert_eq!(Intent::ProofOfPossession as u16, 0x0000);

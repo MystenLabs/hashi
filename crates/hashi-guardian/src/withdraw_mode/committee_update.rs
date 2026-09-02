@@ -48,39 +48,38 @@ pub(crate) async fn update_committee_chain(
         ));
     }
 
-    let final_epoch = activation.message().new_committee.epoch;
-    let final_committee: HashiCommittee = activation
-        .message()
-        .new_committee
-        .clone()
-        .try_into()
-        .map_err(|error| {
-            InvalidInputs(format!(
-                "invalid final committee in activation certificate: {error}"
-            ))
-        })?;
-    if activation.epoch() != final_epoch {
-        return Err(InvalidInputs(format!(
-            "activation signature epoch ({}) does not match final committee epoch ({final_epoch})",
-            activation.epoch()
-        )));
-    }
-    verify_committee_update_cert(&final_committee, &activation)?;
-
     let installed_committee = enclave.state.get_committee()?;
     let installed_epoch = installed_committee.epoch();
-    if final_epoch == installed_epoch {
-        if final_committee == *installed_committee {
-            return Ok(installed_epoch);
-        }
-        return Err(InvalidInputs(format!(
-            "activation targets a different committee at installed epoch {installed_epoch}"
-        )));
-    }
+    let final_epoch = activation.message().new_committee.epoch;
     if final_epoch < installed_epoch {
         return Err(InvalidInputs(format!(
             "activation target epoch {final_epoch} is older than installed epoch {installed_epoch}"
         )));
+    }
+    if final_epoch == installed_epoch {
+        let retry_committee: HashiCommittee = activation
+            .message()
+            .new_committee
+            .clone()
+            .try_into()
+            .map_err(|error| {
+                InvalidInputs(format!(
+                    "invalid final committee in activation certificate: {error}"
+                ))
+            })?;
+        if retry_committee != *installed_committee {
+            return Err(InvalidInputs(format!(
+                "activation targets a different committee at installed epoch {installed_epoch}"
+            )));
+        }
+        if activation.epoch() != installed_epoch {
+            return Err(InvalidInputs(format!(
+                "activation signature epoch ({}) does not match final committee epoch ({installed_epoch})",
+                activation.epoch()
+            )));
+        }
+        verify_committee_update_cert(&installed_committee, &activation)?;
+        return Ok(installed_epoch);
     }
 
     let mut preceding_committee = (*installed_committee).clone();
@@ -103,6 +102,14 @@ pub(crate) async fn update_committee_chain(
         preceding_committee = target_committee;
     }
 
+    if activation.epoch() != final_epoch {
+        return Err(InvalidInputs(format!(
+            "activation signature epoch ({}) does not match final committee epoch ({final_epoch})",
+            activation.epoch()
+        )));
+    }
+    verify_committee_update_cert(&preceding_committee, &activation)?;
+
     let (request_sign, activation) = activation.into_parts();
     let message = CommitteeUpdateLogMessage::Success {
         from_epoch: installed_epoch,
@@ -112,7 +119,7 @@ pub(crate) async fn update_committee_chain(
     enclave.log_committee_update(message).await?;
     enclave
         .state
-        .replace_committee(final_committee, installed_epoch)
+        .replace_committee(preceding_committee, installed_epoch)
         .expect("committee initialized at installed_epoch under the update lock");
     info!(
         from_epoch = installed_epoch,
@@ -426,6 +433,14 @@ mod tests {
             (
                 "bad first transition",
                 request(vec![transition(&wrong_old, &new)], activation(&new, &new)),
+                ErrorClass::Unauthenticated,
+            ),
+            (
+                "bad chain precedes bad activation",
+                request(
+                    vec![transition(&wrong_old, &new)],
+                    at_epoch(&valid_activation, 12),
+                ),
                 ErrorClass::Unauthenticated,
             ),
             (

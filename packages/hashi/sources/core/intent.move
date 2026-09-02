@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Domain-separation intents for Hashi member BLS signatures verified by Move.
+/// Domain-separation intents for everything signed by Hashi member BLS keys.
 ///
 /// The signing preimage is `intent (u16 LE) || bcs(epoch) || bcs(message)`.
 /// Every message type signed under the committee's keys carries a unique
@@ -9,8 +9,8 @@
 /// verify as another — regardless of whether two types happen to share a BCS
 /// layout.
 ///
-/// Values shared with `crates/hashi-types/src/intent.rs` must match; Rust-only
-/// intents may be absent. Allocation blocks, one per domain:
+/// This registry mirrors `crates/hashi-types/src/intent.rs`; the two MUST stay
+/// in sync. Allocation blocks, one per domain, with room to grow within each:
 /// - `0x0000..=0x00FF`: core protocol (committee lifecycle, MPC ceremonies)
 /// - `0x0100..=0x01FF`: Bitcoin
 /// - `0x0200..`: reserved for future chains, one block each
@@ -32,6 +32,8 @@ const DEALER_MESSAGES_HASH: u16 = 0x0003;
 const AVSS_VOTE_MESSAGES_HASH: u16 = 0x0004;
 /// AVID pessimistic-path certificate.
 const AVID_VOTE_MESSAGES_HASH: u16 = 0x0005;
+/// Post-activation proof signed only after members observe the epoch advance.
+const COMMITTEE_ACTIVATION: u16 = 0x0006;
 
 // ==== Bitcoin (0x0100..=0x01FF) ====
 
@@ -64,6 +66,8 @@ public(package) fun dealer_messages_hash(): u16 { DEALER_MESSAGES_HASH }
 public(package) fun avss_vote_messages_hash(): u16 { AVSS_VOTE_MESSAGES_HASH }
 
 public(package) fun avid_vote_messages_hash(): u16 { AVID_VOTE_MESSAGES_HASH }
+
+public(package) fun committee_activation(): u16 { COMMITTEE_ACTIVATION }
 
 public(package) fun deposit_confirmation(): u16 { DEPOSIT_CONFIRMATION }
 

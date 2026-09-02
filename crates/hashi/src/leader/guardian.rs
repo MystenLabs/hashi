@@ -272,6 +272,13 @@ impl LeaderService {
             .set(guardian_epoch as i64);
 
         let hashi_epoch = inner.onchain_state().epoch();
+        if guardian_epoch > hashi_epoch {
+            warn!(
+                guardian_epoch,
+                hashi_epoch, "guardian is ahead of hashi — waiting for local state to catch up"
+            );
+            return Ok(());
+        }
         if guardian_epoch == hashi_epoch {
             return Ok(());
         }
