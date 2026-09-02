@@ -1970,18 +1970,26 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     print_info(&format!("Validator address: {validator_address}"));
     print_info(&format!("Sui RPC: {sui_rpc_url}"));
 
+    // Every `validator::*` entry gates on the CALLED package's
+    // `assert_version_enabled`, so the calls must target a live package.
+    // `hashi_ids.package_id` is the original publish id, whose entries abort
+    // with `EVersionDisabled` once its version is retired; the node's own
+    // startup registration already routes past it. Resolution failure is a
+    // hard error, never a fallback to the original id.
+    let hashi_ids = config.hashi_ids();
+    let call_package = commands::resolve_latest_enabled_package(&sui_rpc_url, hashi_ids).await?;
+
     if opts.serialize_unsigned || opts.dry_run {
         // Build the transaction without executing: print it as base64
         // (serialize) or report the simulated gas estimate (dry-run).
         // No private key is required for either path.
         let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
-        let hashi_ids = config.hashi_ids();
 
         print_info("Building registration transaction ...");
         let transaction = crate::sui_tx_executor::build_register_or_update_validator_tx(
             &mut client,
             &hashi_ids,
-            hashi_ids.package_id,
+            call_package,
             &config,
             operator_address,
             None,
@@ -2024,14 +2032,13 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
 
     let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
     let signer = config.operator_private_key()?;
-    let hashi_ids = config.hashi_ids();
     let sender = signer.verifying_key().derive_address();
 
     print_info("Registering validator ...");
     let transaction = crate::sui_tx_executor::build_register_or_update_validator_tx(
         &mut client,
         &hashi_ids,
-        hashi_ids.package_id,
+        call_package,
         &config,
         operator_address,
         Some(sender),

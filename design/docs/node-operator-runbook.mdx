@@ -289,7 +289,7 @@ Make sure the file is readable by the user running `hashi` (for example, `chmod 
 
 Your **Sui validator account key must sign and broadcast the initial registration transaction.** Onchain, `validator::register` sets the member's `validator_address = ctx.sender()` and asserts the sender is in the Sui active validator set, so no operator key can substitute for this first transaction. Registration places no constraint on the account's key scheme (Ed25519, multisig, secp256k1, or zkLogin all work); it requires only that the sender is an active Sui validator.
 
-Because that key is typically in cold storage or a hardware wallet, use the **offline signing flow**: `hashi register --print-only` builds the unsigned transaction and prints it as base64 **without needing any private key**. Sign it externally with the account key and broadcast. (`hashi register --dry-run` builds and simulates the same transaction without executing it, reporting the gas estimate.)
+Because that key is typically in cold storage or a hardware wallet, use the **offline signing flow**: `hashi register --print-only` builds the unsigned transaction and prints it as base64 **without needing any private key**. Sign it externally with the account key and broadcast. (`hashi register --dry-run` builds and simulates the same transaction without executing it, reporting the gas estimate.) Both forms resolve the network's highest enabled package version on-chain before building, so the transaction targets the live package even after an upgrade; a build against a retired package fails in simulation instead of being emitted.
 
 ```bash
 # Emit the unsigned registration tx (no private key required)
