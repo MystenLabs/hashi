@@ -385,6 +385,21 @@ fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
         TxFailure::Submit(_) => None,
     }
 }
+/// Return the structured execution error from either transaction simulation or
+/// an executed transaction's failed status.
+pub(crate) fn transaction_execution_error(
+    err: &anyhow::Error,
+) -> Option<&sui_rpc::proto::sui::rpc::v2::ExecutionError> {
+    if let Some(tx_err) = err.downcast_ref::<TransactionExecutionError>() {
+        return tx_err.status().error_opt();
+    }
+    match builder_error(err) {
+        Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
+            Some(failure.execution_error())
+        }
+        _ => None,
+    }
+}
 
 /// Whether `e` is a failure of transaction *execution* (a failed simulation
 /// inside the SDK build, or a failed on-chain status) rather than of building

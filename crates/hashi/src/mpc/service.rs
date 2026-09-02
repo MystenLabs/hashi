@@ -14,6 +14,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use sui_futures::service::Service;
+use sui_rpc::proto::sui::rpc::v2::ExecutionError;
 use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
 use tokio::sync::watch;
 use tracing::debug;
@@ -1942,7 +1943,7 @@ impl MpcService {
                 }
             }
         };
-        let committee_handoff_cert = self.collect_committee_handoff_if_needed(epoch).await?;
+        let mut committee_handoff_cert = self.collect_committee_handoff_if_needed(epoch).await?;
         loop {
             if self.get_pending_epoch_change() != Some(epoch) {
                 return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
@@ -1975,8 +1976,20 @@ impl MpcService {
                             )
                         })?;
                     }
-                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort
-                    | ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
+                    ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
+                        if committee_handoff_cert.take().is_some() {
+                            warn!(
+                                "end_reconfig submission for epoch {epoch} found handoff already submitted; retrying without the handoff call: {e:#}"
+                            );
+                            continue;
+                        }
+                        Err(e).with_context(|| {
+                            format!(
+                                "end_reconfig submission for epoch {epoch} failed because a handoff was already submitted, but this transaction did not submit one"
+                            )
+                        })?;
+                    }
+                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort => {
                         Err(e).with_context(|| {
                             format!(
                                 "end_reconfig submission for epoch {epoch} failed with non-retryable error"
@@ -2177,6 +2190,7 @@ fn certified_nonce_weight<T: NonceCertTimestamp>(
         .weight()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconfigSubmissionErrorKind {
     NonMoveAbort,
     NonRetryableMoveAbort,
@@ -2185,14 +2199,13 @@ enum ReconfigSubmissionErrorKind {
 }
 
 fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmissionErrorKind {
-    let Some(tx_err) = err.downcast_ref::<crate::sui_tx_executor::TransactionExecutionError>()
-    else {
+    let Some(error) = crate::sui_tx_executor::transaction_execution_error(err) else {
         return ReconfigSubmissionErrorKind::NonMoveAbort;
     };
+    classify_reconfig_execution_error(error)
+}
 
-    let Some(error) = tx_err.status().error_opt() else {
-        return ReconfigSubmissionErrorKind::NonMoveAbort;
-    };
+fn classify_reconfig_execution_error(error: &ExecutionError) -> ReconfigSubmissionErrorKind {
     if error
         .kind
         .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
