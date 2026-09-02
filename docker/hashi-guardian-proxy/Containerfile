@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Plain (non-enclave) build of hashi-guardian-proxy. Mirrors
-# docker/hashi-guardian-k8s/Containerfile. The sibling
+# docker/hashi-screener/Containerfile. The sibling
 # docker/hashi-guardian/Containerfile is the Nitro enclave build and produces
 # an EIF, not a runnable OCI image — do not conflate the two.
 
