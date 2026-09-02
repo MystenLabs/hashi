@@ -459,23 +459,20 @@ impl HashiClient {
     // Transaction builders (proposal/governance)
     // ========================================================================
 
-    /// Resolve the committee member (validator address) the signer is acting for:
-    /// the signer's own address if it is a validator member, otherwise the member
-    /// that has delegated its operator address to the signer.
-    fn resolve_validator_address(&self) -> anyhow::Result<Address> {
+    /// The address of the configured signing keypair, if any.
+    pub fn signer_address(&self) -> Option<Address> {
+        self.executor.as_ref().map(|e| e.sender())
+    }
+
+    /// Resolve the committee member (validator address) the configured
+    /// keypair acts for in governance calls: an exact validator match wins,
+    /// otherwise exactly one operator delegation; more than one is an error
+    /// (see `resolve_governance_identity`).
+    pub fn resolve_validator_address(&self) -> anyhow::Result<Address> {
         let sender = self
-            .executor
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Cannot resolve validator: no keypair configured"))?
-            .sender();
-        let members = self.fetch_committee_members();
-        members
-            .iter()
-            .find(|m| *m.validator_address() == sender || *m.operator_address() == sender)
-            .map(|m| *m.validator_address())
-            .ok_or_else(|| {
-                anyhow::anyhow!("signer {sender} is not a committee member or delegated operator")
-            })
+            .signer_address()
+            .ok_or_else(|| anyhow::anyhow!("Cannot resolve validator: no keypair configured"))?;
+        resolve_governance_identity(&self.fetch_committee_members(), sender)
     }
 
     /// Build a vote transaction for a proposal.
@@ -1088,6 +1085,49 @@ impl HashiClient {
     }
 }
 
+/// Resolve the committee member `sender` acts for in governance calls
+/// (propose, vote, remove_vote, resign, withdraw_resignation).
+///
+/// An exact validator-address match always wins. Otherwise `sender` may be
+/// the delegated operator of exactly one member. On chain,
+/// `validator::update_operator_address` only checks that the caller is
+/// authorized for the member being updated, so any member can point its
+/// operator address at another member's signing address; a first-match scan
+/// would then let that stray or malicious delegation redirect the signer's
+/// vote to the wrong member (SEC-546). Two or more delegations to the same
+/// signer are therefore an error naming the candidates rather than a guess.
+fn resolve_governance_identity(members: &[MemberInfo], sender: Address) -> Result<Address> {
+    if let Some(member) = members.iter().find(|m| *m.validator_address() == sender) {
+        return Ok(*member.validator_address());
+    }
+
+    let delegating: Vec<Address> = members
+        .iter()
+        .filter(|m| *m.operator_address() == sender)
+        .map(|m| *m.validator_address())
+        .collect();
+
+    match delegating.as_slice() {
+        [] => anyhow::bail!("signer {sender} is not a committee member or delegated operator"),
+        [validator_address] => Ok(*validator_address),
+        candidates => {
+            let count = candidates.len();
+            let candidates = candidates
+                .iter()
+                .map(Address::to_hex)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "signer {sender} is the delegated operator of {count} committee members \
+                 ({candidates}); the CLI cannot tell which one to act for. Sign with that \
+                 member's validator key instead, or have the other members point their \
+                 operator address elsewhere (validator::update_operator_address, \
+                 `hashi register --operator-address`)."
+            )
+        }
+    }
+}
+
 /// Build a `proposal::vote<T>` transaction as a standalone. Reusable outside
 /// `HashiClient` — e2e test infra needs to build vote PTBs for every
 /// committee member.
@@ -1176,3 +1216,7 @@ pub fn get_proposal_type_arg(
         vec![],
     ))))
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;
