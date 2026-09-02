@@ -258,3 +258,29 @@ jobs:
           echo "suspect something the kernel build absorbs from its environment — a clock"
           echo "reaching the built-in initramfs is the failure mode that has happened before."
           exit 1
+
+  # A failed nightly otherwise reaches only the workflow file's last committer,
+  # by email. Open an issue, or bump the open one, so it is visible in the repo.
+  report:
+    needs: [build, verify]
+    if: always() && github.event_name == 'schedule' && (needs.build.result == 'failure' || needs.verify.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or bump the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: Nightly EIF reproducibility build failed
+        run: |
+          body="The nightly guardian EIF build on main failed: $RUN_URL
+
+          Either the two runners disagreed on the PCRs or the build itself broke. Until it is fixed no new PCR0 can be measured, and every enclave host rebuild of main is suspect."
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label bug --body "$body"
+          fi
