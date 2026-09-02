@@ -1050,12 +1050,39 @@ fn test_mpc_manager_new_from_committee_set() {
     .expect("Should create manager from CommitteeSet");
 
     // Verify party_id is assigned based on canonical ordering
-    assert_eq!(manager.party_id, 0);
+    assert_eq!(manager.party_id().unwrap(), 0);
     assert_eq!(manager.address, address);
 
     // Verify DkgConfig was built correctly
     assert_eq!(manager.mpc_config.epoch, setup.epoch());
     assert_eq!(manager.mpc_config.nodes.num_nodes(), 5);
+    assert_eq!(manager.committee.members().len(), 5);
+}
+
+#[test]
+fn test_mpc_manager_new_succeeds_for_non_member_without_identity() {
+    let setup = TestSetup::new(5);
+    let non_member = Address::new([99u8; 32]);
+
+    let manager = MpcManager::new(
+        non_member,
+        &setup.committee_set,
+        setup.epoch(),
+        ProtocolType::Dkg,
+        setup.encryption_keys[0].clone(),
+        None,
+        setup.signing_keys[0].clone(),
+        Arc::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .expect("non-member must construct rather than panic");
+
+    assert!(manager.party_id().is_err());
+    assert_eq!(manager.address, non_member);
     assert_eq!(manager.committee.members().len(), 5);
 }
 
@@ -1464,7 +1491,8 @@ fn test_mpc_manager_new_party_id_follows_canonical_order() {
         let manager = setup.create_manager(i);
 
         assert_eq!(
-            manager.party_id, i as u16,
+            manager.party_id().unwrap(),
+            i as u16,
             "Party ID should match canonical order index for validator {}",
             i
         );
@@ -2699,7 +2727,11 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
                 dealer_address: dealer_addr_0,
                 messages_hash,
             };
-            setup.signing_keys[mgr.party_id as usize].sign(setup.epoch(), mgr.address, &dkg_message)
+            setup.signing_keys[mgr.party_id().unwrap() as usize].sign(
+                setup.epoch(),
+                mgr.address,
+                &dkg_message,
+            )
         })
         .collect();
     let cert_0 = create_test_certificate(
@@ -3314,7 +3346,7 @@ async fn test_run_as_party_with_reduced_weights() {
     let reduced_weight = manager
         .mpc_config
         .nodes
-        .weight_of(manager.party_id)
+        .weight_of(manager.party_id().unwrap())
         .unwrap();
 
     assert_ne!(
@@ -6461,7 +6493,7 @@ impl RotationTestSetup {
         }
         manager.previous_committee = previous_committee;
         // Tests reuse the same key across epochs.
-        manager.previous_encryption_key = Some(manager.encryption_key.clone());
+        manager.previous_encryption_key = Some(manager.encryption_key().unwrap().clone());
     }
 
     /// Creates a manager that has completed DKG and is ready for rotation.
@@ -8600,14 +8632,14 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         .rotation_session_id(&rotation_dealer_addr, share3_index);
     let receiver = avss::Receiver::new(
         receiver_manager.mpc_config.nodes.clone(),
-        receiver_manager.party_id,
+        receiver_manager.party_id().unwrap(),
         Parameters {
             t: receiver_manager.mpc_config.threshold,
             f: receiver_manager.mpc_config.max_faulty,
         },
         session_id.to_vec(),
         None,
-        receiver_manager.encryption_key.clone(),
+        receiver_manager.encryption_key().unwrap().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -8768,14 +8800,14 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         .rotation_session_id(&dealer_addr, first_share_index);
     let receiver = avss::Receiver::new(
         test_manager.mpc_config.nodes.clone(),
-        test_manager.party_id,
+        test_manager.party_id().unwrap(),
         Parameters {
             t: test_manager.mpc_config.threshold,
             f: test_manager.mpc_config.max_faulty,
         },
         session_id.to_vec(),
         None, // No expected commitment
-        test_manager.encryption_key.clone(),
+        test_manager.encryption_key().unwrap().clone(),
     )
     .unwrap();
     let valid_complaint = match receiver
@@ -8939,14 +8971,14 @@ fn test_rotation_complaints_are_scoped_to_the_epoch_in_their_key() {
         .rotation_session_id(&dealer_addr, first_share_index);
     let receiver = avss::Receiver::new(
         test_manager.mpc_config.nodes.clone(),
-        test_manager.party_id,
+        test_manager.party_id().unwrap(),
         Parameters {
             t: test_manager.mpc_config.threshold,
             f: test_manager.mpc_config.max_faulty,
         },
         session_id.to_vec(),
         None,
-        test_manager.encryption_key.clone(),
+        test_manager.encryption_key().unwrap().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -9079,14 +9111,14 @@ fn test_handle_complain_request_success() {
         .copied();
     let receiver = avss::Receiver::new(
         victim_manager.mpc_config.nodes.clone(),
-        victim_manager.party_id,
+        victim_manager.party_id().unwrap(),
         Parameters {
             t: victim_manager.mpc_config.threshold,
             f: victim_manager.mpc_config.max_faulty,
         },
         session_id.to_vec(),
         commitment,
-        victim_manager.encryption_key.clone(),
+        victim_manager.encryption_key().unwrap().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -9237,14 +9269,14 @@ fn test_handle_complain_request_rejects_dealer_that_does_not_own_the_share_index
         .copied();
     let receiver = avss::Receiver::new(
         victim_manager.mpc_config.nodes.clone(),
-        victim_manager.party_id,
+        victim_manager.party_id().unwrap(),
         Parameters {
             t: victim_manager.mpc_config.threshold,
             f: victim_manager.mpc_config.max_faulty,
         },
         session_id.to_vec(),
         commitment,
-        victim_manager.encryption_key.clone(),
+        victim_manager.encryption_key().unwrap().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -9810,7 +9842,7 @@ fn test_party_restart_uses_stored_rotation_messages() {
             party_manager
                 .process_and_store_message(
                     party_manager.mpc_config.nodes.clone(),
-                    party_manager.party_id,
+                    party_manager.party_id().unwrap(),
                     party_manager.mpc_config.threshold,
                     &session_id,
                     message,
@@ -9969,7 +10001,11 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     .unwrap();
 
     // Verify the party_id shift
-    assert_eq!(manager.party_id, 5, "Target party_id should be 5");
+    assert_eq!(
+        manager.party_id().unwrap(),
+        5,
+        "Target party_id should be 5"
+    );
     assert_eq!(
         manager
             .previous_committee
@@ -10459,8 +10495,8 @@ fn test_recover_current_dkg() {
         let context = crate::mpc::types::DkgReconstructionContext {
             committee: &guard.committee,
             nodes: &guard.mpc_config.nodes,
-            party_id: guard.party_id,
-            encryption_key: &guard.encryption_key,
+            party_id: guard.party_id().unwrap(),
+            encryption_key: guard.encryption_key().unwrap(),
             output_threshold: guard.mpc_config.threshold,
             output_max_faulty: guard.mpc_config.max_faulty,
             epoch: guard.mpc_config.epoch,
@@ -10819,7 +10855,11 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     .unwrap();
 
     // Verify the party_id shift
-    assert_eq!(manager.party_id, 5, "Target party_id should be 5");
+    assert_eq!(
+        manager.party_id().unwrap(),
+        5,
+        "Target party_id should be 5"
+    );
     assert_eq!(
         manager
             .previous_committee
@@ -11678,7 +11718,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
     let msg = map.get(&share_index).unwrap();
     let avss_receiver = avss::Receiver::new(
         receiver.mpc_config.nodes.clone(),
-        receiver.party_id,
+        receiver.party_id().unwrap(),
         Parameters {
             t: receiver.mpc_config.threshold,
             f: receiver.mpc_config.max_faulty,
@@ -11744,7 +11784,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
     let msg = map.get(&share_index).unwrap();
     let avss_receiver = avss::Receiver::new(
         receiver.mpc_config.nodes.clone(),
-        receiver.party_id,
+        receiver.party_id().unwrap(),
         Parameters {
             t: receiver.mpc_config.threshold,
             f: receiver.mpc_config.max_faulty,
@@ -11832,14 +11872,14 @@ fn test_handle_complain_request_rotation_caches_response() {
         .copied();
     let receiver = avss::Receiver::new(
         victim_manager.mpc_config.nodes.clone(),
-        victim_manager.party_id,
+        victim_manager.party_id().unwrap(),
         Parameters {
             t: victim_manager.mpc_config.threshold,
             f: victim_manager.mpc_config.max_faulty,
         },
         session_id.to_vec(),
         commitment,
-        victim_manager.encryption_key.clone(),
+        victim_manager.encryption_key().unwrap().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -12881,7 +12921,11 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
                 dealer_address: dealer_addr_0,
                 messages_hash,
             };
-            setup.signing_keys[mgr.party_id as usize].sign(setup.epoch(), mgr.address, &dkg_message)
+            setup.signing_keys[mgr.party_id().unwrap() as usize].sign(
+                setup.epoch(),
+                mgr.address,
+                &dkg_message,
+            )
         })
         .collect();
     let cert_0 = create_test_certificate(
@@ -12905,7 +12949,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
                     dealer_address: dealer_addr,
                     messages_hash,
                 };
-                setup.signing_keys[mgr.party_id as usize].sign(
+                setup.signing_keys[mgr.party_id().unwrap() as usize].sign(
                     setup.epoch(),
                     mgr.address,
                     &dkg_message,
@@ -12994,7 +13038,7 @@ async fn test_vanilla_nonce_dealer_phase_skips_at_zero_weight() {
         .map(|n| Node {
             id: n.id,
             pk: n.pk.clone(),
-            weight: if n.id == test_manager.party_id {
+            weight: if n.id == test_manager.party_id().unwrap() {
                 0
             } else {
                 n.weight
@@ -13006,7 +13050,7 @@ async fn test_vanilla_nonce_dealer_phase_skips_at_zero_weight() {
         test_manager
             .mpc_config
             .nodes
-            .weight_of(test_manager.party_id)
+            .weight_of(test_manager.party_id().unwrap())
             .unwrap(),
         0
     );
@@ -13057,7 +13101,7 @@ async fn test_avid_nonce_dealer_phase_skips_at_zero_weight() {
         .map(|n| Node {
             id: n.id,
             pk: n.pk.clone(),
-            weight: if n.id == test_manager.party_id {
+            weight: if n.id == test_manager.party_id().unwrap() {
                 0
             } else {
                 n.weight
@@ -13069,7 +13113,7 @@ async fn test_avid_nonce_dealer_phase_skips_at_zero_weight() {
         test_manager
             .mpc_config
             .nodes
-            .weight_of(test_manager.party_id)
+            .weight_of(test_manager.party_id().unwrap())
             .unwrap(),
         0
     );
@@ -15866,7 +15910,7 @@ fn test_decoded_shares_match_optimistic_shares() {
     let indices = decoder
         .mpc_config
         .nodes
-        .share_ids_of(decoder.party_id)
+        .share_ids_of(decoder.party_id().unwrap())
         .unwrap();
     let decoded = decoded.into_legacy(&indices);
     let direct = direct.into_legacy(&indices);

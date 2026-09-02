@@ -177,15 +177,20 @@ pub struct NoncePartyOutcome {
     pub local_skips: u32,
 }
 
+struct TargetIdentity {
+    party_id: PartyId,
+    encryption_key: PrivateKey<EncryptionGroupElement>,
+    signing_key: Bls12381PrivateKey,
+}
+
 pub struct MpcManager {
     // Immutable during the epoch
-    pub party_id: PartyId,
+    /// Identity in the target epoch's committee, absent when this node is not one of its members.
+    identity: Option<TargetIdentity>,
     pub address: Address,
     pub mpc_config: MpcConfig,
     protocol_type: ProtocolType,
-    pub encryption_key: PrivateKey<EncryptionGroupElement>,
     pub previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
-    pub signing_key: Bls12381PrivateKey,
     pub committee: Committee,
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
@@ -273,6 +278,27 @@ impl<T> VerifiedNonceCerts<T> {
 }
 
 impl MpcManager {
+    fn identity(&self) -> MpcResult<&TargetIdentity> {
+        self.identity.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig(format!(
+                "node {} is not in the committee for epoch {}",
+                self.address, self.mpc_config.epoch
+            ))
+        })
+    }
+
+    pub fn party_id(&self) -> MpcResult<PartyId> {
+        Ok(self.identity()?.party_id)
+    }
+
+    fn encryption_key(&self) -> MpcResult<&PrivateKey<EncryptionGroupElement>> {
+        Ok(&self.identity()?.encryption_key)
+    }
+
+    fn signing_key(&self) -> MpcResult<&Bls12381PrivateKey> {
+        Ok(&self.identity()?.signing_key)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
@@ -314,20 +340,23 @@ impl MpcManager {
             nonce_generation_protocol,
             committee.mpc_nonce_accumulation_window_ms(),
         );
-        let party_id = committee
-            .index_of(&address)
-            .expect("address not in committee") as u16;
+        let party_id_opt = committee.index_of(&address).map(|i| i as u16);
         let my_pk = PublicKey::<EncryptionGroupElement>::from_private_key(&encryption_key);
-        let committee_pk = &mpc_config
-            .nodes
-            .node_id_to_node(party_id as PartyId)
-            .expect("party_id not in nodes")
-            .pk;
-        let keys_match =
-            my_pk.as_element().to_byte_array() == committee_pk.as_element().to_byte_array();
+        // Both are member-only: a non-member has no committee record to compare against.
+        let committee_pk = party_id_opt.map(|pid| {
+            mpc_config
+                .nodes
+                .node_id_to_node(pid as PartyId)
+                .expect("party_id not in nodes")
+                .pk
+                .clone()
+        });
+        let keys_match = committee_pk
+            .as_ref()
+            .map(|pk| my_pk.as_element().to_byte_array() == pk.as_element().to_byte_array());
         tracing::info!(
             epoch,
-            party_id,
+            party_id = party_id_opt,
             address = %address,
             threshold,
             total_weight,
@@ -335,20 +364,27 @@ impl MpcManager {
             num_nodes = mpc_config.nodes.num_nodes(),
             encryption_keys_match = keys_match,
             my_encryption_pk = hex::encode(my_pk.as_element().to_byte_array()),
-            committee_encryption_pk = hex::encode(committee_pk.as_element().to_byte_array()),
+            committee_encryption_pk = committee_pk
+                .as_ref()
+                .map(|pk| hex::encode(pk.as_element().to_byte_array())),
             "MpcManager initialized"
         );
-        metrics.mpc_party_reduced_weight.set(
-            mpc_config
-                .nodes
-                .weight_of(party_id)
-                .expect("party_id was just derived from this committee") as i64,
-        );
-        if !keys_match {
+        if let Some(pid) = party_id_opt {
+            metrics.mpc_party_reduced_weight.set(
+                mpc_config
+                    .nodes
+                    .weight_of(pid)
+                    .expect("nodes holds one entry per committee index") as i64,
+            );
+        }
+        if keys_match == Some(false) {
             return Err(MpcError::InvalidConfig(format!(
                 "encryption key mismatch at epoch {epoch}: local {my} vs on-chain {chain}",
                 my = hex::encode(my_pk.as_element().to_byte_array()),
-                chain = hex::encode(committee_pk.as_element().to_byte_array()),
+                chain = committee_pk
+                    .as_ref()
+                    .map(|pk| hex::encode(pk.as_element().to_byte_array()))
+                    .unwrap_or_default(),
             )));
         }
         let (previous_epoch, previous_committee) =
@@ -399,14 +435,17 @@ impl MpcManager {
                     .ok()
                     .map(|(_, threshold, _)| threshold)
             });
-        let mut manager = Self {
+        let identity = party_id_opt.map(|party_id| TargetIdentity {
             party_id,
+            encryption_key,
+            signing_key,
+        });
+        let mut manager = Self {
+            identity,
             address,
             mpc_config,
             protocol_type,
-            encryption_key,
             previous_encryption_key,
-            signing_key,
             committee,
             previous_committee,
             previous_nodes,
@@ -741,7 +780,7 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key.clone(),
+                    self.encryption_key()?.clone(),
                 )?;
                 let ProtocolComplaint::Avss(complaint) = &request.complaint else {
                     return Err(MpcError::InvalidMessage {
@@ -787,7 +826,7 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key.clone(),
+                    self.encryption_key()?.clone(),
                 )?;
                 let ProtocolComplaint::Avss(complaint) = &request.complaint else {
                     return Err(MpcError::InvalidMessage {
@@ -1120,7 +1159,7 @@ impl MpcManager {
                 let indices = mgr
                     .mpc_config
                     .nodes
-                    .share_ids_of(mgr.party_id)
+                    .share_ids_of(mgr.party_id()?)
                     .map_err(|e| MpcError::CryptoError(e.to_string()))?;
                 consume_certified_nonce_outputs(
                     &mut mgr.dealer_avid_nonce_outputs,
@@ -2510,9 +2549,9 @@ impl MpcManager {
         };
         let dealer_session_id = self.current_session_id().dealer_session_id(&dealer);
         let result = process_avss_message(
-            &self.encryption_key,
+            self.encryption_key()?,
             self.mpc_config.nodes.clone(),
-            self.party_id,
+            self.party_id()?,
             Parameters {
                 t: self.mpc_config.threshold,
                 f: self.mpc_config.max_faulty,
@@ -2530,7 +2569,7 @@ impl MpcManager {
                     messages_hash: messages.compute_hash(),
                 };
                 let signature =
-                    self.signing_key
+                    self.signing_key()?
                         .sign(self.mpc_config.epoch, self.address, &dkg_message);
                 Ok(signature.signature().clone())
             }
@@ -2561,11 +2600,11 @@ impl MpcManager {
         );
         batch_avss::Receiver::new(
             self.mpc_config.nodes.clone(),
-            self.party_id,
+            self.party_id()?,
             dealer_party_id,
             self.mpc_config.threshold,
             dealer_session_id.to_vec(),
-            self.encryption_key.clone(),
+            self.encryption_key()?.clone(),
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))
@@ -2585,7 +2624,7 @@ impl MpcManager {
         let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
         let dealer = batch_avss::Dealer::new(
             nodes,
-            self.party_id,
+            self.party_id()?,
             self.mpc_config.threshold,
             dealer_sid.to_vec(),
             self.batch_size_per_weight,
@@ -2625,7 +2664,7 @@ impl MpcManager {
                     messages_hash: messages.compute_hash(),
                 };
                 let signature =
-                    self.signing_key
+                    self.signing_key()?
                         .sign(self.mpc_config.epoch, self.address, &nonce_message);
                 Ok(signature.signature().clone())
             }
@@ -2656,14 +2695,14 @@ impl MpcManager {
         );
         batch_avss_avid::Receiver::new(
             self.mpc_config.nodes.clone(),
-            self.party_id,
+            self.party_id()?,
             dealer_party_id,
             Parameters {
                 t: self.mpc_config.threshold,
                 f: self.mpc_config.max_faulty,
             },
             dealer_session_id.to_vec(),
-            self.encryption_key.clone(),
+            self.encryption_key()?.clone(),
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))
@@ -2683,7 +2722,7 @@ impl MpcManager {
         let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
         let dealer = batch_avss_avid::Dealer::new(
             nodes,
-            self.party_id,
+            self.party_id()?,
             Parameters {
                 t: self.mpc_config.threshold,
                 f: self.mpc_config.max_faulty,
@@ -2748,7 +2787,7 @@ impl MpcManager {
             batch_index,
         };
         let signature = self
-            .signing_key
+            .signing_key()?
             .sign(self.mpc_config.epoch, self.address, &confirm);
         Ok(signature.signature().clone())
     }
@@ -2768,7 +2807,7 @@ impl MpcManager {
         let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
         let dealer = batch_avss_avid::Dealer::new(
             nodes,
-            self.party_id,
+            self.party_id()?,
             Parameters {
                 t: self.mpc_config.threshold,
                 f: self.mpc_config.max_faulty,
@@ -2842,7 +2881,7 @@ impl MpcManager {
             batch_index,
         };
         let vote = self
-            .signing_key
+            .signing_key()?
             .sign(self.mpc_config.epoch, self.address, &target)
             .signature()
             .clone();
@@ -4255,7 +4294,7 @@ impl MpcManager {
         let session_id = self.current_session_id().dealer_session_id(&dealer);
         self.process_and_store_message(
             self.mpc_config.nodes.clone(),
-            self.party_id,
+            self.party_id()?,
             self.mpc_config.threshold,
             &session_id,
             &message,
@@ -4293,11 +4332,11 @@ impl MpcManager {
         );
         let receiver = batch_avss::Receiver::new(
             self.mpc_config.nodes.clone(),
-            self.party_id,
+            self.party_id()?,
             dealer_party_id,
             self.mpc_config.threshold,
             dealer_sid.to_vec(),
-            self.encryption_key.clone(),
+            self.encryption_key()?.clone(),
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))?;
@@ -4356,7 +4395,7 @@ impl MpcManager {
             )?);
             self.process_and_store_message(
                 self.mpc_config.nodes.clone(),
-                self.party_id,
+                self.party_id()?,
                 self.mpc_config.threshold,
                 &session_id,
                 &message,
@@ -4395,7 +4434,7 @@ impl MpcManager {
         complaint_key: ComplaintsToProcessKey,
     ) -> MpcResult<()> {
         match process_avss_message(
-            &self.encryption_key,
+            self.encryption_key()?,
             nodes,
             party_id,
             Parameters {
@@ -4779,7 +4818,7 @@ impl MpcManager {
                 params,
                 dealer_session_id.to_vec(),
                 None,
-                mgr.encryption_key.clone(),
+                mgr.encryption_key()?.clone(),
             )?;
             (complaint_request, receiver, committee)
         };
@@ -4882,7 +4921,7 @@ impl MpcManager {
                 dealer_party_id,
                 params.t,
                 dealer_sid.to_vec(),
-                mgr.encryption_key.clone(),
+                mgr.encryption_key()?.clone(),
                 mgr.batch_size_per_weight,
             )
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
@@ -5198,9 +5237,9 @@ impl MpcManager {
                 share_index,
             )?);
             match process_avss_message(
-                &self.encryption_key,
+                self.encryption_key()?,
                 self.mpc_config.nodes.clone(),
-                self.party_id,
+                self.party_id()?,
                 Parameters {
                     t: self.mpc_config.threshold,
                     f: self.mpc_config.max_faulty,
@@ -5226,7 +5265,7 @@ impl MpcManager {
             messages_hash,
         };
         let signature = self
-            .signing_key
+            .signing_key()?
             .sign(self.mpc_config.epoch, self.address, &rotation_message)
             .signature()
             .clone();
@@ -5272,7 +5311,7 @@ impl MpcManager {
             .collect::<Result<_, MpcError>>()?;
         let combined = avss::DkOutput::complete_key_rotation(
             threshold,
-            self.party_id,
+            self.party_id()?,
             &self.mpc_config.nodes,
             &indexed_outputs,
         )
@@ -5367,11 +5406,16 @@ impl MpcManager {
         }
         let candidate = {
             let mgr = mpc_manager.read().unwrap();
+            // Not `Suspicious`: a non-member has no current share to rebuild, which contradicts
+            // nothing on chain.
+            let Ok(identity) = mgr.identity() else {
+                return MpcOutputRecoveryOutcome::NotApplicable;
+            };
             let context = DkgReconstructionContext {
                 committee: &mgr.committee,
                 nodes: &mgr.mpc_config.nodes,
-                party_id: mgr.party_id,
-                encryption_key: &mgr.encryption_key,
+                party_id: identity.party_id,
+                encryption_key: &identity.encryption_key,
                 output_threshold: mgr.mpc_config.threshold,
                 output_max_faulty: mgr.mpc_config.max_faulty,
                 epoch: mgr.mpc_config.epoch,
@@ -5413,10 +5457,15 @@ impl MpcManager {
             let Some(input_threshold) = mgr.previous_reconfig_output_threshold else {
                 return MpcOutputRecoveryOutcome::NotApplicable;
             };
+            // Not `Suspicious`: a non-member has no current share to rebuild, which contradicts
+            // nothing on chain.
+            let Ok(identity) = mgr.identity() else {
+                return MpcOutputRecoveryOutcome::NotApplicable;
+            };
             let current_context = RotationReconstructionContext {
                 nodes: &mgr.mpc_config.nodes,
-                party_id: mgr.party_id,
-                encryption_key: &mgr.encryption_key,
+                party_id: identity.party_id,
+                encryption_key: &identity.encryption_key,
                 output_threshold: mgr.mpc_config.threshold,
                 output_max_faulty: mgr.mpc_config.max_faulty,
                 input_threshold,
@@ -6467,7 +6516,7 @@ impl MpcManager {
         if epoch == self.mpc_config.epoch {
             Ok((
                 self.mpc_config.nodes.clone(),
-                self.party_id,
+                self.party_id()?,
                 Parameters {
                     t: self.mpc_config.threshold,
                     f: self.mpc_config.max_faulty,
@@ -6593,7 +6642,7 @@ impl MpcManager {
         epoch: u64,
     ) -> MpcResult<&PrivateKey<EncryptionGroupElement>> {
         if epoch == self.mpc_config.epoch {
-            Ok(&self.encryption_key)
+            Ok(self.encryption_key()?)
         } else if epoch == self.previous_epoch {
             self.previous_encryption_key.as_ref().ok_or_else(|| {
                 MpcError::InvalidConfig(
