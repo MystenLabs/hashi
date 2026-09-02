@@ -152,6 +152,10 @@ impl MpcService {
         );
         self.run_major_compaction(self.inner.onchain_state().epoch())
             .await;
+        let mut notifications = self.inner.onchain_state().subscribe();
+        if let Err(e) = self.inner.note_resignation_if_flagged() {
+            warn!("could not record resignation state at startup: {e}");
+        }
         if let Some(epoch) = pending {
             info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;
@@ -176,7 +180,7 @@ impl MpcService {
         } else {
             info!("Node is not in the current committee, waiting for reconfig notification...");
         }
-        let mut notifications = self.inner.onchain_state().subscribe();
+
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut reconcile_tick = tokio::time::interval(RECONCILE_TICK);
         reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -207,10 +211,22 @@ impl MpcService {
                             Notification::SuiEpochChanged(sui_epoch) => {
                                 self.try_submit_start_reconfig(sui_epoch).await;
                             }
+                            Notification::ValidatorInfoUpdated(validator)
+                                if Some(validator)
+                                    == self.inner.config.validator_address().ok() =>
+                            {
+                                if let Err(e) = self.inner.note_resignation_if_flagged() {
+                                    warn!("could not record resignation state: {e}");
+                                }
+                            }
                             _ => {}
                         },
                         Err(e) => {
                             error!("MPC notification recv error: {e:?}, resubscribing");
+                            // The dropped backlog may have held our own flag flip; sample it.
+                            if let Err(e) = self.inner.note_resignation_if_flagged() {
+                                warn!("could not record resignation state after lag: {e}");
+                            }
                             notifications = self.inner.onchain_state().subscribe();
                         }
                     }
@@ -250,16 +266,24 @@ impl MpcService {
     }
 
     async fn post_reconfig_housekeeping(&self, target_epoch: u64) {
-        let pruning_references = {
-            let state = self.inner.onchain_state().state();
-            build_pruning_references(&state.hashi().committees, target_epoch)
-        };
-        if let Err(e) = self
-            .inner
-            .db
-            .prune_messages_below(target_epoch, &pruning_references)
-        {
-            error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+        let current_epoch = self.inner.onchain_state().epoch();
+        if current_epoch >= target_epoch {
+            let pruning_references = {
+                let state = self.inner.onchain_state().state();
+                build_pruning_references(&state.hashi().committees, target_epoch)
+            };
+            if let Err(e) = self
+                .inner
+                .db
+                .prune_messages_below(target_epoch, &pruning_references)
+            {
+                error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+            }
+        } else {
+            info!(
+                "handle_reconfig: still on epoch {current_epoch}; skipping the prune for \
+                 epoch {target_epoch}"
+            );
         }
         self.run_major_compaction(target_epoch).await;
         self.backup_handle.backup_after_epoch_change(target_epoch);
@@ -267,6 +291,9 @@ impl MpcService {
 
     async fn sleep_if_still_pending(&self, epoch: u64) {
         if self.get_pending_epoch_change() == Some(epoch) {
+            if let Err(e) = self.inner.note_resignation_if_flagged() {
+                warn!("could not record resignation state for epoch {epoch}: {e}");
+            }
             tokio::time::sleep(RETRY_INTERVAL).await;
         }
     }
@@ -1518,6 +1545,9 @@ impl MpcService {
             self.sleep_if_still_pending(target_epoch).await;
             return;
         }
+        if let Err(e) = self.inner.note_resignation_if_flagged() {
+            warn!("could not record resignation state for epoch {target_epoch}: {e}");
+        }
         let metrics = &self.inner.metrics;
         let _reconfig_timer = metrics
             .mpc_reconfig_total_duration_seconds
@@ -1588,6 +1618,9 @@ impl MpcService {
                         metrics.task_heartbeat("mpc_service");
                         self.sleep_if_still_pending(target_epoch).await;
                     }
+                    if let Err(e) = self.inner.note_resignation_if_flagged() {
+                        warn!("could not record resignation state for epoch {target_epoch}: {e}");
+                    }
                     if !matches!(outcome, ReconfigOutcome::NoRole) {
                         self.post_reconfig_housekeeping(target_epoch).await;
                     }
@@ -1598,6 +1631,7 @@ impl MpcService {
                         "MPC protocol for epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
+                    metrics.task_heartbeat("mpc_service");
                     self.sleep_if_still_pending(target_epoch).await;
                 }
             }

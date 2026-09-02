@@ -7295,7 +7295,6 @@ async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_succe
     );
     let departing = Arc::new(RwLock::new(departing));
 
-    // No peers: the dealer reaches the aggregator and cannot clear t + f.
     let mock_p2p = MockP2PChannel::new(HashMap::new(), departing_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
 
@@ -7352,7 +7351,7 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
         &test_metrics(),
         RotationRole::DealerOnly,
     )
-        .await;
+    .await;
     assert!(
         as_dealer_only.is_err(),
         "a failed reconstruction must surface so the caller retries: {as_dealer_only:?}"
@@ -7365,8 +7364,8 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
         &test_metrics(),
         RotationRole::DealerAndParty,
     )
-        .await
-        .expect("the party path still falls back to the public-only output");
+    .await
+    .expect("the party path still falls back to the public-only output");
     assert!(fallback.key_shares.shares.is_empty());
 }
 
@@ -8264,8 +8263,8 @@ async fn test_prepare_previous_output_for_new_member() {
         &metrics,
         RotationRole::DealerAndParty,
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // Verify is_member_of_previous_committee is false
     assert!(
@@ -8347,8 +8346,8 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
         &metrics,
         RotationRole::DealerAndParty,
     )
-        .await
-        .expect("prepare_previous_output should succeed by retrieving missing DKG messages");
+    .await
+    .expect("prepare_previous_output should succeed by retrieving missing DKG messages");
 
     assert!(is_member, "Validator 0 is in the previous committee");
     assert_eq!(
@@ -8555,8 +8554,8 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
         &metrics,
         RotationRole::DealerAndParty,
     )
-        .await
-        .expect("prepare_previous_output should succeed by retrieving missing rotation messages");
+    .await
+    .expect("prepare_previous_output should succeed by retrieving missing rotation messages");
 
     assert!(is_member, "Validator 2 is in the previous committee");
     assert_eq!(

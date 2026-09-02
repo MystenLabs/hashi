@@ -1037,8 +1037,8 @@ impl Metrics {
                 .unwrap(),
             mpc_rotation_previous_shares_missing_total: register_int_counter_with_registry!(
                 "hashi_mpc_rotation_previous_shares_missing_total",
-                "Rotation attempts where this node was in the previous committee but could not \
-                 rebuild its shares, so its previous-epoch weight did not reach the rotation.",
+                "Rotation attempts where this node was in the previous committee but entered the \
+                 rotation holding no previous-epoch shares, so its weight could not be dealt.",
                 registry,
             )
             .unwrap(),
