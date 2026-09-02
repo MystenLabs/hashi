@@ -2290,6 +2290,40 @@ mod tests {
     }
 
     #[test]
+    fn tob_walk_ahead_of_its_bucket_field_passes() {
+        // The bootstrap scrape decodes the bucket Field before it lists
+        // the nodes, so a submission landing in between leaves the
+        // mirror one linked node ahead of the Field's size. The extra
+        // node is a real on-chain submission, so the walk returns it
+        // rather than failing as a gap.
+        let key = tob_key(7);
+        let bucket_field = addr(0x81);
+        let (node1, node2, d1, d2) = (addr(0x82), addr(0x83), addr(0xE1), addr(0xA2));
+        let mut fixture = Fixture::new();
+        fixture.apply(&tx(vec![
+            written(tob_bucket_object(
+                bucket_field,
+                1,
+                key,
+                Some(d1),
+                Some(d1),
+                1,
+            )),
+            written(tob_node_object(node1, 2, d1, None, Some(d2))),
+            written(tob_node_object(node2, 2, d2, Some(d1), None)),
+        ]));
+        let bucket = fixture.hashi.tob.buckets.get(&key).unwrap();
+        assert_eq!(bucket.size, 1);
+        let walked: Vec<Address> = bucket
+            .complete_certs_in_order()
+            .unwrap()
+            .into_iter()
+            .map(|(dealer, _)| dealer)
+            .collect();
+        assert_eq!(walked, vec![d1, d2]);
+    }
+
+    #[test]
     fn tob_stale_replay_does_not_clobber_newer_links() {
         let mut fixture = Fixture::new();
         let key = tob_key(7);

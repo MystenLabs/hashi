@@ -114,10 +114,11 @@ pub struct TobBucket {
     /// The `LinkedTable` head: the first dealer in insertion order.
     pub head: Option<Address>,
     /// The `LinkedTable`'s on-chain size, the census a complete walk
-    /// must match. Held nodes alone cannot certify completeness: a
-    /// bucket Field can arrive ahead of its nodes mid-convergence, and
-    /// a walk over what the mirror holds would then look internally
-    /// consistent while missing the tail — or the entire list.
+    /// must at least cover. Held nodes alone cannot certify
+    /// completeness: a bucket Field can arrive ahead of its nodes
+    /// mid-convergence, and a walk over what the mirror holds would
+    /// then look internally consistent while missing the tail — or the
+    /// entire list.
     pub size: u64,
     pub nodes: BTreeMap<
         Address,
@@ -137,16 +138,20 @@ pub struct IncompleteTobWalk {
 
 impl TobBucket {
     /// Dealer submissions in on-chain insertion order, verified
-    /// complete: the walk must cover exactly the `LinkedTable`'s
+    /// complete: the walk must cover at least the `LinkedTable`'s
     /// on-chain size. Comparing against held nodes instead would pass a
     /// walk that reaches every node the mirror holds while the chain
     /// holds more (a missing tail, or a head with no nodes applied
-    /// yet).
+    /// yet). A walk that overshoots the size passes: the bootstrap
+    /// scrape decodes the size from the bucket Field before it lists
+    /// the nodes, so a submission landing in between links one more
+    /// node than the Field counts. Every node the walk reaches is a real
+    /// on-chain submission, and the replay brings the Field up to match.
     pub fn complete_certs_in_order(
         &self,
     ) -> Result<Vec<(Address, &move_types::StampedDealerSubmissionV1)>, IncompleteTobWalk> {
         let certs = self.certs_in_order();
-        if certs.len() as u64 != self.size {
+        if (certs.len() as u64) < self.size {
             return Err(IncompleteTobWalk {
                 walked: certs.len(),
                 size: self.size,
