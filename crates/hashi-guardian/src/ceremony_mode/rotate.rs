@@ -78,7 +78,7 @@ async fn complete_rotation(
     )
     .await?;
     enclave
-        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisioners.into())
+        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())
         .expect("rotate_kp_set should await new key provisioner confirmations");
     Ok(response)
 }
@@ -561,7 +561,7 @@ mod tests {
         assert_rotation_output(&ctx.captures, &response, &secret_keys, TEST_N, TEST_T);
         assert_eq!(
             ctx.enclave.lifecycle(),
-            CeremonyStage::AwaitingKeyProvisioners.into()
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
     }
 

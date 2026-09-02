@@ -2352,7 +2352,7 @@ pub enum CeremonyStage {
     Unspecified = 0,
     Uninitialized = 1,
     OperatorInitialized = 2,
-    AwaitingKeyProvisioners = 3,
+    AwaitingKeyProvisionerConfirmations = 3,
     Completed = 4,
 }
 impl CeremonyStage {
@@ -2365,7 +2365,9 @@ impl CeremonyStage {
             Self::Unspecified => "CEREMONY_STAGE_UNSPECIFIED",
             Self::Uninitialized => "CEREMONY_STAGE_UNINITIALIZED",
             Self::OperatorInitialized => "CEREMONY_STAGE_OPERATOR_INITIALIZED",
-            Self::AwaitingKeyProvisioners => "CEREMONY_STAGE_AWAITING_KEY_PROVISIONERS",
+            Self::AwaitingKeyProvisionerConfirmations => {
+                "CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS"
+            }
             Self::Completed => "CEREMONY_STAGE_COMPLETED",
         }
     }
@@ -2375,8 +2377,8 @@ impl CeremonyStage {
             "CEREMONY_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
             "CEREMONY_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
             "CEREMONY_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
-            "CEREMONY_STAGE_AWAITING_KEY_PROVISIONERS" => {
-                Some(Self::AwaitingKeyProvisioners)
+            "CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS" => {
+                Some(Self::AwaitingKeyProvisionerConfirmations)
             }
             "CEREMONY_STAGE_COMPLETED" => Some(Self::Completed),
             _ => None,

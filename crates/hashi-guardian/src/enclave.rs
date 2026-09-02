@@ -501,7 +501,7 @@ impl Enclave {
             EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
                 self.operator_init_state_installed(EnclaveMode::Ceremony)
             }
-            EnclaveLifecycle::Ceremony(CeremonyStage::AwaitingKeyProvisioners) => {
+            EnclaveLifecycle::Ceremony(CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
                 self.pending_ceremony.get().is_some()
             }
             EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => self

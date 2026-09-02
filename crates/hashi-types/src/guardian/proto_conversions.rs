@@ -1071,7 +1071,9 @@ impl TryFrom<i32> for CeremonyStage {
         match pb::CeremonyStage::try_from(stage) {
             Ok(pb::CeremonyStage::Uninitialized) => Ok(Self::Uninitialized),
             Ok(pb::CeremonyStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
-            Ok(pb::CeremonyStage::AwaitingKeyProvisioners) => Ok(Self::AwaitingKeyProvisioners),
+            Ok(pb::CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
+                Ok(Self::AwaitingKeyProvisionerConfirmations)
+            }
             Ok(pb::CeremonyStage::Completed) => Ok(Self::Completed),
             Ok(pb::CeremonyStage::Unspecified) | Err(_) => {
                 Err(InvalidInputs(format!("invalid ceremony stage: {stage}")))
@@ -1084,7 +1086,9 @@ fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
     match stage {
         CeremonyStage::Uninitialized => pb::CeremonyStage::Uninitialized as i32,
         CeremonyStage::OperatorInitialized => pb::CeremonyStage::OperatorInitialized as i32,
-        CeremonyStage::AwaitingKeyProvisioners => pb::CeremonyStage::AwaitingKeyProvisioners as i32,
+        CeremonyStage::AwaitingKeyProvisionerConfirmations => {
+            pb::CeremonyStage::AwaitingKeyProvisionerConfirmations as i32
+        }
         CeremonyStage::Completed => pb::CeremonyStage::Completed as i32,
     }
 }

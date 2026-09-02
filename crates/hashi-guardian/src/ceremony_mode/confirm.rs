@@ -17,10 +17,10 @@ pub async fn confirm_ceremony(
     signed: KpSigned<CeremonyConfirmationRequest>,
 ) -> GuardianResult<CeremonyConfirmationResponse> {
     let lifecycle = enclave.lifecycle();
-    if lifecycle != CeremonyStage::AwaitingKeyProvisioners.into()
+    if lifecycle != CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         && lifecycle != CeremonyStage::Completed.into()
     {
-        enclave.require_lifecycle(CeremonyStage::AwaitingKeyProvisioners.into())?;
+        enclave.require_lifecycle(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())?;
     }
 
     let pending = enclave.pending_ceremony()?;
@@ -44,7 +44,7 @@ pub async fn confirm_ceremony(
         "Accepted key provisioner ceremony confirmation."
     );
 
-    if status.completed && lifecycle == CeremonyStage::AwaitingKeyProvisioners.into() {
+    if status.completed && lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() {
         enclave
             .advance_lifecycle_into(CeremonyStage::Completed.into())
             .expect("all KP confirmations should complete the ceremony lifecycle");
@@ -142,7 +142,7 @@ mod tests {
         let context = setup_context().await;
         assert_eq!(
             context.enclave.lifecycle(),
-            CeremonyStage::AwaitingKeyProvisioners.into()
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
 
         let first = context.signed_confirmation(0);

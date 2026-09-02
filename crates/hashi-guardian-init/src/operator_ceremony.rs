@@ -259,7 +259,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         );
         match status.info.lifecycle {
             lifecycle if lifecycle == CeremonyStage::Completed.into() => break,
-            lifecycle if lifecycle == CeremonyStage::AwaitingKeyProvisioners.into() => {
+            lifecycle if lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() => {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             lifecycle => anyhow::bail!(

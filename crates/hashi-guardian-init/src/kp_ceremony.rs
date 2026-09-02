@@ -183,7 +183,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
             .await?;
     ensure!(
-        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisioners.into()
+        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
             || verified.info.lifecycle == CeremonyStage::Completed.into(),
         "guardian is not accepting key provisioner ceremony confirmations"
     );

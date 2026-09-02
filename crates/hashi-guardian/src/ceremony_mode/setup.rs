@@ -86,7 +86,7 @@ pub async fn setup_new_key(
     let response = enclave.sign(response);
 
     enclave
-        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisioners.into())
+        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())
         .expect("setup_new_key should await key provisioner confirmations");
     info!("Setup complete; awaiting every key provisioner's confirmation.");
     Ok(response)
@@ -124,7 +124,7 @@ mod tests {
         let validated_resp = resp.verify_into_data(verification_key).unwrap().response;
         assert_eq!(
             enclave.lifecycle(),
-            CeremonyStage::AwaitingKeyProvisioners.into()
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
 
         // Response still carries the armored ciphertexts.
