@@ -118,6 +118,8 @@ const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 /// Per-call budget for pulling AVID dispersal artifacts from a cert's signers.
 const AVID_RETRIEVAL_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const AVID_RETRIEVAL_CALL_RETRIES: usize = 2;
+const AVID_LOCAL_READ_ATTEMPTS: usize = 3;
+const AVID_LOCAL_READ_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
@@ -143,11 +145,19 @@ pub(crate) enum AdjudicatedCert {
     Accepted(Option<CertKind>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum LocalMaterial {
-    Matches,
+    Matches { expected_common: MessagesHash },
     Absent,
     Mismatches,
+    Unreadable(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct TaggedAvidOutput {
+    pub output: batch_avss_avid::ReceiverOutput,
+    pub common_hash: MessagesHash,
+    pub cert_digest: Option<MessagesHash>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +230,7 @@ pub struct MpcManager {
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_nonce_outputs: BTreeMap<(u32, Address), batch_avss::ReceiverOutput>,
-    pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), batch_avss_avid::ReceiverOutput>,
+    pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), TaggedAvidOutput>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
 }
@@ -1153,6 +1163,7 @@ impl MpcManager {
                 &mut mgr.dealer_nonce_outputs,
                 batch_index,
                 &admission.certified,
+                |_| true,
                 |output| output.clone(),
             ),
             NonceGenerationProtocol::Avid => {
@@ -1165,7 +1176,8 @@ impl MpcManager {
                     &mut mgr.dealer_avid_nonce_outputs,
                     batch_index,
                     &admission.certified,
-                    |output| output.clone().into_legacy(&indices),
+                    |tagged| tagged.cert_digest.is_some(),
+                    |tagged| tagged.output.clone().into_legacy(&indices),
                 )
             }
         };
@@ -2763,6 +2775,17 @@ impl MpcManager {
         batch_index: u32,
         message: &batch_avss_avid::AvssMessage,
     ) -> MpcResult<BLS12381Signature> {
+        let common_hash = MessagesHash::from(message.common.hash().digest);
+        let cert_digest = match self.dealer_avid_nonce_outputs.get(&(batch_index, dealer)) {
+            Some(cached) if cached.common_hash == common_hash => cached.cert_digest,
+            Some(_) => {
+                return Err(MpcError::InvalidMessage {
+                    sender: dealer,
+                    reason: "this node already holds an output over a different common".into(),
+                });
+            }
+            None => None,
+        };
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let (output, avss_vote, verified_common) = receiver
             .process_avss_message(message)
@@ -2777,8 +2800,14 @@ impl MpcManager {
             dealer,
             &state,
         )?;
-        self.dealer_avid_nonce_outputs
-            .insert((batch_index, dealer), output);
+        self.dealer_avid_nonce_outputs.insert(
+            (batch_index, dealer),
+            TaggedAvidOutput {
+                output,
+                common_hash,
+                cert_digest,
+            },
+        );
         self.current_avid_verified_common
             .insert((batch_index, dealer), verified_common);
         let confirm = AvssVoteMessagesHash {
@@ -2863,7 +2892,11 @@ impl MpcManager {
                 reason: "dispersal common does not match this node's verified round state".into(),
             });
         }
-        self.ensure_avid_nonce_output(dealer, batch_index)?;
+        self.ensure_avid_nonce_output(
+            dealer,
+            batch_index,
+            &MessagesHash::from(own_common.hash().digest),
+        )?;
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let verified_common = self.avid_round_verified_common(dealer, batch_index)?;
         let avid_confirm =
@@ -3023,18 +3056,35 @@ impl MpcManager {
         Ok(ComplaintResponse::NonceGenerationAvid(response))
     }
 
-    fn ensure_avid_nonce_output(&mut self, dealer: Address, batch_index: u32) -> MpcResult<()> {
-        if self
-            .dealer_avid_nonce_outputs
-            .contains_key(&(batch_index, dealer))
-        {
-            return Ok(());
+    fn ensure_avid_nonce_output(
+        &mut self,
+        dealer: Address,
+        batch_index: u32,
+        expected_common: &MessagesHash,
+    ) -> MpcResult<()> {
+        match self.dealer_avid_nonce_outputs.get(&(batch_index, dealer)) {
+            Some(cached) if cached.common_hash == *expected_common => return Ok(()),
+            Some(_) => {
+                return Err(MpcError::InvalidMessage {
+                    sender: dealer,
+                    reason: "this node already holds an output over a different common".into(),
+                });
+            }
+            None => {}
         }
         let state = self
             .get_avid_round_state(batch_index, &dealer)?
             .ok_or_else(|| {
                 MpcError::NotReady("no verified common message for this AVID round".into())
             })?;
+        if MessagesHash::from(state.common.hash().digest) != *expected_common {
+            return Err(MpcError::InvalidMessage {
+                sender: dealer,
+                reason: "this node's AVID round state pins a different common than the \
+                         certificate"
+                    .into(),
+            });
+        }
         let message = batch_avss_avid::AvssMessage {
             common: state.common,
             ciphertext: state.own_ciphertext,
@@ -3700,25 +3750,53 @@ impl MpcManager {
         digest: &MessagesHash,
     ) -> LocalMaterial {
         let read = match kind {
-            CertKind::AvssVote => self
-                .get_avid_round_state(batch_index, dealer)
-                .map(|s| s.map(|state| MessagesHash::from(state.common.hash().digest))),
-            CertKind::AvidVote => self
-                .try_get_avid_held_echoes(batch_index, dealer)
-                .map(|e| e.map(|(vote, _)| hash_avid_vote(&vote))),
+            CertKind::AvssVote => self.get_avid_round_state(batch_index, dealer).map(|s| {
+                s.map(|state| {
+                    let common = MessagesHash::from(state.common.hash().digest);
+                    (common, common)
+                })
+            }),
+            CertKind::AvidVote => self.try_get_avid_held_echoes(batch_index, dealer).map(|e| {
+                e.map(|(vote, _)| {
+                    (
+                        hash_avid_vote(&vote),
+                        MessagesHash::from(vote.common_message_hash.digest),
+                    )
+                })
+            }),
         };
-        let held = read.unwrap_or_else(|e| {
-            tracing::warn!(
-                "AVID local material for {dealer:?} batch {batch_index} unreadable, \
-                 treating as absent: {e}"
-            );
-            None
-        });
-        match held {
-            None => LocalMaterial::Absent,
-            Some(local) if local == *digest => LocalMaterial::Matches,
-            Some(_) => LocalMaterial::Mismatches,
+        match read {
+            Err(e) => LocalMaterial::Unreadable(e.to_string()),
+            Ok(None) => LocalMaterial::Absent,
+            Ok(Some((pins, expected_common))) if pins == *digest => {
+                LocalMaterial::Matches { expected_common }
+            }
+            Ok(Some(_)) => LocalMaterial::Mismatches,
         }
+    }
+
+    async fn avid_local_material_retrying(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        dealer: &Address,
+        kind: CertKind,
+        digest: &MessagesHash,
+    ) -> LocalMaterial {
+        let read = || {
+            mpc_manager
+                .read()
+                .unwrap()
+                .avid_local_material(batch_index, dealer, kind, digest)
+        };
+        let mut material = read();
+        for _ in 1..AVID_LOCAL_READ_ATTEMPTS {
+            if kind != CertKind::AvssVote || !matches!(material, LocalMaterial::Unreadable(_)) {
+                break;
+            }
+            tokio::time::sleep(AVID_LOCAL_READ_RETRY_DELAY).await;
+            material = read();
+        }
+        material
     }
 
     async fn pull_and_resolve_avid_cert(
@@ -3728,7 +3806,7 @@ impl MpcManager {
         nonce_cert: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
-    ) -> MpcResult<CertKind> {
+    ) -> MpcResult<(CertKind, MessagesHash)> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
             let request = RetrieveMessagesRequest {
@@ -3791,7 +3869,7 @@ impl MpcManager {
                         .is_some_and(|c| MessagesHash::from(c.hash().digest) == digest)
                 });
                 return if common_pins {
-                    Ok((CertKind::AvssVote, None))
+                    Ok((CertKind::AvssVote, digest, None))
                 } else {
                     Err(MpcError::NotFound(
                         "no pulled artifact pins to the certified digest".into(),
@@ -3799,6 +3877,20 @@ impl MpcManager {
                 };
             };
             let expected_common_hash = avid_vote.common_message_hash;
+            let expected = MessagesHash::from(expected_common_hash.digest);
+            match mgr.ensure_avid_nonce_output(dealer, batch_index, &expected) {
+                Ok(()) => return Ok((CertKind::AvidVote, expected, None)),
+                Err(MpcError::NotReady(_)) => {}
+                Err(e @ MpcError::InvalidMessage { .. }) => tracing::warn!(
+                    "AVID material held for {:?} batch {batch_index} pins a different common \
+                     than the certified vote; decoding instead: {e}",
+                    dealer
+                ),
+                Err(e) => tracing::debug!(
+                    "AVID material for {:?} batch {batch_index} unavailable before decode: {e}",
+                    dealer
+                ),
+            }
             let common = bundles
                 .iter()
                 .find_map(|(_, b)| {
@@ -3854,6 +3946,7 @@ impl MpcManager {
                 )) => {
                     return Ok((
                         CertKind::AvidVote,
+                        expected,
                         Some((ProtocolComplaint::AvidReveal(complaint), verified_common)),
                     ));
                 }
@@ -3863,6 +3956,7 @@ impl MpcManager {
                 )) => {
                     return Ok((
                         CertKind::AvidVote,
+                        expected,
                         Some((
                             ProtocolComplaint::AvidBlame {
                                 complaint,
@@ -3876,10 +3970,10 @@ impl MpcManager {
                     tracing::warn!("AVID decode for dealer {:?} failed: {}", dealer, e);
                 }
             }
-            Ok((CertKind::AvidVote, None))
+            Ok((CertKind::AvidVote, expected, None))
         })
         .await?;
-        let (kind, complaint) = outcome;
+        let (kind, expected, complaint) = outcome;
         if let Some((complaint, verified_common)) = complaint
             && let Err(e) = Self::recover_avid_nonce_shares_via_complaint(
                 mpc_manager,
@@ -3887,6 +3981,7 @@ impl MpcManager {
                 batch_index,
                 verified_common,
                 complaint,
+                expected,
                 complaint_signers,
                 p2p_channel,
                 metrics,
@@ -3899,7 +3994,7 @@ impl MpcManager {
                 e
             );
         }
-        Ok(kind)
+        Ok((kind, expected))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3909,6 +4004,7 @@ impl MpcManager {
         batch_index: u32,
         verified_common: batch_avss_avid::VerifiedAvssCommonMessage,
         complaint: ProtocolComplaint,
+        expected_common: MessagesHash,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
@@ -3987,8 +4083,14 @@ impl MpcManager {
             verified.push(response);
             if let Some(output) = output {
                 let mut mgr = mpc_manager.write().unwrap();
-                mgr.dealer_avid_nonce_outputs
-                    .insert((batch_index, dealer), output);
+                mgr.dealer_avid_nonce_outputs.insert(
+                    (batch_index, dealer),
+                    TaggedAvidOutput {
+                        output,
+                        common_hash: expected_common,
+                        cert_digest: None,
+                    },
+                );
                 tracing::info!(
                     "AVID nonce shares recovered via complaint: dealer {:?}, \
                      batch_index={batch_index}, responses used {}",
@@ -4101,48 +4203,110 @@ impl MpcManager {
                 }
             }
             let digest = nonce_cert.message().messages_hash;
-            let material = {
+            let validated_common = {
                 let mgr = mpc_manager.read().unwrap();
-                mgr.avid_local_material(batch_index, &dealer, kind, &digest)
+                mgr.dealer_avid_nonce_outputs
+                    .get(&(batch_index, dealer))
+                    .filter(|cached| cached.cert_digest == Some(digest))
+                    .map(|cached| cached.common_hash)
             };
-            if material != LocalMaterial::Matches {
-                let _timer = metrics
-                    .mpc_message_retrieval_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                    .start_timer();
-                let repaired = Self::pull_and_resolve_avid_cert(
-                    mpc_manager,
-                    dealer,
-                    batch_index,
-                    &nonce_cert,
-                    p2p_channel,
-                    metrics,
-                )
-                .await;
-                drop(_timer);
-                match repaired {
-                    Ok(repaired_kind) if repaired_kind == kind => {}
-                    Ok(other) => {
-                        tracing::warn!(
-                            "AVID retrieval for {:?} pinned {:?} against a cert signed as \
-                             {:?}; refusing.",
-                            dealer,
-                            other,
-                            kind
-                        );
-                        local_skips += 1;
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!("AVID retrieval failed for {:?}: {}", dealer, e);
-                        local_skips += 1;
-                        continue;
+            let expected_common = match validated_common {
+                Some(expected_common) => expected_common,
+                None => {
+                    let material = Self::avid_local_material_retrying(
+                        mpc_manager,
+                        batch_index,
+                        &dealer,
+                        kind,
+                        &digest,
+                    )
+                    .await;
+                    match material {
+                        LocalMaterial::Matches { expected_common } => expected_common,
+                        material if kind == CertKind::AvssVote => {
+                            let own_confirm_in_cert = {
+                                let mgr = mpc_manager.read().unwrap();
+                                !Self::dealer_deals_nothing(
+                                    &mgr.committee,
+                                    &mgr.mpc_config.nodes,
+                                    &mgr.address,
+                                )
+                            };
+                            let cause = match (&material, own_confirm_in_cert) {
+                                (_, false) => "this node's confirm was not needed for that cert",
+                                (LocalMaterial::Absent, true) => {
+                                    "this node's confirm was part of that cert, so its round \
+                                     state is missing"
+                                }
+                                (LocalMaterial::Mismatches, true) => {
+                                    "this node's confirm was part of that cert, yet its round \
+                                     state pins a different common"
+                                }
+                                (_, true) => {
+                                    "this node's confirm was part of that cert, and its round \
+                                     state could not be read"
+                                }
+                            };
+                            tracing::warn!(
+                                "Skipping AVID dealer {:?} for batch {batch_index}: local \
+                                 material for its full-weight confirm cert is {material:?}; \
+                                 {cause}",
+                                dealer
+                            );
+                            local_skips += 1;
+                            continue;
+                        }
+                        material => {
+                            if let LocalMaterial::Unreadable(e) = &material {
+                                tracing::warn!(
+                                    "AVID local material for {:?} batch {batch_index} \
+                                     unreadable, pulling instead: {e}",
+                                    dealer
+                                );
+                            }
+                            let _timer = metrics
+                                .mpc_message_retrieval_duration_seconds
+                                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                                .start_timer();
+                            let repaired = Self::pull_and_resolve_avid_cert(
+                                mpc_manager,
+                                dealer,
+                                batch_index,
+                                &nonce_cert,
+                                p2p_channel,
+                                metrics,
+                            )
+                            .await;
+                            drop(_timer);
+                            match repaired {
+                                Ok((repaired_kind, expected_common)) if repaired_kind == kind => {
+                                    expected_common
+                                }
+                                Ok((other, _)) => {
+                                    tracing::warn!(
+                                        "AVID retrieval for {:?} pinned {:?} against a cert \
+                                         signed as {:?}; refusing.",
+                                        dealer,
+                                        other,
+                                        kind
+                                    );
+                                    local_skips += 1;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("AVID retrieval failed for {:?}: {}", dealer, e);
+                                    local_skips += 1;
+                                    continue;
+                                }
+                            }
+                        }
                     }
                 }
-            }
+            };
             let dealer_weight = {
                 let mut mgr = mpc_manager.write().unwrap();
-                if let Err(e) = mgr.ensure_avid_nonce_output(dealer, batch_index) {
+                if let Err(e) = mgr.ensure_avid_nonce_output(dealer, batch_index, &expected_common)
+                {
                     tracing::warn!(
                         "No AVID nonce output for {:?} after processing: {}",
                         dealer,
@@ -4151,6 +4315,18 @@ impl MpcManager {
                     local_skips += 1;
                     continue;
                 }
+                let Some(cached) = mgr
+                    .dealer_avid_nonce_outputs
+                    .get_mut(&(batch_index, dealer))
+                else {
+                    tracing::warn!(
+                        "No AVID nonce output for {:?} after it was ensured; skipping",
+                        dealer
+                    );
+                    local_skips += 1;
+                    continue;
+                };
+                cached.cert_digest = Some(digest);
                 match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
                     mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
                         MpcError::InvalidCertificate(format!(
@@ -4241,6 +4417,7 @@ impl MpcManager {
         batch_avss_avid::VerifiedAvssCommonMessage,
     )> {
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
+        let common_hash = MessagesHash::from(common.hash().digest);
         let verified_common = receiver
             .verify_common_message(vote_cert, common)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
@@ -4248,8 +4425,14 @@ impl MpcManager {
             .decode_and_decrypt(echoes, &verified_common, rng)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         if let batch_avss_avid::DecodeAndDecryptOutcome::Valid(output) = &outcome {
-            self.dealer_avid_nonce_outputs
-                .insert((batch_index, dealer), output.clone());
+            self.dealer_avid_nonce_outputs.insert(
+                (batch_index, dealer),
+                TaggedAvidOutput {
+                    output: output.clone(),
+                    common_hash,
+                    cert_digest: None,
+                },
+            );
         }
         Ok((outcome, verified_common))
     }
@@ -7224,6 +7407,7 @@ fn consume_certified_nonce_outputs<T>(
     outputs_map: &mut BTreeMap<(u32, Address), T>,
     batch_index: u32,
     certified: &HashSet<Address>,
+    mut keep: impl FnMut(&T) -> bool,
     mut convert: impl FnMut(&T) -> batch_avss::ReceiverOutput,
 ) -> (usize, Vec<Address>, Vec<batch_avss::ReceiverOutput>) {
     let pre_filter = outputs_map
@@ -7236,7 +7420,7 @@ fn consume_certified_nonce_outputs<T>(
         if *b != batch_index {
             return true;
         }
-        if certified.contains(addr) {
+        if certified.contains(addr) && keep(output) {
             dealers.push(*addr);
             outputs.push(convert(output));
             true
