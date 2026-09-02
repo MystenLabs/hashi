@@ -89,6 +89,7 @@ pub struct Metrics {
 
     // Hashi Onchain state metrics
     epoch: IntGauge,
+    committee_total_weight: IntGauge,
     reconfig_in_progress: IntGauge,
     paused: IntGauge,
     deposit_queue_size: IntGauge,
@@ -663,6 +664,13 @@ impl Metrics {
             epoch: register_int_gauge_with_registry!(
                 "hashi_epoch",
                 "current hashi epoch",
+                registry,
+            )
+            .unwrap(),
+            committee_total_weight: register_int_gauge_with_registry!(
+                "hashi_committee_total_weight",
+                "Total voting weight of the whole current committee, not this \
+                 node's share; 0 when no committee is known",
                 registry,
             )
             .unwrap(),
@@ -1474,6 +1482,12 @@ impl Metrics {
         let hashi = guard.hashi();
 
         self.epoch.set(hashi.committees.epoch() as i64);
+        self.committee_total_weight.set(
+            hashi
+                .committees
+                .current_committee()
+                .map_or(0, |c| c.total_weight() as i64),
+        );
         self.reconfig_in_progress
             .set(if hashi.committees.pending_epoch_change().is_some() {
                 1
