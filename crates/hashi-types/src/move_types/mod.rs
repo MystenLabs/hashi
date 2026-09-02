@@ -284,9 +284,16 @@ pub struct MemberInfo {
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Vec<u8>,
 
-    /// Open-ended per-member extension slot. Carries the governance flags
-    /// ([`MEMBER_IGNORED_KEY`]) as typed values while `MemberInfo`'s layout
-    /// is frozen on the deployed network.
+    /// Governance "ignored" flag: when set, the next committee formation
+    /// skips this member.
+    pub ignored: bool,
+
+    /// Voluntary "resigned" flag: when set, the next committee formation
+    /// skips this member.
+    pub resigned: bool,
+
+    /// Open-ended per-member extension slot for member data added after the
+    /// layout freezes at mainnet. Empty today.
     pub extra_fields: Config,
 }
 
@@ -985,14 +992,6 @@ impl MoveType for IgnoreMember {
     const MODULE: &'static str = "ignore_member";
     const NAME: &'static str = "IgnoreMember";
 }
-
-/// `MemberInfo.extra_fields` key holding the governance "ignored" flag.
-/// Mirrors `MEMBER_IGNORED_KEY` in `committee_set.move`.
-pub const MEMBER_IGNORED_KEY: &str = "ignored";
-
-/// `MemberInfo.extra_fields` key holding the voluntary "resigned" flag.
-/// Mirrors `MEMBER_RESIGNED_KEY` in `committee_set.move`.
-pub const MEMBER_RESIGNED_KEY: &str = "resigned";
 
 /// Rust version of the Move hashi::validator::ValidatorResigned event.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]

@@ -11,7 +11,7 @@
 #[allow(unused_function, unused_field)]
 module hashi::committee_set;
 
-use hashi::{committee::{Self, Committee}, config::{Self, Config}, config_value};
+use hashi::{committee::{Self, Committee}, config::{Self, Config}};
 use std::string::String;
 use sui::{
     bag::Bag,
@@ -19,32 +19,6 @@ use sui::{
     bls12381::{UncompressedG1, bls12381_min_pk_verify, g1_from_bytes, g1_to_uncompressed_g1},
     group_ops::Element
 };
-
-// ~~~~~~~ Constants ~~~~~~~
-
-/// `MemberInfo.extra_fields` key holding the governance "ignored" flag as a
-/// `Bool` value. An absent key means not ignored, so members registered
-/// before this key existed need no migration.
-///
-/// The flag lives in `extra_fields` only because `MemberInfo`'s layout is
-/// frozen on the deployed network.
-///
-/// TODO(pre-mainnet-wipe): when testnet is wiped and the Move versions are
-/// squashed before mainnet, promote this to a root-level `ignored: bool`
-/// field on `MemberInfo` and delete this key (and its Rust mirror
-/// `MEMBER_IGNORED_KEY` / the `extra_fields` decode in
-/// `convert_move_member_info`).
-const MEMBER_IGNORED_KEY: vector<u8> = b"ignored";
-
-/// `MemberInfo.extra_fields` key holding the voluntary "resigned" flag as a
-/// `Bool` value. Set by `request_resignation`, cleared by
-/// `clear_resignation`, honored by committee formation (skip); the
-/// registration itself is deleted by the permissionless
-/// `remove_inactive_member` once the member holds no epoch duties.
-///
-/// TODO(pre-mainnet-wipe): promote to a root-level `resigned: bool` field on
-/// `MemberInfo` together with `MEMBER_IGNORED_KEY` above.
-const MEMBER_RESIGNED_KEY: vector<u8> = b"resigned";
 
 // ~~~~~~~ Errors ~~~~~~~
 
@@ -135,13 +109,19 @@ public struct MemberInfo has store {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     next_epoch_encryption_public_key: vector<u8>,
+    /// Governance "ignored" flag, set and cleared only through the
+    /// quorum-gated `ignore_member` proposal. Read at committee formation:
+    /// the next formation skips the member; the current epoch's committee is
+    /// never altered.
+    ignored: bool,
+    /// Voluntary "resigned" flag. Set by `request_resignation`, cleared by
+    /// `clear_resignation`, honored by committee formation (skip); the
+    /// registration itself is deleted by the permissionless
+    /// `remove_inactive_member` once the member holds no epoch duties.
+    resigned: bool,
     /// Open-ended per-member extension slot; lets future upgrades attach new
-    /// member data (e.g. per-protocol keys) without a MemberInfoV2 migration.
-    ///
-    /// Carries the governance flags (`MEMBER_IGNORED_KEY`) as typed values
-    /// because MemberInfo's layout is frozen on the deployed network. When
-    /// testnet is wiped before mainnet, promote them to real `bool` fields
-    /// on MemberInfo and delete the keys.
+    /// member data (e.g. per-protocol keys) without a MemberInfoV2 migration
+    /// once the layout freezes at mainnet. Empty today.
     extra_fields: Config,
 }
 
@@ -178,6 +158,8 @@ public(package) fun new_member(
         endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
         next_epoch_encryption_public_key: std::vector::empty(),
+        ignored: false,
+        resigned: false,
         extra_fields: config::empty(),
     };
 
@@ -298,10 +280,7 @@ public(package) fun set_member_ignored(
     ignored: bool,
 ) {
     assert!(self.has_member(validator_address), EMemberNotRegistered);
-    self
-        .member_mut(validator_address)
-        .extra_fields
-        .upsert(MEMBER_IGNORED_KEY, config_value::new_bool(ignored));
+    self.member_mut(validator_address).ignored = ignored;
 }
 
 /// Whether the registered member is currently flagged as ignored by
@@ -340,10 +319,7 @@ public(package) fun request_resignation(
     if (self.in_current_or_pending_committee(validator_address)) {
         self.assert_not_last_active_member(validator_address);
     };
-    self
-        .member_mut(validator_address)
-        .extra_fields
-        .upsert(MEMBER_RESIGNED_KEY, config_value::new_bool(true));
+    self.member_mut(validator_address).resigned = true;
 }
 
 /// Permissionless registry cleanup: delete the registration of a member who
@@ -380,10 +356,7 @@ public(package) fun clear_resignation(
     let member = self.member(validator_address);
     member.assert_authorized(ctx);
     assert!(member.is_resigned(), ENotResigned);
-    self
-        .member_mut(validator_address)
-        .extra_fields
-        .upsert(MEMBER_RESIGNED_KEY, config_value::new_bool(false));
+    self.member_mut(validator_address).resigned = false;
 }
 
 public(package) fun start_reconfig(
@@ -650,16 +623,14 @@ fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
     sender == self.validator_address || sender == self.operator_address
 }
 
-/// Whether governance has flagged this member as ignored. An absent key
-/// means not ignored.
+/// Whether governance has flagged this member as ignored.
 fun is_ignored(self: &MemberInfo): bool {
-    self.extra_fields.try_get(MEMBER_IGNORED_KEY).map!(|value| value.as_bool()).destroy_or!(false)
+    self.ignored
 }
 
-/// Whether this member has a pending resignation. An absent key means not
-/// resigned.
+/// Whether this member has a pending resignation.
 fun is_resigned(self: &MemberInfo): bool {
-    self.extra_fields.try_get(MEMBER_RESIGNED_KEY).map!(|value| value.as_bool()).destroy_or!(false)
+    self.resigned
 }
 
 /// Whether the member currently serves an epoch: in the current committee,
@@ -715,6 +686,8 @@ fun remove_member(self: &mut CommitteeSet, validator_address: address) {
         endpoint_url: _,
         tls_public_key: _,
         next_epoch_encryption_public_key: _,
+        ignored: _,
+        resigned: _,
         extra_fields: _,
     } = self.members.remove(validator_address);
 }
@@ -914,6 +887,8 @@ fun create_member_info_for_testing(
         endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
         next_epoch_encryption_public_key: encryption_key,
+        ignored: false,
+        resigned: false,
         extra_fields: config::empty(),
     }
 }

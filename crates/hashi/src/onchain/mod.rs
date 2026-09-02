@@ -1741,7 +1741,9 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
         endpoint_url,
         tls_public_key,
         next_epoch_encryption_public_key,
-        extra_fields,
+        ignored,
+        resigned,
+        extra_fields: _,
     } = info;
     types::MemberInfo {
         validator_address,
@@ -1753,8 +1755,8 @@ fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
             next_epoch_encryption_public_key.as_slice(),
         )
         .map(Into::into),
-        ignored: extra_fields.get_bool(move_types::MEMBER_IGNORED_KEY, false),
-        resigned: extra_fields.get_bool(move_types::MEMBER_RESIGNED_KEY, false),
+        ignored,
+        resigned,
     }
 }
 
@@ -2427,7 +2429,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_convert_move_member_info_reads_ignored_flag() {
+    fn test_convert_move_member_info_carries_governance_flags() {
         let mut rng = rand::thread_rng();
         let validator_address =
             Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
@@ -2438,26 +2440,29 @@ mod tests {
                 .serialize()
                 .to_vec();
 
-        let member = |extra_fields: move_types::Config| move_types::MemberInfo {
+        let member = |ignored: bool, resigned: bool| move_types::MemberInfo {
             validator_address,
             operator_address: validator_address,
             next_epoch_public_key: uncompressed_pubkey.clone(),
             endpoint_url: String::new(),
             tls_public_key: vec![],
             next_epoch_encryption_public_key: vec![],
-            extra_fields,
+            ignored,
+            resigned,
+            extra_fields: move_types::Config::from_entries(vec![]),
         };
 
-        // Absent key (the state of every member registered before the flag
-        // existed) means not ignored.
-        let converted = convert_move_member_info(member(move_types::Config::from_entries(vec![])));
+        let converted = convert_move_member_info(member(false, false));
         assert!(!converted.ignored);
+        assert!(!converted.resigned);
 
-        let converted = convert_move_member_info(member(move_types::Config::from_entries(vec![(
-            move_types::MEMBER_IGNORED_KEY.to_string(),
-            move_types::ConfigValue::Bool(true),
-        )])));
+        let converted = convert_move_member_info(member(true, false));
         assert!(converted.ignored);
+        assert!(!converted.resigned);
+
+        let converted = convert_move_member_info(member(false, true));
+        assert!(!converted.ignored);
+        assert!(converted.resigned);
     }
 
     #[test]
