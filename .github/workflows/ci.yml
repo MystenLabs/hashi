@@ -117,24 +117,6 @@ jobs:
 
       - run: make is-dirty
 
-  # The enclave build resolves a pruned workspace and passes --locked, so its
-  # lock is committed (docker/hashi-guardian/enclave-Cargo.lock). Regenerate it
-  # here and fail if it drifts: otherwise a workspace dependency change lands
-  # green and only breaks later, when someone actually needs to build an EIF.
-  # The full EIF build (guardian-enclave.yml) is workflow_dispatch only and so
-  # gates nothing on merge; this is the cheap check that does.
-  guardian-enclave-lock:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Regenerate the enclave lock
-        run: make -C docker/hashi-guardian enclave-lock
-
-      - run: make is-dirty
-
   docs:
     runs-on: ubuntu-latest
 

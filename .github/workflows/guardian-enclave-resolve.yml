@@ -1,0 +1,27 @@
+name: Guardian Enclave Resolve
+
+# The enclave EIF build's resolve stage on its own: the hashi-guardian +
+# hashi-types slice resolved against the committed root Cargo.lock, in the
+# enclave toolchain (docker/hashi-guardian/Containerfile), ~45 s. Also runs on
+# push to main: deploy hosts build the EIF from a clone of main, and a merge
+# whose base moved since its PR run can leave main unresolvable (#978).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guardian-enclave-resolve:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve the enclave workspace against the root lock
+        run: make -C docker/hashi-guardian resolve-check
