@@ -919,3 +919,226 @@ fun test_upgrade_non_exclusive_preserves_enabled_versions() {
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
+
+// ======== Event Tests ========
+
+#[test]
+/// The creator's automatic vote is announced like any other vote, and quorum
+/// reached by that vote alone is announced at creation.
+fun test_create_emits_creator_vote_and_quorum() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    let votes = sui::event::events_by_type<proposal::VoteCast<UpdateConfig>>();
+    assert!(votes.length() == 1);
+    assert!(votes[0] == proposal::vote_cast_for_testing<UpdateConfig>(proposal_id, VOTER1));
+    let quorum = sui::event::events_by_type<proposal::QuorumReached<UpdateConfig>>();
+    assert!(quorum.length() == 1);
+    assert!(quorum[0] == proposal::quorum_reached_for_testing<UpdateConfig>(proposal_id));
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// A creator vote that does not reach quorum announces the vote only; the
+/// quorum event still comes from the vote that crosses the threshold.
+fun test_create_below_quorum_emits_vote_only() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx,
+    );
+    assert!(sui::event::events_by_type<proposal::VoteCast<UpdateConfig>>().length() == 1);
+    assert!(sui::event::events_by_type<proposal::QuorumReached<UpdateConfig>>().length() == 0);
+
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<UpdateConfig>(&mut hashi, VOTER2, proposal_id, &clock, ctx2);
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    proposal::vote<UpdateConfig>(&mut hashi, VOTER3, proposal_id, &clock, ctx3);
+    assert!(sui::event::events_by_type<proposal::VoteCast<UpdateConfig>>().length() == 3);
+    assert!(sui::event::events_by_type<proposal::QuorumReached<UpdateConfig>>().length() == 1);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// Before genesis there is no committee to weigh votes against. Creating a
+/// proposal must still work (registration alone authorizes it) and must not
+/// announce quorum.
+fun test_create_before_genesis_emits_no_quorum() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let sk = test_utils::bls_sk_for_testing();
+    let pub_key = bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk));
+    let committee_set = hashi::committee_set::create_pre_genesis_for_testing(
+        vector[VOTER1],
+        *pub_key.bytes(),
+        sk,
+        ctx,
+    );
+    let mut config = hashi::config::create();
+    hashi::btc_config::init_defaults(&mut config);
+    hashi::mpc_config::init_defaults(&mut config);
+    let mut hashi = hashi::hashi::create_for_testing(
+        committee_set,
+        config,
+        hashi::versioning::create(),
+        hashi::treasury::create(ctx),
+        hashi::proposals::create(ctx),
+        sui::bag::new(ctx),
+        ctx,
+    );
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx,
+    );
+    assert!(hashi.proposals().active().contains(proposal_id));
+    assert!(sui::event::events_by_type<proposal::VoteCast<UpdateConfig>>().length() == 1);
+    assert!(sui::event::events_by_type<proposal::QuorumReached<UpdateConfig>>().length() == 0);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// Deleting an expired proposal announces the deletion.
+fun test_delete_expired_emits_proposal_deleted() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx,
+    );
+    clock::increment_for_testing(&mut clock, MAX_PROPOSAL_DURATION_MS + 1);
+    let data = proposal::delete_expired<UpdateConfig>(&mut hashi, proposal_id, &clock);
+    std::unit_test::destroy(data);
+
+    let deleted = sui::event::events_by_type<proposal::ProposalDeleted<UpdateConfig>>();
+    assert!(deleted.length() == 1);
+    assert!(deleted[0] == proposal::proposal_deleted_for_testing<UpdateConfig>(proposal_id));
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+// ======== Committee Membership Tests (Certora L-03) ========
+
+#[test]
+#[expected_failure(abort_code = proposal::ENotCommitteeMember)]
+/// A validator that is registered but not in the current committee cannot
+/// create a proposal once a committee exists.
+fun test_create_by_registered_non_member_fails() {
+    let ctx = &mut test_utils::new_tx_context(NON_VOTER, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2, VOTER3],
+        vector[VOTER1, VOTER2, VOTER3, NON_VOTER],
+        ctx,
+    );
+    let clock = clock::create_for_testing(ctx);
+
+    // Registered, authorized by its own key, but outside the committee.
+    let _proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        NON_VOTER,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // Won't reach here
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = proposal::ENotCommitteeMember)]
+/// A validator that is registered but not in the current committee cannot
+/// vote; its vote would carry no weight and must not be recorded.
+fun test_vote_by_registered_non_member_fails() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2, VOTER3],
+        vector[VOTER1, VOTER2, VOTER3, NON_VOTER],
+        ctx1,
+    );
+    let clock = clock::create_for_testing(ctx1);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx1,
+    );
+
+    let ctx_non = &mut test_utils::new_tx_context(NON_VOTER, 0);
+    proposal::vote<UpdateConfig>(&mut hashi, NON_VOTER, proposal_id, &clock, ctx_non);
+
+    // Won't reach here
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// A registered validator outside the committee can still retract a vote it
+/// cast while seated: `remove_vote` stays registration-gated so a rotated-out
+/// member can withdraw support from a proposal it no longer backs.
+fun test_remove_vote_by_rotated_out_member_succeeds() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee_and_registry(
+        vector[VOTER1, VOTER2, VOTER3],
+        vector[VOTER1, VOTER2, VOTER3, NON_VOTER],
+        ctx1,
+    );
+    let clock = clock::create_for_testing(ctx1);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        VOTER1,
+        1000,
+        &clock,
+        ctx1,
+    );
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<UpdateConfig>(&mut hashi, VOTER2, proposal_id, &clock, ctx2);
+    assert!(
+        hashi.proposals().active().borrow<_, proposal::Proposal<UpdateConfig>>(proposal_id).votes().length() == 2,
+    );
+
+    // Retraction needs registration only.
+    proposal::remove_vote<UpdateConfig>(&mut hashi, VOTER2, proposal_id, ctx2);
+    assert!(
+        hashi.proposals().active().borrow<_, proposal::Proposal<UpdateConfig>>(proposal_id).votes().length() == 1,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
