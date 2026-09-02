@@ -29,6 +29,9 @@ pub struct MonitorConfig {
 
     /// bitcoind JSON-RPC server auth config
     pub bitcoind_rpc_auth: corepc_client::client_sync::Auth,
+
+    /// Directory for storing BTC light client data
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for MonitorConfig {
@@ -39,6 +42,7 @@ impl Default for MonitorConfig {
             start_height: DEFAULT_START_HEIGHT,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
             bitcoind_rpc_auth: corepc_client::client_sync::Auth::None,
+            data_dir: None,
         }
     }
 }
@@ -58,6 +62,7 @@ pub struct MonitorConfigBuilder {
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
     bitcoind_rpc_auth: Option<corepc_client::client_sync::Auth>,
+    data_dir: Option<PathBuf>,
 }
 
 impl MonitorConfigBuilder {
@@ -91,6 +96,12 @@ impl MonitorConfigBuilder {
         self
     }
 
+    /// Set the directory for storing BTC light client data.
+    pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(path.into());
+        self
+    }
+
     pub fn build(self) -> MonitorConfig {
         let default = MonitorConfig::default();
 
@@ -100,6 +111,7 @@ impl MonitorConfigBuilder {
             start_height: self.start_height,
             bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
             bitcoind_rpc_auth: self.bitcoind_rpc_auth.unwrap_or(default.bitcoind_rpc_auth),
+            data_dir: self.data_dir,
         }
     }
 }

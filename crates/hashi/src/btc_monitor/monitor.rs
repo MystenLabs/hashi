@@ -628,7 +628,7 @@ impl Monitor {
         config: &MonitorConfig,
         checkpoint: HashCheckpoint,
     ) -> (kyoto::Node, kyoto::Client) {
-        kyoto::Builder::new(config.network)
+        let mut builder = kyoto::Builder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
             // Only connect to the configured trusted peers. Prevents Kyoto from
             // discovering additional peers via DNS seeding or addr gossip.
@@ -636,8 +636,13 @@ impl Monitor {
             // drains, the node exits and the supervision loop rebuilds it.
             .whitelist_only()
             .maximum_connection_time(Duration::MAX)
-            .chain_state(kyoto::ChainState::Checkpoint(checkpoint))
-            .build()
+            .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
+
+        if let Some(data_dir) = &config.data_dir {
+            builder = builder.data_dir(data_dir.clone());
+        }
+
+        builder.build()
     }
 
     /// Kyoto re-syncs from its checkpoint on every build, so anchor as high as
