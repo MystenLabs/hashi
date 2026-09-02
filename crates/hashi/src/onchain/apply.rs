@@ -1362,6 +1362,8 @@ mod tests {
         endpoint_url: String,
         tls_public_key: Vec<u8>,
         next_epoch_encryption_public_key: Vec<u8>,
+        ignored: bool,
+        resigned: bool,
         extra_fields: move_types::Config,
     }
 
@@ -1726,6 +1728,8 @@ mod tests {
                 endpoint_url: "https://validator.example.com".to_owned(),
                 tls_public_key: vec![7u8; 32],
                 next_epoch_encryption_public_key: vec![0u8; 32],
+                ignored: false,
+                resigned: false,
                 extra_fields: move_types::Config::from_entries(vec![]),
             },
         })

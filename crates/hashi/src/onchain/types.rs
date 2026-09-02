@@ -575,14 +575,13 @@ pub struct MemberInfo {
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Option<EncryptionPublicKey>,
 
-    /// Governance "ignored" flag from `extra_fields`: when set, the next
-    /// committee formation skips this member. The current epoch's committee
-    /// is unaffected.
+    /// Governance "ignored" flag: when set, the next committee formation
+    /// skips this member. The current epoch's committee is unaffected.
     pub ignored: bool,
 
-    /// Voluntary "resigned" flag from `extra_fields`: when set, the next
-    /// committee formation skips this member and the epoch transition
-    /// removes their registration.
+    /// Voluntary "resigned" flag: when set, the next committee formation
+    /// skips this member and the epoch transition removes their
+    /// registration.
     pub resigned: bool,
 }
 
