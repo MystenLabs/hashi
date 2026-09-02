@@ -44,6 +44,13 @@ public struct Versioning has store {
 
 // Constructor
 
+/// The version this tree declares, for tests that must stay correct across
+/// the bump that records each deployment.
+#[test_only]
+public fun package_version(): u64 {
+    PACKAGE_VERSION
+}
+
 public(package) fun create(): Versioning {
     Versioning {
         enabled_versions: vec_set::from_keys(vector[PACKAGE_VERSION]),
