@@ -18,7 +18,8 @@ bitcoin.workspace = true
 corepc-client.workspace = true
 jsonrpc.workspace = true
 kyoto.workspace = true
-# Unused directly; enables minreq's `https` feature for the bitcoind RPC client.
+# Enables minreq's `https` feature for the bitcoind RPC client; the monitor
+# also matches on its error type.
 minreq.workspace = true
 lru.workspace = true
 
