@@ -63,6 +63,34 @@ fn build_committee_signature_arg(
     )
 }
 
+fn add_end_reconfig_calls(
+    builder: &mut TransactionBuilder,
+    package_id: Address,
+    hashi_arg: sui_transaction_builder::Argument,
+    committee_handoff_cert_arg: Option<sui_transaction_builder::Argument>,
+    mpc_public_key_arg: sui_transaction_builder::Argument,
+    mpc_cert_arg: sui_transaction_builder::Argument,
+) {
+    if let Some(committee_handoff_cert_arg) = committee_handoff_cert_arg {
+        builder.move_call(
+            Function::new(
+                package_id,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("submit_committee_handoff"),
+            ),
+            vec![hashi_arg, committee_handoff_cert_arg],
+        );
+    }
+    builder.move_call(
+        Function::new(
+            package_id,
+            Identifier::from_static("reconfig"),
+            Identifier::from_static("end_reconfig"),
+        ),
+        vec![hashi_arg, mpc_public_key_arg, mpc_cert_arg],
+    );
+}
+
 /// Maximum size in bytes for a single pure argument in a Sui PTB.
 ///
 /// Sui enforces a 16 KiB (16384 byte) limit per pure argument. We use a 4 KiB
@@ -355,6 +383,21 @@ fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
     match e.downcast_ref::<TxFailure>()? {
         TxFailure::NotSubmitted(inner) => inner.downcast_ref(),
         TxFailure::Submit(_) => None,
+    }
+}
+/// Return the structured execution error from either transaction simulation or
+/// an executed transaction's failed status.
+pub(crate) fn transaction_execution_error(
+    err: &anyhow::Error,
+) -> Option<&sui_rpc::proto::sui::rpc::v2::ExecutionError> {
+    if let Some(tx_err) = err.downcast_ref::<TransactionExecutionError>() {
+        return tx_err.status().error_opt();
+    }
+    match builder_error(err) {
+        Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
+            Some(failure.execution_error())
+        }
+        _ => None,
     }
 }
 
@@ -1162,11 +1205,14 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Submit the outgoing committee handoff and activate its successor in one
+    /// PTB, so the handoff certificate is never committed before activation.
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_end_reconfig(
         &mut self,
         mpc_public_key: &[u8],
         mpc_cert: &CommitteeSignature,
+        committee_handoff_cert: Option<&CommitteeSignature>,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let package_id = self.active_call_package_id();
@@ -1175,55 +1221,23 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
+        let committee_handoff_cert_arg = committee_handoff_cert
+            .map(|cert| build_committee_signature_arg(&mut builder, package_id, cert));
         let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
         let mpc_cert_arg = build_committee_signature_arg(&mut builder, package_id, mpc_cert);
-        builder.move_call(
-            Function::new(
-                package_id,
-                Identifier::from_static("reconfig"),
-                Identifier::from_static("end_reconfig"),
-            ),
-            vec![hashi_arg, mpc_public_key_arg, mpc_cert_arg],
+        add_end_reconfig_calls(
+            &mut builder,
+            package_id,
+            hashi_arg,
+            committee_handoff_cert_arg,
+            mpc_public_key_arg,
+            mpc_cert_arg,
         );
         let response = self.execute(builder).await?;
         let status = response.transaction().effects().status();
         if !status.success() {
             return Err(TransactionExecutionError {
                 function: "end_reconfig",
-                status: status.clone(),
-            }
-            .into());
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(level = "info", skip_all)]
-    pub async fn execute_submit_committee_handoff(
-        &mut self,
-        committee_handoff_cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
-        let mut builder = TransactionBuilder::new();
-        let package_id = self.active_call_package_id();
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let committee_handoff_cert_arg =
-            build_committee_signature_arg(&mut builder, package_id, committee_handoff_cert);
-        builder.move_call(
-            Function::new(
-                package_id,
-                Identifier::from_static("reconfig"),
-                Identifier::from_static("submit_committee_handoff"),
-            ),
-            vec![hashi_arg, committee_handoff_cert_arg],
-        );
-        let response = self.execute(builder).await?;
-        let status = response.transaction().effects().status();
-        if !status.success() {
-            return Err(TransactionExecutionError {
-                function: "submit_committee_handoff",
                 status: status.clone(),
             }
             .into());
@@ -2851,6 +2865,56 @@ pub async fn sweep_to_address_balance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_reconfig_commands(with_handoff: bool) -> Vec<sui_sdk_types::Command> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.pure(&0u8);
+        let handoff_arg = with_handoff.then(|| builder.pure(&1u8));
+        let mpc_public_key_arg = builder.pure(&2u8);
+        let mpc_cert_arg = builder.pure(&3u8);
+        add_end_reconfig_calls(
+            &mut builder,
+            Address::TWO,
+            hashi_arg,
+            handoff_arg,
+            mpc_public_key_arg,
+            mpc_cert_arg,
+        );
+        builder.set_sender(Address::ZERO);
+        builder.set_gas_budget(1);
+        builder.set_gas_price(1);
+        builder.add_gas_objects([ObjectInput::owned(
+            Address::from_static("0x1"),
+            1,
+            sui_sdk_types::Digest::ZERO,
+        )]);
+
+        match builder.try_build().expect("offline PTB must build").kind {
+            sui_sdk_types::TransactionKind::ProgrammableTransaction(pt) => pt.commands,
+            _ => panic!("expected programmable transaction"),
+        }
+    }
+
+    #[test]
+    fn end_reconfig_calls_are_atomic() {
+        let commands = build_reconfig_commands(true);
+        let [
+            sui_sdk_types::Command::MoveCall(submit),
+            sui_sdk_types::Command::MoveCall(end),
+        ] = commands.as_slice()
+        else {
+            panic!("expected handoff followed by end_reconfig");
+        };
+        assert_eq!(submit.function.as_str(), "submit_committee_handoff");
+        assert_eq!(end.function.as_str(), "end_reconfig");
+        assert_eq!(submit.arguments[0], end.arguments[0]);
+
+        let genesis_commands = build_reconfig_commands(false);
+        assert!(matches!(
+            genesis_commands.as_slice(),
+            [sui_sdk_types::Command::MoveCall(end)] if end.function.as_str() == "end_reconfig"
+        ));
+    }
 
     #[test]
     fn destroy_tob_splits_only_on_execution_failures() {

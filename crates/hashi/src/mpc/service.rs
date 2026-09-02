@@ -14,6 +14,7 @@ use futures::future::join_all;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use sui_futures::service::Service;
+use sui_rpc::proto::sui::rpc::v2::ExecutionError;
 use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
 use tokio::sync::watch;
 use tracing::debug;
@@ -51,6 +52,7 @@ use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
+use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::move_types;
 use hashi_types::move_types::ReconfigCompletionMessage;
@@ -1776,7 +1778,7 @@ impl MpcService {
                 }
             }
         };
-        self.submit_committee_handoff_if_needed(epoch).await?;
+        let mut committee_handoff_cert = self.collect_committee_handoff_if_needed(epoch).await?;
         loop {
             if self.get_pending_epoch_change() != Some(epoch) {
                 return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
@@ -1785,7 +1787,11 @@ impl MpcService {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
                 executor
-                    .execute_end_reconfig(&mpc_public_key, cert.committee_signature())
+                    .execute_end_reconfig(
+                        &mpc_public_key,
+                        cert.committee_signature(),
+                        committee_handoff_cert.as_ref(),
+                    )
                     .await
             };
             match result.await {
@@ -1799,14 +1805,25 @@ impl MpcService {
                         if self.get_pending_epoch_change() != Some(epoch) {
                             return Ok(());
                         }
+                        warn!(
+                            "end_reconfig for epoch {epoch} is complete on chain, but the watcher still reports it pending after the visibility wait; retrying"
+                        );
+                        continue;
+                    }
+                    ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
+                        if committee_handoff_cert.take().is_some() {
+                            warn!(
+                                "end_reconfig submission for epoch {epoch} found handoff already submitted; retrying without the handoff call: {e:#}"
+                            );
+                            continue;
+                        }
                         Err(e).with_context(|| {
                             format!(
-                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after waiting for the watcher"
+                                "end_reconfig submission for epoch {epoch} failed because a handoff was already submitted, but this transaction did not submit one"
                             )
                         })?;
                     }
-                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort
-                    | ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
+                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort => {
                         Err(e).with_context(|| {
                             format!(
                                 "end_reconfig submission for epoch {epoch} failed with non-retryable error"
@@ -1825,7 +1842,10 @@ impl MpcService {
         }
     }
 
-    async fn submit_committee_handoff_if_needed(&self, epoch: u64) -> anyhow::Result<()> {
+    async fn collect_committee_handoff_if_needed(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<Option<CommitteeSignature>> {
         let from_epoch = self.inner.onchain_state().epoch();
         let requires_committee_handoff = !self
             .inner
@@ -1836,7 +1856,7 @@ impl MpcService {
             .mpc_public_key()
             .is_empty();
         if !requires_committee_handoff {
-            return Ok(());
+            return Ok(None);
         }
 
         let committee_handoff = loop {
@@ -1859,44 +1879,7 @@ impl MpcService {
                 }
             }
         };
-        loop {
-            if self.get_pending_epoch_change() != Some(epoch) {
-                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
-            }
-            let result = async {
-                let mut executor =
-                    crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
-                executor
-                    .execute_submit_committee_handoff(committee_handoff.committee_signature())
-                    .await
-            };
-            match result.await {
-                Ok(()) => return Ok(()),
-                Err(e) => match classify_reconfig_submission_error(&e) {
-                    ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
-                        warn!(
-                            "submit_committee_handoff submission for epoch {epoch} found handoff already submitted: {e:#}"
-                        );
-                        return Ok(());
-                    }
-                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort
-                    | ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
-                        Err(e).with_context(|| {
-                            format!(
-                                "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error"
-                            )
-                        })?;
-                    }
-                    ReconfigSubmissionErrorKind::NonMoveAbort => {
-                        warn!(
-                            "submit_committee_handoff submission for epoch {} failed: {e:#}, retrying...",
-                            epoch
-                        );
-                        self.sleep_if_still_pending(epoch).await;
-                    }
-                },
-            }
-        }
+        Ok(Some(committee_handoff.into_parts().0))
     }
 
     async fn collect_reconfig_signatures(
@@ -2041,6 +2024,7 @@ fn certified_nonce_weight<T: NonceCertTimestamp>(
         .weight()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconfigSubmissionErrorKind {
     NonMoveAbort,
     NonRetryableMoveAbort,
@@ -2049,14 +2033,13 @@ enum ReconfigSubmissionErrorKind {
 }
 
 fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmissionErrorKind {
-    let Some(tx_err) = err.downcast_ref::<crate::sui_tx_executor::TransactionExecutionError>()
-    else {
+    let Some(error) = crate::sui_tx_executor::transaction_execution_error(err) else {
         return ReconfigSubmissionErrorKind::NonMoveAbort;
     };
+    classify_reconfig_execution_error(error)
+}
 
-    let Some(error) = tx_err.status().error_opt() else {
-        return ReconfigSubmissionErrorKind::NonMoveAbort;
-    };
+fn classify_reconfig_execution_error(error: &ExecutionError) -> ReconfigSubmissionErrorKind {
     if error
         .kind
         .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
@@ -2082,9 +2065,11 @@ fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmission
         (Some("committee_set"), Some("set_pending_committee_handoff_cert"), _) => {
             ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
         }
-        (Some("reconfig"), Some("end_reconfig"), Some(RECONFIG_E_NOT_RECONFIGURING)) => {
-            ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
-        }
+        (
+            Some("reconfig"),
+            Some("submit_committee_handoff") | Some("end_reconfig"),
+            Some(RECONFIG_E_NOT_RECONFIGURING),
+        ) => ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted,
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
     }
 }

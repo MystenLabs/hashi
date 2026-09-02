@@ -159,7 +159,7 @@ impl BridgeService for HttpService {
         tracing::Span::current().record("from_epoch", from_epoch);
         let member_signature = self
             .inner
-            .validate_and_sign_committee_transition(from_epoch)
+            .validate_and_sign_committee_transition(from_epoch, caller)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!(from_epoch, "Signed committee transition");
         Ok(Response::new(SignCommitteeTransitionResponse {
