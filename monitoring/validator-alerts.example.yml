@@ -93,3 +93,15 @@ groups:
             The chain has moved past every package version this build
             implements; autonomous writes are halted. Upgrade the node
             binary immediately.
+
+      - alert: HashiDbPoisoned
+        expr: hashi_db_poisoned == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "database poisoned; restart required"
+          description: >-
+            fjall refused a write after a failed flush or fsync (usually a
+            full disk) and will refuse every write until the process
+            restarts; reads and signing carry on looking healthy. Free the
+            disk, then restart the node.

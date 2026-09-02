@@ -913,6 +913,7 @@ impl Hashi {
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
         let sui_balance_service = self.clone().start_sui_balance_metric();
         let sui_address_balance_sweeper_service = self.clone().start_sui_address_balance_sweeper();
+        let db_metrics_service = self.clone().start_db_metrics();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -924,7 +925,8 @@ impl Hashi {
             .merge(mpc_service)
             .merge(guardian_bootstrap_service)
             .merge(sui_balance_service)
-            .merge(sui_address_balance_sweeper_service);
+            .merge(sui_address_balance_sweeper_service)
+            .merge(db_metrics_service);
 
         Ok(service)
     }
@@ -1290,6 +1292,19 @@ impl Hashi {
                     }
                     Err(e) => tracing::debug!("failed to fetch operator SUI balance: {e}"),
                 }
+            }
+        })
+    }
+
+    fn start_db_metrics(self: Arc<Self>) -> Service {
+        const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+        Service::new().spawn_aborting(async move {
+            let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                self.metrics.update_db(&self.db);
             }
         })
     }
