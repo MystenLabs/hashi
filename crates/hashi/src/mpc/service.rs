@@ -44,6 +44,8 @@ use crate::mpc::types::NonceCertTimestamp;
 use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
+use crate::mpc::types::ReconfigOutcome;
+use crate::mpc::types::RotationRole;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -247,6 +249,22 @@ impl MpcService {
         }
     }
 
+    async fn post_reconfig_housekeeping(&self, target_epoch: u64) {
+        let pruning_references = {
+            let state = self.inner.onchain_state().state();
+            build_pruning_references(&state.hashi().committees, target_epoch)
+        };
+        if let Err(e) = self
+            .inner
+            .db
+            .prune_messages_below(target_epoch, &pruning_references)
+        {
+            error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+        }
+        self.run_major_compaction(target_epoch).await;
+        self.backup_handle.backup_after_epoch_change(target_epoch);
+    }
+
     async fn sleep_if_still_pending(&self, epoch: u64) {
         if self.get_pending_epoch_change() == Some(epoch) {
             tokio::time::sleep(RETRY_INTERVAL).await;
@@ -383,7 +401,14 @@ impl MpcService {
                 );
                 Ok(output)
             }
-            MpcOutputRecoveryOutcome::NotApplicable => self.run_dkg(epoch).await,
+            MpcOutputRecoveryOutcome::NotApplicable => match self.run_dkg(epoch).await? {
+                ReconfigOutcome::Output(output) => Ok(output),
+                other => Err(anyhow::anyhow!(
+                    "dkg for epoch {epoch} produced no output ({}): this node has no \
+                         share state to recover",
+                    other.label()
+                )),
+            },
             MpcOutputRecoveryOutcome::Suspicious(reason) => {
                 error!(
                     "recover_current_dkg: local DKG state for epoch {epoch} contradicts on-chain \
@@ -444,7 +469,14 @@ impl MpcService {
                 );
                 Ok(output)
             }
-            MpcOutputRecoveryOutcome::NotApplicable => self.run_key_rotation(epoch).await,
+            MpcOutputRecoveryOutcome::NotApplicable => match self.run_key_rotation(epoch).await? {
+                ReconfigOutcome::Output(output) => Ok(output),
+                other => Err(anyhow::anyhow!(
+                    "rotation for epoch {epoch} produced no output ({}): this node has no \
+                         share state to recover",
+                    other.label()
+                )),
+            },
             MpcOutputRecoveryOutcome::Suspicious(reason) => {
                 error!(
                     "recover_current_rotation: local rotation state for epoch {epoch} contradicts \
@@ -460,12 +492,16 @@ impl MpcService {
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
-    async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
+    async fn run_dkg(&self, target_epoch: u64) -> anyhow::Result<ReconfigOutcome> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
             .inner
             .mpc_manager()
             .expect("MpcManager must be set before run_dkg");
+        if !mpc_manager.read().unwrap().is_committee_member() {
+            info!("run_dkg: not in the epoch {target_epoch} committee, no role in its DKG");
+            return Ok(ReconfigOutcome::NoRole);
+        }
         let signer = self.inner.config.operator_private_key()?;
         let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_DKG);
         let mut tob_channel = SuiTobSessionChannel::new(
@@ -485,7 +521,7 @@ impl MpcService {
         )
         .await
         .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
-        Ok(output)
+        Ok(ReconfigOutcome::Output(output))
     }
 
     async fn generate_presignatures(
@@ -1493,9 +1529,14 @@ impl MpcService {
                 info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
                 return;
             }
+            let in_committee = self.inner.is_in_committee_for(target_epoch);
             let needs_fresh_manager = match self.inner.mpc_manager() {
                 None => true,
-                Some(mgr) => mgr.read().unwrap().mpc_config.epoch != target_epoch,
+                Some(mgr) => {
+                    let mgr = mgr.read().unwrap();
+                    mgr.mpc_config.epoch != target_epoch
+                        || mgr.is_committee_member() != in_committee
+                }
             };
             if needs_fresh_manager {
                 let setup_result = if run_dkg {
@@ -1523,7 +1564,35 @@ impl MpcService {
             };
             drop(_timer);
             match result {
-                Ok(output) => break output,
+                Ok(ReconfigOutcome::Output(output)) => break output,
+                Ok(outcome) => {
+                    let reason = outcome.label();
+                    if matches!(outcome, ReconfigOutcome::NoShares) {
+                        warn!(
+                            "handle_reconfig: epoch {target_epoch} could not reshare: this node \
+                             holds no previous-epoch shares, so its weight did not reach the \
+                             rotation"
+                        );
+                    } else {
+                        info!(
+                            "handle_reconfig: epoch {target_epoch} produced no output for this \
+                             node ({reason}); waiting out the pending window"
+                        );
+                    }
+                    metrics
+                        .mpc_reconfig_no_output_total
+                        .with_label_values(&[protocol_label, reason])
+                        .inc();
+                    _reconfig_timer.stop_and_discard();
+                    while self.get_pending_epoch_change() == Some(target_epoch) {
+                        metrics.task_heartbeat("mpc_service");
+                        self.sleep_if_still_pending(target_epoch).await;
+                    }
+                    if !matches!(outcome, ReconfigOutcome::NoRole) {
+                        self.post_reconfig_housekeeping(target_epoch).await;
+                    }
+                    return;
+                }
                 Err(e) => {
                     error!(
                         "MPC protocol for epoch {} failed: {e}, retrying...",
@@ -1578,22 +1647,7 @@ impl MpcService {
             );
         }
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
-        let pruning_references = {
-            let state = self.inner.onchain_state().state();
-            build_pruning_references(&state.hashi().committees, target_epoch)
-        };
-        if let Err(e) = self
-            .inner
-            .db
-            .prune_messages_below(target_epoch, &pruning_references)
-        {
-            error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
-        }
-        self.run_major_compaction(target_epoch).await;
-        // Only after compaction: the backup takes a database-wide snapshot,
-        // and a snapshot taken before the prune pins every value the
-        // compaction would otherwise drop.
-        self.backup_handle.backup_after_epoch_change(target_epoch);
+        self.post_reconfig_housekeeping(target_epoch).await;
         if !self.reconfig_target_live(target_epoch) {
             info!(
                 "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
@@ -1688,7 +1742,7 @@ impl MpcService {
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
-    async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<MpcOutput> {
+    async fn run_key_rotation(&self, target_epoch: u64) -> anyhow::Result<ReconfigOutcome> {
         let onchain_state = self.inner.onchain_state().clone();
         let mpc_manager = self
             .inner
@@ -1701,6 +1755,20 @@ impl MpcService {
             "run_key_rotation: target_epoch={target_epoch}, previous_epoch={previous_epoch}, \
              onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
         );
+        let role = {
+            let mgr = mpc_manager.read().unwrap();
+            if mgr.is_committee_member() {
+                RotationRole::DealerAndParty
+            } else if mgr.is_previous_committee_member() {
+                RotationRole::DealerOnly
+            } else {
+                info!(
+                    "run_key_rotation: in neither the epoch {target_epoch} committee nor its \
+                     predecessor, no role in this rotation"
+                );
+                return Ok(ReconfigOutcome::NoRole);
+            }
+        };
         let previous_certs = key_generation_certificates(&onchain_state, previous_epoch)
             .map_err(|e| anyhow::anyhow!("Failed to read previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
@@ -1730,6 +1798,7 @@ impl MpcService {
             &p2p_channel,
             &mut tob_channel,
             &self.inner.metrics,
+            role,
         )
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;

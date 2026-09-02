@@ -171,6 +171,11 @@ pub struct Metrics {
     pub mpc_certs_rejected_total: IntCounterVec,
     /// Writer-side outcome of publishing a dealer certificate to the TOB.
     pub mpc_cert_publish_total: IntCounterVec,
+    /// Reconfiguration runs that produced no key share for this node, by reason.
+    pub mpc_reconfig_no_output_total: IntCounterVec,
+    /// Rotation attempts where this node was in the previous committee but held no shares to
+    /// reshare, so its previous-epoch weight did not reach the rotation.
+    pub mpc_rotation_previous_shares_missing_total: IntCounter,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
     /// Ticks where no DB encryption key matched the current committee record
@@ -1022,6 +1027,20 @@ impl Metrics {
                 &["protocol", "outcome"],
                 registry,
             )
+                .unwrap(),
+            mpc_reconfig_no_output_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_reconfig_no_output_total",
+                "Reconfiguration runs that ended with no key share for this node, by reason.",
+                &["protocol", "reason"],
+                registry,
+            )
+                .unwrap(),
+            mpc_rotation_previous_shares_missing_total: register_int_counter_with_registry!(
+                "hashi_mpc_rotation_previous_shares_missing_total",
+                "Rotation attempts where this node was in the previous committee but could not \
+                 rebuild its shares, so its previous-epoch weight did not reach the rotation.",
+                registry,
+            )
             .unwrap(),
             mpc_recovery_suspicious_total: register_int_counter_with_registry!(
                 "hashi_mpc_recovery_suspicious_total",
@@ -1344,8 +1363,10 @@ impl Metrics {
             .unwrap(),
             mpc_party_reduced_weight: register_int_gauge_with_registry!(
                 "hashi_mpc_party_reduced_weight",
-                "This party's post-reduction weight in the current MPC \
-                 committee.",
+                "This party's post-reduction weight in the committee of the epoch its MPC \
+                 manager was built for. Reads 0 when this node is not in that committee, \
+                 including during a pending reconfig that removes it, when it may still be \
+                 signing for the live epoch.",
                 registry,
             )
             .unwrap(),
