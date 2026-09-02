@@ -6,6 +6,7 @@
 
 use super::config::S3ObjectLockPolicy;
 use super::log_layout::ObjectKeyPattern;
+use super::log_messages::CeremonyCompletionLogMessage;
 use super::log_messages::CeremonyLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
 use super::log_messages::GenesisLogMessage;
@@ -73,6 +74,8 @@ pub enum LogMessageV1 {
 /// Uses an enum discriminator for automatic domain separation between variants.
 // TODO(testnet-wipe): Collapse the V1/V2 compatibility layer into a single log
 // schema once existing testnet records no longer need to be read.
+///
+/// Variant order is part of the signed BCS preimage. New variants must be appended.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV2 {
     Heartbeat(HeartbeatLogMessage),
@@ -82,6 +85,7 @@ pub enum LogMessageV2 {
     KpShareState(Box<KpShareStateLogMessageV2>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
+    CeremonyCompletion(Box<CeremonyCompletionLogMessage>),
 }
 
 /// Writer-facing alias for the log-message schema emitted by guardians.
@@ -94,6 +98,7 @@ pub enum LogType {
     Init,
     Withdrawal,
     Ceremony,
+    CeremonyCompletion,
     KpShareState,
     CommitteeUpdate,
     Genesis,
@@ -106,6 +111,7 @@ impl LogType {
             Self::Init
             | Self::Withdrawal
             | Self::Ceremony
+            | Self::CeremonyCompletion
             | Self::CommitteeUpdate
             | Self::Genesis => policy.long_lived,
         }
@@ -157,7 +163,33 @@ macro_rules! impl_log_message_schema {
 }
 
 impl_log_message_schema!(LogMessageV1);
-impl_log_message_schema!(LogMessageV2);
+impl LogMessageSchema for LogMessageV2 {
+    fn log_type(&self) -> LogType {
+        match self {
+            Self::Heartbeat(..) => LogType::Heartbeat,
+            Self::Init(..) => LogType::Init,
+            Self::Withdrawal(..) => LogType::Withdrawal,
+            Self::Ceremony(..) => LogType::Ceremony,
+            Self::KpShareState(..) => LogType::KpShareState,
+            Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
+            Self::Genesis(..) => LogType::Genesis,
+            Self::CeremonyCompletion(..) => LogType::CeremonyCompletion,
+        }
+    }
+
+    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern {
+        match self {
+            Self::Heartbeat(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Init(message) => message.object_key_pattern(session_id),
+            Self::Withdrawal(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Ceremony(message) => message.object_key_pattern(session_id),
+            Self::KpShareState(message) => message.object_key_pattern(session_id),
+            Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
+            Self::Genesis(message) => message.object_key_pattern(),
+            Self::CeremonyCompletion(message) => message.object_key_pattern(session_id),
+        }
+    }
+}
 
 impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;

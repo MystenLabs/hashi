@@ -396,6 +396,7 @@ impl LogRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guardian::CeremonyCompletionLogMessage;
     use crate::guardian::CeremonyLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
@@ -567,6 +568,12 @@ mod tests {
                     new_instance: instance_1,
                     btc_master_pubkey,
                 })),
+            ),
+            (
+                "ceremony completion",
+                LogMessage::CeremonyCompletion(Box::new(CeremonyCompletionLogMessage::new(
+                    1, [0x42; 32],
+                ))),
             ),
             (
                 "KP share state",
@@ -792,6 +799,40 @@ mod tests {
         };
 
         assert_eq!(signed.signature, signing_key.sign(&signed_bytes));
+    }
+
+    #[test]
+    fn ceremony_completion_record_contract() {
+        let signing_key = GuardianSignKeyPair::from([22u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let log = LogRecord::new_at_timestamp(
+            session_id.clone(),
+            LogMessage::CeremonyCompletion(Box::new(CeremonyCompletionLogMessage::new(
+                42, [0xab; 32],
+            ))),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        assert_eq!(
+            log.object_key(),
+            format!("ceremony-complete/{:020}-{session_id}.json", 42)
+        );
+        assert_eq!(
+            log.object_lock_duration(MAINNET_S3_OBJECT_LOCK_POLICY),
+            MAINNET_S3_OBJECT_LOCK_POLICY.long_lived
+        );
+
+        let mut json = serde_json::to_value(log).unwrap();
+        json["message"]["CeremonyCompletion"]["ceremony_digest"] = hex::encode([0xcd; 32]).into();
+        let tampered: LogRecord = serde_json::from_value(json.clone()).unwrap();
+        assert!(
+            tampered
+                .validate(Some(&signing_key.verification_key()))
+                .is_err()
+        );
+
+        json["schema_version"] = VersionedLogMessage::SCHEMA_VERSION_V1.into();
+        assert!(serde_json::from_value::<LogRecord>(json).is_err());
     }
 
     #[test]

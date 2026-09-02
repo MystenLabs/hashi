@@ -85,8 +85,24 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         "identified this KP's complete roster entry",
     );
 
-    // 1. Discover and verify the latest ceremony from the immutable log
-    //    (attestation-verified once via the reader's session-key cache).
+    // 1. Verify the live guardian before selecting its ceremony from S3.
+    let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
+        .await
+        .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
+    let verified =
+        verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
+            .await?;
+    ensure!(
+        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
+            || verified.info.lifecycle == CeremonyStage::Completed.into(),
+        "guardian is not accepting key provisioner ceremony confirmations"
+    );
+    let expected_instance = verified
+        .info
+        .secret_sharing_instance
+        .context("live ceremony GuardianInfo missing secret_sharing_instance")?;
+    let sharing_seq = expected_instance.sharing_seq();
+    let session_id = verified.session_id;
     info!(
         phase = "s3 connect",
         bucket = guardian_s3.bucket_name(),
@@ -101,11 +117,15 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     info!(
         phase = "ceremony scrape",
-        "scraping latest ceremony/ + kp-shares/ logs (attestation-anchored)",
+        "scraping ceremony/ + kp-shares/ logs (attestation-anchored)",
     );
     let state = reader
-        .read_latest_ceremony_state_from_current_build()
+        .read_pending_ceremony_state_from_current_build(&session_id, sharing_seq)
         .await?;
+    ensure!(
+        state.secret_sharing_instance == expected_instance,
+        "ceremony state differs from the live guardian's secret-sharing instance"
+    );
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "ceremony scrape",
@@ -115,7 +135,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         t = state.secret_sharing_instance.threshold(),
         share_count = state.encrypted_shares.share_count(),
         ciphertext_count = state.encrypted_shares.ciphertext_count(),
-        "discovered + validated latest ceremony state",
+        "discovered + validated ceremony state",
     );
 
     // 2. Confirm every PGP-encrypted share is addressed to the expected KP cert set.
@@ -171,23 +191,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // 5. Submit a signed confirmation only after the verified recovery artifact
     //    is safely stored locally.
-    info!(
-        phase = "confirmation",
-        endpoint = %cfg.guardian_endpoint,
-        "connecting to live ceremony guardian",
-    );
-    let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
-        .await
-        .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
-    let verified =
-        verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
-            .await?;
-    ensure!(
-        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
-            || verified.info.lifecycle == CeremonyStage::Completed.into(),
-        "guardian is not accepting key provisioner ceremony confirmations"
-    );
-    let confirmation = CeremonyConfirmationRequest::new(verified.session_id, state.digest());
+    let confirmation = CeremonyConfirmationRequest::new(session_id, state.digest());
     let signed = KpSigned::sign(confirmation, kp_cert, None)
         .map_err(anyhow::Error::msg)
         .context("sign ceremony confirmation with the KP key")?;

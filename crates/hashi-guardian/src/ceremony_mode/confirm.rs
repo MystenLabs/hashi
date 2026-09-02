@@ -29,22 +29,20 @@ pub async fn confirm_ceremony(
         .verify_signature()
         .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
     request.validate_session(&enclave.s3_session_id())?;
-    let (share_id, already_confirmed) =
-        pending.validate_confirmation(&signer_fingerprint, request.ceremony_digest())?;
-    if already_confirmed {
-        return pending.status();
+    let share_id = pending.validate_confirmation(&signer_fingerprint, request.ceremony_digest())?;
+    let (status, accepted) = pending.record_confirmation(share_id)?;
+    if accepted {
+        info!(
+            share_id = share_id.get(),
+            signer_fingerprint,
+            have = status.have,
+            need = status.need,
+            "Accepted key provisioner ceremony confirmation."
+        );
     }
 
-    let status = pending.record_confirmation(share_id)?;
-    info!(
-        share_id = share_id.get(),
-        signer_fingerprint,
-        have = status.have,
-        need = status.need,
-        "Accepted key provisioner ceremony confirmation."
-    );
-
     if status.completed && lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() {
+        enclave.log_ceremony_completion(pending).await?;
         enclave
             .advance_lifecycle_into(CeremonyStage::Completed.into())
             .expect("all KP confirmations should complete the ceremony lifecycle");
@@ -60,6 +58,7 @@ mod tests {
     use crate::ceremony_mode::setup::setup_new_key;
     use crate::mock_logger_capturing;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
+    use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertsRoster;
@@ -77,11 +76,12 @@ mod tests {
         ceremony_digest: [u8; 32],
         roster: KpCertsRoster,
         secret_keys: MockKpSecretKeys,
+        captures: CapturedPuts,
     }
 
     async fn setup_context() -> TestContext {
         let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
-        let (logger, _) = mock_logger_capturing();
+        let (logger, captures) = mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_ceremony(logger);
         let response = setup_new_key(
             enclave.clone(),
@@ -97,20 +97,13 @@ mod tests {
             ceremony_digest: CeremonyState::from(response).digest(),
             roster,
             secret_keys,
+            captures,
         }
     }
 
     impl TestContext {
         fn signed_confirmation(&self, index: usize) -> KpSigned<CeremonyConfirmationRequest> {
             self.signed_confirmation_with(index, self.enclave.s3_session_id(), self.ceremony_digest)
-        }
-
-        fn signed_confirmation_with_digest(
-            &self,
-            index: usize,
-            ceremony_digest: [u8; 32],
-        ) -> KpSigned<CeremonyConfirmationRequest> {
-            self.signed_confirmation_with(index, self.enclave.s3_session_id(), ceremony_digest)
         }
 
         fn signed_confirmation_with(
@@ -135,6 +128,15 @@ mod tests {
             );
             KpSigned::from_parts(request, cert, signature)
         }
+
+        fn completion_count(&self) -> usize {
+            self.captures
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| key.starts_with("ceremony-complete/"))
+                .count()
+        }
     }
 
     #[tokio::test]
@@ -155,6 +157,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repeated.have, 1);
+        assert_eq!(context.completion_count(), 0);
 
         for index in 1..TEST_N {
             let status =
@@ -166,6 +169,27 @@ mod tests {
             assert_eq!(status.completed, index + 1 == TEST_N);
         }
         assert_eq!(context.enclave.lifecycle(), CeremonyStage::Completed.into());
+        assert_eq!(context.completion_count(), 1);
+        {
+            let captures = context.captures.lock().unwrap();
+            let (key, body) = captures
+                .iter()
+                .find(|(key, _)| key.starts_with("ceremony-complete/"))
+                .unwrap();
+            assert_eq!(
+                key,
+                &format!(
+                    "ceremony-complete/{:020}-{}.json",
+                    0,
+                    context.enclave.s3_session_id()
+                )
+            );
+            let json: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(
+                json["message"]["CeremonyCompletion"]["ceremony_digest"],
+                hex::encode(context.ceremony_digest)
+            );
+        }
         let repeated = confirm_ceremony(
             context.enclave.clone(),
             context.signed_confirmation(TEST_N - 1),
@@ -173,12 +197,37 @@ mod tests {
         .await
         .unwrap();
         assert!(repeated.completed);
+        assert_eq!(context.completion_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_publishes_marker_when_confirmations_are_already_complete() {
+        let context = setup_context().await;
+        let pending = context.enclave.pending_ceremony().unwrap();
+        for share_id in 1..=TEST_N {
+            let _ = pending
+                .record_confirmation(std::num::NonZeroU16::new(share_id as u16).unwrap())
+                .unwrap();
+        }
+        assert_eq!(
+            context.enclave.lifecycle(),
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
+        );
+        assert_eq!(context.completion_count(), 0);
+
+        let status = confirm_ceremony(context.enclave.clone(), context.signed_confirmation(0))
+            .await
+            .unwrap();
+
+        assert!(status.completed);
+        assert_eq!(context.enclave.lifecycle(), CeremonyStage::Completed.into());
+        assert_eq!(context.completion_count(), 1);
     }
 
     #[tokio::test]
     async fn rejects_wrong_ceremony_digest() {
         let context = setup_context().await;
-        let signed = context.signed_confirmation_with_digest(0, [0; 32]);
+        let signed = context.signed_confirmation_with(0, context.enclave.s3_session_id(), [0; 32]);
         let error = confirm_ceremony(context.enclave.clone(), signed)
             .await
             .unwrap_err();

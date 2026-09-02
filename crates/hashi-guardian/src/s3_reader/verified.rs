@@ -52,9 +52,8 @@ pub struct VerifiedLogRecord {
 
 impl InitCheckpoint {
     /// Return the initialization checkpoint required before serving a log.
-    /// Withdrawal and committee-update logs require 01-04; heartbeat, ceremony,
-    /// and genesis logs require only 01-02. KP-share state is mode-dependent.
-    /// Init logs use the dedicated init-log reader and are rejected here.
+    /// Withdrawal and committee-update logs require 01-04; KP-share state is
+    /// mode-dependent; all other non-init logs require only 01-02.
     fn required_for(log_type: LogType, mode: EnclaveMode) -> GuardianResult<Self> {
         let required = match log_type {
             LogType::Init => {
@@ -67,7 +66,10 @@ impl InitCheckpoint {
                 EnclaveMode::Ceremony => Self::OperatorInitialized,
                 EnclaveMode::Withdraw => Self::OperatorActivated,
             },
-            LogType::Heartbeat | LogType::Ceremony | LogType::Genesis => Self::OperatorInitialized,
+            LogType::Heartbeat
+            | LogType::Ceremony
+            | LogType::CeremonyCompletion
+            | LogType::Genesis => Self::OperatorInitialized,
         };
         Ok(required)
     }
@@ -343,7 +345,12 @@ mod tests {
                 InitCheckpoint::required_for(LogType::CommitteeUpdate, mode).unwrap(),
                 OperatorActivated
             );
-            for log_type in [LogType::Heartbeat, LogType::Ceremony, LogType::Genesis] {
+            for log_type in [
+                LogType::Heartbeat,
+                LogType::Ceremony,
+                LogType::CeremonyCompletion,
+                LogType::Genesis,
+            ] {
                 assert_eq!(
                     InitCheckpoint::required_for(log_type, mode).unwrap(),
                     OperatorInitialized

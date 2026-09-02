@@ -95,6 +95,7 @@ pub struct TemporaryInitState {
 }
 
 pub(crate) struct PendingCeremony {
+    sharing_seq: u64,
     digest: [u8; 32],
     encrypted_shares: KPEncryptedSharesRoster,
     confirmed_share_ids: RwLock<BTreeSet<ShareID>>,
@@ -103,6 +104,7 @@ pub(crate) struct PendingCeremony {
 impl PendingCeremony {
     fn new(state: CeremonyState) -> Self {
         Self {
+            sharing_seq: state.secret_sharing_instance.sharing_seq(),
             digest: state.digest(),
             encrypted_shares: state.encrypted_shares,
             confirmed_share_ids: RwLock::new(BTreeSet::new()),
@@ -113,7 +115,7 @@ impl PendingCeremony {
         &self,
         signer_fingerprint: &str,
         ceremony_digest: &[u8; 32],
-    ) -> GuardianResult<(ShareID, bool)> {
+    ) -> GuardianResult<ShareID> {
         if ceremony_digest != &self.digest {
             return Err(InvalidInputs(
                 "ceremony confirmation digest differs from pending ceremony".into(),
@@ -127,38 +129,31 @@ impl PendingCeremony {
                     "KP fingerprint {signer_fingerprint} is not present in the pending ceremony roster"
                 ))
             })?;
-        let confirmed = self
-            .confirmed_share_ids
-            .read()
-            .expect("pending ceremony lock poisoned")
-            .contains(&share.id);
-        Ok((share.id, confirmed))
+        Ok(share.id)
     }
 
     pub(crate) fn record_confirmation(
         &self,
         share_id: ShareID,
-    ) -> GuardianResult<CeremonyConfirmationResponse> {
+    ) -> GuardianResult<(CeremonyConfirmationResponse, bool)> {
         let mut confirmed = self
             .confirmed_share_ids
             .write()
             .expect("pending ceremony lock poisoned");
-        confirmed.insert(share_id);
-        CeremonyConfirmationResponse::new(confirmed.len(), self.encrypted_shares.share_count())
-    }
-
-    pub(crate) fn status(&self) -> GuardianResult<CeremonyConfirmationResponse> {
-        CeremonyConfirmationResponse::new(
-            self.confirmed_share_ids
-                .read()
-                .expect("pending ceremony lock poisoned")
-                .len(),
+        let inserted = confirmed.insert(share_id);
+        let status = CeremonyConfirmationResponse::new(
+            confirmed.len(),
             self.encrypted_shares.share_count(),
-        )
+        )?;
+        Ok((status, inserted))
     }
 
     fn is_complete(&self) -> bool {
-        self.status().is_ok_and(|status| status.completed)
+        self.confirmed_share_ids
+            .read()
+            .expect("pending ceremony lock poisoned")
+            .len()
+            == self.encrypted_shares.share_count()
     }
 }
 
@@ -679,6 +674,15 @@ impl Enclave {
     pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
         self.write_log_or_abort(LogMessage::Ceremony(Box::new(state)))
             .await
+    }
+    pub(crate) async fn log_ceremony_completion(
+        &self,
+        pending: &PendingCeremony,
+    ) -> GuardianResult<()> {
+        self.write_log_or_abort(LogMessage::CeremonyCompletion(Box::new(
+            CeremonyCompletionLogMessage::new(pending.sharing_seq, pending.digest),
+        )))
+        .await
     }
 
     /// Persist the current encrypted KP share state to `kp-shares/` for recovery.

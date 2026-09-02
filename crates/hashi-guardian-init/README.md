@@ -64,19 +64,18 @@ command uses `guardian_endpoint`, `hashi`, and `kp_roster`.
 
 ## key-provisioner ceremony
 
-Confirms a KP can fetch and decrypt their share from the latest setup or
-rotation ceremony. Trust is anchored to the guardian's S3 attestation log: it
-discovers the latest ceremony and KP-share state from S3, verifies each record
-against its writing session's attested signing pubkey and the expected `n`/`t`,
-and confirms each share's recipient roster and PGP-encrypted ciphertexts match
-the expected KP cert sets. It then uses `kp_pgp_cert_path` to identify this KP's
-roster entry and decrypts and commitment-checks the copy for every cert in that
-entry. After verification it saves the full ceremony state, including every
-KP's encrypted shares and the public ceremony data, to the requested path, then
-signs and submits a confirmation to the live guardian. The guardian completes
-the ceremony only after all KP/share entries have confirmed.
-For rotations, the external orchestrator must keep the ceremony guardian
-running after `RotateKpSet` returns until its lifecycle reaches `Completed`.
+Confirms a KP can fetch and decrypt their share from the live setup or rotation
+ceremony. Trust is anchored to the guardian's S3 attestation log: it verifies
+the live guardian first, then reads that session's ceremony and KP-share state
+from S3, verifies each record against its writing session's attested signing
+pubkey and the expected `n`/`t`, and confirms each share's recipient roster and
+PGP-encrypted ciphertexts match the expected KP cert sets. It then uses
+`kp_pgp_cert_path` to identify this KP's roster entry and decrypts and
+commitment-checks the copy for every cert in that entry. After verification it
+saves the full ceremony state, then signs and submits a confirmation to the
+live guardian. The guardian completes the ceremony only after all KP/share
+entries have confirmed. For rotations, the external orchestrator must keep the
+ceremony guardian running until its lifecycle reaches `Completed`.
 
 Both ceremony commands verify live guardian info and Nitro attestation against
 the configured current build. The KP additionally anchors the ceremony and

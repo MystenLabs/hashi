@@ -215,14 +215,17 @@ pub async fn run(cfg: Config) -> Result<()> {
         "all returned PGP-encrypted share ciphertexts verified against expected KP certificates",
     );
 
-    // 9. Cross-check the latest guardian ceremony/ and kp-shares/ logs.
+    // 9. Cross-check this guardian session's ceremony/ and kp-shares/ logs.
     //    KPs will fetch the same KP share state during key-provisioner ceremony.
     info!(
         phase = "log cross-check",
-        "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
+        "cross-checking this guardian session's ceremony/ and kp-shares/ logs",
     );
     let logged = reader
-        .read_latest_ceremony_state_from_current_build()
+        .read_pending_ceremony_state_from_current_build(
+            &session_id,
+            live.secret_sharing_instance.sharing_seq(),
+        )
         .await?;
     logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(

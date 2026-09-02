@@ -3,15 +3,14 @@
 
 use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_CEREMONY;
+use super::super::log_layout::S3_DIR_CEREMONY_COMPLETION;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::SecretSharingInstance;
 use serde::Deserialize;
 use serde::Serialize;
-
-/// The authoritative secret-sharing instance, written to `ceremony/` after each
-/// ceremony. Carries the commitments + n/t/seq; encrypted KP shares live in
-/// `kp-shares/`. A rotation records the `old_instance` it consumed so the chain
-/// is auditable from the log alone.
+/// A ceremony's secret-sharing instance, written before KP confirmations.
+/// Carries commitments + n/t/seq; encrypted KP shares live in `kp-shares/`.
+/// A rotation records the consumed instance so the chain remains auditable.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum CeremonyLogMessage {
     /// Initial key setup (`setup_new_key`); `instance` has `sharing_seq` 0.
@@ -82,5 +81,37 @@ impl CeremonyLogMessage {
 
     pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
         ObjectKeyPattern::Fixed(self.object_key(session_id))
+    }
+}
+
+/// Marker written after every KP confirms a ceremony.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CeremonyCompletionLogMessage {
+    pub sharing_seq: u64,
+    #[serde(with = "hex::serde")]
+    pub ceremony_digest: [u8; 32],
+}
+
+impl CeremonyCompletionLogMessage {
+    pub fn new(sharing_seq: u64, ceremony_digest: [u8; 32]) -> Self {
+        Self {
+            sharing_seq,
+            ceremony_digest,
+        }
+    }
+
+    /// Slash-terminated completion marker prefix.
+    pub fn object_key_dir() -> String {
+        format!("{S3_DIR_CEREMONY_COMPLETION}/")
+    }
+
+    /// `ceremony-complete/{sharing_seq:020}-{session_id}.json` — the canonical
+    /// key for one ceremony completion marker.
+    pub fn object_key(session_id: &str, sharing_seq: u64) -> String {
+        format!("{S3_DIR_CEREMONY_COMPLETION}/{sharing_seq:020}-{session_id}.json")
+    }
+
+    pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(Self::object_key(session_id, self.sharing_seq))
     }
 }

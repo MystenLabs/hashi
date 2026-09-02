@@ -35,6 +35,7 @@ pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 pub const S3_DIR_CEREMONY: &str = "ceremony";
+pub const S3_DIR_CEREMONY_COMPLETION: &str = "ceremony-complete";
 pub const S3_DIR_KP_SHARES: &str = "kp-shares";
 pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";
 pub const S3_DIR_GENESIS: &str = "genesis";

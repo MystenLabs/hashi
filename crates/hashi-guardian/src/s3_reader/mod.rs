@@ -10,6 +10,7 @@
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
+use hashi_types::guardian::CeremonyCompletionLogMessage;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
@@ -146,62 +147,66 @@ impl GuardianReader {
         Ok(session_info.clone())
     }
 
-    /// Read and verify the latest ceremony, or return `None` if none exists.
-    ///
-    /// Ceremony keys begin with a zero-padded `sharing_seq`, so the
-    /// lexicographically greatest key identifies the latest ceremony.
-    async fn read_latest_ceremony_log(
+    /// Read and verify one ceremony record under the requested build policy.
+    async fn read_ceremony_log_at_key(
         &mut self,
+        key: &str,
         require_current: bool,
-    ) -> GuardianResult<Option<CeremonyLogMessage>> {
-        let keys = self
-            .s3
-            .list_keys(&CeremonyLogMessage::object_key_dir(), true)
-            .await?;
-        let Some(key) = keys.into_iter().max() else {
-            return Ok(None);
-        };
-        let verified_record = self.read_verified_record(&key).await?;
+    ) -> GuardianResult<CeremonyLogMessage> {
+        let verified_record = self.read_verified_record(key).await?;
         if require_current {
             self.allowlist
                 .require_current_build(verified_record.build_pcrs())?;
         }
         let session_id = verified_record.entry().session_id().clone();
-        let msg = match verified_record.into_entry().into_message() {
-            V1(LogMessageV1::Ceremony(msg)) | V2(LogMessageV2::Ceremony(msg)) => msg,
+        let message = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::Ceremony(message)) | V2(LogMessageV2::Ceremony(message)) => *message,
             V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
             }
         };
-        log_verified_read(&key, &session_id);
-        Ok(Some(*msg))
+        log_verified_read(key, &session_id);
+        Ok(message)
     }
 
-    /// Read and verify the latest encrypted KP-share state for `sharing_seq`.
+    /// Read the highest unique ceremony completion marker.
+    async fn read_latest_ceremony_completion(
+        &mut self,
+    ) -> GuardianResult<Option<(CeremonyCompletionLogMessage, SessionID)>> {
+        let prefix = CeremonyCompletionLogMessage::object_key_dir();
+        let keys = self.s3.list_keys(&prefix, true).await?;
+        let Some((_, key)) = latest_unique_versioned_session_key(keys, &prefix, None)? else {
+            return Ok(None);
+        };
+
+        let verified_record = self.read_verified_record(&key).await?;
+        let session_id = verified_record.entry().session_id().clone();
+        let message = match verified_record.into_entry().into_message() {
+            V2(LogMessageV2::CeremonyCompletion(message)) => *message,
+            V1(_) | V2(_) => {
+                return Err(InvalidS3Log(format!(
+                    "expected a ceremony completion log at {key}"
+                )));
+            }
+        };
+        log_verified_read(&key, &session_id);
+        Ok(Some((message, session_id)))
+    }
+
+    /// Read the newest certificate snapshot after `cert_seq = 0`, if any.
     ///
-    /// Keys begin with a zero-padded `cert_seq`, so the lexicographically
-    /// greatest key identifies the latest state. KP-share locks are expected to
-    /// expire, so this read authenticates the selected record without claiming
-    /// S3 immutability.
+    /// KP-share locks are expected to expire, so this authenticates the record
+    /// without claiming S3 immutability.
     async fn read_latest_kp_share_state_log(
         &mut self,
         sharing_seq: u64,
-        require_current: bool,
     ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self.s3.list_keys(&prefix, false).await?;
-        let Some(key) = keys.into_iter().max() else {
+        let Some((_, key)) = latest_unique_versioned_session_key(keys, &prefix, Some(0))? else {
             return Ok(None);
         };
-        let msg = self
-            .read_kp_share_state_log_at_key(&key, require_current)
-            .await?;
-        if msg.sharing_seq != sharing_seq {
-            return Err(InvalidS3Log(format!(
-                "sharing_seq mismatch: {} != {}",
-                msg.sharing_seq, sharing_seq
-            )));
-        }
+        let msg = self.read_kp_share_state_log_at_key(&key, false).await?;
         Ok(Some(msg))
     }
 
@@ -252,45 +257,48 @@ impl GuardianReader {
         Ok(msg)
     }
 
-    /// Read the latest ceremony together with the latest KP-share state for its
-    /// `sharing_seq`, accepting any allowlisted build.
-    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_requirement(false)
-            .await
-    }
-
-    /// Read the latest ceremony together with the latest KP-share state for its
-    /// `sharing_seq`, requiring both records to come from the current build.
-    pub async fn read_latest_ceremony_state_from_current_build(
+    /// Read one current-build ceremony by session and sequence.
+    pub async fn read_pending_ceremony_state_from_current_build(
         &mut self,
+        session_id: &SessionID,
+        sharing_seq: u64,
     ) -> GuardianResult<CeremonyState> {
-        self.read_latest_ceremony_state_with_build_requirement(true)
-            .await
-    }
+        let ceremony_key = format!(
+            "{}{sharing_seq:020}-{session_id}.json",
+            CeremonyLogMessage::object_key_dir()
+        );
+        let ceremony = self.read_ceremony_log_at_key(&ceremony_key, true).await?;
 
-    /// Once a ceremony is present, its matching KP-share state must also exist
-    /// because writers publish `kp-shares/` before `ceremony/`.
-    async fn read_latest_ceremony_state_with_build_requirement(
-        &mut self,
-        require_current: bool,
-    ) -> GuardianResult<CeremonyState> {
-        let ceremony = self
-            .read_latest_ceremony_log(require_current)
-            .await?
-            .ok_or_else(|| {
-                InvalidInputs("no ceremony log found; setup_new_key has not run".into())
-            })?;
-        let sharing_seq = ceremony.sharing_seq();
         let kp_share_state = self
-            .read_latest_kp_share_state_log(sharing_seq, require_current)
+            .read_kp_share_state_log_from_current_build(session_id, sharing_seq, 0)
+            .await?;
+        CeremonyState::new(ceremony, kp_share_state)
+    }
+
+    /// Read the latest ceremony authorized by a completion marker.
+    pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
+        let (completion, session_id) = self
+            .read_latest_ceremony_completion()
             .await?
-            .ok_or_else(|| {
-                InvalidS3Log(format!(
-                    "no kp-shares log found for latest ceremony sharing_seq {sharing_seq}"
-                ))
-            })?;
-        Ok(CeremonyState::new(ceremony, kp_share_state)
-            .expect("ceremony and KP share state must have a consistent shape"))
+            .ok_or_else(|| InvalidInputs("no ceremony found".into()))?;
+        let sharing_seq = completion.sharing_seq;
+        let ceremony_key = format!(
+            "{}{sharing_seq:020}-{session_id}.json",
+            CeremonyLogMessage::object_key_dir()
+        );
+        let ceremony = self.read_ceremony_log_at_key(&ceremony_key, false).await?;
+        let initial_key = KpShareStateLogMessage::object_key(&session_id, sharing_seq, 0);
+        let initial_kp_share_state = self
+            .read_kp_share_state_log_at_key(&initial_key, false)
+            .await?;
+
+        let latest_kp_share_state = self.read_latest_kp_share_state_log(sharing_seq).await?;
+        ceremony_state_from_completion(
+            &completion,
+            ceremony,
+            initial_kp_share_state,
+            latest_kp_share_state,
+        )
     }
 
     /// Read the latest serving committee.
@@ -374,6 +382,149 @@ impl GuardianReader {
     }
 }
 
+fn ceremony_state_from_completion(
+    completion: &CeremonyCompletionLogMessage,
+    ceremony: CeremonyLogMessage,
+    initial_kp_share_state: KpShareStateLogMessage,
+    latest_kp_share_state: Option<KpShareStateLogMessage>,
+) -> GuardianResult<CeremonyState> {
+    let initial_state = CeremonyState::new(ceremony.clone(), initial_kp_share_state)?;
+    if initial_state.digest() != completion.ceremony_digest {
+        return Err(InvalidS3Log("ceremony completion digest mismatch".into()));
+    }
+    match latest_kp_share_state {
+        Some(state) => CeremonyState::new(ceremony, state),
+        None => Ok(initial_state),
+    }
+}
+
+fn versioned_session_key_seq(key: &str, prefix: &str) -> GuardianResult<u64> {
+    let malformed = || InvalidS3Log(format!("non-canonical key {key} under {prefix}"));
+    let (sequence, session_id) = key
+        .strip_prefix(prefix)
+        .and_then(|key| key.strip_suffix(".json"))
+        .and_then(|key| key.split_once('-'))
+        .ok_or_else(&malformed)?;
+    if sequence.len() != 20
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+        || session_id.len() != SessionID::HEX_LEN
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(malformed());
+    }
+    sequence.parse().map_err(|_| malformed())
+}
+
+fn latest_unique_versioned_session_key(
+    keys: Vec<String>,
+    prefix: &str,
+    minimum_exclusive: Option<u64>,
+) -> GuardianResult<Option<(u64, String)>> {
+    let mut latest = None;
+    let mut ambiguous = false;
+    for key in keys {
+        let sequence = versioned_session_key_seq(&key, prefix)?;
+        if minimum_exclusive.is_some_and(|minimum| sequence <= minimum) {
+            continue;
+        }
+        match latest {
+            None => latest = Some((sequence, key)),
+            Some((current, _)) if sequence > current => {
+                latest = Some((sequence, key));
+                ambiguous = false;
+            }
+            Some((current, _)) if sequence == current => ambiguous = true,
+            Some(_) => {}
+        }
+    }
+    if ambiguous {
+        return Err(InvalidS3Log(format!(
+            "multiple records found for sequence {} under {prefix}",
+            latest.as_ref().expect("ambiguous sequence exists").0
+        )));
+    }
+    Ok(latest)
+}
+
 fn log_verified_read(key: &str, session_id: &SessionID) {
     info!("Successfully read {key} from session {session_id}.");
+}
+#[cfg(test)]
+mod tests {
+    use super::ceremony_state_from_completion;
+    use super::latest_unique_versioned_session_key;
+    use super::versioned_session_key_seq;
+    use hashi_types::guardian::CeremonyCompletionLogMessage;
+    use hashi_types::guardian::CeremonyLogMessage;
+    use hashi_types::guardian::CeremonyState;
+    use hashi_types::guardian::KpShareStateLogMessage;
+    use hashi_types::guardian::SetupNewKeyResponse;
+
+    #[test]
+    fn completion_pins_initial_state_but_returns_latest_cert_snapshot() {
+        let response = SetupNewKeyResponse::mock_for_testing();
+        let initial_state = CeremonyState::from(response.clone());
+        let sharing_seq = response.secret_sharing_instance.sharing_seq();
+        let ceremony = CeremonyLogMessage::NewKey {
+            instance: response.secret_sharing_instance,
+            btc_master_pubkey: response.btc_master_pubkey,
+        };
+        let initial =
+            KpShareStateLogMessage::new(sharing_seq, 0, response.encrypted_shares.clone());
+        let latest = KpShareStateLogMessage::new(sharing_seq, 1, response.encrypted_shares);
+
+        assert!(ceremony_state_from_completion(
+            &CeremonyCompletionLogMessage::new(sharing_seq, [0; 32]),
+            ceremony.clone(),
+            initial.clone(),
+            Some(latest.clone()),
+        )
+        .is_err());
+        let state = ceremony_state_from_completion(
+            &CeremonyCompletionLogMessage::new(sharing_seq, initial_state.digest()),
+            ceremony,
+            initial,
+            Some(latest),
+        )
+        .unwrap();
+        assert_eq!(state.cert_seq, 1);
+    }
+
+    #[test]
+    fn completion_keys_are_canonical_and_unambiguous() {
+        let prefix = "ceremony-complete/";
+        for malformed in [
+            "ceremony-complete/1-0123456789abcdef.json",
+            "ceremony-complete/00000000000000000001-0123456789ABCDEF.json",
+        ] {
+            assert!(versioned_session_key_seq(malformed, prefix).is_err());
+        }
+        assert!(latest_unique_versioned_session_key(
+            vec![
+                "ceremony-complete/00000000000000000001-0123456789abcdef.json".into(),
+                "ceremony-complete/00000000000000000001-fedcba9876543210.json".into(),
+            ],
+            prefix,
+            None,
+        )
+        .is_err());
+
+        let prefix = "kp-shares/00000000000000000007/";
+        let latest = format!("{prefix}00000000000000000001-2222222222222222.json");
+        assert_eq!(
+            latest_unique_versioned_session_key(
+                vec![
+                    format!("{prefix}00000000000000000000-0000000000000000.json"),
+                    format!("{prefix}00000000000000000000-1111111111111111.json"),
+                    latest.clone(),
+                ],
+                prefix,
+                Some(0),
+            )
+            .unwrap(),
+            Some((1, latest))
+        );
+    }
 }
