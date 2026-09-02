@@ -82,7 +82,7 @@ enum KeyProvisionerCommand {
         #[arg(long)]
         new_kp_pgp_cert_path: PathBuf,
     },
-    /// Verify this KP can fetch and decrypt its encrypted ceremony share from guardian S3.
+    /// Verify, save, and confirm this KP's encrypted ceremony share.
     Ceremony {
         /// Path to key-provisioner ceremony YAML config file.
         #[arg(long)]

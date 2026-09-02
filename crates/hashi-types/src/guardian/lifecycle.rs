@@ -56,6 +56,7 @@ impl From<WithdrawStage> for EnclaveLifecycle {
 pub enum CeremonyStage {
     Uninitialized,
     OperatorInitialized,
+    AwaitingKeyProvisionerConfirmations,
     Completed,
 }
 
@@ -64,7 +65,8 @@ impl CeremonyStage {
         match self {
             Self::Uninitialized => None,
             Self::OperatorInitialized => Some(Self::Uninitialized),
-            Self::Completed => Some(Self::OperatorInitialized),
+            Self::AwaitingKeyProvisionerConfirmations => Some(Self::OperatorInitialized),
+            Self::Completed => Some(Self::AwaitingKeyProvisionerConfirmations),
         }
     }
 }

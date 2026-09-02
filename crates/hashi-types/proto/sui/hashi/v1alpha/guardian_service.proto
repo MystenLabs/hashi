@@ -11,11 +11,16 @@ service GuardianService {
 
   // Ceremony mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
+  // Ceremony mode only: accept one KP's signed confirmation of the complete
+  // ceremony state. The ceremony completes only after every assigned KP confirms.
+  rpc ConfirmCeremony(SignedCeremonyConfirmationRequest) returns (CeremonyConfirmationResponse);
 
   // Ceremony mode only: rotate the KP set holding the existing BTC key. The
   // operator relays threshold-many current-KP-signed contributions; the enclave
   // verifies them, reconstructs the BTC key, re-splits it for the new KP set,
-  // writes the new share state to ceremony/, and returns the encrypted shares.
+  // and returns the encrypted shares. Returning does not complete the rotation:
+  // keep this enclave running until every new KP confirms and its lifecycle is
+  // CEREMONY_STAGE_COMPLETED.
   rpc RotateKpSet(BatchProvisionerRotateKpSetRequest) returns (SignedRotateKpSetResponse);
 
   // Operator initialization: provide stable config before provisioning.
@@ -71,7 +76,8 @@ enum CeremonyStage {
   CEREMONY_STAGE_UNSPECIFIED = 0;
   CEREMONY_STAGE_UNINITIALIZED = 1;
   CEREMONY_STAGE_OPERATOR_INITIALIZED = 2;
-  CEREMONY_STAGE_COMPLETED = 3;
+  CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS = 3;
+  CEREMONY_STAGE_COMPLETED = 4;
 }
 
 enum WithdrawStage {
@@ -214,6 +220,34 @@ message SignedSetupNewKeyResponse {
 
   // Signature over (intent || data || timestamp).
   optional bytes signature = 3;
+}
+
+// =======================
+//    ConfirmCeremony
+// =======================
+
+// One KP's signed confirmation of the exact ceremony state.
+message SignedCeremonyConfirmationRequest {
+  // Guardian session the KP authenticated before confirming.
+  string expected_session_id = 1;
+
+  // Blake2b-256 digest of the BCS-encoded CeremonyState.
+  optional bytes ceremony_digest = 2;
+
+  // Complete detached-signature envelope.
+  string signer_cert = 3;
+  string kp_signature = 4;
+}
+
+message CeremonyConfirmationResponse {
+  // Number of distinct assigned shares that have confirmed.
+  optional uint32 have = 1;
+
+  // Total number of assigned shares required for completion.
+  optional uint32 need = 2;
+
+  // True exactly when `have == need`.
+  optional bool completed = 3;
 }
 
 // =======================

@@ -685,6 +685,12 @@ mod tests {
         ) -> Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
+        async fn confirm_ceremony(
+            &self,
+            _: Request<proto::SignedCeremonyConfirmationRequest>,
+        ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
         async fn operator_init(
             &self,
             _: Request<proto::OperatorInitRequest>,

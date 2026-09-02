@@ -77,16 +77,18 @@ pub async fn setup_new_key(
         })
         .await?;
 
-    let response = enclave.sign(SetupNewKeyResponse {
+    let response = SetupNewKeyResponse {
         encrypted_shares,
         secret_sharing_instance: ss_instance,
         btc_master_pubkey,
-    });
+    };
+    enclave.install_pending_ceremony(CeremonyState::from(response.clone()))?;
+    let response = enclave.sign(response);
 
     enclave
-        .advance_lifecycle_into(CeremonyStage::Completed.into())
-        .expect("setup_new_key should complete a ceremony lifecycle");
-    info!("Setup complete.");
+        .advance_lifecycle_into(CeremonyStage::AwaitingKeyProvisionerConfirmations.into())
+        .expect("setup_new_key should await key provisioner confirmations");
+    info!("Setup complete; awaiting every key provisioner's confirmation.");
     Ok(response)
 }
 
@@ -120,7 +122,10 @@ mod tests {
         let (request, secret_keys) = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify_into_data(verification_key).unwrap().response;
-        assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
+        assert_eq!(
+            enclave.lifecycle(),
+            CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
+        );
 
         // Response still carries the armored ciphertexts.
         assert_eq!(validated_resp.encrypted_shares.share_count(), TEST_N);

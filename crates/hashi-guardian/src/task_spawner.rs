@@ -13,6 +13,7 @@
 //! may validate concurrently, but limiter mutation through durable logging is
 //! still exclusive.
 
+use crate::ceremony_mode::confirm;
 use crate::ceremony_mode::rotate;
 use crate::ceremony_mode::setup;
 use crate::operator_init as operator_init_domain;
@@ -24,6 +25,8 @@ use crate::withdraw_mode::standard_withdrawal as standard_withdrawal_domain;
 use crate::Enclave;
 use hashi_types::guardian::BatchProvisionerInitRequest;
 use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
+use hashi_types::guardian::CeremonyConfirmationRequest;
+use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSignedResponse;
@@ -55,6 +58,15 @@ pub async fn rotate_kp_set(
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     enclave
         .spawn_control_task(request, rotate::rotate_kp_set)
+        .await
+}
+
+pub async fn confirm_ceremony(
+    enclave: Arc<Enclave>,
+    signed: KpSigned<CeremonyConfirmationRequest>,
+) -> GuardianResult<CeremonyConfirmationResponse> {
+    enclave
+        .spawn_control_task(signed, confirm::confirm_ceremony)
         .await
 }
 

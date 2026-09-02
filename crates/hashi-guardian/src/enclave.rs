@@ -18,9 +18,11 @@ use hashi_types::bitcoin::TxUTXOs;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::LifecycleMismatch;
+use hashi_types::guardian::GuardianError::Unauthenticated;
 use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -44,6 +46,8 @@ pub struct Enclave {
     /// Serializes lifecycle and control-plane transitions so concurrent
     /// operations cannot race a check-then-set.
     control_lock: tokio::sync::Mutex<()>,
+    /// Ceremony state retained until every KP confirms successful share recovery.
+    pending_ceremony: OnceLock<PendingCeremony>,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -88,6 +92,74 @@ pub struct TemporaryInitState {
     pub ceremony_state: CeremonyState,
     pub genesis_state: Option<GenesisState>,
     pub config_hash: [u8; 32],
+}
+
+pub(crate) struct PendingCeremony {
+    digest: [u8; 32],
+    encrypted_shares: KPEncryptedSharesRoster,
+    confirmed_share_ids: RwLock<BTreeSet<ShareID>>,
+}
+
+impl PendingCeremony {
+    fn new(state: CeremonyState) -> Self {
+        Self {
+            digest: state.digest(),
+            encrypted_shares: state.encrypted_shares,
+            confirmed_share_ids: RwLock::new(BTreeSet::new()),
+        }
+    }
+
+    pub(crate) fn validate_confirmation(
+        &self,
+        signer_fingerprint: &str,
+        ceremony_digest: &[u8; 32],
+    ) -> GuardianResult<(ShareID, bool)> {
+        if ceremony_digest != &self.digest {
+            return Err(InvalidInputs(
+                "ceremony confirmation digest differs from pending ceremony".into(),
+            ));
+        }
+        let (share, _) = self
+            .encrypted_shares
+            .find_by_fingerprint(signer_fingerprint)
+            .ok_or_else(|| {
+                Unauthenticated(format!(
+                    "KP fingerprint {signer_fingerprint} is not present in the pending ceremony roster"
+                ))
+            })?;
+        let confirmed = self
+            .confirmed_share_ids
+            .read()
+            .expect("pending ceremony lock poisoned")
+            .contains(&share.id);
+        Ok((share.id, confirmed))
+    }
+
+    pub(crate) fn record_confirmation(
+        &self,
+        share_id: ShareID,
+    ) -> GuardianResult<CeremonyConfirmationResponse> {
+        let mut confirmed = self
+            .confirmed_share_ids
+            .write()
+            .expect("pending ceremony lock poisoned");
+        confirmed.insert(share_id);
+        CeremonyConfirmationResponse::new(confirmed.len(), self.encrypted_shares.share_count())
+    }
+
+    pub(crate) fn status(&self) -> GuardianResult<CeremonyConfirmationResponse> {
+        CeremonyConfirmationResponse::new(
+            self.confirmed_share_ids
+                .read()
+                .expect("pending ceremony lock poisoned")
+                .len(),
+            self.encrypted_shares.share_count(),
+        )
+    }
+
+    fn is_complete(&self) -> bool {
+        self.status().is_ok_and(|status| status.completed)
+    }
 }
 
 impl EnclaveConfig {
@@ -321,6 +393,7 @@ impl Enclave {
                 rate_limiter: OnceLock::new(),
             },
             temporary_init_state: RwLock::new(None),
+            pending_ceremony: OnceLock::new(),
             control_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -428,12 +501,16 @@ impl Enclave {
             EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
                 self.operator_init_state_installed(EnclaveMode::Ceremony)
             }
+            EnclaveLifecycle::Ceremony(CeremonyStage::AwaitingKeyProvisionerConfirmations) => {
+                self.pending_ceremony.get().is_some()
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => self
+                .pending_ceremony
+                .get()
+                .is_some_and(PendingCeremony::is_complete),
             EnclaveLifecycle::Withdraw(WithdrawStage::OperatorInitialized) => {
                 self.operator_init_state_installed(EnclaveMode::Withdraw)
             }
-            // Ceremony handlers advance only after writing their output to S3.
-            // The lifecycle itself is the completion state.
-            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => return,
             EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
                 self.config.is_enclave_btc_keypair_set() && self.temporary_init_state_is_available()
             }
@@ -617,6 +694,22 @@ impl Enclave {
             KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
         )))
         .await
+    }
+
+    // ========================================================================
+    // Pending Ceremony State
+    // ========================================================================
+
+    pub(crate) fn install_pending_ceremony(&self, state: CeremonyState) -> GuardianResult<()> {
+        self.pending_ceremony
+            .set(PendingCeremony::new(state))
+            .map_err(|_| InvalidInputs("Pending ceremony state already set".into()))
+    }
+
+    pub(crate) fn pending_ceremony(&self) -> GuardianResult<&PendingCeremony> {
+        self.pending_ceremony
+            .get()
+            .ok_or_else(|| InvalidInputs("Pending ceremony state not set".into()))
     }
 
     // ========================================================================

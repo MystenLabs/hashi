@@ -7,7 +7,8 @@
 //! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
 //! share's recipient roster matches its expected KP cert set and every
 //! ciphertext targets its keyed cert (without decrypting) -> cross-check the
-//! guardian's `ceremony/` audit log and `kp-shares/` recovery log.
+//! guardian's `ceremony/` audit log and `kp-shares/` recovery log -> wait for
+//! every KP to confirm successful recovery.
 //!
 //! [`OperatorInit`]: hashi_types::guardian::OperatorInitRequest
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
@@ -27,10 +28,22 @@ use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
+use std::time::Duration;
+use tonic::Code;
 use tracing::info;
+use tracing::warn;
 
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
+
+fn is_transient_rpc_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<tonic::Status>().is_some_and(|status| {
+        matches!(
+            status.code(),
+            Code::Cancelled | Code::DeadlineExceeded | Code::Unavailable
+        )
+    })
+}
 
 /// Run the one-time production guardian key ceremony.
 ///
@@ -135,7 +148,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         session_id = %session_id,
         "connecting to guardian log bucket + verifying attestation against current build",
     );
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist)
+    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
         .await
         .context("connect to guardian log bucket")?;
     let verified_session = reader.get_current_session_info(&session_id).await?;
@@ -219,6 +232,44 @@ pub async fn run(cfg: Config) -> Result<()> {
     info!(
         phase = "log cross-check",
         "ceremony/ and kp-shares/ logs match the SetupNewKeyResponse",
+    );
+
+    info!(
+        phase = "KP confirmations",
+        "ceremony state published; waiting for every key provisioner to run key-provisioner ceremony",
+    );
+    loop {
+        let status = match verified_live_guardian_info(&mut client, allowlist.current_build()).await
+        {
+            Ok(status) => status,
+            Err(error) if is_transient_rpc_error(&error) => {
+                warn!(
+                    phase = "KP confirmations",
+                    error = %format!("{error:#}"),
+                    "transient guardian status failure; retrying",
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        ensure!(
+            status.session_id == session_id && status.signing_pub_key == signing_pub_key,
+            "ceremony guardian session changed while waiting for KP confirmations"
+        );
+        match status.info.lifecycle {
+            lifecycle if lifecycle == CeremonyStage::Completed.into() => break,
+            lifecycle if lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            lifecycle => anyhow::bail!(
+                "ceremony guardian entered unexpected lifecycle {lifecycle:?} while waiting for KP confirmations"
+            ),
+        }
+    }
+    info!(
+        phase = "KP confirmations",
+        "every key provisioner confirmed successful ceremony recovery",
     );
 
     // 10. Summary.

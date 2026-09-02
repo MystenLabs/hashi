@@ -322,6 +322,13 @@ where
         self.inner.setup_new_key(request).await
     }
 
+    async fn confirm_ceremony(
+        &self,
+        request: Request<proto::SignedCeremonyConfirmationRequest>,
+    ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
+        self.inner.confirm_ceremony(request).await
+    }
+
     async fn operator_init(
         &self,
         request: Request<proto::OperatorInitRequest>,
@@ -479,6 +486,12 @@ mod tests {
             &self,
             _: Request<proto::SetupNewKeyRequest>,
         ) -> Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn confirm_ceremony(
+            &self,
+            _: Request<proto::SignedCeremonyConfirmationRequest>,
+        ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
         async fn operator_init(

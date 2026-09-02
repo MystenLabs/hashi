@@ -48,6 +48,7 @@ setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony 
 share's recipient roster matches its expected KP cert set and each
 PGP-encrypted ciphertext targets its keyed cert (parsed without decrypting) →
 cross-checks the guardian's `ceremony/` audit log and `kp-shares/` recovery log.
+It then waits for every KP to confirm successful share recovery.
 
 `kp_roster.kp_pgp_cert_paths` has one entry per KP/share id; each entry
 may contain multiple PGP cert paths for that KP. Each encrypted copy is keyed
@@ -64,21 +65,22 @@ command uses `guardian_endpoint`, `hashi`, and `kp_roster`.
 ## key-provisioner ceremony
 
 Confirms a KP can fetch and decrypt their share from the latest setup or
-rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
-gRPC to the live guardian): it discovers the latest ceremony and KP-share state
-from S3, verifies each record against its writing session's attested signing
-pubkey and the expected `n`/`t`, and confirms each share's recipient roster and
-PGP-encrypted ciphertexts match the expected KP cert sets. It then uses
-`kp_pgp_cert_path` to identify this KP's roster entry and decrypts and
-commitment-checks the copy for every cert in that entry. After verification it
-saves the full ceremony state, including every KP's encrypted shares and the
-public ceremony data, to the requested path.
+rotation ceremony. Trust is anchored to the guardian's S3 attestation log: it
+discovers the latest ceremony and KP-share state from S3, verifies each record
+against its writing session's attested signing pubkey and the expected `n`/`t`,
+and confirms each share's recipient roster and PGP-encrypted ciphertexts match
+the expected KP cert sets. It then uses `kp_pgp_cert_path` to identify this KP's
+roster entry and decrypts and commitment-checks the copy for every cert in that
+entry. After verification it saves the full ceremony state, including every
+KP's encrypted shares and the public ceremony data, to the requested path, then
+signs and submits a confirmation to the live guardian. The guardian completes
+the ceremony only after all KP/share entries have confirmed.
+For rotations, the external orchestrator must keep the ceremony guardian
+running after `RotateKpSet` returns until its lifecycle reaches `Completed`.
 
-The operator `run` command verifies live `/info` signed info and Nitro
-attestation against the configured current build before trusting the session
-signing key. The KP `verify` command anchors trust to the S3 `init/`
-attestation log before verifying the ceremony and share logs under that
-attested session key.
+Both ceremony commands verify live guardian info and Nitro attestation against
+the configured current build. The KP additionally anchors the ceremony and
+share logs to their writing session's S3 `init/` attestation.
 
 Each ciphertext in the selected roster entry is piped from memory to `gpg` over
 stdin. No temporary ciphertext or plaintext file is written locally; only the
