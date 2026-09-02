@@ -119,6 +119,18 @@ an exclusive publication causes old binaries to stop writing.
 
 ## Current testnet v1 to v2 plan
 
+**Executed 2026-09-01.** The upgrade, publish and finalize ran as one
+transaction (`FgXcPn4EJTHXuNcqpEuUwHDrKs6X8V8rFrg49c6AZMz3`) and published v2
+at `0x8f7efd743897fde48cc35b6203cd72c7ad4248f0eb02a9ad378e4a2d39cc2c7e`;
+`DisableVersion(1)` then executed through v2
+(`2Ydq5EwBTbqAcUtuTeTwu4rjMRdkg2ZKoZk26x6gJzgu`), leaving `[2]` enabled. The
+pause steps below were not used: the withdrawal queue was drained beforehand by
+raising `bitcoin_withdrawal_minimum` through `UpdateConfig` and verified empty
+before the upgrade, so the window held no withdrawal state to corrupt, and the
+minimum was set to its new value after the disable. `Published.toml` and the
+`testnet/v2` bytecode snapshot record the deployment; the plan is kept for the
+reasoning behind the ordering.
+
 The deployed testnet v1 package only has the legacy `upgrade` proposal. That
 proposal always leaves previous versions enabled, so it cannot make the first
 v1-to-v2 transition atomic. Testnet carries no real funds, and we accept a small

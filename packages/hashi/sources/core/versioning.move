@@ -21,7 +21,7 @@ use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{
 /// upgrade (snapshot v1 + upgrade in every dev harness), never as a fresh
 /// publish — `create` enables this constant, and a fresh publish is Sui
 /// sequence version 1, so a mid-cycle fresh publish can never activate.
-const PACKAGE_VERSION: u64 = 2;
+const PACKAGE_VERSION: u64 = 3;
 
 // ~~~~~~~ Errors ~~~~~~~
 
