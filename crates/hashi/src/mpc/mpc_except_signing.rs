@@ -1069,10 +1069,10 @@ impl MpcManager {
         if certified_reduced_weight < required_reduced_weight {
             {
                 let mgr = mpc_manager.read().unwrap();
-                if Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, &mgr.address) {
+                if mgr.this_node_deals_nothing() {
                     tracing::debug!(
-                        "Skipping nonce dealing for batch {batch_index}: this node has zero \
-                         reduced weight"
+                        "Skipping nonce dealing for batch {batch_index}: this node has no \
+                         reduced weight in this committee"
                     );
                     return;
                 }
@@ -3473,6 +3473,16 @@ impl MpcManager {
             .ok()
             .and_then(|id| nodes.weight_of(id).ok())
             .is_some_and(|weight| weight == 0)
+    }
+
+    fn this_node_deals_nothing(&self) -> bool {
+        let Ok(party_id) = self.party_id() else {
+            return true;
+        };
+        self.mpc_config
+            .nodes
+            .weight_of(party_id)
+            .is_ok_and(|weight| weight == 0)
     }
 
     fn certified_dealer_party_id(committee: &Committee, dealer: &Address) -> MpcResult<PartyId> {
