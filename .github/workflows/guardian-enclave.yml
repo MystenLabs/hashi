@@ -1,24 +1,46 @@
 name: Guardian Enclave Build
 
-# Measures the guardian EIF for a deployment.
+# Builds the guardian EIF on two runner images and fails unless their PCRs
+# agree. PCR0 is a hash of the built image, and the build takes BUCKET_NAME,
+# AWS_REGION and CEREMONY_MODE as inputs — they are substituted into run.sh,
+# which goes in the ramdisk the measurement covers. So a PCR0 only means
+# something next to the deployment it was built for.
 #
-# PCR0 is a hash of the built image, and the build takes BUCKET_NAME, AWS_REGION
-# and CEREMONY_MODE as inputs — they are substituted into run.sh, which goes in
-# the ramdisk the measurement covers. So a PCR0 only means something next to the
-# deployment it was built for: pass the same values that stack's enclave hosts
-# build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml in
-# sui-operations, rendered into user-data by enclave.go), and dispatch this on
-# the commit the hosts pin.
+# Three ways in, one job:
 #
-# This is the ONLY sanctioned source for the eif-pcr0 / eif-pcr0-b /
-# ceremony-pcr0 config values and for the rotate workflow's hashi_pcr0 input.
-# Reading a measurement off the host being verified would make the check
-# circular: it would confirm the host runs whatever it runs.
+#   workflow_dispatch — a MEASUREMENT. Pass the same values that stack's enclave
+#     hosts build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml
+#     in sui-operations, rendered into user-data by enclave.go), and dispatch on
+#     the commit the hosts pin. This is the ONLY sanctioned source for the
+#     eif-pcr0 / eif-pcr0-b / ceremony-pcr0 config values and for the rotate
+#     workflow's hashi_pcr0 input. Reading a measurement off the host being
+#     verified would make the check circular: it would confirm the host runs
+#     whatever it runs.
+#
+#   pull_request — a REPRODUCIBILITY GATE on the enclave's build inputs, with
+#     canonical test values. Its PCR0 is not a deployment measurement; the only
+#     question is whether two builders agree. Every enclave host rebuilds the EIF
+#     from source, so a change that stops reproducing must not merge — the last
+#     one that did was found at a testnet rotation.
+#
+#   schedule — the same gate on main, nightly, so drift from anything the path
+#     filter misses shows up within a day rather than at the next rotation.
 #
 # Both runners must agree, or the build is not reproducible and no measurement
 # from it can be trusted.
 
 on:
+  pull_request:
+    paths:
+      - docker/hashi-guardian/**
+      - crates/hashi-guardian/**
+      - crates/hashi-types/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/guardian-enclave.yml
+  schedule:
+    - cron: '20 4 * * *'
   workflow_dispatch:
     inputs:
       bucket_name:
@@ -49,14 +71,33 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes the build in flight; dispatch and
+# nightly runs never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
       matrix:
         os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    # Dispatch inputs are empty on pull_request and schedule; these are the
+    # gate's canonical values (the bucket is the Makefile's default, the region
+    # every deployed stack's).
+    env:
+      BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
+      AWS_REGION: ${{ inputs.aws_region || 'us-west-2' }}
+      CEREMONY_MODE_INPUT: ${{ inputs.ceremony_mode || 'withdraw' }}
+      FEATURES: ${{ inputs.features || '' }}
     outputs:
       git_revision: ${{ steps.rev.outputs.git_revision }}
+      bucket_name: ${{ steps.rev.outputs.bucket_name }}
+      aws_region: ${{ steps.rev.outputs.aws_region }}
+      ceremony_mode: ${{ steps.rev.outputs.ceremony_mode }}
+      features: ${{ steps.rev.outputs.features }}
 
     steps:
       # The SOURCE measured is git_revision's, not the dispatched ref's — the
@@ -68,22 +109,25 @@ jobs:
         with:
           ref: ${{ inputs.git_revision || github.sha }}
 
-      - name: Resolve the revision being measured
+      - name: Resolve the revision and inputs being measured
         id: rev
         shell: bash
         run: |
           REV="$(git rev-parse HEAD)"
           echo "GIT_REVISION=$REV" >> "$GITHUB_ENV"
-          echo "git_revision=$REV" >> "$GITHUB_OUTPUT"
+          {
+            echo "git_revision=$REV"
+            echo "bucket_name=$BUCKET_NAME"
+            echo "aws_region=$AWS_REGION"
+            echo "ceremony_mode=$CEREMONY_MODE_INPUT"
+            echo "features=$FEATURES"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build enclave EIF
         working-directory: docker/hashi-guardian
         env:
-          BUCKET_NAME: ${{ inputs.bucket_name }}
-          AWS_REGION: ${{ inputs.aws_region }}
-          FEATURES: ${{ inputs.features }}
           # The Makefile takes "true"/empty, not the friendlier input wording.
-          CEREMONY_MODE: ${{ inputs.ceremony_mode == 'ceremony' && 'true' || '' }}
+          CEREMONY_MODE: ${{ env.CEREMONY_MODE_INPUT == 'ceremony' && 'true' || '' }}
         run: |
           make BUCKET_NAME="$BUCKET_NAME" AWS_REGION="$AWS_REGION" \
                GIT_REVISION="$GIT_REVISION" FEATURES="$FEATURES" \
@@ -122,7 +166,7 @@ jobs:
           path: docker/hashi-guardian/out/nitro.pcrs
 
   verify:
-    needs: build
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Download ubuntu-latest PCRs
@@ -166,15 +210,17 @@ jobs:
             echo ""
             echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)"
             echo ""
+            echo "**Trigger**: \`${{ github.event_name }}\`${{ github.event_name != 'workflow_dispatch' && ' — reproducibility gate with canonical inputs, NOT a deployment measurement' || '' }}"
+            echo ""
             echo "Measured build — a PCR0 is only valid for this exact combination:"
             echo ""
             echo "| Input | Value |"
             echo "|-------|-------|"
             echo "| commit | \`${{ needs.build.outputs.git_revision }}\` |"
-            echo "| bucket | \`${{ inputs.bucket_name }}\` |"
-            echo "| region | \`${{ inputs.aws_region }}\` |"
-            echo "| mode | \`${{ inputs.ceremony_mode }}\` |"
-            echo "| features | \`${{ inputs.features }}\`${{ inputs.features == '' && ' (real attestation)' || ' — MOCK attestation, not provenance' }} |"
+            echo "| bucket | \`${{ needs.build.outputs.bucket_name }}\` |"
+            echo "| region | \`${{ needs.build.outputs.aws_region }}\` |"
+            echo "| mode | \`${{ needs.build.outputs.ceremony_mode }}\` |"
+            echo "| features | \`${{ needs.build.outputs.features }}\`${{ needs.build.outputs.features == '' && ' (real attestation)' || ' — MOCK attestation, not provenance' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # A bare "the PCRs differ" costs whoever sees it a long investigation:
