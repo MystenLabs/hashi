@@ -72,8 +72,8 @@ The main components are:
   guardian stores static config and the reconstructed BTC key; an active
   guardian additionally verifies committee certificates, enforces the limiter,
   signs Bitcoin inputs, and records signed logs.
-- **Key provisioners (KPs)**: independent holders of encrypted guardian key
-  shares.
+- **Key provisioners (KPs)**: independent holders of guardian key shares. Each
+  share has one configured OpenPGP certificate and one encrypted ciphertext.
 - **Operator**: the off-enclave actor that drives guardian ceremony and
   withdraw-mode provisioning and activation.
 - **S3**: immutable log storage for attestation,
@@ -96,13 +96,13 @@ sequenceDiagram
 
     Operator->>Guardian: OperatorInit(S3 config)
     Guardian->>S3: log(init attestation + GuardianInfo)
-    Operator->>Guardian: SetupNewKey(KP PGP cert sets, n, t)
+    Operator->>Guardian: SetupNewKey(ordered KP PGP certs, n, t)
     Guardian->>S3: log(ceremony/NewKey + kp-shares state)
     Guardian-->>Operator: encrypted KP share state + guardian BTC pubkey
 
     KPs->>S3: Read init, ceremony, and kp-shares logs
-    S3-->>KPs: PGP-encrypted share keyed by this KP cert fingerprint
-    KPs->>KPs: Decrypt encrypted share and verify attestation, recipients, commitment
+    S3-->>KPs: One PGP-encrypted share addressed to this KP cert fingerprint
+    KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
 ```
 
 ## Withdraw-mode provisioning flow

@@ -240,10 +240,7 @@ impl GuardianReader {
         }
         let session_id = verified_record.entry().session_id().clone();
         let msg = match verified_record.into_entry().into_message() {
-            V1(LogMessageV1::KpShareState(msg)) => (*msg)
-                .try_into()
-                .map_err(|e| InvalidS3Log(format!("log schema conversion failed: {e}")))?,
-            V2(LogMessageV2::KpShareState(msg)) => *msg,
+            V1(LogMessageV1::KpShareState(msg)) | V2(LogMessageV2::KpShareState(msg)) => *msg,
             V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
             }

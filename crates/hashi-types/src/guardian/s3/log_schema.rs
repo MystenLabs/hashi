@@ -11,8 +11,7 @@ use super::log_messages::CommitteeUpdateLogMessage;
 use super::log_messages::GenesisLogMessage;
 use super::log_messages::HeartbeatLogMessage;
 use super::log_messages::InitLogMessage;
-use super::log_messages::KpShareStateLogMessageV1;
-use super::log_messages::KpShareStateLogMessageV2;
+use super::log_messages::KpShareStateLogMessage;
 use super::log_messages::WithdrawalLogMessage;
 use crate::guardian::UnixMillis;
 use serde::Deserialize;
@@ -55,16 +54,15 @@ impl Serialize for VersionedLogMessage {
     }
 }
 
-/// Schema-version-1 log messages. Its legacy KP-share payload is retained so
-/// readers can verify signatures over records emitted before KP shares
-/// supported multiple certificates.
+/// Schema-version-1 log messages. KP-share state uses the same scalar-recipient
+/// payload as V2 to preserve deployed signed JSON bytes.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     Ceremony(Box<CeremonyLogMessage>),
-    KpShareState(Box<KpShareStateLogMessageV1>),
+    KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
 }
@@ -79,7 +77,7 @@ pub enum LogMessageV2 {
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     Ceremony(Box<CeremonyLogMessage>),
-    KpShareState(Box<KpShareStateLogMessageV2>),
+    KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
 }

@@ -404,7 +404,8 @@ mod tests {
     use crate::guardian::GuardianSigningIntentType;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
-    use crate::guardian::KPEncryptedSharesRoster;
+    use crate::guardian::KpEncryptedShare;
+    use crate::guardian::KpEncryptedShareRoster;
     use crate::guardian::KpShareStateLogMessage;
     use crate::guardian::LimiterState;
     use crate::guardian::MAINNET_S3_OBJECT_LOCK_POLICY;
@@ -661,18 +662,92 @@ mod tests {
         else {
             panic!("expected the exact V1 KP share state");
         };
-        let message: KpShareStateLogMessage = (*message)
-            .try_into()
-            .expect("the deployed V1 KP share state must convert");
+        let message = *message;
         assert_eq!(message.sharing_seq, 0);
         assert_eq!(message.cert_seq, 0);
         assert_eq!(message.encrypted_shares.share_count(), 6);
-        let (share, ciphertext) = message
+        let share = message
             .encrypted_shares
             .find_by_fingerprint("010AFFD5514AE454CA0D56DAA40FE24388998D2A")
-            .expect("legacy ciphertext must be retained");
+            .expect("deployed ciphertext must be retained");
         assert_eq!(share.id.get(), 1);
-        assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
+        assert!(
+            share
+                .armored_ciphertext
+                .starts_with("-----BEGIN PGP MESSAGE-----")
+        );
+    }
+
+    #[test]
+    fn v2_kp_share_state_uses_scalar_recipient_and_round_trips() {
+        let signing_key = GuardianSignKeyPair::from([22u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let encrypted_shares = KpEncryptedShareRoster::new(vec![KpEncryptedShare {
+            id: NonZeroU16::new(1).unwrap(),
+            recipient_fingerprint: "010AFFD5514AE454CA0D56DAA40FE24388998D2A".into(),
+            armored_ciphertext: "ciphertext".into(),
+        }])
+        .unwrap();
+        let record = LogRecord::new_at_timestamp(
+            session_id,
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
+                7,
+                1,
+                encrypted_shares,
+            ))),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        let json = serde_json::to_value(&record).unwrap();
+        let share = &json["message"]["KpShareState"]["encrypted_shares"][0];
+        assert_eq!(
+            share,
+            &serde_json::json!({
+                "id": 1,
+                "recipient_fingerprint": "010AFFD5514AE454CA0D56DAA40FE24388998D2A",
+                "armored_ciphertext": "ciphertext",
+            })
+        );
+
+        let decoded: LogRecord = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            decoded.message(),
+            VersionedLogMessage::V2(LogMessageV2::KpShareState(..))
+        ));
+        decoded
+            .validate(Some(&signing_key.verification_key()))
+            .unwrap();
+    }
+
+    #[test]
+    fn v2_kp_share_state_rejects_removed_fingerprint_map() {
+        let signing_key = GuardianSignKeyPair::from([23u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let encrypted_shares = KpEncryptedShareRoster::new(vec![KpEncryptedShare {
+            id: NonZeroU16::new(1).unwrap(),
+            recipient_fingerprint: "010AFFD5514AE454CA0D56DAA40FE24388998D2A".into(),
+            armored_ciphertext: "ciphertext".into(),
+        }])
+        .unwrap();
+        let record = LogRecord::new_at_timestamp(
+            session_id,
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
+                7,
+                1,
+                encrypted_shares,
+            ))),
+            &signing_key,
+            1_700_000_000_000,
+        );
+        let mut json = serde_json::to_value(record).unwrap();
+        json["message"]["KpShareState"]["encrypted_shares"][0] = serde_json::json!({
+            "id": 1,
+            "ciphertexts_by_fingerprint": {
+                "010AFFD5514AE454CA0D56DAA40FE24388998D2A": "ciphertext"
+            },
+        });
+
+        assert!(serde_json::from_value::<LogRecord>(json).is_err());
     }
 
     #[test]
@@ -1061,7 +1136,7 @@ mod tests {
             LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
                 3,
-                KPEncryptedSharesRoster::new(vec![]).unwrap(),
+                KpEncryptedShareRoster::new(vec![]).unwrap(),
             ))),
             &signing_key,
             1_700_000_000_000,

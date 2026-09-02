@@ -473,7 +473,6 @@ mod tests {
         let domain = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
             "session".into(),
             0,
-            cert.fingerprint().to_hex(),
             cert.clone(),
             GuardianEncryptedShare {
                 id: ShareID::new(1).unwrap(),
@@ -490,7 +489,7 @@ mod tests {
 
         verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap();
 
-        request.target_kp_pgp_fingerprint.push('0');
+        request.new_kp_pgp_cert.push('0');
         let err = verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }

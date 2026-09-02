@@ -8,7 +8,7 @@ use super::s3::log::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianResult;
-use crate::guardian::KPEncryptedSharesRoster;
+use crate::guardian::KpEncryptedShareRoster;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::SetupNewKeyResponse;
 use blake2::Blake2b;
@@ -22,7 +22,7 @@ pub struct CeremonyState {
     pub secret_sharing_instance: SecretSharingInstance,
     pub btc_master_pubkey: BitcoinPubkey,
     pub cert_seq: u64,
-    pub encrypted_shares: KPEncryptedSharesRoster,
+    pub encrypted_shares: KpEncryptedShareRoster,
 }
 
 impl CeremonyState {
@@ -58,7 +58,7 @@ impl CeremonyState {
         secret_sharing_instance: SecretSharingInstance,
         btc_master_pubkey: BitcoinPubkey,
         cert_seq: u64,
-        encrypted_shares: KPEncryptedSharesRoster,
+        encrypted_shares: KpEncryptedShareRoster,
     ) -> GuardianResult<Self> {
         if encrypted_shares.share_count() != secret_sharing_instance.num_shares() {
             return Err(GuardianError::InternalError(format!(
@@ -159,7 +159,7 @@ mod tests {
             KpShareStateLogMessage::new(
                 sharing_seq,
                 0,
-                KPEncryptedSharesRoster::new(vec![]).unwrap(),
+                KpEncryptedShareRoster::new(vec![]).unwrap(),
             ),
         )
         .unwrap_err();

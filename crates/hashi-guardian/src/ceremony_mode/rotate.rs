@@ -21,7 +21,7 @@ struct VerifiedShareSubmission {
 struct VerifiedRotationProposal {
     pcr_allowlist: PcrAllowlist,
     share_submissions: Vec<VerifiedShareSubmission>,
-    new_kp_certs_roster: KpCertsRoster,
+    new_kp_certs_roster: KpCertRoster,
     new_params: SecretSharingParams,
 }
 
@@ -155,7 +155,7 @@ fn require_agreement<T: Clone + PartialEq>(
 
 fn authorize_share_submissions(
     submissions: &[VerifiedShareSubmission],
-    old_kp_encrypted_shares: &KPEncryptedSharesRoster,
+    old_kp_encrypted_shares: &KpEncryptedShareRoster,
 ) -> GuardianResult<Vec<GuardianEncryptedShare>> {
     submissions
         .iter()
@@ -173,7 +173,7 @@ async fn finalize_rotation(
     old_shares: &[Share],
     old_instance: &SecretSharingInstance,
     expected_btc_master_pubkey: BitcoinPubkey,
-    new_certs_roster: KpCertsRoster,
+    new_certs_roster: KpCertRoster,
     new_params: SecretSharingParams,
 ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
     info!("Threshold reached, reconstructing BTC key.");
@@ -192,22 +192,16 @@ async fn finalize_rotation(
 
     let n = new_params.num_shares();
     let t = new_params.threshold();
-    let certificate_count: usize = new_certs_roster
-        .iter()
-        .map(|set| set.pgp_certs().len())
-        .sum();
     info!(
         share_count = n,
         threshold = t,
-        certificate_count,
         "Received new key provisioner OpenPGP certificate roster."
     );
-    for (index, cert_set) in new_certs_roster.iter().enumerate() {
+    for (index, cert) in new_certs_roster.iter().enumerate() {
         info!(
             share_id = index + 1,
-            certificate_count = cert_set.pgp_certs().len(),
-            recipient_fingerprints = ?cert_set.fingerprints(),
-            "Received new KP certificate set."
+            recipient_fingerprint = %cert.fingerprint().to_hex(),
+            "Received new KP certificate."
         );
     }
 
@@ -219,8 +213,7 @@ async fn finalize_rotation(
     };
     info!(
         share_count = encrypted_shares.share_count(),
-        ciphertext_count = encrypted_shares.ciphertext_count(),
-        "Re-encrypted each share once per new KP certificate."
+        "Re-encrypted one share for each new key provisioner."
     );
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
@@ -289,11 +282,11 @@ mod tests {
     struct TestContext {
         shares: Vec<Share>,
         old_instance: SecretSharingInstance,
-        old_kp_encrypted_shares: KPEncryptedSharesRoster,
+        old_kp_encrypted_shares: KpEncryptedShareRoster,
         btc_master_pubkey: BitcoinPubkey,
         pcr_allowlist: PcrAllowlist,
         kp_keys: Vec<(PgpPublicCert, String)>,
-        alternate_first_kp_key: (PgpPublicCert, String),
+        alternate_kp_key: (PgpPublicCert, String),
         captures: CapturedPuts,
         enclave: Arc<Enclave>,
     }
@@ -317,31 +310,18 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let (alternate_cert, alternate_secret) = mock_pgp_keypair();
-        let alternate_first_kp_key = (
+        let alternate_kp_key = (
             PgpPublicCert::new(alternate_cert).unwrap(),
             alternate_secret,
         );
-        let old_kp_encrypted_shares = KPEncryptedSharesRoster::new(
+        let old_kp_encrypted_shares = KpEncryptedShareRoster::new(
             kp_keys
                 .iter()
                 .enumerate()
-                .map(|(index, (cert, _))| KPEncryptedShares {
+                .map(|(index, (cert, _))| KpEncryptedShare {
                     id: ShareID::new((index + 1) as u16).unwrap(),
-                    ciphertexts_by_fingerprint: if index == 0 {
-                        [
-                            (cert.fingerprint().to_hex(), "dummy".into()),
-                            (
-                                alternate_first_kp_key.0.fingerprint().to_hex(),
-                                "dummy".into(),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect()
-                    } else {
-                        [(cert.fingerprint().to_hex(), "dummy".into())]
-                            .into_iter()
-                            .collect()
-                    },
+                    recipient_fingerprint: cert.fingerprint().to_hex(),
+                    armored_ciphertext: "dummy".into(),
                 })
                 .collect(),
         )
@@ -355,7 +335,7 @@ mod tests {
             btc_master_pubkey,
             pcr_allowlist: PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
             kp_keys,
-            alternate_first_kp_key,
+            alternate_kp_key,
             captures,
             enclave,
         }
@@ -370,10 +350,7 @@ mod tests {
             })
         }
 
-        fn build_roster_with_secrets(
-            &self,
-            num_shares: usize,
-        ) -> (KpCertsRoster, MockKpSecretKeys) {
+        fn build_roster_with_secrets(&self, num_shares: usize) -> (KpCertRoster, MockKpSecretKeys) {
             mock_kp_certs_roster_with_secrets(num_shares)
         }
 
@@ -382,7 +359,7 @@ mod tests {
             share: &Share,
             signer: &(PgpPublicCert, String),
             expected_session_id: SessionID,
-            new_kp_certs_roster: &KpCertsRoster,
+            new_kp_certs_roster: &KpCertRoster,
             new_threshold: usize,
         ) -> KpSigned<ProvisionerRotateKpSetRequest> {
             let request = ProvisionerRotateKpSetRequest::build_from_share(
@@ -405,7 +382,7 @@ mod tests {
             share: &Share,
             signer_index: usize,
             expected_session_id: SessionID,
-            new_kp_certs_roster: &KpCertsRoster,
+            new_kp_certs_roster: &KpCertRoster,
             new_threshold: usize,
         ) -> KpSigned<ProvisionerRotateKpSetRequest> {
             self.signed_submission_with_key(
@@ -420,7 +397,7 @@ mod tests {
         fn request(
             &self,
             shares: &[Share],
-            new_kp_certs_roster: KpCertsRoster,
+            new_kp_certs_roster: KpCertRoster,
             new_threshold: usize,
         ) -> GuardianResult<BatchProvisionerRotateKpSetRequest> {
             let submissions = shares
@@ -466,13 +443,13 @@ mod tests {
     ) {
         let response_shares = &response.encrypted_shares;
         assert_eq!(response_shares.share_count(), new_n);
-        for enc in response_shares.iter() {
-            for ciphertext in enc.ciphertexts_by_fingerprint.values() {
-                assert!(
-                    ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"),
-                    "expected a PGP-armored share in the response"
-                );
-            }
+        for encrypted_share in response_shares.iter() {
+            assert!(
+                encrypted_share
+                    .armored_ciphertext
+                    .starts_with("-----BEGIN PGP MESSAGE-----"),
+                "expected a PGP-armored share in the response"
+            );
         }
 
         let captured = captures.lock().unwrap();
@@ -838,13 +815,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_alternate_cert_assigned_to_same_share() {
+    async fn rejects_alternate_cert_for_rostered_share() {
         let ctx = setup_rotation_enclave().await;
         let roster = mock_kp_certs_roster(TEST_N);
         let submissions = vec![
             ctx.signed_submission_with_key(
                 &ctx.shares[0],
-                &ctx.alternate_first_kp_key,
+                &ctx.alternate_kp_key,
                 ctx.enclave.s3_session_id(),
                 &roster,
                 TEST_T,
@@ -866,9 +843,13 @@ mod tests {
         ];
         let req = BatchProvisionerRotateKpSetRequest::new(submissions).unwrap();
 
-        rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
+        let err = rotate_kp_set_with_state(ctx.enclave.clone(), req, ctx.latest_s3_state())
             .await
-            .expect("should succeed");
+            .expect_err("an alternate certificate must not authorize the rostered share");
+        assert!(matches!(
+            &err,
+            InvalidInputs(message) if message.contains("not present in the encrypted-share roster")
+        ));
     }
 
     #[tokio::test]

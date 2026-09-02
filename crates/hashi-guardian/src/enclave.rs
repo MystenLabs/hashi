@@ -105,7 +105,7 @@ pub struct TemporaryInitState {
 
 pub(crate) struct PendingCeremony {
     digest: [u8; 32],
-    encrypted_shares: KPEncryptedSharesRoster,
+    encrypted_shares: KpEncryptedShareRoster,
     confirmed_share_ids: RwLock<BTreeSet<ShareID>>,
 }
 
@@ -128,7 +128,7 @@ impl PendingCeremony {
                 "ceremony confirmation digest differs from pending ceremony".into(),
             ));
         }
-        let (share, _) = self
+        let share = self
             .encrypted_shares
             .find_by_fingerprint(signer_fingerprint)
             .ok_or_else(|| {
@@ -703,7 +703,7 @@ impl Enclave {
         &self,
         sharing_seq: u64,
         cert_seq: u64,
-        encrypted_shares: KPEncryptedSharesRoster,
+        encrypted_shares: KpEncryptedShareRoster,
     ) -> GuardianResult<()> {
         self.write_log(LogMessage::KpShareState(Box::new(
             KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
