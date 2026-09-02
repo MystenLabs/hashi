@@ -12,6 +12,7 @@ use anyhow::Context;
 use anyhow::Result;
 use bitcoin::Network;
 
+use crate::remote_write;
 use crate::remote_write::RemoteWriteConfig;
 
 pub struct Config {
@@ -84,17 +85,26 @@ impl Config {
             .context("BTC_NETWORK must be one of bitcoin|testnet|signet|regtest")?;
         let remote_write = match std::env::var("MIMIR_URL").ok().filter(|u| !u.is_empty()) {
             None => None,
-            Some(url) => Some(RemoteWriteConfig {
-                url,
-                username: std::env::var("MIMIR_USERNAME")
-                    .unwrap_or_else(|_| "incoming_metrics".to_string()),
-                password: std::env::var("MIMIR_PASSWORD")
-                    .context("MIMIR_PASSWORD must be set when MIMIR_URL is")?,
-                interval: Duration::from_secs(parse_env_u64("MIMIR_PUSH_INTERVAL_SECS", 60)?),
-                external_labels: parse_external_labels(
-                    &std::env::var("MIMIR_EXTERNAL_LABELS").unwrap_or_default(),
-                )?,
-            }),
+            Some(url) => {
+                let interval_secs = parse_env_u64("MIMIR_PUSH_INTERVAL_SECS", 60)?;
+                // `tokio::time::interval` panics on zero, and a panic aborts this binary.
+                anyhow::ensure!(
+                    interval_secs > 0,
+                    "MIMIR_PUSH_INTERVAL_SECS must be at least 1"
+                );
+                Some(RemoteWriteConfig {
+                    url: url.parse().context("MIMIR_URL must be a valid URL")?,
+                    username: std::env::var("MIMIR_USERNAME")
+                        .unwrap_or_else(|_| "incoming_metrics".to_string()),
+                    password: std::env::var("MIMIR_PASSWORD")
+                        .context("MIMIR_PASSWORD must be set when MIMIR_URL is")?,
+                    interval: Duration::from_secs(interval_secs),
+                    external_labels: remote_write::parse_external_labels(
+                        &std::env::var("MIMIR_EXTERNAL_LABELS").unwrap_or_default(),
+                    )
+                    .context("MIMIR_EXTERNAL_LABELS")?,
+                })
+            }
         };
         Ok(Self {
             backend_url,
@@ -112,59 +122,11 @@ impl Config {
     }
 }
 
-/// Parse the comma-separated labels pinned on every pushed series. A name the
-/// remote-write endpoint would reject fails at startup rather than once a tick.
-fn parse_external_labels(raw: &str) -> Result<Vec<(String, String)>> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            let (name, value) = entry.split_once('=').with_context(|| {
-                format!("MIMIR_EXTERNAL_LABELS entry {entry:?} must be name=value")
-            })?;
-            let (name, value) = (name.trim(), value.trim());
-            anyhow::ensure!(
-                is_label_name(name) && !value.is_empty(),
-                "MIMIR_EXTERNAL_LABELS entry {entry:?} needs a prometheus label name \
-                 ([a-zA-Z_][a-zA-Z0-9_]*) and a non-empty value"
-            );
-            Ok((name.to_string(), value.to_string()))
-        })
-        .collect()
-}
-
-fn is_label_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 fn parse_env_u64(key: &str, default: u64) -> Result<u64> {
     match std::env::var(key) {
         Ok(v) => v
             .parse()
             .with_context(|| format!("{key} must be a non-negative integer")),
         Err(_) => Ok(default),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_external_labels_trims_and_rejects_bad_names() {
-        let labels = parse_external_labels(" network = testnet , cluster=hashi-guardian,").unwrap();
-        let expected = vec![
-            ("network".to_string(), "testnet".to_string()),
-            ("cluster".to_string(), "hashi-guardian".to_string()),
-        ];
-        assert_eq!(labels, expected);
-        assert!(parse_external_labels("").unwrap().is_empty());
-        assert!(parse_external_labels("network").is_err());
-        assert!(parse_external_labels("net work=testnet").is_err());
-        assert!(parse_external_labels("1network=testnet").is_err());
     }
 }

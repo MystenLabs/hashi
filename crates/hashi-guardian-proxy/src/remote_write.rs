@@ -8,34 +8,45 @@
 //! collector sidecar would share this task's IAM role, which carries
 //! `s3:GetObject` on the guardian's withdrawal log.
 
+use std::future::Future;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
+use bytes::Bytes;
 use prometheus::proto::MetricFamily;
 use prometheus::proto::MetricType;
 use prometheus::Registry;
+use reqwest::StatusCode;
+use reqwest::Url;
+use tokio::time::Instant;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
 const USER_AGENT: &str = concat!("hashi-guardian-proxy/", env!("CARGO_PKG_VERSION"));
 const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Delay before the first retry of a transient failure; doubles per attempt.
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_BACKOFF: Duration = Duration::from_secs(16);
 const NAME_LABEL: &str = "__name__";
+/// The label histogram buckets carry; the encoder adds it itself.
+const BUCKET_LABEL: &str = "le";
 
 pub struct RemoteWriteConfig {
-    pub url: String,
+    pub url: Url,
     pub username: String,
     pub password: String,
     pub interval: Duration,
     pub external_labels: Vec<(String, String)>,
 }
 
-/// Spawn the push task. Returns immediately; a failed push is logged and
-/// retried on the next tick, since metrics must never take the proxy down and
-/// a briefly unreachable Mimir is not a proxy fault.
+/// Spawn the push task. Returns immediately; metrics must never take the proxy
+/// down, and a briefly unreachable Mimir is not a proxy fault: a push that
+/// keeps failing is retried until the next one is due, then dropped in favour
+/// of the fresh snapshot.
 pub fn start(config: RemoteWriteConfig, registry: Registry) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(PUSH_TIMEOUT)
@@ -49,7 +60,8 @@ pub fn start(config: RemoteWriteConfig, registry: Registry) -> Result<()> {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            if let Err(e) = push_once(&client, &config, &authorization, &registry).await {
+            let deadline = Instant::now() + config.interval;
+            if let Err(e) = push(&client, &config, &authorization, &registry, deadline).await {
                 warn!("unable to push metrics: {e:#}");
             }
         }
@@ -57,11 +69,15 @@ pub fn start(config: RemoteWriteConfig, registry: Registry) -> Result<()> {
     Ok(())
 }
 
-async fn push_once(
+/// Gather the registry into one write request and send it, resending the same
+/// body on transient failures until `deadline`. The body keeps its original
+/// timestamps, so a retry lands as one late sample rather than a gap.
+async fn push(
     client: &reqwest::Client,
     config: &RemoteWriteConfig,
     authorization: &reqwest::header::HeaderValue,
     registry: &Registry,
+    deadline: Instant,
 ) -> Result<()> {
     // Stamp every series with a single collection time.
     let now_ms = SystemTime::now()
@@ -77,12 +93,59 @@ async fn push_once(
     }
     // Snappy raw block (NOT frame), as the remote-write spec requires; the
     // frame format arrives as "corrupt input" on the receiving end.
-    let body = snap::raw::Encoder::new()
-        .compress_vec(&prost::Message::encode_to_vec(&request))
-        .context("snappy raw compression")?;
+    let body = Bytes::from(
+        snap::raw::Encoder::new()
+            .compress_vec(&prost::Message::encode_to_vec(&request))
+            .context("snappy raw compression")?,
+    );
 
+    retry_until(deadline, || {
+        send(client, &config.url, authorization, body.clone())
+    })
+    .await?;
+    debug!(series = request.timeseries.len(), "Pushed metrics.");
+    Ok(())
+}
+
+/// Whether a failed push is worth resending unchanged. Per the remote-write
+/// spec the receiver asks for a retry with 5xx (and 429); any other 4xx means
+/// the request itself is bad and would fail the same way again.
+enum PushError {
+    Transient(anyhow::Error),
+    Permanent(anyhow::Error),
+}
+
+/// Run `attempt` until it succeeds, fails permanently, or the next retry would
+/// land past `deadline`; transient failures back off exponentially in between.
+async fn retry_until<F, Fut>(deadline: Instant, mut attempt: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), PushError>>,
+{
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        let error = match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(PushError::Permanent(e)) => return Err(e),
+            Err(PushError::Transient(e)) => e,
+        };
+        if Instant::now() + backoff >= deadline {
+            return Err(error.context("gave up, the next push is due"));
+        }
+        warn!(retry_in =? backoff, "Transient push failure, retrying: {error:#}");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
+async fn send(
+    client: &reqwest::Client,
+    url: &Url,
+    authorization: &reqwest::header::HeaderValue,
+    body: Bytes,
+) -> Result<(), PushError> {
     let response = client
-        .post(&config.url)
+        .post(url.clone())
         .header(reqwest::header::AUTHORIZATION, authorization.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
         .header(reqwest::header::CONTENT_ENCODING, "snappy")
@@ -91,15 +154,57 @@ async fn push_once(
         .body(body)
         .send()
         .await
-        .context("HTTP send")?;
+        .map_err(|e| PushError::Transient(anyhow::Error::new(e).context("HTTP send")))?;
 
     let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("remote-write returned {status}: {}", body.trim());
+    if status.is_success() {
+        return Ok(());
     }
-    debug!(series = request.timeseries.len(), "Pushed metrics.");
-    Ok(())
+    let detail = response.text().await.unwrap_or_default();
+    let error = anyhow::anyhow!("remote-write returned {status}: {}", detail.trim());
+    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+        Err(PushError::Transient(error))
+    } else {
+        Err(PushError::Permanent(error))
+    }
+}
+
+/// Parse comma-separated `name=value` labels to pin on every pushed series.
+/// Anything the receiver would reject fails here rather than once a tick: a
+/// malformed name, a name given twice, or one the encoder sets itself
+/// (`__name__` — Prometheus reserves every `__` prefix — and `le` on
+/// histogram buckets), since a series carrying a label twice is refused whole.
+pub fn parse_external_labels(raw: &str) -> Result<Vec<(String, String)>> {
+    let mut labels: Vec<(String, String)> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let (name, value) = entry
+            .split_once('=')
+            .with_context(|| format!("label {entry:?} must be name=value"))?;
+        let (name, value) = (name.trim(), value.trim());
+        anyhow::ensure!(
+            is_label_name(name) && !value.is_empty(),
+            "label {entry:?} needs a prometheus label name ([a-zA-Z_][a-zA-Z0-9_]*) \
+             and a non-empty value"
+        );
+        anyhow::ensure!(
+            !name.starts_with("__") && name != BUCKET_LABEL,
+            "label {name:?} is reserved for the encoder"
+        );
+        anyhow::ensure!(
+            !labels.iter().any(|(existing, _)| existing == name),
+            "label {name:?} is set more than once"
+        );
+        labels.push((name.to_string(), value.to_string()));
+    }
+    Ok(labels)
+}
+
+fn is_label_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Expand gathered families into remote-write series. Histograms fan out into
@@ -142,12 +247,12 @@ fn to_timeseries(
                     let histogram = metric.get_histogram();
                     let bucket = format!("{name}_bucket");
                     for b in histogram.get_bucket() {
-                        let le = Label::new("le", &b.upper_bound().to_string());
+                        let le = Label::new(BUCKET_LABEL, &b.upper_bound().to_string());
                         push(&bucket, Some(le), b.cumulative_count() as f64);
                     }
                     let count = histogram.sample_count() as f64;
                     // `prometheus` leaves the open-ended bucket implicit.
-                    push(&bucket, Some(Label::new("le", "+Inf")), count);
+                    push(&bucket, Some(Label::new(BUCKET_LABEL, "+Inf")), count);
                     push(&format!("{name}_sum"), None, histogram.sample_sum());
                     push(&format!("{name}_count"), None, count);
                 }
@@ -224,6 +329,7 @@ mod tests {
     use prometheus::HistogramOpts;
     use prometheus::IntCounterVec;
     use prometheus::Opts;
+    use std::cell::Cell;
 
     fn network_label() -> Vec<(String, String)> {
         vec![("network".to_string(), "testnet".to_string())]
@@ -295,6 +401,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_labels_parse_and_reject_what_the_receiver_would() {
+        let labels = parse_external_labels(" network = testnet , cluster=hashi-guardian,").unwrap();
+        let expected = vec![
+            ("network".to_string(), "testnet".to_string()),
+            ("cluster".to_string(), "hashi-guardian".to_string()),
+        ];
+        assert_eq!(labels, expected);
+        assert!(parse_external_labels("").unwrap().is_empty());
+        assert!(parse_external_labels("network").is_err());
+        assert!(parse_external_labels("net work=testnet").is_err());
+        assert!(parse_external_labels("1network=testnet").is_err());
+        assert!(parse_external_labels("network=").is_err());
+        // Repeated within the list, or already set by the encoder.
+        assert!(parse_external_labels("network=a,network=b").is_err());
+        assert!(parse_external_labels("__name__=foo").is_err());
+        assert!(parse_external_labels("__meta=foo").is_err());
+        assert!(parse_external_labels("le=foo").is_err());
+    }
+
     /// The one thing that fails closed and silently: without it Mimir 401s
     /// every tick behind a `warn!`.
     #[test]
@@ -317,5 +443,116 @@ mod tests {
             String::from_utf8(decoded).unwrap(),
             format!("{USER}:{PASSWORD}")
         );
+    }
+
+    /// Drive `retry_until` with a scripted outcome per attempt; returns the
+    /// result and how many attempts it took.
+    async fn retry_script(
+        deadline: Duration,
+        mut outcomes: Vec<Option<bool>>,
+    ) -> (Result<()>, u32) {
+        let attempts = Cell::new(0);
+        let result = retry_until(Instant::now() + deadline, || {
+            attempts.set(attempts.get() + 1);
+            // `None` = success; `Some(true)` = transient; `Some(false)` = permanent.
+            let outcome = if outcomes.is_empty() {
+                None
+            } else {
+                outcomes.remove(0)
+            };
+            async move {
+                match outcome {
+                    None => Ok(()),
+                    Some(true) => Err(PushError::Transient(anyhow::anyhow!("503"))),
+                    Some(false) => Err(PushError::Permanent(anyhow::anyhow!("400"))),
+                }
+            }
+        })
+        .await;
+        (result, attempts.get())
+    }
+
+    /// Two transient failures then success: three attempts of the same request.
+    #[tokio::test(start_paused = true)]
+    async fn transient_failures_are_retried_with_backoff() {
+        let started = Instant::now();
+        let (result, attempts) =
+            retry_script(Duration::from_secs(60), vec![Some(true), Some(true)]).await;
+        result.unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(started.elapsed(), Duration::from_secs(1 + 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permanent_failures_are_not_retried() {
+        let (result, attempts) = retry_script(Duration::from_secs(60), vec![Some(false)]).await;
+        assert!(result.unwrap_err().to_string().contains("400"));
+        assert_eq!(attempts, 1);
+    }
+
+    /// Retries stop once the next push is due, so a receiver that stays down
+    /// costs one warning per interval and never a pile-up of stale snapshots.
+    #[tokio::test(start_paused = true)]
+    async fn retries_give_up_when_the_next_push_is_due() {
+        let (result, attempts) = retry_script(Duration::from_secs(5), vec![Some(true); 10]).await;
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("next push is due"), "{error:#}");
+        // 1s + 2s of backoff fit inside 5s; the third wait of 4s would not.
+        assert_eq!(attempts, 3);
+    }
+
+    /// A receiver answering with a fixed status, to check how `send` classes it.
+    async fn receiver(status: StatusCode) -> Url {
+        let app =
+            axum::Router::new().route("/push", axum::routing::post(move || async move { status }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/push", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    async fn send_to(url: Url) -> Result<(), PushError> {
+        let client = reqwest::Client::new();
+        let authorization = basic_auth("u", "p").unwrap();
+        send(&client, &url, &authorization, Bytes::from_static(b"body")).await
+    }
+
+    /// The receiver's verdicts, per the remote-write spec: 5xx and 429 ask for
+    /// a retry, any other 4xx is final, and no receiver at all is transient.
+    #[tokio::test]
+    async fn responses_are_classed_for_retry() {
+        assert!(send_to(receiver(StatusCode::NO_CONTENT).await)
+            .await
+            .is_ok());
+        for status in [StatusCode::BAD_GATEWAY, StatusCode::TOO_MANY_REQUESTS] {
+            assert!(
+                matches!(
+                    send_to(receiver(status).await).await,
+                    Err(PushError::Transient(_))
+                ),
+                "{status}"
+            );
+        }
+        for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED] {
+            assert!(
+                matches!(
+                    send_to(receiver(status).await).await,
+                    Err(PushError::Permanent(_))
+                ),
+                "{status}"
+            );
+        }
+        // A port nothing listens on: the connection is refused before any status.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unreachable: Url = format!("http://{}/push", closed.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        drop(closed);
+        assert!(matches!(
+            send_to(unreachable).await,
+            Err(PushError::Transient(_))
+        ));
     }
 }

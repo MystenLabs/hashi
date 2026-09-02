@@ -3079,6 +3079,7 @@ dependencies = [
  "axum",
  "base64ct",
  "bitcoin",
+ "bytes",
  "hashi-types",
  "hex",
  "lru 0.16.3",
