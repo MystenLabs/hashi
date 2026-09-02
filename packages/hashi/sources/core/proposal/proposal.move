@@ -34,6 +34,8 @@ const EProposalNotExpired: vector<u8> = b"Proposal not expired";
 const EProposalExpired: vector<u8> = b"Proposal expired";
 #[error(code = 6)]
 const EProposalAlreadyExecuted: vector<u8> = b"Proposal already executed";
+#[error(code = 7)]
+const ENotCommitteeMember: vector<u8> = b"Validator is not a member of the current committee";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -93,6 +95,10 @@ entry fun vote<T: store>(
 ) {
     hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
+    // Registration authorizes the key; only current-committee membership
+    // carries weight. A registered validator outside the committee (rotated
+    // out, or not yet seated) must not record a weightless vote.
+    assert!(hashi.current_committee().has_member(&validator_address), ENotCommitteeMember);
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
 
@@ -145,6 +151,7 @@ public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &
     let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(proposal.is_expired(clock), EProposalNotExpired);
+    sui::event::emit(ProposalDeleted<T> { proposal_id });
     proposal.delete()
 }
 
@@ -163,6 +170,18 @@ public(package) fun create<T: store>(
     // operator key it has delegated to. The vote is recorded under
     // `validator_address` so quorum weight is computed correctly.
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
+    // Before genesis no committee exists yet: the registered validators are
+    // the future committee and registration is the only authority. Once one
+    // exists, the same membership rule as `vote` applies to the creator's
+    // automatic vote.
+    let has_committee = {
+        let committee_set = hashi.committee_set();
+        committee_set.has_committee(committee_set.epoch())
+    };
+    assert!(
+        !has_committee || hashi.current_committee().has_member(&validator_address),
+        ENotCommitteeMember,
+    );
 
     let votes = vector[validator_address];
     let created_timestamp_ms = clock.timestamp_ms();
@@ -179,8 +198,21 @@ public(package) fun create<T: store>(
     };
 
     let proposal_id = object::id(&proposal);
+
+    // The creator's vote alone can satisfy the threshold (a single-member
+    // committee, or one member holding the whole quorum), so check it here
+    // the way `vote` does. Skipped before genesis: no committee exists yet,
+    // so nothing can reach quorum and there is no committee to weigh against.
+    let quorum_reached = has_committee && proposal.quorum_reached(hashi);
+
     hashi.proposals_mut().active_mut().add(proposal_id, proposal);
     sui::event::emit(ProposalCreated<T> { proposal_id, timestamp_ms: created_timestamp_ms });
+    // The creator's vote is recorded above; announce it like any other vote so
+    // event consumers can attribute it.
+    sui::event::emit(VoteCast<T> { proposal_id, voter: validator_address });
+    if (quorum_reached) {
+        sui::event::emit(QuorumReached<T> { proposal_id });
+    };
     proposal_id
 }
 
@@ -249,4 +281,19 @@ public(package) fun votes<T>(proposal: &Proposal<T>): &vector<address> {
 #[test_only]
 public fun data<T>(proposal: &Proposal<T>): &T {
     &proposal.data
+}
+
+#[test_only]
+public fun vote_cast_for_testing<T>(proposal_id: ID, voter: address): VoteCast<T> {
+    VoteCast { proposal_id, voter }
+}
+
+#[test_only]
+public fun quorum_reached_for_testing<T>(proposal_id: ID): QuorumReached<T> {
+    QuorumReached { proposal_id }
+}
+
+#[test_only]
+public fun proposal_deleted_for_testing<T>(proposal_id: ID): ProposalDeleted<T> {
+    ProposalDeleted { proposal_id }
 }
