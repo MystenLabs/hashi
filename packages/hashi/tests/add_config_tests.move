@@ -325,3 +325,46 @@ fun test_propose_vote_execute_through_quorum() {
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
+
+#[test]
+#[expected_failure(abort_code = add_config::EProtectedConfigKey)]
+/// A pinned key name cannot be introduced into the epoch store.
+fun test_pinned_key_cannot_be_added_to_epoch_store() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    add_and_execute(
+        &mut hashi,
+        true,
+        b"guardian_btc_public_key",
+        config_value::new_bytes(vector::tabulate!(32, |i| i as u8)),
+        &clock,
+        ctx,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = add_config::EProtectedConfigKey)]
+/// Nor into the instant store, where it would otherwise abort as an existing
+/// key: the pinned-key rule is checked first.
+fun test_pinned_key_cannot_be_added_to_instant_store() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    add_and_execute(
+        &mut hashi,
+        false,
+        b"bitcoin_chain_id",
+        config_value::new_bytes(vector::tabulate!(32, |i| i as u8)),
+        &clock,
+        ctx,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}

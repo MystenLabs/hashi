@@ -9,10 +9,11 @@
 /// Every entry must refer to an existing key with a matching value type and
 /// pass `mpc_config::is_valid_value` (the MPC parameters live here), so
 /// governance can tune parameters but never introduce unknown keys or change
-/// an entry's type. New keys go through `add_config`.
+/// an entry's type. The keys the package pins for the deployment's lifetime
+/// are refused here as on `update_config`. New keys go through `add_config`.
 module hashi::update_epoch_config;
 
-use hashi::{config_value::Value, hashi::Hashi, mpc_config, proposal};
+use hashi::{btc_config, config, config_value::Value, hashi::Hashi, mpc_config, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -29,6 +30,9 @@ const EInvalidConfigEntry: vector<u8> =
 #[error(code = 1)]
 const ENoEntriesProvided: vector<u8> =
     b"UpdateEpochConfig proposal must contain at least one entry";
+
+#[error(code = 2)]
+const EProtectedConfigKey: vector<u8> = b"Config key cannot be changed through UpdateEpochConfig";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -64,6 +68,12 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let UpdateEpochConfig { entries } = proposal::execute(hashi, proposal_id, clock);
     let (keys, values) = entries.into_keys_values();
     keys.zip_do!(values, |key, value| {
+        // The keys the package pins for the deployment's lifetime are refused
+        // on every config proposal, whichever store they are aimed at.
+        assert!(
+            config::is_governable_key(&key) && btc_config::is_governable_key(&key),
+            EProtectedConfigKey,
+        );
         assert!(
             hashi.epoch_config().is_valid_config_update(&key, &value)
                 && mpc_config::is_valid_value(&key, &value),

@@ -371,3 +371,14 @@ fun test_pin_seeds_absent_mpc_keys() {
 
     std::unit_test::destroy(hashi);
 }
+
+#[test]
+#[expected_failure(abort_code = update_epoch_config::EProtectedConfigKey)]
+/// The keys the package pins for the deployment's lifetime are refused on the
+/// epoch path too, before the store is even consulted.
+fun test_pinned_key_is_refused() {
+    reject_single(
+        b"guardian_btc_public_key".to_string(),
+        config_value::new_bytes(vector::tabulate!(32, |i| i as u8)),
+    );
+}

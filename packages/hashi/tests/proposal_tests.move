@@ -995,10 +995,12 @@ fun test_create_before_genesis_emits_no_quorum() {
     );
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
-    hashi::mpc_config::init_defaults(&mut config);
+    let mut epoch_config = hashi::config::empty();
+    hashi::mpc_config::init_defaults(&mut epoch_config);
     let mut hashi = hashi::hashi::create_for_testing(
         committee_set,
         config,
+        epoch_config,
         hashi::versioning::create(),
         hashi::treasury::create(ctx),
         hashi::proposals::create(ctx),

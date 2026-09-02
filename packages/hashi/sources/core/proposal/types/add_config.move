@@ -19,7 +19,7 @@
 /// `mpc_config::is_valid_value`, which keeps the reserved MPC keys out.
 module hashi::add_config;
 
-use hashi::{config_value::Value, hashi::Hashi, mpc_config, proposal};
+use hashi::{btc_config, config, config_value::Value, hashi::Hashi, mpc_config, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -37,6 +37,9 @@ const EInvalidConfigEntry: vector<u8> = b"Proposed entry is not allowed in the e
 
 #[error(code = 2)]
 const ENoEntriesProvided: vector<u8> = b"AddConfig proposal must contain at least one entry";
+
+#[error(code = 3)]
+const EProtectedConfigKey: vector<u8> = b"Config key cannot be introduced through AddConfig";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -76,6 +79,12 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let (keys, values) = entries.into_keys_values();
     let store = if (epoch) hashi.epoch_config_mut() else hashi.config_mut();
     keys.zip_do!(values, |key, value| {
+        // The pinned key names are refused in either store: a same-named epoch
+        // entry would shadow nothing today, but the rule stays one rule.
+        assert!(
+            config::is_governable_key(&key) && btc_config::is_governable_key(&key),
+            EProtectedConfigKey,
+        );
         assert!(!store.contains(*key.as_bytes()), EKeyAlreadyExists);
         assert!(!epoch || mpc_config::is_valid_value(&key, &value), EInvalidConfigEntry);
         store.upsert(*key.as_bytes(), value);
