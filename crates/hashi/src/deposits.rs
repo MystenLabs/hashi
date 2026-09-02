@@ -176,9 +176,12 @@ impl Hashi {
                     outpoint.txid
                 )));
             }
-            Ok(DepositConfirmation::InsufficientConfirmations { confirmations }) => {
+            Ok(DepositConfirmation::InsufficientConfirmations {
+                confirmations,
+                required_confirmations,
+            }) => {
                 return Err(UnapprovedDepositError::BitcoinNotConfirmed(anyhow!(
-                    "transaction {} has {confirmations}/{confirmation_threshold} confirmations",
+                    "transaction {} has {confirmations}/{required_confirmations} confirmations",
                     outpoint.txid
                 )));
             }

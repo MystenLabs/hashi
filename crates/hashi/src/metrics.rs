@@ -120,6 +120,7 @@ pub struct Metrics {
     /// metrics still look alive.
     task_last_iteration_timestamp_seconds: IntGaugeVec,
 
+    pub(crate) coinbase_deposit_observations_total: IntCounterVec,
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
     pub deposit_lookup_cache_requests_total: IntCounterVec,
@@ -802,6 +803,13 @@ impl Metrics {
                 "hashi_task_last_iteration_timestamp_seconds",
                 "unix seconds of each task loop's last iteration; stale = task wedged",
                 &["task"],
+                registry,
+            )
+            .unwrap(),
+            coinbase_deposit_observations_total: register_int_counter_vec_with_registry!(
+                "hashi_coinbase_deposit_observations_total",
+                "Total times a tracked deposit outpoint was classified as a coinbase output, labeled by Bitcoin outpoint",
+                &["outpoint"],
                 registry,
             )
             .unwrap(),
