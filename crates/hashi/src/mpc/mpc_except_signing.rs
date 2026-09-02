@@ -123,6 +123,7 @@ const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 const PREVIOUS_MESSAGE_REPAIR_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+const NONCE_RECOVERY_DEALER_BUDGET: Duration = Duration::from_secs(600);
 /// How long the first phase of batch AVSS keeps waiting for unanimity once the
 /// pessimistic fallback is already assured.
 const BATCH_AVSS_VOTES_GRACE: Duration = Duration::from_secs(90);
@@ -2252,38 +2253,20 @@ impl MpcManager {
                 mgr.needs_nonce_retrieval(dealer, batch_index, &message.messages_hash)
             };
             if needs_retrieval {
-                tracing::info!(
-                    "Nonce message for dealer {:?} not found in memory or DB, retrieving from signers",
-                    &dealer
-                );
                 let _timer = metrics
                     .mpc_message_retrieval_duration_seconds
                     .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                     .start_timer();
-                Self::retrieve_nonce_message(
-                    mpc_manager,
-                    message,
-                    &nonce_cert,
-                    p2p_channel,
-                    batch_index,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        "Failed to retrieve nonce message from any signer for dealer {:?}: {}",
-                        &dealer,
+                Self::retrieve_nonce_message(mpc_manager, &nonce_cert, p2p_channel, batch_index)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            "Failed to retrieve nonce message from any signer for dealer {:?}: {}",
+                            &dealer,
+                            e
+                        );
                         e
-                    );
-                    e
-                })?;
-                drop(_timer);
-                // Delete stale output from the RPC handler so the party phase
-                // reprocesses with the retrieved (certified) message.
-                mpc_manager
-                    .write()
-                    .unwrap()
-                    .dealer_nonce_outputs
-                    .remove(&(batch_index, dealer));
+                    })?;
             }
             let _timer = metrics
                 .mpc_message_process_duration_seconds
@@ -4557,22 +4540,30 @@ impl MpcManager {
 
     async fn retrieve_nonce_message(
         mpc_manager: &Arc<RwLock<Self>>,
-        message: &DealerMessagesHash,
         certificate: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
         batch_index: u32,
     ) -> MpcResult<()> {
+        let message = certificate.message();
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
-            if certificate
-                .is_signer(&mgr.address, &mgr.committee)
-                .map_err(|e| MpcError::CryptoError(e.to_string()))?
-            {
+            let mut signers = certificate
+                .signers(&mgr.committee)
+                .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+            let self_signed = signers.contains(&mgr.address);
+            signers.retain(|signer| *signer != mgr.address);
+            if self_signed {
                 tracing::warn!(
                     "Self in certificate signers but nonce message not in memory or DB for dealer {:?} \
                      — retrieving from other signers",
                     message.dealer_address
                 );
+            }
+            if signers.is_empty() {
+                return Err(MpcError::ProtocolFailed(format!(
+                    "Nonce certificate for dealer {:?} names no peer to retrieve the message from",
+                    message.dealer_address
+                )));
             }
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
@@ -4580,11 +4571,13 @@ impl MpcManager {
                 epoch: mgr.mpc_config.epoch,
                 batch_index: Some(batch_index),
             };
-            let signers = certificate
-                .signers(&mgr.committee)
-                .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
+        tracing::info!(
+            "Nonce message for dealer {:?} missing or hash-mismatching locally, retrieving from {} signer(s)",
+            message.dealer_address,
+            signers.len()
+        );
         let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
             .await
             .ok_or_else(|| {
@@ -4594,14 +4587,16 @@ impl MpcManager {
                 ))
             })?;
         let Messages::NonceGeneration(ref nonce) = messages else {
-            unreachable!(
-                "Hash matched nonce certificate but got {:?}",
-                std::mem::discriminant(&messages)
-            );
+            return Err(MpcError::ProtocolFailed(format!(
+                "Retrieved non-nonce message for dealer {:?}",
+                message.dealer_address
+            )));
         };
         let mut mgr = mpc_manager.write().unwrap();
         let epoch = mgr.mpc_config.epoch;
         mgr.persist_and_cache_nonce_message(epoch, message.dealer_address, nonce)?;
+        mgr.dealer_nonce_outputs
+            .remove(&(batch_index, message.dealer_address));
         Ok(())
     }
 
@@ -6201,42 +6196,47 @@ impl MpcManager {
                         dealer_address
                     );
                     let signers = {
-                        let mut mgr = mpc_manager.write().unwrap();
-                        mgr.complaints_to_process.insert(
-                            ComplaintsToProcessKey::NonceGeneration {
-                                batch_index: complaint_batch_index,
-                                dealer: dealer_address,
-                            },
-                            ProtocolComplaint::BatchedAvss(complaint),
-                        );
-                        certs
+                        let mgr = mpc_manager.read().unwrap();
+                        let (_, cert) = certs
                             .as_slice()
                             .iter()
                             .find(|(_, cert)| {
                                 cert.submission.message.dealer_address == dealer_address
                             })
-                            .map(|(_, cert)| {
-                                let members = mgr.committee.members();
-                                cert.submission
-                                    .signature
-                                    .signers_bitmap
-                                    .iter()
-                                    .filter_map(|&idx| {
-                                        members.get(idx as usize).map(|m| m.validator_address())
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
+                            .ok_or_else(|| {
+                                MpcError::InvalidCertificate(format!(
+                                    "no nonce certificate for complained dealer {dealer_address:?}"
+                                ))
+                            })?;
+                        cert.to_dealer_certificate(mgr.mpc_config.epoch)?
+                            .signers(&mgr.committee)
+                            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?
                     };
-                    Self::recover_nonce_shares_via_complaint(
-                        mpc_manager,
-                        &dealer_address,
-                        complaint_batch_index,
-                        signers,
-                        p2p_channel,
-                        epoch,
+                    mpc_manager.write().unwrap().complaints_to_process.insert(
+                        ComplaintsToProcessKey::NonceGeneration {
+                            batch_index: complaint_batch_index,
+                            dealer: dealer_address,
+                        },
+                        ProtocolComplaint::BatchedAvss(complaint),
+                    );
+                    tokio::time::timeout(
+                        NONCE_RECOVERY_DEALER_BUDGET,
+                        Self::recover_nonce_shares_via_complaint(
+                            mpc_manager,
+                            &dealer_address,
+                            complaint_batch_index,
+                            signers,
+                            p2p_channel,
+                            epoch,
+                        ),
                     )
-                    .await?;
+                    .await
+                    .map_err(|_| {
+                        MpcError::ProtocolFailed(format!(
+                            "Complaint recovery for dealer {dealer_address:?} exceeded \
+                             {NONCE_RECOVERY_DEALER_BUDGET:?}"
+                        ))
+                    })??;
                 }
             }
         }
@@ -6279,47 +6279,19 @@ impl MpcManager {
             if !needs_retrieval {
                 continue;
             }
-            let (request, signers) = {
-                let mgr = mpc_manager.read().unwrap();
-                let members = mgr.committee.members();
-                let signers: Vec<Address> = cert
-                    .submission
-                    .signature
-                    .signers_bitmap
-                    .iter()
-                    .filter_map(|&idx| members.get(idx as usize).map(|m| m.validator_address()))
-                    .collect();
-                let request = RetrieveMessagesRequest {
-                    dealer: *dealer,
-                    protocol_type: ProtocolTypeIndicator::NonceGeneration,
-                    epoch: mgr.mpc_config.epoch,
-                    batch_index: Some(batch_index),
-                };
-                (request, signers)
-            };
-            tracing::info!(
-                "Nonce message for certified dealer {dealer:?} missing locally during recovery, \
-                 retrieving from signers"
-            );
-            let messages = hedged_retrieve(signers, p2p_channel, &request, expected_hash)
-                .await
-                .ok_or_else(|| {
-                    MpcError::PairwiseCommunicationError(format!(
-                        "Could not retrieve nonce message for dealer {dealer:?} from any signer \
-                         during recovery"
-                    ))
-                })?;
-            let Messages::NonceGeneration(ref nonce) = messages else {
-                return Err(MpcError::ProtocolFailed(format!(
-                    "Retrieved non-nonce message for dealer {dealer:?} during recovery"
-                )));
-            };
-            let mut mgr = mpc_manager.write().unwrap();
-            let epoch = mgr.mpc_config.epoch;
-            mgr.persist_and_cache_nonce_message(epoch, *dealer, nonce)?;
-            // Drop any output derived from the previously stored (hash-mismatching)
-            // message so reconstruction reprocesses the retrieved certified message.
-            mgr.dealer_nonce_outputs.remove(&(batch_index, *dealer));
+            let epoch = mpc_manager.read().unwrap().mpc_config.epoch;
+            let dealer_cert = cert.to_dealer_certificate(epoch)?;
+            tokio::time::timeout(
+                NONCE_RECOVERY_DEALER_BUDGET,
+                Self::retrieve_nonce_message(mpc_manager, &dealer_cert, p2p_channel, batch_index),
+            )
+            .await
+            .map_err(|_| {
+                MpcError::PairwiseCommunicationError(format!(
+                    "Retrieving the nonce message for dealer {dealer:?} exceeded \
+                     {NONCE_RECOVERY_DEALER_BUDGET:?}"
+                ))
+            })??;
         }
         Ok(())
     }
