@@ -49,12 +49,6 @@ pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
 }
 
-/// The `versioning::PACKAGE_VERSION` at which the stamped nonce-cert path becomes available
-/// on-chain: from the first publish of the squashed package. Compared against the *active*
-/// version, which is already intersected with `SUPPORTED_PACKAGE_VERSIONS` and the published
-/// set — so a version merely `enable_version`d ahead of its deployment cannot switch the ABI
-/// on early.
-pub const STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION: u64 = 1;
 #[cfg(test)]
 mod tests {
     use super::*;
