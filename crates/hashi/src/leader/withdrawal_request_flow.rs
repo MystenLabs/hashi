@@ -31,22 +31,23 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-const WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE: usize = 200;
-
+/// Cap on how many approvals one cycle of the singleton approval task takes
+/// on. Bounds how long the task holds its slot, since every approval now
 impl LeaderService {
     // ========================================================================
     // Step 1: Approve unapproved withdrawal requests
     // ========================================================================
 
+    /// Approve every actionable Requested withdrawal, one task and one
+    /// transaction per request (mirroring the deposit approval pool). Each
+    /// task holds its request in `inflight_withdrawal_approvals` through the
+    /// object-mirror wait, so a later cycle cannot re-approve it while other
+    /// requests keep flowing — a single request's mirror wait must not stall
+    /// the rest of a batch past the commitment path's batching delay.
     pub(super) fn process_unapproved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_unapproved_withdrawal_requests");
         if self.is_reconfiguring() {
             debug!("Reconfig in progress, skipping withdrawal approval processing");
-            return;
-        }
-
-        if self.withdrawal_approval_task.is_some() {
-            debug!("Withdrawal approval task already in-flight, skipping");
             return;
         }
 
@@ -63,23 +64,15 @@ impl LeaderService {
         self.withdrawal_approval_retry_tracker
             .prune(&unapproved_ids);
 
-        let mut to_process: Vec<_> = unapproved
+        let to_process: Vec<_> = unapproved
             .into_iter()
+            .filter(|r| !self.inflight_withdrawal_approvals.contains(&r.id))
             .filter(|r| {
                 !self
                     .withdrawal_approval_retry_tracker
                     .should_skip(&r.id, checkpoint_timestamp_ms)
             })
             .collect();
-
-        if to_process.len() > WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE {
-            info!(
-                available = to_process.len(),
-                batch_size = WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE,
-                "Limiting withdrawal approval batch to PTB batch size",
-            );
-            to_process.truncate(WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE);
-        }
 
         self.inner
             .metrics
@@ -94,70 +87,38 @@ impl LeaderService {
             return;
         }
 
-        let inner = self.inner.clone();
-        let retry_tracker = self.withdrawal_approval_retry_tracker.clone();
-
-        self.withdrawal_approval_task =
-            Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
-                Self::process_unapproved_withdrawal_requests_task(
-                    inner,
-                    retry_tracker,
-                    to_process,
-                    checkpoint_timestamp_ms,
-                )
-                .await
-            })));
-    }
-
-    #[tracing::instrument(level = "info", skip_all, fields(batch_size = to_process.len()))]
-    async fn process_unapproved_withdrawal_requests_task(
-        inner: Arc<Hashi>,
-        retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
-        to_process: Vec<WithdrawalRequest>,
-        checkpoint_timestamp_ms: u64,
-    ) -> anyhow::Result<()> {
-        let max_concurrent = inner.config.max_concurrent_leader_job_tasks();
-
-        let this_validator_address = inner
+        let this_validator_address = self
+            .inner
             .config
             .validator_address()
             .expect("No configured validator address");
 
-        let members = inner
+        let members = self
+            .inner
             .onchain_state()
             .current_committee_members()
             .expect("No current committee members");
 
-        let committee = inner
+        let committee = self
+            .inner
             .onchain_state()
             .current_committee()
             .expect("No current committee");
 
-        let mut tasks = JoinSet::new();
-        let mut certified: Vec<(Address, CommitteeSignature)> = Vec::new();
-
+        let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
         for request in to_process {
-            if tasks.len() >= max_concurrent {
-                // Wait for one to finish before spawning more.
-                if let Some(result) = tasks.join_next().await {
-                    match &result {
-                        Err(err) if err.is_panic() => {
-                            error!("Withdrawal approval task panicked: {err}")
-                        }
-                        Err(err) => error!("Withdrawal approval task failed to join: {err}"),
-                        Ok(_) => {}
-                    }
-                    if let Ok((_request_id, Ok(Some(cert)))) = result {
-                        certified.push(cert);
-                    }
-                }
+            // Whatever does not fit is picked up again on a later checkpoint
+            // tick; the worklist is recomputed from the mirror every cycle.
+            if self.withdrawal_approval_tasks.len() >= max_concurrent {
+                break;
             }
 
-            let inner = inner.clone();
-            let retry_tracker = retry_tracker.clone();
+            let inner = self.inner.clone();
+            let retry_tracker = self.withdrawal_approval_retry_tracker.clone();
             let members = members.clone();
             let committee = committee.clone();
-            tasks.spawn(async move {
+            self.inflight_withdrawal_approvals.insert(request.id);
+            self.withdrawal_approval_tasks.spawn(async move {
                 let request_id = request.id;
                 let task_result = tokio::time::timeout(
                     LEADER_TASK_TIMEOUT,
@@ -173,8 +134,18 @@ impl LeaderService {
                 )
                 .await;
 
-                let (result, failure_kind) = match task_result {
-                    Ok(result) => (result, None),
+                match task_result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        let kind = WithdrawalApprovalErrorKind::TaskFailed;
+                        inner
+                            .metrics
+                            .leader_retries_total
+                            .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
+                            .inc();
+                        retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
+                        error!(request_id = %request_id, "Withdrawal approval failed: {err:#}");
+                    }
                     Err(_) => {
                         let kind = WithdrawalApprovalErrorKind::TimedOut;
                         inner
@@ -183,46 +154,35 @@ impl LeaderService {
                             .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
                             .inc();
                         retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
-                        (Ok(None), Some(kind))
                     }
-                };
-
-                if result.is_err() && failure_kind.is_none() {
-                    let kind = WithdrawalApprovalErrorKind::TaskFailed;
-                    inner
-                        .metrics
-                        .leader_retries_total
-                        .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
-                        .inc();
-                    retry_tracker.record_failure(kind, request_id, checkpoint_timestamp_ms);
-                }
-                if let Err(err) = &result {
-                    error!(request_id = %request_id, "Withdrawal approval failed: {err:#}");
                 }
 
-                (request_id, result)
+                request_id
             });
         }
-
-        while let Some(result) = tasks.join_next().await {
-            match &result {
-                Err(err) if err.is_panic() => error!("Withdrawal approval task panicked: {err}"),
-                Err(err) => error!("Withdrawal approval task failed to join: {err}"),
-                Ok(_) => {}
-            }
-            if let Ok((_request_id, Ok(Some(cert)))) = result {
-                certified.push(cert);
-            }
-        }
-
-        if certified.is_empty() {
-            return Ok(());
-        }
-
-        Self::submit_approve_withdrawal_requests_with_retry(&inner, certified).await;
-        Ok(())
     }
 
+    /// Completion handler for the withdrawal approval task pool: release the
+    /// in-flight guard. Failures were already recorded into the retry
+    /// tracker inside the task.
+    pub(super) fn handle_completed_withdrawal_approval_task(
+        &mut self,
+        result: Result<Address, tokio::task::JoinError>,
+    ) {
+        match result {
+            Ok(request_id) => {
+                self.inflight_withdrawal_approvals.remove(&request_id);
+            }
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(err) => error!("Withdrawal approval task failed to join: {err}"),
+        }
+    }
+
+    /// Approve one withdrawal request end-to-end: validate and sign locally,
+    /// collect a certificate quorum, submit the approval on its own
+    /// transaction, and wait for the object mirror to apply it. Handled
+    /// failures are recorded into the retry tracker and return `Ok(())`;
+    /// `Err` is reserved for unexpected task failures.
     #[tracing::instrument(level = "info", skip_all, fields(request_id = %request.id))]
     async fn process_unapproved_withdrawal_request(
         inner: Arc<Hashi>,
@@ -232,7 +192,7 @@ impl LeaderService {
         this_validator_address: Address,
         members: &[CommitteeMember],
         committee: &hashi_types::committee::Committee,
-    ) -> anyhow::Result<Option<(Address, CommitteeSignature)>> {
+    ) -> anyhow::Result<()> {
         let approval = WithdrawalRequestApproval {
             request_id: request.id,
         };
@@ -255,7 +215,7 @@ impl LeaderService {
                     .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
                     .inc();
                 retry_tracker.record_failure(kind, request.id, checkpoint_timestamp_ms);
-                return Ok(None);
+                return Ok(());
             }
         };
 
@@ -305,16 +265,59 @@ impl LeaderService {
                 checkpoint_timestamp_ms,
             );
             error!("Insufficient approval signatures: weight {weight} < {required_weight}");
-            return Ok(None);
+            return Ok(());
         }
 
-        match aggregator.finish() {
-            Ok(signed) => Ok(Some((request.id, signed.committee_signature().clone()))),
+        let cert = match aggregator.finish() {
+            Ok(signed) => signed.committee_signature().clone(),
             Err(e) => {
                 error!("Failed to build approval certificate: {e}");
-                Ok(None)
+                return Ok(());
             }
-        }
+        };
+
+        // Submit this request's approval on its own transaction — a duplicate
+        // approval (another leader's stale mirror across a handoff) aborts
+        // on-chain and must not take unrelated approvals down with it — and
+        // wait for the object mirror to apply it before completing, matching
+        // the deposit approval path. The subtask holds its slot through the
+        // wait, so the next approval cycle reads a mirror that already
+        // reflects this approval instead of re-approving it (IOP-662).
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let checkpoint = executor
+            .execute_approve_withdrawal_request(request.id, &cert)
+            .await
+            .inspect(|checkpoint| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["approve_withdrawal", "success"])
+                    .inc();
+                info!(checkpoint, "Successfully submitted withdrawal approval");
+            })
+            .inspect_err(|e| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["approve_withdrawal", "failure"])
+                    .inc();
+                error!("Failed to submit withdrawal approval: {e}");
+            });
+        let Ok(checkpoint) = checkpoint else {
+            let kind = WithdrawalApprovalErrorKind::SubmitFailed;
+            inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_approval", &format!("{kind:?}")])
+                .inc();
+            retry_tracker.record_failure(kind, request.id, checkpoint_timestamp_ms);
+            return Ok(());
+        };
+        inner
+            .onchain_state()
+            .wait_until_checkpoint(checkpoint)
+            .await;
+        Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
@@ -354,78 +357,6 @@ impl LeaderService {
                 );
             })
             .ok()
-    }
-
-    async fn submit_approve_withdrawal_requests_with_retry(
-        inner: &Arc<Hashi>,
-        mut certified: Vec<(Address, CommitteeSignature)>,
-    ) {
-        loop {
-            let approvals: Vec<(Address, &CommitteeSignature)> =
-                certified.iter().map(|(id, cert)| (*id, cert)).collect();
-
-            let result = Self::submit_approve_withdrawal_requests(inner, &approvals)
-                .await
-                .inspect(|()| {
-                    inner
-                        .metrics
-                        .sui_tx_submissions_total
-                        .with_label_values(&["approve_withdrawal", "success"])
-                        .inc();
-                })
-                .inspect_err(|_| {
-                    inner
-                        .metrics
-                        .sui_tx_submissions_total
-                        .with_label_values(&["approve_withdrawal", "failure"])
-                        .inc();
-                });
-            let Err(e) = result else { return };
-
-            let err_msg = format!("{e}");
-            error!("approve_request PTB failed: {err_msg}");
-
-            // Try to identify which request caused the failure by dropping
-            // every request that is no longer approvable: cancelled requests
-            // vanish from the queue, and with deferred archival a request
-            // that some earlier PTB already approved or committed lingers
-            // with an advanced status (re-approving it would abort the PTB).
-            let before_len = certified.len();
-            certified.retain(|(id, _)| {
-                inner
-                    .onchain_state()
-                    .withdrawal_request(id)
-                    .is_some_and(|r| is_still_approvable(&r))
-            });
-
-            if certified.len() == before_len {
-                error!("Could not identify failed request, aborting retry");
-                return;
-            }
-            if certified.is_empty() {
-                return;
-            }
-
-            info!(
-                "Retrying approve_request with {} remaining requests",
-                certified.len()
-            );
-        }
-    }
-
-    async fn submit_approve_withdrawal_requests(
-        inner: &Arc<Hashi>,
-        approvals: &[(Address, &CommitteeSignature)],
-    ) -> anyhow::Result<()> {
-        info!(
-            "Submitting approve_request PTB for {} requests",
-            approvals.len()
-        );
-
-        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
-        executor
-            .execute_approve_withdrawal_requests(approvals)
-            .await
     }
 
     // ========================================================================
@@ -831,58 +762,12 @@ impl WithdrawalTxCommitment {
     }
 }
 
-/// A request is worth retrying in an approval PTB only while its status is
-/// still Requested. Cancelled requests vanish from the queue entirely; under
-/// deferred archival, approved/committed/terminal requests linger in the
-/// queue with an advanced status, and re-approving any of them aborts the
-/// whole PTB on-chain.
-fn is_still_approvable(request: &hashi_types::move_types::WithdrawalRequest) -> bool {
-    request.status.is_requested()
-}
-
 /// The batch size at which the scheduler stops holding for more demand.
 /// Capped by the executable request cap: commitment construction trims the
 /// batch to it, so a threshold above the cap can never be met and only pays
 /// the full batching delay before committing the capped batch anyway.
 fn withdrawal_fire_threshold(config_max: usize) -> usize {
     config_max.min(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
-}
-
-#[cfg(test)]
-mod approvable_tests {
-    use super::*;
-    use hashi_types::move_types::WithdrawalStatus;
-
-    fn request_with_status(status: WithdrawalStatus) -> hashi_types::move_types::WithdrawalRequest {
-        hashi_types::move_types::WithdrawalRequest {
-            id: sui_sdk_types::Address::new([1; 32]),
-            sender: sui_sdk_types::Address::new([2; 32]),
-            btc_amount: 1,
-            bitcoin_address: vec![0; 20],
-            created_timestamp_ms: 0,
-            status,
-            approval_cert: None,
-            approved_timestamp_ms: None,
-            withdrawal_txn_id: None,
-            sui_tx_digest: sui_sdk_types::Digest::new([0; 32]),
-            btc: 1,
-        }
-    }
-
-    #[test]
-    fn only_requested_is_approvable() {
-        assert!(is_still_approvable(&request_with_status(
-            WithdrawalStatus::Requested
-        )));
-        for status in [
-            WithdrawalStatus::Approved,
-            WithdrawalStatus::Processing,
-            WithdrawalStatus::Signed,
-            WithdrawalStatus::Confirmed,
-        ] {
-            assert!(!is_still_approvable(&request_with_status(status)));
-        }
-    }
 }
 
 #[cfg(test)]
