@@ -205,6 +205,8 @@ pub struct Metrics {
     pub mpc_end_reconfig_duration_seconds: HistogramVec,
     db_major_compaction_duration_seconds: HistogramVec,
     db_major_compaction_failures_total: IntCounterVec,
+    db_keyspace_disk_bytes: IntGaugeVec,
+    db_poisoned: IntGauge,
     pub mpc_prepare_signing_duration_seconds: HistogramVec,
     pub mpc_total_duration_seconds: HistogramVec,
     pub mpc_dealer_crypto_duration_seconds: HistogramVec,
@@ -1169,6 +1171,19 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            db_keyspace_disk_bytes: register_int_gauge_vec_with_registry!(
+                "hashi_db_keyspace_disk_bytes",
+                "Bytes of live tables in each database keyspace",
+                &["keyspace"],
+                registry,
+            )
+            .unwrap(),
+            db_poisoned: register_int_gauge_with_registry!(
+                "hashi_db_poisoned",
+                "1 once fjall has refused a write for good; only a restart recovers",
+                registry,
+            )
+            .unwrap(),
             mpc_prepare_signing_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_prepare_signing_duration_seconds",
                 "Duration of prepare_signing",
@@ -1464,6 +1479,15 @@ impl Metrics {
         self.db_major_compaction_failures_total
             .with_label_values(&["unlink"])
             .inc();
+    }
+
+    pub fn update_db(&self, db: &crate::db::Database) {
+        for (keyspace, bytes) in db.keyspace_disk_space() {
+            self.db_keyspace_disk_bytes
+                .with_label_values(&[keyspace])
+                .set(i64::try_from(bytes).unwrap_or(i64::MAX));
+        }
+        self.db_poisoned.set(i64::from(db.is_poisoned()));
     }
 
     pub fn set_utxo_pool_ages(&self, average_age_blocks: i64, oldest_age_blocks: i64) {

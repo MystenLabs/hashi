@@ -25,6 +25,7 @@ Two principles shape this list:
 | Reconfig not tracking | `changes(hashi_epoch[3h]) == 0` | Testnet reconfigures roughly every 40 minutes. If the committee epoch stops moving, either your node stopped following reconfig or the fleet itself stalled — check the operator channel before assuming local fault. |
 | Low gas | `hashi_sui_balance < 1e9` | Below 1 SUI the operator wallet is close to unable to submit. Refill. |
 | Binary behind chain | `hashi_package_version_unsupported == 1` | The chain moved to a package version this binary does not implement; autonomous writes are halted. Upgrade the binary immediately. |
+| Database poisoned | `hashi_db_poisoned == 1` | fjall refuses every write after a failed flush or fsync (usually a full disk) until the process restarts, while reads and signing carry on looking healthy. Free the disk, then restart. |
 | Crash looping | `changes(process_start_time_seconds{job="<your-node>"}[1h]) > 3` | Uses the standard process exporter if you run one; any restart-count source works. |
 
 Dashboard-worthy but **not** alerts:
@@ -35,6 +36,9 @@ Dashboard-worthy but **not** alerts:
   upgrade progress is counted before the on-chain upgrade flips `active`.
 - `hashi_is_leader` — leadership rotates; useful context when reading other
   metrics, meaningless to alert on.
+- `hashi_db_keyspace_disk_bytes` — live table bytes per keyspace. Each one
+  should fall at every epoch boundary; one that climbs across epochs is
+  leaking. Alert on the volume itself, not on this.
 - `hashi_deposit_outpoint_confirmations{status="not_found"}` — expected for
   unbroadcast transactions. It is suspicious only when your node reports it
   while peers report confirmations for the same deposits.
@@ -62,6 +66,7 @@ Dashboard-worthy but **not** alerts:
 | `hashi_deposit_outpoint_confirmations` | node |
 | `hashi_latest_checkpoint_*`, `hashi_task_last_iteration_timestamp_seconds` | node |
 | `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader` | node |
+| `hashi_db_*` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

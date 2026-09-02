@@ -257,6 +257,22 @@ impl Database {
         ]
     }
 
+    /// Bytes of live tables per keyspace; journals and tables awaiting unlink
+    /// are not counted.
+    pub fn keyspace_disk_space(&self) -> [(&'static str, u64); 11] {
+        self.all_keyspaces()
+            .map(|(name, keyspace)| (name, keyspace.disk_space()))
+    }
+
+    /// fjall only reports poisoning by refusing a write; `persist` checks the
+    /// flag before touching the journal, so this is free once poisoned.
+    pub fn is_poisoned(&self) -> bool {
+        matches!(
+            self.db.persist(fjall::PersistMode::Buffer),
+            Err(fjall::Error::Poisoned)
+        )
+    }
+
     /// Rewrite every keyspace into a single run, dropping what
     /// `prune_messages_below` tombstoned. Pruning alone frees nothing: a
     /// tombstone is a few dozen bytes against a nonce message of hundreds of
@@ -2000,6 +2016,76 @@ pub(crate) mod tests {
             bytes_on_disk(&db.nonce_messages) < occupied / 10,
             "compaction must give back the {occupied} bytes pruning tombstoned",
         );
+    }
+
+    /// The gauge names the keyspace and falls once compaction has freed it.
+    #[test]
+    fn test_keyspace_disk_space_falls_after_compaction() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let nonce_msg = create_test_nonce_message();
+        for batch_index in 0..64 {
+            db.store_nonce_message(1, batch_index, &Address::new([1u8; 32]), &nonce_msg)
+                .unwrap();
+        }
+        db.nonce_messages.rotate_memtable_and_wait().unwrap();
+
+        let nonce_bytes = |db: &Database| {
+            db.keyspace_disk_space()
+                .into_iter()
+                .find(|(name, _)| *name == NONCE_MESSAGES_CF_NAME)
+                .expect("nonce_messages must be reported")
+                .1
+        };
+        assert!(nonce_bytes(&db) > 0, "epoch 1 should be on disk");
+
+        db.prune_messages_below(2, &PruningReferences::default())
+            .unwrap();
+        let compaction = db.major_compact();
+        assert!(compaction.unlink_error.is_none());
+        assert_eq!(
+            nonce_bytes(&db),
+            0,
+            "every row was pruned and compacted away"
+        );
+    }
+
+    /// Removing the tables directory makes the next flush fail, which poisons
+    /// the database from the worker thread.
+    #[test]
+    fn test_is_poisoned_after_a_failed_flush() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+        assert!(!db.is_poisoned());
+
+        let nonce_msg = create_test_nonce_message();
+        let dealer = Address::new([1u8; 32]);
+        for batch_index in 0..16 {
+            db.store_nonce_message(1, batch_index, &dealer, &nonce_msg)
+                .unwrap();
+        }
+        std::fs::remove_dir_all(db.nonce_messages.path().join("tables")).unwrap();
+        // `rotate_memtable_and_wait` would spin forever: a failed flush never
+        // clears the sealed memtable it waits on.
+        assert!(db.nonce_messages.rotate_memtable().unwrap());
+
+        // The flush worker sets the flag.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !db.is_poisoned() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the failed flush never poisoned the database"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(
+            db.store_nonce_message(1, 99, &dealer, &nonce_msg),
+            Err(fjall::Error::Poisoned)
+        ));
+
+        // Dropping the database blocks forever once a worker has crashed.
+        std::mem::forget(db);
     }
 
     #[test]
