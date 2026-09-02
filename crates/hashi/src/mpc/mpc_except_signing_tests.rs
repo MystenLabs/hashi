@@ -644,6 +644,7 @@ fn create_manager_with_valid_keys(
 
 struct FailingP2PChannel {
     error_message: String,
+    retrieved_from: std::sync::Arc<std::sync::Mutex<Vec<Address>>>,
 }
 
 #[async_trait::async_trait]
@@ -660,9 +661,10 @@ impl P2PChannel for FailingP2PChannel {
 
     async fn retrieve_messages(
         &self,
-        _party: &Address,
+        party: &Address,
         _request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
+        self.retrieved_from.lock().unwrap().push(*party);
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -2868,6 +2870,7 @@ async fn test_run_as_dealer_p2p_send_error() {
     let test_manager = Arc::new(RwLock::new(test_manager));
 
     let failing_p2p = FailingP2PChannel {
+        retrieved_from: Default::default(),
         error_message: "network error".to_string(),
     };
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
@@ -6972,6 +6975,7 @@ async fn test_run_key_rotation_as_dealer_reports_a_shortfall() {
     let dealer = Arc::new(RwLock::new(dealer_manager));
 
     let failing_p2p = FailingP2PChannel {
+        retrieved_from: Default::default(),
         error_message: "network error".to_string(),
     };
     let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
@@ -12271,6 +12275,16 @@ fn valid_dealer_submission(
     dealer_idx: usize,
     timestamp_ms: u64,
 ) -> (Address, hashi_types::move_types::StampedDealerSubmissionV1) {
+    let all: Vec<usize> = (0..setup.signing_keys.len()).collect();
+    valid_dealer_submission_signed_by(setup, dealer_idx, timestamp_ms, &all)
+}
+
+fn valid_dealer_submission_signed_by(
+    setup: &TestSetup,
+    dealer_idx: usize,
+    timestamp_ms: u64,
+    signer_indices: &[usize],
+) -> (Address, hashi_types::move_types::StampedDealerSubmissionV1) {
     let dealer = setup.address(dealer_idx);
     let hash_bytes = [7u8; 32];
     let target = DealerMessagesHash {
@@ -12280,9 +12294,9 @@ fn valid_dealer_submission(
     let committee = setup.committee();
     let epoch = committee.epoch();
     let mut aggregator = BlsSignatureAggregator::new(committee, target.clone());
-    for (i, key) in setup.signing_keys.iter().enumerate() {
+    for &i in signer_indices {
         aggregator
-            .add_signature(key.sign(epoch, setup.address(i), &target))
+            .add_signature(setup.signing_keys[i].sign(epoch, setup.address(i), &target))
             .unwrap();
     }
     let signed = aggregator.finish().unwrap();
@@ -12303,6 +12317,27 @@ fn valid_dealer_submission(
             timestamp_ms,
         },
     )
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_retrieve_missing_nonce_messages_contacts_certificate_signers() {
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let manager = Arc::new(RwLock::new(setup.create_manager(0)));
+    let (dealer, cert) = valid_dealer_submission_signed_by(&setup, 1, 0, &[0, 1, 2]);
+    let certs = VerifiedNonceCerts::unclassified(vec![(dealer, cert)]);
+    let retrieved_from = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let channel = FailingP2PChannel {
+        error_message: "peer down".into(),
+        retrieved_from: Arc::clone(&retrieved_from),
+    };
+
+    let _ = MpcManager::retrieve_missing_nonce_messages(&manager, 0, &certs, &channel).await;
+
+    let contacted: HashSet<Address> = retrieved_from.lock().unwrap().iter().copied().collect();
+    assert_eq!(
+        contacted,
+        HashSet::from([setup.address(1), setup.address(2)])
+    );
 }
 
 #[test]
