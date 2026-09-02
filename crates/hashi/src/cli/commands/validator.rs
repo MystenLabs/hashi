@@ -9,6 +9,7 @@ use colored::Colorize;
 use crate::cli::TxOptions;
 use crate::cli::client::HashiClient;
 use crate::cli::commands::proposal::execute_or_simulate;
+use crate::cli::commands::proposal::print_acting_validator;
 use crate::cli::commands::proposal::prompt_continue;
 use crate::cli::config::CliConfig;
 use crate::cli::print_detail;
@@ -34,6 +35,7 @@ pub async fn resign(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
          duties. The node suppresses its own auto-registration while the resignation is \
          pending; after removal, re-joining requires `hashi register` again.",
     );
+    print_acting_validator(&client)?;
 
     prompt_continue("resign from the committee", tx_opts).await?;
 
@@ -55,6 +57,7 @@ pub async fn withdraw_resignation(config: &CliConfig, tx_opts: &TxOptions) -> Re
         "  If the next committee was already formed without this node, it keeps its \
          registration but sits out that one epoch.",
     );
+    print_acting_validator(&client)?;
 
     prompt_continue("withdraw the resignation", tx_opts).await?;
 

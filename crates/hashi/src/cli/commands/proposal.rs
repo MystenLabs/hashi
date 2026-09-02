@@ -35,6 +35,26 @@ fn print_metadata(metadata: &[(String, String)]) {
     }
 }
 
+/// Resolve and show the committee member the configured keypair acts for, so
+/// the operator sees which member the transaction is attributed to before
+/// confirming it. The signer may be a member's validator address or an
+/// operator address a member delegated to it; see
+/// [`HashiClient::resolve_validator_address`] for the rules.
+pub(crate) fn print_acting_validator(client: &HashiClient) -> Result<()> {
+    let validator_address = client.resolve_validator_address()?;
+    let via_operator = match client.signer_address() {
+        Some(signer) if signer != validator_address => {
+            format!(" (delegated operator {})", signer.to_hex().dimmed())
+        }
+        _ => String::new(),
+    };
+    print_detail(&format!(
+        "  Acting as validator: {}{via_operator}",
+        validator_address.to_hex().cyan()
+    ));
+    Ok(())
+}
+
 /// Finalize a transaction according to `tx_opts`: serialize it unsigned,
 /// dry-run it, or sign and submit it.
 ///
@@ -213,6 +233,7 @@ pub async fn vote(
 
     print_detail(&format!("\n{}", "Proposal Details:".bold()));
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
+    print_acting_validator(&client)?;
 
     prompt_continue("vote on this proposal", tx_opts).await?;
 
@@ -316,6 +337,7 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
 
     print_detail(&format!("\n{}", "Proposal Details:".bold()));
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
+    print_acting_validator(&client)?;
 
     prompt_continue("remove your vote from this proposal", tx_opts).await?;
 
@@ -623,6 +645,7 @@ pub async fn create_upgrade_proposal(
     print_detail(&format!("  Digest: 0x{}", hex::encode(&digest_bytes)));
     print_detail(&format!("  Exclusive: {exclusive}"));
     print_metadata(&metadata);
+    print_acting_validator(&client)?;
 
     prompt_continue("create this upgrade proposal", tx_opts).await?;
 
@@ -655,9 +678,11 @@ pub async fn create_update_config_proposal(
     print_detail(&format!("  Value: {}", value_str));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue("create this config update proposal", tx_opts).await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateConfig {
         key: key.to_string(),
         value,
@@ -721,9 +746,11 @@ pub async fn create_update_mpc_config_proposal(
         );
     }
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue("create this MPC config update proposal", tx_opts).await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
         max_faulty_bps,
         weight_reduction_allowed_delta,
@@ -769,9 +796,11 @@ pub async fn create_enable_version_proposal(
     print_detail(&format!("  Version: {}", version));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue("create this enable version proposal", tx_opts).await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EnableVersion {
         version,
         metadata,
@@ -797,9 +826,11 @@ pub async fn create_disable_version_proposal(
     print_detail(&format!("  Version: {}", version));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue("create this disable version proposal", tx_opts).await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::DisableVersion {
         version,
         metadata,
@@ -822,9 +853,11 @@ pub async fn create_abort_reconfig_proposal(
     print_info(&format!("Target epoch: {epoch}"));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue("create this abort reconfig proposal", tx_opts).await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::AbortReconfig {
         epoch,
         metadata,
@@ -850,9 +883,11 @@ pub async fn create_update_guardian_proposal(
     print_detail(&format!("  URL:        {}", url));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue("create this update guardian proposal", tx_opts).await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
         url: url.to_string(),
         metadata,
@@ -881,13 +916,15 @@ pub async fn create_emergency_pause_proposal(
     print_detail(&format!("  Action: {action}"));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    print_acting_validator(&client)?;
+
     prompt_continue(
         &format!("create this emergency {} proposal", action.to_lowercase()),
         tx_opts,
     )
     .await?;
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EmergencyPause {
         pause: !unpause,
         metadata,
@@ -946,6 +983,8 @@ pub async fn create_ignore_member_proposal(
             }
         }
     }
+
+    print_acting_validator(&client)?;
 
     prompt_continue(
         &format!("create this {} member proposal", action.to_lowercase()),
