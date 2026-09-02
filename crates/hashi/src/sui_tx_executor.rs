@@ -494,8 +494,8 @@ pub struct SuiTxExecutor {
     hashi_ids: HashiIds,
     timeout: Duration,
     /// Present for node-internal executors (built via [`SuiTxExecutor::from_config`]
-    /// / [`SuiTxExecutor::from_hashi`]). Supplies both the call target and the
-    /// ABI shape (see [`Self::call_target`]), and refuses to submit when this
+    /// / [`SuiTxExecutor::from_hashi`]). Supplies the call target (see
+    /// [`Self::active_call_package_id`]) and refuses to submit when this
     /// binary supports no live on-chain package version. CLI executors attach
     /// a one-shot governance reader via [`SuiTxExecutor::with_onchain_state`]
     /// for the same routing. `None` for ad-hoc executors built via
@@ -553,17 +553,6 @@ impl SuiTxExecutor {
     pub fn with_onchain_state(mut self, onchain_state: &OnchainState) -> Self {
         self.onchain_state = Some(onchain_state.clone());
         self
-    }
-
-    fn call_target(&self) -> (Address, Option<u64>) {
-        match self
-            .onchain_state
-            .as_ref()
-            .and_then(OnchainState::active_package)
-        {
-            Some((id, version)) => (id, Some(version)),
-            None => (self.hashi_ids.package_id, None),
-        }
     }
 
     /// Get the sender address (derived from the signer's public key).
@@ -1170,8 +1159,17 @@ impl SuiTxExecutor {
         Ok(request_ids)
     }
 
+    /// The package id governance, certificate and validator calls target: the
+    /// active on-chain package when an [`OnchainState`] is attached, otherwise
+    /// the original publish id. Withdrawal-archival entries resolve through
+    /// [`Self::withdrawal_version_package`] instead, which refuses to fall
+    /// back. Only the target varies by version; no call shapes its argument
+    /// list by package version.
     pub(crate) fn active_call_package_id(&self) -> Address {
-        self.call_target().0
+        self.onchain_state
+            .as_ref()
+            .and_then(OnchainState::active_package)
+            .map_or(self.hashi_ids.package_id, |(id, _version)| id)
     }
 
     #[tracing::instrument(level = "info", skip_all)]
@@ -1349,7 +1347,11 @@ impl SuiTxExecutor {
     ///
     /// This submits a DKG, rotation, or nonce generation certificate to the on-chain
     /// certificate store. The certificate contains the dealer's message hash and
-    /// committee signature.
+    /// committee signature. Nonce certs additionally pass the Sui `Clock`:
+    /// `submit_nonce_cert` takes it on every published version (stamping the
+    /// submission with chain time), so the argument is unconditional, not
+    /// version-gated (a gate could only ever drop a required argument and
+    /// fail the call). DKG and rotation certs are submitted bare by design.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -1389,13 +1391,10 @@ impl SuiTxExecutor {
         }
         let dealer_arg = builder.pure(&dealer);
         let message_hash_arg = builder.pure(&message_hash);
-        let (package_id, version) = self.call_target();
+        let package_id = self.active_call_package_id();
         let cert_arg = build_committee_signature_arg(&mut builder, package_id, committee_sig);
         args.extend([dealer_arg, message_hash_arg, cert_arg]);
-        if batch_index.is_some()
-            && version
-                .is_some_and(|v| v >= crate::constants::STAMPED_NONCE_CERTS_MIN_PACKAGE_VERSION)
-        {
+        if batch_index.is_some() {
             let clock_arg = builder.object(
                 ObjectInput::new(SUI_CLOCK_OBJECT_ID)
                     .as_shared()
