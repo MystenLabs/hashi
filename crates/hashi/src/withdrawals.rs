@@ -1068,6 +1068,7 @@ impl Hashi {
     pub fn validate_and_sign_committee_transition(
         &self,
         from_epoch: u64,
+        caller: Address,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let validator_address = self
             .config
@@ -1078,6 +1079,13 @@ impl Hashi {
             .onchain_state()
             .committee_transition(from_epoch)
             .ok_or_else(|| anyhow!("no on-chain committee transition from epoch {from_epoch}"))?;
+        if !from_committee
+            .members()
+            .iter()
+            .any(|m| m.validator_address() == caller)
+        {
+            anyhow::bail!("caller {caller} is not a member of the committee at epoch {from_epoch}");
+        }
         if !from_committee
             .members()
             .iter()

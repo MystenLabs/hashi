@@ -1970,11 +1970,10 @@ impl MpcService {
                         if self.get_pending_epoch_change() != Some(epoch) {
                             return Ok(());
                         }
-                        Err(e).with_context(|| {
-                            format!(
-                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after waiting for the watcher"
-                            )
-                        })?;
+                        warn!(
+                            "end_reconfig for epoch {epoch} is complete on chain, but the watcher still reports it pending after the visibility wait; retrying"
+                        );
+                        continue;
                     }
                     ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
                         if committee_handoff_cert.take().is_some() {
