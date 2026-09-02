@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use futures::FutureExt;
@@ -62,6 +63,16 @@ const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT: usize = 100;
 // At most 16 concurrent txid lookups: bitcoind's default rpcworkqueue is 16,
 // and overflowing it fails calls outright ("Work queue depth exceeded").
 const UTXO_HEIGHT_LOOKUP_CONCURRENCY: usize = 16;
+
+/// Budget for one bitcoind RPC: corepc's fixed 60s transport timeout, which
+/// minreq enforces around the whole request, plus a scheduling margin.
+const BITCOIND_RPC_BUDGET: Duration = Duration::from_secs(65);
+
+/// How long a `MonitorClient` call waits for the loop. A worker starts an RPC
+/// only if its budget fits before this deadline, so a caller that times out
+/// never has one in flight.
+const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const _: () = assert!(MONITOR_REQUEST_TIMEOUT.as_secs() > BITCOIND_RPC_BUDGET.as_secs());
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
@@ -285,6 +296,34 @@ pub struct Monitor {
     trusted_peer_rotation: std::iter::Cycle<std::vec::IntoIter<kyoto::TrustedPeer>>,
 }
 
+/// bitcoind is still catching up (-8 out of range, -28 warming up), overloaded,
+/// or briefly unreachable; anything else will not clear by waiting.
+fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
+    use jsonrpc::http::minreq_http::Error as TransportError;
+
+    let corepc_client::client_sync::Error::JsonRpc(e) = e else {
+        return false;
+    };
+    match e {
+        jsonrpc::error::Error::Rpc(e) => matches!(e.code, -8 | -28),
+        jsonrpc::error::Error::Transport(e) => match e.downcast_ref::<TransportError>() {
+            // A refused connection and an HTTP error status arrive alike; 5xx
+            // clears by waiting (503 is a full RPC work queue), 4xx never will.
+            Some(TransportError::Http(e)) => e.status_code >= 500,
+            // Connection-level only; a malformed reply, a protocol error or a
+            // bad TLS or proxy setup will not fix itself.
+            Some(TransportError::Minreq(e)) => {
+                matches!(
+                    e,
+                    minreq::Error::IoError(_) | minreq::Error::AddressNotFound
+                )
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// Offload a blocking Bitcoin Core RPC call to the tokio blocking thread pool.
 async fn btc_rpc_call<F, T>(client: &Arc<corepc_client::client_sync::v29::Client>, f: F) -> T
 where
@@ -295,6 +334,43 @@ where
     tokio::task::spawn_blocking(move || f(&client))
         .await
         .expect("btc_rpc_call: spawn_blocking task panicked")
+}
+
+/// A `MonitorClient` caller's reply channel and the instant it stops waiting.
+struct Caller<T> {
+    deadline: Instant,
+    result_tx: oneshot::Sender<Result<T>>,
+}
+
+impl<T> Caller<T> {
+    /// Run `f` on the blocking pool only if the caller is still waiting and
+    /// `BITCOIND_RPC_BUDGET` fits before its deadline; `None` means skipped.
+    async fn rpc<F, R>(
+        &self,
+        client: &Arc<corepc_client::client_sync::v29::Client>,
+        f: F,
+    ) -> Option<R>
+    where
+        F: FnOnce(&corepc_client::client_sync::v29::Client) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        if self.result_tx.is_closed() {
+            return None;
+        }
+        let deadline = self.deadline;
+        let client = Arc::clone(client);
+        // Checked on the blocking thread: a busy pool can hold the closure
+        // back, and the caller's deadline does not wait for it.
+        tokio::task::spawn_blocking(move || {
+            (Instant::now() + BITCOIND_RPC_BUDGET <= deadline).then(|| f(&client))
+        })
+        .await
+        .expect("Caller::rpc: spawn_blocking task panicked")
+    }
+
+    fn reply(self, result: Result<T>) {
+        let _ = self.result_tx.send(result);
+    }
 }
 
 impl Monitor {
@@ -613,64 +689,72 @@ impl Monitor {
             .build()
     }
 
-    /// Kyoto re-syncs from its checkpoint on every build, so anchoring at genesis
-    /// replays the whole chain. Anchor non-mainnet at `start_height`; mainnet
-    /// keeps the soft-fork activation anchors.
+    /// Kyoto re-syncs from its checkpoint on every build, so anchor as high as
+    /// possible without passing `start_height`: mainnet reuses the soft-fork
+    /// activation heights, everything else resolves the exact block.
     async fn resolve_start_checkpoint(
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
         config: &MonitorConfig,
-    ) -> HashCheckpoint {
+    ) -> Result<HashCheckpoint> {
         match config.network {
             bitcoin::Network::Bitcoin if config.start_height > 709_631 => {
-                HashCheckpoint::taproot_activation()
+                Ok(HashCheckpoint::taproot_activation())
             }
             bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
-                HashCheckpoint::segwit_activation()
+                Ok(HashCheckpoint::segwit_activation())
             }
-            network => Self::checkpoint_at_height(bitcoind_rpc, config.start_height, network).await,
+            _ => Self::checkpoint_at_height(bitcoind_rpc, config.start_height).await,
         }
     }
 
+    /// Wait for bitcoind to have the block at `height`. A node still in initial
+    /// block download reports it "out of range" just like a height past the tip.
     async fn checkpoint_at_height(
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
         height: u32,
-        network: bitcoin::Network,
-    ) -> HashCheckpoint {
-        const MAX_ATTEMPTS: u32 = 5;
+    ) -> Result<HashCheckpoint> {
         const RETRY_DELAY: Duration = Duration::from_secs(2);
+        const LOG_INTERVAL: Duration = Duration::from_secs(30);
 
-        for attempt in 1..=MAX_ATTEMPTS {
+        let mut next_log = Instant::now();
+        loop {
             match btc_rpc_call(bitcoind_rpc, move |rpc| rpc.get_block_hash(height as u64)).await {
-                Ok(raw) => match raw.into_model() {
-                    Ok(model) => {
-                        info!("Anchoring Kyoto at start height {height} ({})", model.0);
-                        return HashCheckpoint::new(height, model.0);
-                    }
-                    Err(e) => error!("Failed to parse getblockhash({height}) response: {e}"),
-                },
-                // RPC error -8 "block height out of range": start_height is beyond
-                // the node's tip — permanent, so anchor at genesis instead of retrying.
-                Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(
-                    ref e,
-                ))) if e.code == -8 => {
-                    warn!(
-                        "Start height {height} is beyond bitcoind's tip; anchoring Kyoto at genesis"
-                    );
-                    return HashCheckpoint::from_genesis(network);
+                Ok(raw) => {
+                    let model = raw.into_model().map_err(|e| {
+                        anyhow::anyhow!("Failed to parse getblockhash({height}) response: {e}")
+                    })?;
+                    info!("Anchoring Kyoto at start height {height} ({})", model.0);
+                    return Ok(HashCheckpoint::new(height, model.0));
                 }
-                Err(e) => warn!(
-                    "Failed to fetch block hash at start height {height} \
-                     (attempt {attempt}/{MAX_ATTEMPTS}): {e}"
-                ),
+                Err(e) if is_transient_rpc_error(&e) => {
+                    if Instant::now() >= next_log {
+                        next_log = Instant::now() + LOG_INTERVAL;
+                        match Self::bitcoind_height(bitcoind_rpc).await {
+                            Some(blocks) => warn!(
+                                "Waiting for bitcoind to reach start height {height}; it is at {blocks}"
+                            ),
+                            None => warn!("Waiting for a block at start height {height}: {e}"),
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to fetch the block at start height {height}: {e}"
+                    ));
+                }
             }
             tokio::time::sleep(RETRY_DELAY).await;
         }
+    }
 
-        warn!(
-            "Could not resolve a checkpoint at start height {height}; falling back to genesis. \
-             Kyoto will sync the entire chain from genesis."
-        );
-        HashCheckpoint::from_genesis(network)
+    async fn bitcoind_height(
+        bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+    ) -> Option<u32> {
+        btc_rpc_call(bitcoind_rpc, |rpc| rpc.get_blockchain_info())
+            .await
+            .ok()
+            .and_then(|info| info.into_model().ok())
+            .map(|info| info.blocks)
     }
 
     /// Run a BTC monitor with the given configuration.
@@ -699,7 +783,8 @@ impl Monitor {
             async move {
                 let bitcoind_rpc = Arc::new(bitcoind_rpc);
 
-                let start_checkpoint = Self::resolve_start_checkpoint(&bitcoind_rpc, &config).await;
+                let start_checkpoint =
+                    Self::resolve_start_checkpoint(&bitcoind_rpc, &config).await?;
                 let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config, start_checkpoint);
                 let trusted_peer_rotation = config.trusted_peers.clone().into_iter().cycle();
 
@@ -1093,26 +1178,26 @@ impl Monitor {
                         context, txids, result_tx,
                     ));
             }
-            MonitorMessage::GetRecentFeeRate(conf_target, result_tx) => {
+            MonitorMessage::GetRecentFeeRate(conf_target, caller) => {
                 self.rpc_workers.spawn(Self::get_recent_fee_rate(
                     self.bitcoind_rpc.clone(),
                     self.metrics.clone(),
                     conf_target,
-                    result_tx,
+                    caller,
                 ));
             }
-            MonitorMessage::BroadcastTransaction(tx, result_tx) => {
+            MonitorMessage::BroadcastTransaction(tx, caller) => {
                 self.rpc_workers.spawn(Self::broadcast_transaction(
                     self.bitcoind_rpc.clone(),
                     tx,
-                    result_tx,
+                    caller,
                 ));
             }
-            MonitorMessage::GetTransactionStatus(txid, result_tx) => {
+            MonitorMessage::GetTransactionStatus(txid, caller) => {
                 self.rpc_workers.spawn(Self::get_transaction_status(
                     self.bitcoind_rpc.clone(),
                     txid,
-                    result_tx,
+                    caller,
                 ));
             }
         }
@@ -1154,55 +1239,71 @@ impl Monitor {
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         metrics: Arc<Metrics>,
         conf_target: u16,
-        result_tx: oneshot::Sender<Result<FeeRate>>,
+        caller: Caller<FeeRate>,
     ) {
         // ECONOMICAL tracks spot fees more closely than the default
         // CONSERVATIVE, which blends in a long-horizon max.
-        let result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
-            rpc.call::<corepc_client::types::v29::EstimateSmartFee>(
-                "estimatesmartfee",
-                &[
-                    serde_json::json!(conf_target as u32),
-                    serde_json::json!("ECONOMICAL"),
-                ],
-            )
-        })
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|res| Ok(res.into_model()?))
-        .map(|res| {
-            let sat_per_kwu = match res.fee_rate {
-                Some(fee_rate) => fee_rate.to_sat_per_kwu(),
-                None => {
-                    warn!(
-                        conf_target,
-                        fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
-                        "Node could not estimate fee rate; falling back to minimum relay fee"
-                    );
-                    FALLBACK_FEE_RATE_SAT_PER_KWU
-                }
-            };
-            metrics
-                .btc_fee_rate_sat_per_kvb
-                .set((sat_per_kwu * 4) as i64);
-            FeeRate::from_sat_per_kwu(sat_per_kwu)
-        });
-        let _ = result_tx.send(result);
+        let rpc_result = caller
+            .rpc(&bitcoind_rpc, move |rpc| {
+                rpc.call::<corepc_client::types::v29::EstimateSmartFee>(
+                    "estimatesmartfee",
+                    &[
+                        serde_json::json!(conf_target as u32),
+                        serde_json::json!("ECONOMICAL"),
+                    ],
+                )
+            })
+            .await;
+        let Some(rpc_result) = rpc_result else {
+            caller.reply(Err(anyhow::anyhow!(
+                "Fee estimate expired before its bitcoind RPC could start"
+            )));
+            return;
+        };
+        let result = rpc_result
+            .map_err(anyhow::Error::from)
+            .and_then(|res| Ok(res.into_model()?))
+            .map(|res| {
+                let sat_per_kwu = match res.fee_rate {
+                    Some(fee_rate) => fee_rate.to_sat_per_kwu(),
+                    None => {
+                        warn!(
+                            conf_target,
+                            fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
+                            "Node could not estimate fee rate; falling back to minimum relay fee"
+                        );
+                        FALLBACK_FEE_RATE_SAT_PER_KWU
+                    }
+                };
+                metrics
+                    .btc_fee_rate_sat_per_kvb
+                    .set((sat_per_kwu * 4) as i64);
+                FeeRate::from_sat_per_kwu(sat_per_kwu)
+            });
+        caller.reply(result);
     }
 
     async fn broadcast_transaction(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         tx: bitcoin::Transaction,
-        result_tx: oneshot::Sender<Result<()>>,
+        caller: Caller<()>,
     ) {
         // Broadcast via the bitcoind RPC, not kyoto's P2P submit_package, which
         // dropped its response or hung under load.
         let txid = tx.compute_txid();
-        let result = btc_rpc_call(&bitcoind_rpc, move |rpc| rpc.send_raw_transaction(&tx)).await;
+        let Some(result) = caller
+            .rpc(&bitcoind_rpc, move |rpc| rpc.send_raw_transaction(&tx))
+            .await
+        else {
+            caller.reply(Err(anyhow::anyhow!(
+                "Broadcast of {txid} expired before its bitcoind RPC could start"
+            )));
+            return;
+        };
         match result {
             Ok(_) => {
                 info!("Transaction {txid} broadcast via Bitcoin Core RPC");
-                let _ = result_tx.send(Ok(()));
+                caller.reply(Ok(()));
             }
             Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
                 if e.code == -27 =>
@@ -1210,11 +1311,11 @@ impl Monitor {
                 // RPC error -27: tx already confirmed on-chain ("outputs already in utxo
                 // set"), so the broadcast succeeded. (A mempool duplicate returns Ok.)
                 debug!("Transaction {txid} already confirmed on-chain");
-                let _ = result_tx.send(Ok(()));
+                caller.reply(Ok(()));
             }
             Err(e) => {
                 error!("Failed to broadcast transaction {txid}: {e}");
-                let _ = result_tx.send(Err(anyhow::anyhow!(e)));
+                caller.reply(Err(anyhow::anyhow!(e)));
             }
         }
     }
@@ -1222,12 +1323,19 @@ impl Monitor {
     async fn get_transaction_status(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         txid: bitcoin::Txid,
-        result_tx: oneshot::Sender<Result<TxStatus>>,
+        caller: Caller<TxStatus>,
     ) {
-        let rpc_result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
-            rpc.get_raw_transaction_verbose(txid)
-        })
-        .await;
+        let rpc_result = caller
+            .rpc(&bitcoind_rpc, move |rpc| {
+                rpc.get_raw_transaction_verbose(txid)
+            })
+            .await;
+        let Some(rpc_result) = rpc_result else {
+            caller.reply(Err(anyhow::anyhow!(
+                "Status lookup for {txid} expired before its bitcoind RPC could start"
+            )));
+            return;
+        };
         let result = match rpc_result {
             Ok(tx_info) => match tx_info.into_model() {
                 Ok(tx_info) => {
@@ -1248,7 +1356,7 @@ impl Monitor {
             }
             Err(e) => Err(anyhow::anyhow!("Failed to query transaction status: {e}")),
         };
-        let _ = result_tx.send(result);
+        caller.reply(result);
     }
 }
 
@@ -1746,31 +1854,51 @@ impl MonitorClient {
         rx.await.map_err(|e| anyhow::anyhow!(e))?
     }
 
+    /// Round-trip a request through the monitor loop. The deadline travels with
+    /// it, so a worker never starts an RPC the caller will not wait out.
+    async fn request<T>(
+        &self,
+        message: impl FnOnce(Caller<T>) -> MonitorMessage,
+        what: &str,
+    ) -> Result<T> {
+        let (result_tx, rx) = oneshot::channel();
+        let deadline = Instant::now() + MONITOR_REQUEST_TIMEOUT;
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            self.tx
+                .send(message(Caller {
+                    deadline,
+                    result_tx,
+                }))
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            rx.await.map_err(|e| anyhow::anyhow!(e))?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("{what} timed out waiting for the Bitcoin monitor"))?
+    }
+
     pub async fn get_recent_fee_rate(&self, conf_target: u16) -> Result<FeeRate> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(MonitorMessage::GetRecentFeeRate(conf_target, tx))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        self.request(
+            |caller| MonitorMessage::GetRecentFeeRate(conf_target, caller),
+            "get_recent_fee_rate",
+        )
+        .await
     }
 
     pub async fn broadcast_transaction(&self, transaction: bitcoin::Transaction) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(MonitorMessage::BroadcastTransaction(transaction, tx))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        self.request(
+            |caller| MonitorMessage::BroadcastTransaction(transaction, caller),
+            "broadcast_transaction",
+        )
+        .await
     }
 
     pub async fn get_transaction_status(&self, txid: bitcoin::Txid) -> Result<TxStatus> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(MonitorMessage::GetTransactionStatus(txid, tx))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        rx.await.map_err(|e| anyhow::anyhow!(e))?
+        self.request(
+            |caller| MonitorMessage::GetTransactionStatus(txid, caller),
+            "get_transaction_status",
+        )
+        .await
     }
 }
 
@@ -1785,13 +1913,13 @@ enum MonitorMessage {
     ),
 
     // Returns an estimated fee rate targeting confirmation within `conf_target` blocks.
-    GetRecentFeeRate(u16, oneshot::Sender<Result<FeeRate>>),
+    GetRecentFeeRate(u16, Caller<FeeRate>),
 
     // Broadcast a transaction to the network.
-    BroadcastTransaction(bitcoin::Transaction, oneshot::Sender<Result<()>>),
+    BroadcastTransaction(bitcoin::Transaction, Caller<()>),
 
     // Query the status of a transaction (confirmed, in mempool, or not found).
-    GetTransactionStatus(bitcoin::Txid, oneshot::Sender<Result<TxStatus>>),
+    GetTransactionStatus(bitcoin::Txid, Caller<TxStatus>),
 }
 
 #[cfg(test)]
@@ -2391,7 +2519,9 @@ mod tests {
             ..MonitorConfig::default()
         };
         assert_eq!(
-            Monitor::resolve_start_checkpoint(&rpc, &above_taproot).await,
+            Monitor::resolve_start_checkpoint(&rpc, &above_taproot)
+                .await
+                .unwrap(),
             HashCheckpoint::taproot_activation(),
         );
 
@@ -2401,9 +2531,208 @@ mod tests {
             ..MonitorConfig::default()
         };
         assert_eq!(
-            Monitor::resolve_start_checkpoint(&rpc, &between_segwit_and_taproot).await,
+            Monitor::resolve_start_checkpoint(&rpc, &between_segwit_and_taproot)
+                .await
+                .unwrap(),
             HashCheckpoint::segwit_activation(),
         );
+    }
+
+    /// Answer a JSON-RPC request, echoing its id.
+    fn rpc_reply(req: &str, result: serde_json::Value, error: serde_json::Value) -> String {
+        let body = req.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+        let id = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|req| req.get("id").cloned())
+            .unwrap_or_default();
+        serde_json::json!({ "result": result, "error": error, "id": id }).to_string()
+    }
+
+    fn rpc_error(req: &str, code: i32, message: &str) -> String {
+        rpc_reply(
+            req,
+            serde_json::Value::Null,
+            serde_json::json!({ "code": code, "message": message }),
+        )
+    }
+
+    fn rpc_ok(req: &str, result: &str) -> String {
+        rpc_reply(req, serde_json::json!(result), serde_json::Value::Null)
+    }
+
+    /// Serve JSON-RPC over loopback, answering each request body with `reply`.
+    async fn stub_bitcoind(
+        reply: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Arc<corepc_client::client_sync::v29::Client> {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let reply = Arc::new(reply);
+
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let body = reply(&String::from_utf8_lossy(&buf[..n]));
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if sock.write_all(resp.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        Arc::new(corepc_client::client_sync::v29::Client::new(&format!(
+            "http://{addr}"
+        )))
+    }
+
+    #[tokio::test]
+    async fn checkpoint_at_height_waits_out_a_lagging_bitcoind() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::atomic::Ordering;
+
+        const HASH: &str = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
+        // `getblockhash` replies "out of range" this many times before the block lands.
+        const LAGGING_REPLIES: u32 = 2;
+
+        let block_hash_calls = Arc::new(AtomicU32::new(0));
+        let rpc = stub_bitcoind({
+            let block_hash_calls = block_hash_calls.clone();
+            move |req| {
+                if req.contains("\"getblockhash\"")
+                    && block_hash_calls.fetch_add(1, Ordering::SeqCst) >= LAGGING_REPLIES
+                {
+                    rpc_ok(req, HASH)
+                } else {
+                    rpc_error(req, -8, "Block height out of range")
+                }
+            }
+        })
+        .await;
+
+        // The old "-8 is permanent" path returned a genesis checkpoint on the first reply.
+        let checkpoint = tokio::time::timeout(
+            Duration::from_secs(60),
+            Monitor::checkpoint_at_height(&rpc, 300_000),
+        )
+        .await
+        .expect("checkpoint_at_height gave up instead of waiting for bitcoind")
+        .unwrap();
+
+        assert_eq!(checkpoint.height, 300_000);
+        assert_eq!(checkpoint.hash.to_string(), HASH);
+        assert!(block_hash_calls.load(Ordering::SeqCst) > LAGGING_REPLIES);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_at_height_gives_up_on_a_permanent_rpc_error() {
+        let rpc = stub_bitcoind(|req| rpc_error(req, -32601, "Method not found")).await;
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(60),
+            Monitor::checkpoint_at_height(&rpc, 300_000),
+        )
+        .await
+        .expect("checkpoint_at_height retried an error that will never clear")
+        .unwrap_err();
+
+        assert!(err.to_string().contains("start height 300000"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_at_height_gives_up_on_a_malformed_reply() {
+        let rpc = stub_bitcoind(|_| "<html>not json</html>".to_string()).await;
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(60),
+            Monitor::checkpoint_at_height(&rpc, 300_000),
+        )
+        .await
+        .expect("checkpoint_at_height retried a reply that will never parse")
+        .unwrap_err();
+
+        assert!(err.to_string().contains("start height 300000"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn caller_rpc_only_starts_inside_the_deadline() {
+        let rpc = Arc::new(corepc_client::client_sync::v29::Client::new(
+            "http://127.0.0.1:1",
+        ));
+
+        let (result_tx, _rx) = oneshot::channel::<Result<()>>();
+        let fits = Caller {
+            deadline: Instant::now() + MONITOR_REQUEST_TIMEOUT,
+            result_tx,
+        };
+        assert_eq!(fits.rpc(&rpc, |_| 1).await, Some(1));
+
+        let (result_tx, _rx) = oneshot::channel::<Result<()>>();
+        let too_late = Caller {
+            deadline: Instant::now() + BITCOIND_RPC_BUDGET / 2,
+            result_tx,
+        };
+        assert_eq!(too_late.rpc(&rpc, |_| 1).await, None);
+
+        let (result_tx, rx) = oneshot::channel::<Result<()>>();
+        drop(rx);
+        let gone = Caller {
+            deadline: Instant::now() + MONITOR_REQUEST_TIMEOUT,
+            result_tx,
+        };
+        assert_eq!(gone.rpc(&rpc, |_| 1).await, None);
+    }
+
+    #[test]
+    fn only_recoverable_transport_errors_are_retried() {
+        use jsonrpc::http::minreq_http::Error as TransportError;
+        use jsonrpc::http::minreq_http::HttpError;
+
+        let http = |status_code| {
+            corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Transport(Box::new(
+                TransportError::Http(HttpError {
+                    status_code,
+                    body: String::new(),
+                }),
+            )))
+        };
+        assert!(is_transient_rpc_error(&http(503)));
+        assert!(is_transient_rpc_error(&http(502)));
+        assert!(!is_transient_rpc_error(&http(401)));
+        assert!(!is_transient_rpc_error(&http(403)));
+
+        // A 200 whose body is not JSON-RPC is a transport error too, and permanent.
+        let malformed =
+            corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Transport(Box::new(
+                TransportError::Minreq(minreq::Error::SerdeJsonError(
+                    serde_json::from_str::<serde_json::Value>("nope").unwrap_err(),
+                )),
+            )));
+        assert!(!is_transient_rpc_error(&malformed));
+
+        // Against a port nothing is listening on, so the retryable branch is
+        // exercised on a real error rather than a hand-built one.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let refused = corepc_client::client_sync::v29::Client::new(&format!("http://{addr}"))
+            .get_blockchain_info()
+            .unwrap_err();
+        assert!(is_transient_rpc_error(&refused), "{refused}");
     }
 
     #[test]
