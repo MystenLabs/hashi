@@ -301,9 +301,9 @@ impl TestSetup {
             &self.committee_set,
             self.committee_set.epoch(),
             ProtocolType::Dkg,
-            self.encryption_keys[validator_index].clone(),
+            Some(self.encryption_keys[validator_index].clone()),
             None,
-            self.signing_keys[validator_index].clone(),
+            Some(self.signing_keys[validator_index].clone()),
             store,
             TEST_CHAIN_ID,
             None,
@@ -986,7 +986,7 @@ impl P2PChannel for PreCollectedP2PChannel {
             .unwrap()
             .get(party)
             .cloned()
-            .ok_or_else(|| crate::communication::ChannelError::RequestFailed("No response".into()))
+            .ok_or_else(|| ChannelError::RequestFailed("No response".into()))
     }
 
     async fn get_public_mpc_output(
@@ -1052,9 +1052,9 @@ fn test_mpc_manager_new_from_committee_set() {
         &setup.committee_set,
         setup.epoch(),
         ProtocolType::Dkg,
-        encryption_key,
+        Some(encryption_key),
         None,
-        signing_key,
+        Some(signing_key),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -1084,9 +1084,9 @@ fn test_mpc_manager_new_succeeds_for_non_member_without_identity() {
         &setup.committee_set,
         setup.epoch(),
         ProtocolType::Dkg,
-        setup.encryption_keys[0].clone(),
         None,
-        setup.signing_keys[0].clone(),
+        None,
+        None,
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -1099,6 +1099,166 @@ fn test_mpc_manager_new_succeeds_for_non_member_without_identity() {
     assert!(manager.party_id().is_err());
     assert_eq!(manager.address, non_member);
     assert_eq!(manager.committee.members().len(), 5);
+}
+
+#[test]
+fn test_this_node_deals_nothing_only_for_a_non_member() {
+    let setup = TestSetup::new(5);
+
+    let member = MpcManager::new(
+        setup.address(0),
+        &setup.committee_set,
+        setup.epoch(),
+        ProtocolType::Dkg,
+        Some(setup.encryption_keys[0].clone()),
+        None,
+        Some(setup.signing_keys[0].clone()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .expect("member must construct");
+    assert!(!member.this_node_deals_nothing());
+
+    let observer = MpcManager::new(
+        Address::new([99u8; 32]),
+        &setup.committee_set,
+        setup.epoch(),
+        ProtocolType::Dkg,
+        None,
+        None,
+        None,
+        Arc::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .expect("non-member must construct");
+    assert!(observer.this_node_deals_nothing());
+    assert!(!MpcManager::dealer_deals_nothing(
+        &observer.committee,
+        &observer.mpc_config.nodes,
+        &Address::new([99u8; 32]),
+    ));
+}
+
+#[test]
+fn test_send_messages_entry_point_rejects_only_a_non_member() {
+    let setup = TestSetup::new(5);
+    let request = SendMessagesRequest {
+        messages: Messages::Rotation(BTreeMap::new()),
+    };
+    let guard_fired = |r: &MpcResult<SendMessagesResponse>| matches!(r, Err(MpcError::InvalidMessage { reason, .. }) if reason.contains("no receiver role"));
+
+    let mut observer = MpcManager::new(
+        Address::new([99u8; 32]),
+        &setup.committee_set,
+        setup.epoch(),
+        ProtocolType::Dkg,
+        None,
+        None,
+        None,
+        Arc::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .expect("non-member must construct");
+    assert!(guard_fired(
+        &observer.handle_send_messages_request(setup.address(0), &request)
+    ));
+
+    let mut member = MpcManager::new(
+        setup.address(0),
+        &setup.committee_set,
+        setup.epoch(),
+        ProtocolType::Dkg,
+        Some(setup.encryption_keys[0].clone()),
+        None,
+        Some(setup.signing_keys[0].clone()),
+        Arc::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .expect("member must construct");
+    assert!(!guard_fired(
+        &member.handle_send_messages_request(setup.address(1), &request)
+    ));
+}
+
+#[test]
+fn test_role_predicates_separate_a_departing_node_from_a_never_member() {
+    let mut setup = TestSetup::new(5);
+    let target_epoch = setup.committee_set.epoch();
+    let previous_epoch = target_epoch - 1;
+    let all_members = setup
+        .committee_set
+        .current_committee()
+        .unwrap()
+        .members()
+        .to_vec();
+    let mut remaining = all_members.clone();
+    remaining.pop();
+
+    let mut committees = BTreeMap::new();
+    committees.insert(
+        previous_epoch,
+        Committee::new(
+            all_members,
+            previous_epoch,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
+        ),
+    );
+    committees.insert(
+        target_epoch,
+        Committee::new(
+            remaining,
+            target_epoch,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
+        ),
+    );
+    setup.committee_set.set_committees(committees);
+
+    let build = |address: Address, previous_encryption_key| {
+        MpcManager::new(
+            address,
+            &setup.committee_set,
+            target_epoch,
+            ProtocolType::KeyRotation,
+            None,
+            previous_encryption_key,
+            None,
+            Arc::new(InMemoryPublicMessagesStore::new()),
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            &test_metrics(),
+        )
+        .expect("a non-member must construct")
+    };
+
+    let departing = build(setup.address(4), Some(setup.encryption_keys[4].clone()));
+    assert!(!departing.is_committee_member());
+    assert!(departing.is_previous_committee_member());
+
+    let never_member = build(Address::new([99u8; 32]), None);
+    assert!(!never_member.is_committee_member());
+    assert!(!never_member.is_previous_committee_member());
 }
 
 #[test]
@@ -1145,9 +1305,9 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         &committee_set,
         epoch,
         ProtocolType::Dkg,
-        encryption_keys[0].clone(),
+        Some(encryption_keys[0].clone()),
         None,
-        signing_keys[0].clone(),
+        Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         "test",
         None,
@@ -1177,9 +1337,9 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         &setup.committee_set,
         setup.epoch(),
         ProtocolType::Dkg,
-        wrong_encryption_key,
+        Some(wrong_encryption_key),
         None,
-        setup.signing_keys[0].clone(),
+        Some(setup.signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -1265,9 +1425,9 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         &committee_set,
         33,
         ProtocolType::KeyRotation,
-        encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
-        signing_keys[0].clone(),
+        Some(encryption_keys[0].clone()),
+        Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -1352,9 +1512,9 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         &committee_set,
         33,
         ProtocolType::KeyRotation,
-        encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
-        signing_keys[0].clone(),
+        Some(encryption_keys[0].clone()),
+        Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -1458,9 +1618,9 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         &committee_set,
         5, // <-- explicit caller epoch; old recompute would have used 10
         ProtocolType::KeyRotation,
-        encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
-        signing_keys[0].clone(),
+        Some(encryption_keys[0].clone()),
+        Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -6457,9 +6617,66 @@ impl RotationTestSetup {
         }
     }
 
-    /// Reconstruction takes only verified certificates; these tests exercise
-    /// reconstruction itself, so they bypass the predicate rather than build
-    /// quorum-weight certs.
+    fn shrink_to_next_epoch(&mut self, departing_idx: usize) -> u64 {
+        let dkg_epoch = self.setup.committee_set.epoch();
+        let target_epoch = dkg_epoch + 1;
+        let departing = self.setup.address(departing_idx);
+        let mut remaining = self.setup.committee_set.committees()[&dkg_epoch]
+            .members()
+            .to_vec();
+        remaining.retain(|m| m.validator_address() != departing);
+        assert!(
+            remaining.len() + 1
+                == self.setup.committee_set.committees()[&dkg_epoch]
+                    .members()
+                    .len(),
+            "departing_idx must be in the DKG committee"
+        );
+        self.setup.committee_set.committees_mut().insert(
+            target_epoch,
+            Committee::new(
+                remaining,
+                target_epoch,
+                TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+                TEST_MAX_FAULTY_IN_BASIS_POINTS,
+                0,
+            ),
+        );
+        self.setup.committee_set.set_epoch(target_epoch);
+        target_epoch
+    }
+
+    fn rotation_manager_at_target(
+        &self,
+        index: usize,
+        dkg_output: MpcOutput,
+        store: Arc<dyn PublicMessagesStore>,
+    ) -> MpcManager {
+        let target_epoch = self.setup.committee_set.epoch();
+        let address = self.setup.address(index);
+        let in_target = self.setup.committee_set.committees()[&target_epoch]
+            .index_of(&address)
+            .is_some();
+        let mut manager = MpcManager::new(
+            address,
+            &self.setup.committee_set,
+            target_epoch,
+            ProtocolType::KeyRotation,
+            in_target.then(|| self.setup.encryption_keys[index].clone()),
+            Some(self.setup.encryption_keys[index].clone()),
+            in_target.then(|| self.setup.signing_keys[index].clone()),
+            store,
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            &test_metrics(),
+        )
+        .unwrap();
+        manager.previous_output = Some(dkg_output);
+        manager
+    }
+
     fn certificates(&self) -> Vec<VerifiedCertificateV1> {
         self.certificates
             .values()
@@ -6468,9 +6685,6 @@ impl RotationTestSetup {
             .collect()
     }
 
-    /// Returns the subset of dealer addresses that `reconstruct_previous_dkg_output`
-    /// would use (sorted order, stopping at threshold weight).
-    /// This matches `run_as_party` behavior during live DKG.
     fn threshold_dealer_addresses(&self) -> Vec<Address> {
         let committee = self.setup.committee();
         let (nodes, threshold, _max_faulty) =
@@ -7025,6 +7239,155 @@ async fn test_run_key_rotation_as_dealer_reports_a_shortfall() {
 }
 
 #[tokio::test]
+async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
+    let mut rotation_setup = RotationTestSetup::new();
+    let departing_idx = 4;
+    let departing_addr = rotation_setup.setup.address(departing_idx);
+
+    let mut dkg: Vec<(MpcOutput, Arc<dyn PublicMessagesStore>)> = Vec::new();
+    for i in 0..5 {
+        let (manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+        dkg.push((output, Arc::clone(&manager.public_messages_store)));
+    }
+
+    rotation_setup.shrink_to_next_epoch(departing_idx);
+
+    let mut peers = HashMap::new();
+    for (i, (output, store)) in dkg.iter().enumerate().take(departing_idx) {
+        let manager =
+            rotation_setup.rotation_manager_at_target(i, output.clone(), Arc::clone(store));
+        assert!(manager.is_committee_member());
+        peers.insert(rotation_setup.setup.address(i), manager);
+    }
+
+    let (departing_output, departing_store) = dkg[departing_idx].clone();
+    let departing =
+        rotation_setup.rotation_manager_at_target(departing_idx, departing_output, departing_store);
+    assert!(!departing.is_committee_member());
+    assert!(departing.is_previous_committee_member());
+    let departing = Arc::new(RwLock::new(departing));
+
+    let mock_p2p = MockP2PChannel::new(peers, departing_addr);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+    let outcome = MpcManager::run_key_rotation(
+        &departing,
+        &rotation_setup.certificates(),
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+        RotationRole::DealerOnly,
+    )
+    .await
+    .expect("a departing node must be able to deal into the rotation that removes it");
+
+    assert!(
+        matches!(outcome, ReconfigOutcome::Dealt),
+        "expected the departing node to deal, got {outcome:?}"
+    );
+    assert_eq!(
+        mock_tob.published_count(),
+        1,
+        "dealing means a published rotation certificate, not just a clean return"
+    );
+    assert!(
+        departing.read().unwrap().current_output.is_none(),
+        "a dealer-only run holds no share of the new key"
+    );
+}
+
+#[tokio::test]
+async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_success() {
+    let mut rotation_setup = RotationTestSetup::new();
+    let departing_idx = 4;
+    let departing_addr = rotation_setup.setup.address(departing_idx);
+
+    let (member_view, dkg_output) = rotation_setup.create_receiver_with_memory_store(departing_idx);
+    rotation_setup.shrink_to_next_epoch(departing_idx);
+
+    let departing = rotation_setup.rotation_manager_at_target(
+        departing_idx,
+        dkg_output,
+        Arc::clone(&member_view.public_messages_store),
+    );
+    let departing = Arc::new(RwLock::new(departing));
+
+    // No peers: the dealer reaches the aggregator and cannot clear t + f.
+    let mock_p2p = MockP2PChannel::new(HashMap::new(), departing_addr);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(Vec::new());
+
+    let outcome = MpcManager::run_key_rotation(
+        &departing,
+        &rotation_setup.certificates(),
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+        RotationRole::DealerOnly,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, Err(MpcError::NotEnoughApprovals { .. })),
+        "a dealer-only run must surface its failure so the caller retries, got {outcome:?}"
+    );
+    assert_eq!(mock_tob.published_count(), 0);
+}
+
+#[tokio::test]
+async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parking() {
+    let mut rotation_setup = RotationTestSetup::new();
+    let departing_idx = 4;
+    let departing_addr = rotation_setup.setup.address(departing_idx);
+
+    let mut dkg: Vec<(MpcOutput, Arc<dyn PublicMessagesStore>)> = Vec::new();
+    for i in 0..5 {
+        let (manager, output) = rotation_setup.create_receiver_with_memory_store(i);
+        dkg.push((output, Arc::clone(&manager.public_messages_store)));
+    }
+    rotation_setup.shrink_to_next_epoch(departing_idx);
+
+    let mut peers = HashMap::new();
+    for (i, (output, store)) in dkg.iter().enumerate().take(departing_idx) {
+        let manager =
+            rotation_setup.rotation_manager_at_target(i, output.clone(), Arc::clone(store));
+        peers.insert(rotation_setup.setup.address(i), manager);
+    }
+
+    let (departing_output, departing_store) = dkg[departing_idx].clone();
+    let departing = Arc::new(RwLock::new(rotation_setup.rotation_manager_at_target(
+        departing_idx,
+        departing_output,
+        departing_store,
+    )));
+
+    let mock_p2p = MockP2PChannel::new(peers, departing_addr);
+
+    let as_dealer_only = MpcManager::prepare_previous_output(
+        &departing,
+        &[],
+        &mock_p2p,
+        &test_metrics(),
+        RotationRole::DealerOnly,
+    )
+        .await;
+    assert!(
+        as_dealer_only.is_err(),
+        "a failed reconstruction must surface so the caller retries: {as_dealer_only:?}"
+    );
+
+    let (fallback, _) = MpcManager::prepare_previous_output(
+        &departing,
+        &[],
+        &mock_p2p,
+        &test_metrics(),
+        RotationRole::DealerAndParty,
+    )
+        .await
+        .expect("the party path still falls back to the public-only output");
+    assert!(fallback.key_shares.shares.is_empty());
+}
+
+#[tokio::test]
 async fn test_run_key_rotation() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
@@ -7115,8 +7478,11 @@ async fn test_run_key_rotation() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
+    .unwrap()
+    .into_output()
     .unwrap();
 
     assert_eq!(
@@ -7250,8 +7616,11 @@ async fn test_run_key_rotation_skips_dealer_phase() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
+    .unwrap()
+    .into_output()
     .unwrap();
 
     // Verify dealer did NOT publish (skipped)
@@ -7391,8 +7760,11 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
+    .unwrap()
+    .into_output()
     .unwrap();
 
     // Dealer MUST have published: the filter excluded the empty-messages dealer
@@ -7624,8 +7996,11 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
+    .unwrap()
+    .into_output()
     .unwrap();
 
     // Compare key shares with the reference via serialization (SharesForNode
@@ -7758,8 +8133,11 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         &mock_p2p,
         &mut mock_tob,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
+    .unwrap()
+    .into_output()
     .unwrap();
 
     assert_eq!(
@@ -7867,9 +8245,9 @@ async fn test_prepare_previous_output_for_new_member() {
         &new_committee_set,
         epoch,
         ProtocolType::Dkg,
-        new_member_encryption_key,
+        Some(new_member_encryption_key),
         None,
-        new_member_signing_key,
+        Some(new_member_signing_key),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
@@ -7896,10 +8274,15 @@ async fn test_prepare_previous_output_for_new_member() {
     // Call prepare_previous_output for new member
     let new_member_manager = Arc::new(RwLock::new(new_member_manager));
     let metrics = test_metrics();
-    let (previous_output, is_member_of_previous_committee) =
-        MpcManager::prepare_previous_output(&new_member_manager, &[], &mock_p2p, &metrics)
-            .await
-            .unwrap();
+    let (previous_output, is_member_of_previous_committee) = MpcManager::prepare_previous_output(
+        &new_member_manager,
+        &[],
+        &mock_p2p,
+        &metrics,
+        RotationRole::DealerAndParty,
+    )
+        .await
+        .unwrap();
 
     // Verify is_member_of_previous_committee is false
     assert!(
@@ -7974,10 +8357,15 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
 
     let previous_certs = rotation_setup.certificates();
     let metrics = test_metrics();
-    let (previous_output, is_member) =
-        MpcManager::prepare_previous_output(&test_manager, &previous_certs, &mock_p2p, &metrics)
-            .await
-            .expect("prepare_previous_output should succeed by retrieving missing DKG messages");
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &previous_certs,
+        &mock_p2p,
+        &metrics,
+        RotationRole::DealerAndParty,
+    )
+        .await
+        .expect("prepare_previous_output should succeed by retrieving missing DKG messages");
 
     assert!(is_member, "Validator 0 is in the previous committee");
     assert_eq!(
@@ -8061,6 +8449,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
         &previous_certs,
         &mock_p2p,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
     .expect("prepare_previous_output should succeed after re-fetching the diverged message");
@@ -8176,12 +8565,15 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
     let metrics = test_metrics();
-    let (previous_output, is_member) =
-        MpcManager::prepare_previous_output(&test_manager, &rotation_certs, &mock_p2p, &metrics)
-            .await
-            .expect(
-                "prepare_previous_output should succeed by retrieving missing rotation messages",
-            );
+    let (previous_output, is_member) = MpcManager::prepare_previous_output(
+        &test_manager,
+        &rotation_certs,
+        &mock_p2p,
+        &metrics,
+        RotationRole::DealerAndParty,
+    )
+        .await
+        .expect("prepare_previous_output should succeed by retrieving missing rotation messages");
 
     assert!(is_member, "Validator 2 is in the previous committee");
     assert_eq!(
@@ -8299,6 +8691,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         &rotation_certs,
         &mock_p2p,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
     .expect("prepare_previous_output should succeed after re-fetching the diverged message");
@@ -8412,6 +8805,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         &rotation_certs,
         &mock_p2p,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await
     .expect("prepare_previous_output should succeed from the stored messages alone");
@@ -8532,6 +8926,7 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
         &rotation_certs,
         &mock_p2p,
         &test_metrics(),
+        RotationRole::DealerAndParty,
     )
     .await;
 
@@ -10005,9 +10400,9 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         &committee_set,
         target_epoch,
         ProtocolType::Dkg,
-        rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
-        rotation_setup.setup.signing_keys[shifted_member_index].clone(),
+        Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
+        Some(rotation_setup.setup.signing_keys[shifted_member_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
         None,
@@ -10187,9 +10582,9 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         &committee_set,
         target_epoch,
         ProtocolType::Dkg,
-        setup.encryption_keys[target_index].clone(),
         Some(setup.encryption_keys[target_index].clone()),
-        setup.signing_keys[target_index].clone(),
+        Some(setup.encryption_keys[target_index].clone()),
+        Some(setup.signing_keys[target_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
         None,
@@ -10321,9 +10716,9 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         &committee_set,
         target_epoch,
         ProtocolType::Dkg,
-        prev_key.clone(),
         Some(prev_key.clone()),
-        setup.signing_keys[target_index].clone(),
+        Some(prev_key.clone()),
+        Some(setup.signing_keys[target_index].clone()),
         Arc::new(build_store()),
         TEST_CHAIN_ID,
         None,
@@ -10349,9 +10744,9 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         &committee_set,
         target_epoch,
         ProtocolType::Dkg,
-        prev_key,
+        Some(prev_key),
         None,
-        setup.signing_keys[target_index].clone(),
+        Some(setup.signing_keys[target_index].clone()),
         Arc::new(build_store()),
         TEST_CHAIN_ID,
         None,
@@ -10453,9 +10848,10 @@ fn test_recover_current_dkg() {
             &committee_set,
             epoch,
             ProtocolType::Dkg,
-            setup.encryption_keys[target_index].clone(),
-            None, // genesis: no previous encryption key
-            setup.signing_keys[target_index].clone(),
+            Some(setup.encryption_keys[target_index].clone()),
+            // genesis: no previous encryption key
+            None,
+            Some(setup.signing_keys[target_index].clone()),
             store,
             TEST_CHAIN_ID,
             None,
@@ -10624,9 +11020,9 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         &committee_set,
         epoch,
         ProtocolType::Dkg,
-        setup.encryption_keys[target_index].clone(),
+        Some(setup.encryption_keys[target_index].clone()),
         None,
-        setup.signing_keys[target_index].clone(),
+        Some(setup.signing_keys[target_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
         None,
@@ -10716,9 +11112,9 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             &rotation_committee_set,
             rotation_epoch,
             ProtocolType::KeyRotation,
-            rotation_setup.setup.encryption_keys[dealer_idx].clone(),
+            Some(rotation_setup.setup.encryption_keys[dealer_idx].clone()),
             None,
-            rotation_setup.setup.signing_keys[dealer_idx].clone(),
+            Some(rotation_setup.setup.signing_keys[dealer_idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
@@ -10749,9 +11145,9 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             &rotation_committee_set,
             rotation_epoch,
             ProtocolType::KeyRotation,
-            rotation_setup.setup.encryption_keys[other_idx].clone(),
+            Some(rotation_setup.setup.encryption_keys[other_idx].clone()),
             None,
-            rotation_setup.setup.signing_keys[other_idx].clone(),
+            Some(rotation_setup.setup.signing_keys[other_idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
@@ -10859,9 +11255,9 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         &committee_set,
         target_epoch,
         ProtocolType::KeyRotation,
-        rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
-        rotation_setup.setup.signing_keys[shifted_member_index].clone(),
+        Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
+        Some(rotation_setup.setup.signing_keys[shifted_member_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
         None,
@@ -10948,9 +11344,9 @@ fn test_recover_current_rotation() {
             &committee_set,
             rotation_epoch,
             ProtocolType::KeyRotation,
-            rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
-            rotation_setup.setup.signing_keys[idx].clone(),
+            Some(rotation_setup.setup.encryption_keys[idx].clone()),
+            Some(rotation_setup.setup.signing_keys[idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
@@ -11026,9 +11422,9 @@ fn test_recover_current_rotation() {
             &committee_set,
             rotation_epoch,
             ProtocolType::KeyRotation,
-            rotation_setup.setup.encryption_keys[receiver_index].clone(),
             Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
-            rotation_setup.setup.signing_keys[receiver_index].clone(),
+            Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
+            Some(rotation_setup.setup.signing_keys[receiver_index].clone()),
             store,
             TEST_CHAIN_ID,
             None,
@@ -11212,9 +11608,9 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             &committee_set,
             rotation_epoch,
             ProtocolType::KeyRotation,
-            rotation_setup.setup.encryption_keys[idx].clone(),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
-            rotation_setup.setup.signing_keys[idx].clone(),
+            Some(rotation_setup.setup.encryption_keys[idx].clone()),
+            Some(rotation_setup.setup.signing_keys[idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             None,
@@ -11292,9 +11688,9 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         &committee_set,
         rotation_epoch,
         ProtocolType::KeyRotation,
-        rotation_setup.setup.encryption_keys[receiver_index].clone(),
         Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
-        rotation_setup.setup.signing_keys[receiver_index].clone(),
+        Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
+        Some(rotation_setup.setup.signing_keys[receiver_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
         None,
@@ -18352,7 +18748,7 @@ fn formation_and_acceptance_quorums_agree() {
         .unwrap();
 
     let formation = dealer
-        .build_dealer_flow_data(messages, signature)
+        .build_dealer_flow_data(messages, Some(signature))
         .required_reduced_weight;
     let acceptance = dealer.key_generation_cert_quorum(setup.epoch()).unwrap();
     assert_eq!(

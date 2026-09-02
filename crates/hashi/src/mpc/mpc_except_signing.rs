@@ -56,12 +56,14 @@ pub use crate::mpc::types::ProtocolComplaint;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
 pub use crate::mpc::types::PublicMpcOutput;
+use crate::mpc::types::ReconfigOutcome;
 use crate::mpc::types::ReconstructionOutcome;
 pub use crate::mpc::types::RetrieveMessagesRequest;
 pub use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::RotationComplainContext;
 use crate::mpc::types::RotationMessages;
 use crate::mpc::types::RotationReconstructionContext;
+use crate::mpc::types::RotationRole;
 pub use crate::mpc::types::SendMessagesRequest;
 pub use crate::mpc::types::SendMessagesResponse;
 pub use crate::mpc::types::SessionId;
@@ -298,6 +300,16 @@ impl MpcManager {
         })
     }
 
+    pub fn is_committee_member(&self) -> bool {
+        self.identity.is_some()
+    }
+
+    pub fn is_previous_committee_member(&self) -> bool {
+        self.previous_committee
+            .as_ref()
+            .is_some_and(|c| c.index_of(&self.address).is_some())
+    }
+
     pub fn party_id(&self) -> MpcResult<PartyId> {
         Ok(self.identity()?.party_id)
     }
@@ -316,9 +328,9 @@ impl MpcManager {
         committee_set: &CommitteeSet,
         epoch: u64,
         protocol_type: ProtocolType,
-        encryption_key: PrivateKey<EncryptionGroupElement>,
+        encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
         previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
-        signing_key: Bls12381PrivateKey,
+        signing_key: Option<Bls12381PrivateKey>,
         public_message_store: Arc<dyn PublicMessagesStore>,
         chain_id: &str,
         weight_divisor: Option<u16>,
@@ -352,7 +364,9 @@ impl MpcManager {
             committee.mpc_nonce_accumulation_window_ms(),
         );
         let party_id_opt = committee.index_of(&address).map(|i| i as u16);
-        let my_pk = PublicKey::<EncryptionGroupElement>::from_private_key(&encryption_key);
+        let my_pk = encryption_key
+            .as_ref()
+            .map(PublicKey::<EncryptionGroupElement>::from_private_key);
         // Both are member-only: a non-member has no committee record to compare against.
         let committee_pk = party_id_opt.map(|pid| {
             mpc_config
@@ -362,9 +376,12 @@ impl MpcManager {
                 .pk
                 .clone()
         });
-        let keys_match = committee_pk
+        let keys_match = my_pk
             .as_ref()
-            .map(|pk| my_pk.as_element().to_byte_array() == pk.as_element().to_byte_array());
+            .zip(committee_pk.as_ref())
+            .map(|(mine, theirs)| {
+                mine.as_element().to_byte_array() == theirs.as_element().to_byte_array()
+            });
         tracing::info!(
             epoch,
             party_id = party_id_opt,
@@ -374,24 +391,29 @@ impl MpcManager {
             max_faulty,
             num_nodes = mpc_config.nodes.num_nodes(),
             encryption_keys_match = keys_match,
-            my_encryption_pk = hex::encode(my_pk.as_element().to_byte_array()),
+            my_encryption_pk = my_pk
+                .as_ref()
+                .map(|pk| hex::encode(pk.as_element().to_byte_array())),
             committee_encryption_pk = committee_pk
                 .as_ref()
                 .map(|pk| hex::encode(pk.as_element().to_byte_array())),
             "MpcManager initialized"
         );
-        if let Some(pid) = party_id_opt {
-            metrics.mpc_party_reduced_weight.set(
+        metrics
+            .mpc_party_reduced_weight
+            .set(party_id_opt.map_or(0, |pid| {
                 mpc_config
                     .nodes
                     .weight_of(pid)
-                    .expect("nodes holds one entry per committee index") as i64,
-            );
-        }
+                    .expect("nodes holds one entry per committee index") as i64
+            }));
         if keys_match == Some(false) {
             return Err(MpcError::InvalidConfig(format!(
                 "encryption key mismatch at epoch {epoch}: local {my} vs on-chain {chain}",
-                my = hex::encode(my_pk.as_element().to_byte_array()),
+                my = my_pk
+                    .as_ref()
+                    .map(|pk| hex::encode(pk.as_element().to_byte_array()))
+                    .unwrap_or_default(),
                 chain = committee_pk
                     .as_ref()
                     .map(|pk| hex::encode(pk.as_element().to_byte_array()))
@@ -446,11 +468,20 @@ impl MpcManager {
                     .ok()
                     .map(|(_, threshold, _)| threshold)
             });
-        let identity = party_id_opt.map(|party_id| TargetIdentity {
-            party_id,
-            encryption_key,
-            signing_key,
-        });
+        let identity = match (party_id_opt, encryption_key, signing_key) {
+            (Some(party_id), Some(encryption_key), Some(signing_key)) => Some(TargetIdentity {
+                party_id,
+                encryption_key,
+                signing_key,
+            }),
+            (None, _, _) => None,
+            (Some(_), _, _) => {
+                return Err(MpcError::InvalidConfig(format!(
+                    "node is in the epoch {epoch} committee but is missing its encryption or \
+                     signing key for it"
+                )));
+            }
+        };
         let mut manager = Self {
             identity,
             address,
@@ -488,12 +519,20 @@ impl MpcManager {
         Ok(manager)
     }
 
-    // Only for devnet key recovery CLI tool
     pub fn handle_send_messages_request(
         &mut self,
         sender: Address,
         request: &SendMessagesRequest,
     ) -> MpcResult<SendMessagesResponse> {
+        if !self.is_committee_member() {
+            return Err(MpcError::InvalidMessage {
+                sender,
+                reason: format!(
+                    "not in the epoch {} committee: no receiver role this epoch",
+                    self.mpc_config.epoch
+                ),
+            });
+        }
         if matches!(request.messages, Messages::AvidNonceRetrieval(_)) {
             return Err(MpcError::InvalidMessage {
                 sender,
@@ -655,6 +694,15 @@ impl MpcManager {
         caller: Address,
         request: &ComplainRequest,
     ) -> MpcResult<ComplaintResponse> {
+        if request.epoch == self.mpc_config.epoch && !self.is_committee_member() {
+            return Err(MpcError::InvalidMessage {
+                sender: caller,
+                reason: format!(
+                    "not in the epoch {} committee: no receiver role this epoch",
+                    self.mpc_config.epoch
+                ),
+            });
+        }
         let cache_key = match request.protocol_type {
             ProtocolTypeIndicator::Dkg => ComplaintResponsesKey::Dkg {
                 dealer: request.dealer,
@@ -957,15 +1005,21 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
-    ) -> MpcResult<MpcOutput> {
-        tracing::info!("run_key_rotation: starting prepare_previous_output");
+        role: RotationRole,
+    ) -> MpcResult<ReconfigOutcome> {
+        tracing::info!("run_key_rotation: starting prepare_previous_output, role={role:?}");
         let _timer = metrics
             .mpc_rotation_prepare_previous_duration_seconds
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
             .start_timer();
-        let (previous, is_member_of_previous_committee) =
-            Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel, metrics)
-                .await?;
+        let (previous, is_member_of_previous_committee) = Self::prepare_previous_output(
+            mpc_manager,
+            previous_certificates,
+            p2p_channel,
+            metrics,
+            role,
+        )
+        .await?;
         drop(_timer);
         tracing::info!(
             "run_key_rotation: prepare_previous_output complete, \
@@ -989,40 +1043,48 @@ impl MpcManager {
         // Optimization: a node that fell back to the new-member path has empty
         // key shares and cannot generate valid rotation messages.
         let has_previous_shares = !previous.key_shares.shares.is_empty();
-        if is_member_of_previous_committee
-            && has_previous_shares
-            && {
-                let certified = ordered_broadcast_channel.certified_dealers().await;
-                let verified =
-                    Self::verified_dealer_weight_blocking(mpc_manager, certified, metrics).await;
-                let mgr = mpc_manager.read().unwrap();
-                let prev_committee = mgr.previous_committee.as_ref().expect(
-                    "previous_committee must be set when is_member_of_previous_committee is true",
-                );
-                let prev_nodes = mgr.previous_nodes.as_ref().expect(
-                    "previous_nodes must be set when is_member_of_previous_committee is true",
-                );
-                let certified_share_count: usize = verified
-                    .keys()
-                    .filter_map(|d| {
-                        let messages = mgr.current_rotation_messages.get(d)?;
-                        if messages.is_empty() {
-                            return None;
-                        }
-                        let party_id = prev_committee.index_of(d)? as u16;
-                        prev_nodes.share_ids_of(party_id).ok()
-                    })
-                    .map(|ids| ids.len())
-                    .sum();
-                tracing::info!(
-                    "run_key_rotation: certified_share_count={certified_share_count}, \
+        if is_member_of_previous_committee && !has_previous_shares {
+            tracing::warn!(
+                "run_key_rotation: in the previous committee but holding no shares to reshare; \
+                 this node's previous-epoch weight will not reach the rotation"
+            );
+            metrics.mpc_rotation_previous_shares_missing_total.inc();
+        }
+        let should_deal = is_member_of_previous_committee && has_previous_shares && {
+            let certified = ordered_broadcast_channel.certified_dealers().await;
+            let verified =
+                Self::verified_dealer_weight_blocking(mpc_manager, certified, metrics).await;
+            let mgr = mpc_manager.read().unwrap();
+            let prev_committee = mgr.previous_committee.as_ref().expect(
+                "previous_committee must be set when is_member_of_previous_committee is true",
+            );
+            let prev_nodes = mgr
+                .previous_nodes
+                .as_ref()
+                .expect("previous_nodes must be set when is_member_of_previous_committee is true");
+            let certified_share_count: usize = verified
+                .keys()
+                .filter_map(|d| {
+                    let messages = mgr.current_rotation_messages.get(d)?;
+                    if messages.is_empty() {
+                        return None;
+                    }
+                    let party_id = prev_committee.index_of(d)? as u16;
+                    prev_nodes.share_ids_of(party_id).ok()
+                })
+                .map(|ids| ids.len())
+                .sum();
+            tracing::info!(
+                "run_key_rotation: certified_share_count={certified_share_count}, \
                      threshold={}, skip_dealer={}",
-                    previous.threshold,
-                    certified_share_count >= previous.threshold as usize,
-                );
-                certified_share_count < previous.threshold as usize
-            }
-            && let Err(e) = Self::run_key_rotation_as_dealer(
+                previous.threshold,
+                certified_share_count >= previous.threshold as usize,
+            );
+            certified_share_count < previous.threshold as usize
+        };
+        let mut dealt = false;
+        if should_deal {
+            match Self::run_key_rotation_as_dealer(
                 mpc_manager,
                 &previous,
                 p2p_channel,
@@ -1030,11 +1092,28 @@ impl MpcManager {
                 metrics,
             )
             .await
-        {
-            tracing::error!(
-                "Rotation dealer phase failed: {}. Continuing as party only.",
-                e
+            {
+                Ok(()) => dealt = true,
+                Err(e) if role == RotationRole::DealerOnly => return Err(e),
+                Err(e) => tracing::error!(
+                    "Rotation dealer phase failed: {}. Continuing as party only.",
+                    e
+                ),
+            }
+        }
+        if role == RotationRole::DealerOnly {
+            let outcome = if dealt {
+                ReconfigOutcome::Dealt
+            } else if !has_previous_shares {
+                ReconfigOutcome::NoShares
+            } else {
+                ReconfigOutcome::NotNeeded
+            };
+            tracing::info!(
+                "run_key_rotation: dealer-only run complete, outcome={}",
+                outcome.label()
             );
+            return Ok(outcome);
         }
         tracing::info!(
             "run_key_rotation: entering party phase, previous_vk={}, \
@@ -1055,7 +1134,7 @@ impl MpcManager {
             .write()
             .unwrap()
             .set_current_output(output.clone());
-        Ok(output)
+        Ok(ReconfigOutcome::Output(output))
     }
 
     pub async fn run_nonce_dealer_phase(
@@ -1485,7 +1564,13 @@ impl MpcManager {
         )
         .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
-            .add_signature(dealer_data.my_signature)
+            .add_signature(
+                dealer_data.my_signature.ok_or_else(|| {
+                    MpcError::InvalidConfig(
+                        "a DKG dealer always deals to the committee it belongs to, so it must have acked its own deal".into(),
+                    )
+                })?,
+            )
             .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
@@ -1777,9 +1862,11 @@ impl MpcManager {
         // Not a crypto failure: the local `nodes` do not match the committee
         // they are being aggregated against.
         .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
-        aggregator
-            .add_signature(dealer_data.my_signature)
-            .expect("own signature must always verify");
+        if let Some(my_signature) = dealer_data.my_signature {
+            aggregator
+                .add_signature(my_signature)
+                .expect("own signature must always verify");
+        }
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
@@ -2080,7 +2167,13 @@ impl MpcManager {
         )
         .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
         aggregator
-            .add_signature(dealer_data.my_signature)
+            .add_signature(
+                dealer_data.my_signature.ok_or_else(|| {
+                    MpcError::InvalidConfig(
+                        "a nonce dealer is always in the current committee, so it must have acked its own deal".into(),
+                    )
+                })?,
+            )
             .expect("own signature must always verify");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
@@ -4816,7 +4909,7 @@ impl MpcManager {
             },
         };
         let signature = self.try_sign_dkg_message(self.address, &messages)?;
-        Ok(self.build_dealer_flow_data(messages, signature))
+        Ok(self.build_dealer_flow_data(messages, Some(signature)))
     }
 
     fn prepare_rotation_dealer_flow(
@@ -4847,7 +4940,10 @@ impl MpcManager {
                 Err(e) => return Err(MpcError::StorageError(e.to_string())),
             },
         };
-        let signature = self.try_sign_rotation_messages(previous, self.address, &messages)?;
+        let signature = self
+            .is_committee_member()
+            .then(|| self.try_sign_rotation_messages(previous, self.address, &messages))
+            .transpose()?;
         Ok(self.build_dealer_flow_data(messages, signature))
     }
 
@@ -4890,15 +4986,16 @@ impl MpcManager {
             },
         };
         let signature = self.try_sign_nonce_message(self.address, &messages)?;
-        Ok(self.build_dealer_flow_data(messages, signature))
+        Ok(self.build_dealer_flow_data(messages, Some(signature)))
     }
 
     fn build_dealer_flow_data(
         &self,
         messages: Messages,
-        signature: BLS12381Signature,
+        signature: Option<BLS12381Signature>,
     ) -> DealerFlowData {
-        let my_signature = MemberSignature::new(self.mpc_config.epoch, self.address, signature);
+        let my_signature =
+            signature.map(|s| MemberSignature::new(self.mpc_config.epoch, self.address, s));
         let messages_hash = DealerMessagesHash {
             dealer_address: self.address,
             messages_hash: messages.compute_hash(),
@@ -6102,6 +6199,7 @@ impl MpcManager {
         previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
+        role: RotationRole,
     ) -> MpcResult<(MpcOutput, bool)> {
         let (is_member_of_previous_committee, has_previous_key, threshold_opt) = {
             let mgr = mpc_manager.read().unwrap();
@@ -6142,6 +6240,14 @@ impl MpcManager {
             match reconstruction_result {
                 Ok(output) => output,
                 Err(e) => {
+                    // The fallback exists so a node that cannot reconstruct can still take the
+                    // party phase on the public key alone. A dealer-only run has no party phase,
+                    // so falling back would turn a retryable reconstruction failure into a
+                    // permanent one: the caller parks on `NoShares` and never re-attempts, and
+                    // this node's previous weight may be exactly what the rotation is short of.
+                    if role == RotationRole::DealerOnly {
+                        return Err(e);
+                    }
                     tracing::info!("Reconstruction failed ({e}), falling back to new-member path");
                     let _fetch_timer = metrics
                         .mpc_prepare_previous_fetch_public_output_duration_seconds

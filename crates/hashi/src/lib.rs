@@ -435,11 +435,23 @@ impl Hashi {
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<EncryptionPrivateKey> {
-        let member = committee
+        self.try_find_encryption_key_for_committee(committee, validator_address, epoch)?
+            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))
+    }
+
+    fn try_find_encryption_key_for_committee(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+        epoch: u64,
+    ) -> anyhow::Result<Option<EncryptionPrivateKey>> {
+        let Some(member) = committee
             .members()
             .iter()
             .find(|m| m.validator_address() == validator_address)
-            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))?;
+        else {
+            return Ok(None);
+        };
         let pub_key = member.encryption_public_key();
         self.db
             .find_encryption_key_matching(pub_key)
@@ -452,6 +464,7 @@ impl Hashi {
                      reconfig"
                 )
             })
+            .map(Some)
     }
 
     pub(crate) fn committee_encryption_key_lost(
@@ -510,11 +523,23 @@ impl Hashi {
         validator_address: sui_sdk_types::Address,
         epoch: u64,
     ) -> anyhow::Result<Bls12381PrivateKey> {
-        let member = committee
+        self.try_find_signing_key_for_committee(committee, validator_address, epoch)?
+            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))
+    }
+
+    fn try_find_signing_key_for_committee(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+        epoch: u64,
+    ) -> anyhow::Result<Option<Bls12381PrivateKey>> {
+        let Some(member) = committee
             .members()
             .iter()
             .find(|m| m.validator_address() == validator_address)
-            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))?;
+        else {
+            return Ok(None);
+        };
         let pub_key = member.public_key();
         self.db
             .find_signing_key_matching(pub_key)
@@ -527,6 +552,7 @@ impl Hashi {
                      reconfig"
                 )
             })
+            .map(Some)
     }
 
     pub(crate) async fn next_reconfig_epoch(&self) -> anyhow::Result<u64> {
@@ -605,7 +631,7 @@ impl Hashi {
         let hashi = state.hashi();
         let committee_set = &hashi.committees;
         let validator_address = self.config.validator_address()?;
-        let encryption_key = self.find_encryption_key_for_committee(
+        let encryption_key = self.try_find_encryption_key_for_committee(
             committee_set
                 .committees()
                 .get(&epoch)
@@ -615,7 +641,7 @@ impl Hashi {
         )?;
         let previous_encryption_key =
             self.resolve_previous_encryption_key(committee_set, epoch, validator_address)?;
-        let signing_key = self.find_signing_key_for_committee(
+        let signing_key = self.try_find_signing_key_for_committee(
             committee_set
                 .committees()
                 .get(&epoch)
@@ -1405,6 +1431,20 @@ impl Hashi {
                 }
             }
         })
+    }
+
+    pub(crate) fn is_in_committee_for(&self, epoch: u64) -> bool {
+        let address = match self.config.validator_address() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        let state = self.onchain_state().state();
+        state
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .is_some_and(|c| c.index_of(&address).is_some())
     }
 
     pub(crate) fn is_in_current_committee(&self) -> bool {

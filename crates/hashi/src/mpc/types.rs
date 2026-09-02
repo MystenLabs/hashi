@@ -1006,11 +1006,45 @@ impl From<crate::communication::ChannelError> for MpcError {
     }
 }
 
+#[derive(Debug)]
+pub enum ReconfigOutcome {
+    Output(MpcOutput),
+    Dealt,
+    NotNeeded,
+    NoShares,
+    NoRole,
+}
+
+impl ReconfigOutcome {
+    pub fn into_output(self) -> Option<MpcOutput> {
+        match self {
+            Self::Output(output) => Some(output),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Output(_) => "output",
+            Self::Dealt => "dealt",
+            Self::NotNeeded => "not_needed",
+            Self::NoShares => "no_shares",
+            Self::NoRole => "no_role",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RotationRole {
+    DealerAndParty,
+    DealerOnly,
+}
+
 pub struct DealerFlowData {
     pub request: SendMessagesRequest,
     pub recipients: Vec<Address>,
     pub messages_hash: DealerMessagesHash,
-    pub my_signature: MemberSignature,
+    pub my_signature: Option<MemberSignature>,
     pub required_reduced_weight: u32,
     pub committee: Committee,
     pub nodes: Nodes<EncryptionGroupElement>,
