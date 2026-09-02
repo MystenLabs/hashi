@@ -35,11 +35,16 @@ const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// mirror to show the certificate that beat ours before classifying the
 /// race from whatever it holds.
 const SETTLED_READ_TIMEOUT: Duration = Duration::from_secs(10);
+// Publish runs inside `with_timeout_and_retry`, whose `CALL_TIMEOUT`
+// covers the submit and the settled read together, so the bound must
+// leave the deadline arm reachable at all. It is not a guarantee that
+// the arm fires: a submit that runs close to `TX_CONFIRMATION_TIMEOUT`
+// still eats the budget, and the outer timeout then cancels the read
+// and the retry resubmits a paid on-chain no-op.
 const _: () = assert!(
     SETTLED_READ_TIMEOUT.as_millis() < super::timeout_and_retry::CALL_TIMEOUT.as_millis(),
-    "publish runs inside with_timeout_and_retry, so a settled-read bound at or above \
-     CALL_TIMEOUT never fires and the deadline arm becomes dead code — the outer timeout \
-     cancels first and every retry resubmits a paid on-chain no-op",
+    "a settled-read bound at or above CALL_TIMEOUT can never fire: the outer \
+     with_timeout_and_retry deadline cancels publish first",
 );
 
 #[derive(Debug, Error)]
