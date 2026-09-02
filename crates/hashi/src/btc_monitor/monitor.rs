@@ -64,10 +64,9 @@ const MAX_PENDING_DEPOSIT_CHECKS_PER_OUTPOINT: usize = 100;
 // and overflowing it fails calls outright ("Work queue depth exceeded").
 const UTXO_HEIGHT_LOOKUP_CONCURRENCY: usize = 16;
 
-/// Ceiling on a round trip through the monitor loop: corepc's 60s transport
-/// timeout plus the longest stretch the loop is alive but not receiving (a
-/// Kyoto restart, up to 35s), with margin. It can only fire on a request the
-/// loop never dispatched, which the workers' `is_closed` guards then drop.
+/// Bound on a round trip through the monitor loop, above corepc's 60s RPC
+/// timeout plus a Kyoto restart gap, so it only fires on a request the loop
+/// never dispatched; the workers' `is_closed` checks then drop that request.
 const MONITOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn next_restart_delay() -> Duration {
@@ -293,9 +292,7 @@ pub struct Monitor {
 }
 
 /// bitcoind is still catching up (-8 out of range, -28 warming up), overloaded,
-/// or briefly unreachable; anything else will not clear by waiting. Transport
-/// blips are safe to wait out because `verify_bitcoind_network` already proved
-/// a reachable node with working credentials before the loop starts.
+/// or briefly unreachable; anything else will not clear by waiting.
 fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
     use jsonrpc::http::minreq_http::Error as TransportError;
 
@@ -305,9 +302,8 @@ fn is_transient_rpc_error(e: &corepc_client::client_sync::Error) -> bool {
     match e {
         jsonrpc::error::Error::Rpc(e) => matches!(e.code, -8 | -28),
         jsonrpc::error::Error::Transport(e) => match e.downcast_ref::<TransportError>() {
-            // A refused connection and an HTTP error status arrive alike. A 5xx
-            // is the server's problem (503: bitcoind's RPC work queue is full);
-            // a 4xx is ours: wrong credentials or an RPC whitelist.
+            // A refused connection and an HTTP error status arrive alike; 5xx
+            // clears by waiting (503 is a full RPC work queue), 4xx never will.
             Some(TransportError::Http(e)) => e.status_code >= 500,
             Some(_) => true,
             None => false,
@@ -651,20 +647,19 @@ impl Monitor {
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
         config: &MonitorConfig,
     ) -> Result<HashCheckpoint> {
-        Ok(match config.network {
+        match config.network {
             bitcoin::Network::Bitcoin if config.start_height > 709_631 => {
-                HashCheckpoint::taproot_activation()
+                Ok(HashCheckpoint::taproot_activation())
             }
             bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
-                HashCheckpoint::segwit_activation()
+                Ok(HashCheckpoint::segwit_activation())
             }
-            _ => Self::checkpoint_at_height(bitcoind_rpc, config.start_height).await?,
-        })
+            _ => Self::checkpoint_at_height(bitcoind_rpc, config.start_height).await,
+        }
     }
 
     /// Wait for bitcoind to have the block at `height`. A node still in initial
-    /// block download reports the same "out of range" error as a height past the
-    /// tip, so giving up would anchor Kyoto far below `height` permanently.
+    /// block download reports it "out of range" just like a height past the tip.
     async fn checkpoint_at_height(
         bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
         height: u32,
@@ -682,12 +677,7 @@ impl Monitor {
                     info!("Anchoring Kyoto at start height {height} ({})", model.0);
                     return Ok(HashCheckpoint::new(height, model.0));
                 }
-                Err(e) if !is_transient_rpc_error(&e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to fetch the block at start height {height}: {e}"
-                    ));
-                }
-                Err(e) => {
+                Err(e) if is_transient_rpc_error(&e) => {
                     if Instant::now() >= next_log {
                         next_log = Instant::now() + LOG_INTERVAL;
                         match Self::bitcoind_height(bitcoind_rpc).await {
@@ -697,6 +687,11 @@ impl Monitor {
                             None => warn!("Waiting for a block at start height {height}: {e}"),
                         }
                     }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to fetch the block at start height {height}: {e}"
+                    ));
                 }
             }
             tokio::time::sleep(RETRY_DELAY).await;
@@ -1240,8 +1235,7 @@ impl Monitor {
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
-        // The caller stopped waiting, so don't put the transaction on the wire
-        // behind its back.
+        // The caller gave up; don't broadcast behind its back.
         if result_tx.is_closed() {
             return;
         }
