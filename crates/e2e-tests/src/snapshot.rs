@@ -43,12 +43,19 @@ use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
 use sui_sdk_types::Address;
 
-/// Default snapshot directory: the deployed `testnet` package's snapshot,
-/// `../hashi/tests/move_upgrade_snapshots/testnet/v<version>`, with the
-/// version taken from `packages/hashi/Published.toml` — the same source of
-/// truth the compat CI gate derives its snapshot locations from. A deployment
-/// bumps `Published.toml`, so this test follows it to the new snapshot
-/// instead of silently exercising stale bytecode.
+/// The bytecode a fresh e2e publish boots from: the deployed `testnet`
+/// package's **genesis** snapshot, `../hashi/tests/move_upgrade_snapshots/testnet/v1`.
+///
+/// Always version 1, regardless of the version `packages/hashi/Published.toml`
+/// currently records. `hashi::init` seeds `enabled_versions` from the
+/// bytecode's own `PACKAGE_VERSION`, while a fresh publish is always Sui
+/// sequence version 1, so publishing any later snapshot as a new package
+/// enables a version that is never published and leaves every node
+/// permanently `NotReady`. The compat CI gate, not this boot, is what follows
+/// `Published.toml` to the currently deployed version; the harness reaches
+/// that state by upgrading the v1 boot to the current source one sequence
+/// version at a time. The `Published.toml` lookup here only asserts the
+/// testnet deployment is still the one being exercised.
 pub fn default_snapshot_dir() -> Result<PathBuf> {
     let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let published = crates_dir
@@ -57,18 +64,17 @@ pub fn default_snapshot_dir() -> Result<PathBuf> {
         .join("hashi")
         .join("Published.toml");
     let entries = hashi::published::published_entries(&published)?;
-    let entry = entries.get("testnet").ok_or_else(|| {
-        anyhow::anyhow!(
-            "no `testnet` entry in {} — the snapshot tests exercise the testnet deployment",
-            published.display()
-        )
-    })?;
+    anyhow::ensure!(
+        entries.contains_key("testnet"),
+        "no `testnet` entry in {} — the snapshot tests exercise the testnet deployment",
+        published.display()
+    );
     Ok(crates_dir
         .join("hashi")
         .join("tests")
         .join("move_upgrade_snapshots")
         .join("testnet")
-        .join(format!("v{}", entry.version)))
+        .join("v1"))
 }
 
 /// The self-address a module declares in its bytecode.

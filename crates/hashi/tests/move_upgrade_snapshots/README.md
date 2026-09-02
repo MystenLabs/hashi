@@ -42,7 +42,12 @@ is needed here is capturing the snapshot it now expects:
 
 1. Create the `<network>/v<N>/` directory matching the new `Published.toml`
    version (keep the old `v<N-1>/` — the history of deployed bytecode is
-   preserved, it just stops being checked).
+   preserved, it just stops being checked). Never delete `testnet/v1/`: it is
+   also the bytecode the e2e harness fresh-publishes to boot a local chain
+   (`crates/e2e-tests/src/snapshot.rs`), and only the genesis version can be
+   published fresh, because `hashi::init` seeds the enabled version set from
+   the bytecode's own `PACKAGE_VERSION` while a fresh publish is always
+   sequence version 1.
 2. Fetch the deployed modules into it (recipe below) and write a
    `manifest.json` that matches the `Published.toml` entry (`network`,
    `version`, `package_id` = `published-at`).
@@ -62,9 +67,11 @@ Copy-pasteable recipe (requires `curl`, `jq`, and `base64`):
 
 ```bash
 # --- edit these two lines for the version you are capturing ---
-PACKAGE_ID="0xfcea10cadbb553c4874201584abf68771592678952efd957b2e82c010c7f4360"
-OUT_DIR="crates/hashi/tests/move_upgrade_snapshots/testnet/v1"
-RPC_URL="https://fullnode.testnet.sui.io:443"
+PACKAGE_ID="0x8f7efd743897fde48cc35b6203cd72c7ad4248f0eb02a9ad378e4a2d39cc2c7e"
+OUT_DIR="crates/hashi/tests/move_upgrade_snapshots/testnet/v2"
+# The Mysten fullnodes no longer serve JSON-RPC; any public JSON-RPC
+# endpoint for the network works for this one read.
+RPC_URL="https://sui-testnet-rpc.publicnode.com"
 # --------------------------------------------------------------
 
 mkdir -p "$OUT_DIR"

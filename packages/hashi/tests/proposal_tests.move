@@ -749,10 +749,11 @@ fun test_enable_version_proposal() {
 
     // Enable a version that is not already enabled (genesis enables
     // PACKAGE_VERSION itself, so use the one after it).
+    let next_version = hashi::versioning::package_version() + 1;
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        3,
+        next_version,
         &clock,
         ctx,
     );
@@ -775,10 +776,11 @@ fun test_disable_version_proposal() {
     let clock = clock::create_for_testing(ctx);
 
     // First enable a version that is not the current PACKAGE_VERSION
+    let next_version = hashi::versioning::package_version() + 1;
     let enable_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        3,
+        next_version,
         &clock,
         ctx,
     );
@@ -788,7 +790,7 @@ fun test_disable_version_proposal() {
     let disable_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        3,
+        next_version,
         &clock,
         ctx,
     );
@@ -813,7 +815,7 @@ fun test_disable_current_version_fails() {
     let proposal_id = test_utils::create_disable_version_proposal(
         &mut hashi,
         VOTER1,
-        2, // current package version
+        hashi::versioning::package_version(),
         &clock,
         ctx,
     );
@@ -839,7 +841,7 @@ fun test_enable_already_enabled_version_fails() {
     let proposal_id = test_utils::create_enable_version_proposal(
         &mut hashi,
         VOTER1,
-        2, // already enabled
+        hashi::versioning::package_version(),
         &clock,
         ctx,
     );
@@ -852,11 +854,16 @@ fun test_enable_already_enabled_version_fails() {
 
 // ======== Upgrade V2 Tests ========
 
-/// Build an upgrade cap whose next receipt will commit package version 3.
-fun test_upgrade_cap_at_v2(ctx: &mut TxContext): sui::package::UpgradeCap {
+/// Build an upgrade cap sequenced to the declared `PACKAGE_VERSION`, so its
+/// next receipt commits the version after it (a fresh cap starts at 1).
+fun test_upgrade_cap_at_current_version(ctx: &mut TxContext): sui::package::UpgradeCap {
     let mut cap = package::test_publish(@0x42.to_id(), ctx);
-    let ticket = cap.authorize_upgrade(package::compatible_policy(), b"bootstrap v2");
-    cap.commit_upgrade(ticket.test_upgrade());
+    let mut version = 1;
+    while (version < hashi::versioning::package_version()) {
+        let ticket = cap.authorize_upgrade(package::compatible_policy(), b"bootstrap");
+        cap.commit_upgrade(ticket.test_upgrade());
+        version = version + 1;
+    };
     cap
 }
 
@@ -867,13 +874,14 @@ fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
-    hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_v2(ctx));
+    let current = hashi::versioning::package_version();
+    hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_current_version(ctx));
     hashi.versioning_mut().enable_version(1);
 
     let proposal_id = upgrade_v2::propose(
         &mut hashi,
         VOTER1,
-        b"exclusive v3",
+        b"exclusive next",
         true,
         vec_map::empty(),
         &clock,
@@ -883,8 +891,8 @@ fun test_upgrade_v2_exclusive_replaces_enabled_versions() {
     upgrade_v2::finalize_upgrade(&mut hashi, ticket.test_upgrade(), authorization);
 
     assert!(!hashi.versioning().is_version_enabled(1));
-    assert!(!hashi.versioning().is_version_enabled(2));
-    assert!(hashi.versioning().is_version_enabled(3));
+    assert!(!hashi.versioning().is_version_enabled(current));
+    assert!(hashi.versioning().is_version_enabled(current + 1));
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -897,13 +905,14 @@ fun test_upgrade_v2_non_exclusive_preserves_enabled_versions() {
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
-    hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_v2(ctx));
+    let current = hashi::versioning::package_version();
+    hashi.versioning_mut().set_upgrade_cap(test_upgrade_cap_at_current_version(ctx));
     hashi.versioning_mut().enable_version(1);
 
     let proposal_id = upgrade_v2::propose(
         &mut hashi,
         VOTER1,
-        b"non-exclusive v3",
+        b"non-exclusive next",
         false,
         vec_map::empty(),
         &clock,
@@ -913,8 +922,8 @@ fun test_upgrade_v2_non_exclusive_preserves_enabled_versions() {
     upgrade_v2::finalize_upgrade(&mut hashi, ticket.test_upgrade(), authorization);
 
     assert!(hashi.versioning().is_version_enabled(1));
-    assert!(hashi.versioning().is_version_enabled(2));
-    assert!(hashi.versioning().is_version_enabled(3));
+    assert!(hashi.versioning().is_version_enabled(current));
+    assert!(hashi.versioning().is_version_enabled(current + 1));
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
