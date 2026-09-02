@@ -26,10 +26,6 @@ sui-rpc.workspace = true
 sui-crypto.workspace = true
 sui-sdk-types.workspace = true
 sui-transaction-builder.workspace = true
-# Needed by src/snapshot.rs to deserialize/rebase/re-serialize the checked-in
-# Move bytecode snapshot before publishing it.
-move-binary-format.workspace = true
-move-core-types.workspace = true
 base64ct.workspace = true
 serde_yaml.workspace = true
 serde.workspace = true
