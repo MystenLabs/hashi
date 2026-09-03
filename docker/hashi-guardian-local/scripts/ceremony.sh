@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Genesis ceremony against the ceremony-mode guardian (chain-free):
-#   1. generate the test KP roster,
+#   1. mint the test KP roster,
 #   2. `operator ceremony` -> the guardian generates the BTC key in-enclave,
 #      splits it, encrypts shares to the KP certs, writes ceremony/ + kp-shares/
-#      to MinIO, and returns the x-only BTC master pubkey,
-#   3. capture that pubkey for `hashi-localnet start --guardian-btc-pubkey`.
+#      to MinIO, and waits for every KP's confirmation,
+#   3. every KP runs `key-provisioner ceremony`: verify, decrypt, save, confirm,
+#   4. capture the BTC pubkey for `hashi-localnet start --guardian-btc-pubkey`.
 #
 # The ceremony needs NO chain — `hashi.*` config ids can be placeholders here
-# (operator ceremony never dials Sui). We still render a full config so the same
+# (ceremony commands never dial Sui). We still render a full config so the same
 # file is reusable; SUI_RPC/ids may be dummy at this stage.
 set -euo pipefail
 . /scripts/lib.sh
@@ -21,22 +22,36 @@ PACKAGE_ID="${PACKAGE_ID:-0x0000000000000000000000000000000000000000000000000000
 HASHI_OBJECT_ID="${HASHI_OBJECT_ID:-0x0000000000000000000000000000000000000000000000000000000000000000}"
 export SUI_RPC PACKAGE_ID HASHI_OBJECT_ID
 
-gen_kp_keys
-# `operator ceremony` connects to the ceremony-mode guardian directly.
-render_config "${CEREMONY_GUARDIAN_ENDPOINT:-http://ceremony:3000}" ""
+if [ -f "${ROSTER_FILE}" ]; then
+  echo "A ceremony already dealt a roster (${ROSTER_FILE}); 'make down' for a fresh key." >&2
+  exit 1
+fi
+load_roster
+gen_kp_keys 1 "${NUM_SHARES}"
+# Ceremony commands connect to the ceremony-mode guardian directly.
+endpoint="${CEREMONY_GUARDIAN_ENDPOINT:-http://ceremony:3000}"
+render_config "${endpoint}" ""
 
-echo "Running operator ceremony..."
-# Capture stdout so we can extract GUARDIAN_BTC_PUBKEY=... (tracing -> stderr).
-out="$(hashi-guardian-init operator ceremony --config "${CONFIG}")"
-echo "${out}"
+echo "== operator ceremony (waits for every KP's confirmation) =="
+# stdout carries GUARDIAN_BTC_PUBKEY=...; tracing goes to stderr.
+hashi-guardian-init operator ceremony --config "${CONFIG}" \
+  > "${WORK}/operator-ceremony.out" 2> "${WORK}/operator-ceremony.log" &
+operator=$!
+wait_for_line "${WORK}/operator-ceremony.log" "waiting for every key provisioner" 120 "${operator}"
 
-pubkey="$(printf '%s\n' "${out}" | sed -n 's/^GUARDIAN_BTC_PUBKEY=//p' | tail -1)"
+echo "== key-provisioner ceremony x ${NUM_SHARES} =="
+confirm_kps "${endpoint}" "${KP_CERTS}"
+
+wait "${operator}" || { cat "${WORK}/operator-ceremony.log" >&2; exit 1; }
+cat "${WORK}/operator-ceremony.out"
+pubkey="$(sed -n 's/^GUARDIAN_BTC_PUBKEY=//p' "${WORK}/operator-ceremony.out" | tail -1)"
 if [ -z "${pubkey}" ]; then
   echo "ERROR: operator ceremony did not print GUARDIAN_BTC_PUBKEY" >&2
   exit 1
 fi
 printf '%s' "${pubkey}" > "${PUBKEY_FILE}"
+save_roster "${NUM_SHARES}" "${THRESHOLD}" "${KP_CERTS}"
 echo
-echo "Ceremony complete. Guardian BTC master pubkey:"
+echo "Ceremony complete (${THRESHOLD}-of-${NUM_SHARES}). Guardian BTC master pubkey:"
 echo "  ${pubkey}"
-echo "Saved to ${PUBKEY_FILE} (the Makefile reads it for 'make localnet')."
+echo "Saved to ${PUBKEY_FILE} (the Makefile reads it for 'make localnet-cmd')."
