@@ -4389,7 +4389,7 @@ impl MpcManager {
                             let cause = match (&material, own_confirm_in_cert) {
                                 (_, false) => "this node's confirm was not needed for that cert",
                                 (LocalMaterial::Absent, true) => {
-                                    "this node's confirm was part of that cert, so its round \
+                                    "this node's confirm was part of that cert, yet its round \
                                      state is missing"
                                 }
                                 (LocalMaterial::Mismatches, true) => {
