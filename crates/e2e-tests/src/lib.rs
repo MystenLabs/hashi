@@ -1127,6 +1127,7 @@ mod tests {
                 let mgr = mpc_mgr.read().unwrap();
                 mgr.committee.clone()
             };
+            let epoch = committee.epoch();
             let (refill_tx, _) = tokio::sync::watch::channel(0u32);
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
@@ -1140,7 +1141,12 @@ mod tests {
                 0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
-            );
+                hashi::mpc::IdentityInputs {
+                    epoch,
+                    batch_size_per_weight,
+                },
+            )
+            .0;
             node.hashi().store_signing_manager(signing_manager);
         }
         vk
