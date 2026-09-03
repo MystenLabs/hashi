@@ -5,7 +5,8 @@
 //! and rejects the operator surface with `PERMISSION_DENIED`: the proxy is
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
-//! forwarded after a signature and roster check. Wrapped by
+//! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
+//! ceremony guardian, which is the relay's backend. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use std::sync::Arc;
@@ -31,15 +32,20 @@ use crate::widlog::LogStore;
 #[derive(Clone)]
 pub struct Forwarding<L> {
     client: GuardianServiceClient<Channel>,
+    /// The guardian KPs are provisioning, same as the relay's: the standby
+    /// when one is configured (a KP-set rotation's ceremony enclave), else
+    /// the active guardian.
+    ceremony_client: GuardianServiceClient<Channel>,
     /// Shared with the relay: one gate admits every KP-signed RPC, and a cert
     /// rotation drops the cached roster for both.
     roster: Arc<RosterCache<L>>,
 }
 
 impl<L: LogStore> Forwarding<L> {
-    pub fn new(channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
+    pub fn new(channel: Channel, ceremony_channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
+            ceremony_client: GuardianServiceClient::new(ceremony_channel),
             roster,
         }
     }
@@ -132,7 +138,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
         self.admit::<CeremonyConfirmationRequest, _>(request.get_ref())
             .await?;
-        self.client.clone().confirm_ceremony(request).await
+        self.ceremony_client.clone().confirm_ceremony(request).await
     }
 
     // --- Rejected: operator surface ---
@@ -300,12 +306,7 @@ mod tests {
 
     type StubStore = crate::widlog::test_store::MemStore;
 
-    async fn spawn_stub_proxy(
-        store: StubStore,
-    ) -> (
-        StubGuardian,
-        CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
-    ) {
+    async fn spawn_stub() -> (StubGuardian, tonic::transport::Channel) {
         let stub = StubGuardian::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -323,13 +324,31 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
             .unwrap()
             .connect_lazy();
-        let cache = CachingGuardianGrpc::new(
-            Forwarding::new(channel, Arc::new(RosterCache::new(store))),
+        (stub, channel)
+    }
+
+    fn proxy_over(
+        active: tonic::transport::Channel,
+        ceremony: tonic::transport::Channel,
+        store: StubStore,
+    ) -> CachingGuardianGrpc<Forwarding<StubStore>, StubStore> {
+        CachingGuardianGrpc::new(
+            Forwarding::new(active, ceremony, Arc::new(RosterCache::new(store))),
             StubStore::default(),
             bitcoin::Network::Regtest,
             std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
-        );
-        (stub, cache)
+        )
+    }
+
+    /// A proxy whose active and ceremony guardian are the same stub.
+    async fn spawn_stub_proxy(
+        store: StubStore,
+    ) -> (
+        StubGuardian,
+        CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
+    ) {
+        let (stub, channel) = spawn_stub().await;
+        (stub, proxy_over(channel.clone(), channel, store))
     }
 
     #[tokio::test]
@@ -397,6 +416,32 @@ mod tests {
             .expect_err("an unsigned confirmation must not be forwarded");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // A KP-set rotation runs its ceremony on the standby while the active
+    // guardian keeps serving: confirmations must reach the standby.
+    #[tokio::test]
+    async fn confirms_a_ceremony_on_the_provisioning_target() {
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let store = StubStore::default();
+        seed_roster(&store, 0, &[&cert.fingerprint().to_hex()]);
+        let (active, active_channel) = spawn_stub().await;
+        let (standby, standby_channel) = spawn_stub().await;
+        let proxy = proxy_over(active_channel, standby_channel, store);
+
+        proxy
+            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
+            .await
+            .unwrap();
+        proxy
+            .get_guardian_info(Request::new(proto::GetGuardianInfoRequest {}))
+            .await
+            .unwrap();
+        assert_eq!(standby.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(active.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(active.get_guardian_info_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(standby.get_guardian_info_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
