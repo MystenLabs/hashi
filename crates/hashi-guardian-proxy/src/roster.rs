@@ -24,7 +24,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Context as _;
 use hashi_types::guardian::log::CeremonyLogMessage;
@@ -32,6 +31,7 @@ use hashi_types::guardian::log::KpShareStateLogMessage;
 use hashi_types::pgp::Fingerprint;
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tonic::Status;
 use tracing::warn;
 
@@ -45,78 +45,99 @@ const LEGACY_SHARES_PREFIX: &str = "shares/";
 /// rotation — and rotation invalidates explicitly — so a minute of staleness
 /// costs nothing and bounds S3 reads under submission spam.
 const ROSTER_TTL: Duration = Duration::from_secs(60);
-/// "No ceremony yet" is cached far more briefly: the first ceremony should be
-/// authorized promptly once its log lands, but an unauthenticated caller must
-/// not be able to drive an S3 read per request while we wait.
-const MISSING_ROSTER_TTL: Duration = Duration::from_secs(5);
+/// A miss — no roster yet, or a signer the cached roster does not name — may
+/// be a share set the guardian committed since the last read: `SetupNewKey`
+/// and `RotateKpSet` run over the operator's tunnel, so nothing invalidates
+/// this cache for them. A miss re-reads at most this often, so a new roster
+/// admits its KPs on their first call while unrostered callers cannot force
+/// an S3 read each.
+const MISS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 struct Cached {
     at: Instant,
     roster: Option<Arc<Vec<Fingerprint>>>,
 }
 
+#[derive(Default)]
+struct State {
+    cached: Option<Cached>,
+    miss_refreshed_at: Option<Instant>,
+}
+
+impl State {
+    fn miss_refresh_due(&self) -> bool {
+        self.miss_refreshed_at
+            .is_none_or(|at| at.elapsed() >= MISS_REFRESH_INTERVAL)
+    }
+}
+
 /// TTL-cached view of [`latest_kp_roster`]. The mutex is held across the fetch,
 /// so concurrent misses collapse into one S3 read.
 pub struct RosterCache<L> {
     store: L,
-    cached: Mutex<Option<Cached>>,
+    state: Mutex<State>,
 }
 
 impl<L: LogStore> RosterCache<L> {
     pub fn new(store: L) -> Self {
         Self {
             store,
-            cached: Mutex::new(None),
+            state: Mutex::new(State::default()),
         }
-    }
-
-    /// `Ok(None)` means no ceremony has committed a share set yet.
-    pub async fn get(&self) -> anyhow::Result<Option<Arc<Vec<Fingerprint>>>> {
-        let mut cached = self.cached.lock().await;
-        if let Some(entry) = cached.as_ref() {
-            let ttl = if entry.roster.is_some() {
-                ROSTER_TTL
-            } else {
-                MISSING_ROSTER_TTL
-            };
-            if entry.at.elapsed() < ttl {
-                return Ok(entry.roster.clone());
-            }
-        }
-        let roster = latest_kp_roster(&self.store).await?.map(Arc::new);
-        *cached = Some(Cached {
-            at: Instant::now(),
-            roster: roster.clone(),
-        });
-        Ok(roster)
     }
 
     /// Drop the cached roster so the next read observes a just-committed change.
     pub async fn invalidate(&self) {
-        *self.cached.lock().await = None;
+        self.state.lock().await.cached = None;
     }
 
     /// Admit `signer` only if the latest committed share set names it. No share
     /// log yet is a definitive "not ready"; a read error is transient.
     pub async fn authorize(&self, signer: &Fingerprint) -> Result<(), Status> {
-        let roster = match self.get().await {
-            Ok(Some(roster)) => roster,
-            Ok(None) => {
-                return Err(Status::failed_precondition(
-                    "no KP share log in the guardian bucket; run the key ceremony first",
-                ))
-            }
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "KP roster read failed");
-                return Err(Status::unavailable("KP roster unavailable; retry"));
-            }
+        let mut state = self.state.lock().await;
+        let fresh = state
+            .cached
+            .as_ref()
+            .filter(|cached| cached.at.elapsed() < ROSTER_TTL)
+            .map(|cached| cached.roster.clone());
+        let (mut roster, just_read) = match fresh {
+            Some(roster) => (roster, false),
+            None => (self.read(&mut state).await?, true),
         };
-        if roster.contains(signer) {
-            return Ok(());
+        let names_signer = |roster: &Option<Arc<Vec<Fingerprint>>>| {
+            roster
+                .as_deref()
+                .is_some_and(|roster| roster.contains(signer))
+        };
+        if !names_signer(&roster) && !just_read && state.miss_refresh_due() {
+            state.miss_refreshed_at = Some(Instant::now());
+            roster = self.read(&mut state).await?;
         }
-        Err(Status::permission_denied(format!(
-            "signer {signer} is not in the ceremony's committed KP roster"
-        )))
+        match roster {
+            Some(roster) if roster.contains(signer) => Ok(()),
+            Some(_) => Err(Status::permission_denied(format!(
+                "signer {signer} is not in the ceremony's committed KP roster"
+            ))),
+            None => Err(Status::failed_precondition(
+                "no KP share log in the guardian bucket; run the key ceremony first",
+            )),
+        }
+    }
+
+    /// One read of the share log, cached whatever it finds.
+    async fn read(&self, state: &mut State) -> Result<Option<Arc<Vec<Fingerprint>>>, Status> {
+        let roster = latest_kp_roster(&self.store)
+            .await
+            .map_err(|e| {
+                warn!(error = %format!("{e:#}"), "KP roster read failed");
+                Status::unavailable("KP roster unavailable; retry")
+            })?
+            .map(Arc::new);
+        state.cached = Some(Cached {
+            at: Instant::now(),
+            roster: roster.clone(),
+        });
+        Ok(roster)
     }
 }
 
@@ -124,9 +145,9 @@ impl<L: LogStore> RosterCache<L> {
 pub(crate) mod test_utils {
     use crate::widlog::test_store::MemStore;
 
-    /// Commit a one-cert-per-share roster at sharing_seq 0, in the layout the
+    /// Commit a one-cert-per-share roster at `sharing_seq`, in the layout the
     /// enclave writes today.
-    pub(crate) fn seed_roster(store: &MemStore, fingerprints: &[&str]) {
+    pub(crate) fn seed_roster(store: &MemStore, sharing_seq: u64, fingerprints: &[&str]) {
         let shares: Vec<serde_json::Value> = fingerprints
             .iter()
             .enumerate()
@@ -140,18 +161,18 @@ pub(crate) mod test_utils {
             "session_id": "test-session",
             "timestamp_ms": 0,
             "message": { "KpShareState": {
-                "sharing_seq": 0,
+                "sharing_seq": sharing_seq,
                 "cert_seq": 0,
                 "encrypted_shares": shares,
             }},
             "signature": null,
         });
         store.insert(
-            "kp-shares/00000000000000000000/00000000000000000000-test-session.json".to_string(),
+            format!("kp-shares/{sharing_seq:020}/00000000000000000000-test-session.json"),
             serde_json::to_vec(&record).unwrap(),
         );
         store.insert(
-            "ceremony/00000000000000000000-test-session.json".to_string(),
+            format!("ceremony/{sharing_seq:020}-test-session.json"),
             b"{}".to_vec(),
         );
     }
@@ -285,6 +306,7 @@ fn parse_recipient_fingerprint(label: &str) -> anyhow::Result<Fingerprint> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_utils::seed_roster;
     use super::*;
     use crate::widlog::test_store::MemStore;
     use std::sync::atomic::Ordering;
@@ -594,50 +616,84 @@ mod tests {
         assert!(latest_kp_roster(&store).await.is_err());
     }
 
-    #[tokio::test]
-    async fn cache_reads_the_committed_roster() {
+    #[tokio::test(start_paused = true)]
+    async fn a_rostered_signer_is_served_from_cache_until_the_ttl() {
         let store = MemStore::default();
-        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
-        store.insert(key, bytes);
-        complete_ceremony(&store, 0);
-
-        let roster = RosterCache::new(store).get().await.unwrap().unwrap();
-        assert_eq!(*roster, vec![fp(FP_A)]);
-    }
-
-    #[tokio::test]
-    async fn cache_serves_the_cached_roster_within_the_ttl() {
-        let store = MemStore::default();
-        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
-        store.insert(key, bytes);
-        complete_ceremony(&store, 0);
+        seed_roster(&store, 0, &[FP_A]);
         let cache = RosterCache::new(store);
+        cache.authorize(&fp(FP_A)).await.unwrap();
 
-        let first = cache.get().await.unwrap();
         // The store now fails hard; a fresh read would error, the cache must not.
         cache.store.fail_lists.store(true, Ordering::SeqCst);
-        assert_eq!(first, cache.get().await.unwrap());
-    }
+        cache.authorize(&fp(FP_A)).await.unwrap();
 
-    #[tokio::test]
-    async fn cache_reports_a_missing_share_log_as_none() {
-        assert!(RosterCache::new(MemStore::default())
-            .get()
-            .await
-            .unwrap()
-            .is_none());
+        tokio::time::advance(ROSTER_TTL).await;
+        let err = cache.authorize(&fp(FP_A)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 
     #[tokio::test]
     async fn authorize_matches_fingerprints_by_value() {
         let store = MemStore::default();
         // Share-log labels are bare hex, so case must not matter.
-        super::test_utils::seed_roster(&store, &[&FP_A.to_lowercase()]);
+        seed_roster(&store, 0, &[&FP_A.to_lowercase()]);
         let cache = RosterCache::new(store);
 
         cache.authorize(&fp(FP_A)).await.unwrap();
         let err = cache.authorize(&fp(FP_B)).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// `SetupNewKey` and `RotateKpSet` commit a new roster over the operator's
+    /// tunnel, never through the proxy, so nothing invalidates the cache: a KP
+    /// the new roster adds must be admitted on its first call, not after the
+    /// TTL (`key-provisioner ceremony` confirms once and does not retry).
+    #[tokio::test]
+    async fn a_kp_added_since_the_last_read_is_admitted_on_its_first_call() {
+        let store = MemStore::default();
+        seed_roster(&store, 0, &[FP_A]);
+        let cache = RosterCache::new(store);
+        cache.authorize(&fp(FP_A)).await.unwrap();
+
+        // A KP-set rotation commits sharing_seq 1 with a new holder.
+        seed_roster(&cache.store, 1, &[FP_A, FP_B]);
+        cache.authorize(&fp(FP_B)).await.unwrap();
+        cache.authorize(&fp(FP_A)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_first_ceremony_is_admitted_from_a_cached_none() {
+        let cache = RosterCache::new(MemStore::default());
+        let err = cache.authorize(&fp(FP_A)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        seed_roster(&cache.store, 0, &[FP_A]);
+        cache.authorize(&fp(FP_A)).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn miss_refreshes_are_bounded() {
+        let store = MemStore::default();
+        seed_roster(&store, 0, &[FP_A]);
+        let cache = RosterCache::new(store);
+        cache.authorize(&fp(FP_A)).await.unwrap();
+        let reads = || cache.store.list_calls.load(Ordering::SeqCst);
+
+        // The first unrostered signer costs one re-read; the next does not.
+        let before = reads();
+        let err = cache.authorize(&fp(FP_B)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(reads() > before);
+        let before = reads();
+        let err = cache.authorize(&fp(FP_B)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(reads(), before);
+
+        // The budget renews after the interval.
+        tokio::time::advance(MISS_REFRESH_INTERVAL).await;
+        let err = cache.authorize(&fp(FP_B)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(reads() > before);
     }
 
     #[tokio::test]
@@ -671,18 +727,19 @@ mod tests {
         store.insert(key, bytes);
         complete_ceremony(&store, 0);
         let cache = RosterCache::new(store);
-        assert_eq!(*cache.get().await.unwrap().unwrap(), vec![fp(FP_A)]);
+        cache.authorize(&fp(FP_A)).await.unwrap();
 
         // A cert rotation commits a higher cert_seq under the same sharing_seq.
         let (key, bytes) = kp_shares_record(0, 1, &[FP_B]);
         cache.store.insert(key, bytes);
-        assert_eq!(
-            *cache.get().await.unwrap().unwrap(),
-            vec![fp(FP_A)],
-            "still cached until invalidated"
-        );
+        cache
+            .authorize(&fp(FP_A))
+            .await
+            .expect("still cached until invalidated");
 
         cache.invalidate().await;
-        assert_eq!(*cache.get().await.unwrap().unwrap(), vec![fp(FP_B)]);
+        let err = cache.authorize(&fp(FP_A)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        cache.authorize(&fp(FP_B)).await.unwrap();
     }
 }

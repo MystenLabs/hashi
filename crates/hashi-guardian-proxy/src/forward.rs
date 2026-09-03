@@ -377,7 +377,7 @@ mod tests {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
         let store = StubStore::default();
-        seed_roster(&store, &[&cert.fingerprint().to_hex()]);
+        seed_roster(&store, 0, &[&cert.fingerprint().to_hex()]);
         let (stub, proxy) = spawn_stub_proxy(store).await;
 
         let status = proxy
@@ -404,7 +404,7 @@ mod tests {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
         let store = StubStore::default();
-        seed_roster(&store, &["AAAABBBBCCCCDDDDEEEE11112222333344445555"]);
+        seed_roster(&store, 0, &["AAAABBBBCCCCDDDDEEEE11112222333344445555"]);
         let (stub, proxy) = spawn_stub_proxy(store).await;
 
         let err = proxy
