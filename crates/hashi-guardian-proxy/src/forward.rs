@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Forwards the node/KP-facing `GuardianService` RPCs to the enclave guardian
-//! and rejects the operator/ceremony surface with `PERMISSION_DENIED`: the proxy
-//! is internet-facing and `OperatorInit` is one-shot and unauthenticated, so
-//! exposing it would let anyone wedge the guardian. Wrapped by
+//! and rejects the operator surface with `PERMISSION_DENIED`: the proxy is
+//! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
+//! exposing it would let anyone wedge the guardian. KP-signed RPCs are
+//! forwarded after a signature check, so a KP on its own machine reaches the
+//! guardian through the public endpoint. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use std::sync::Arc;
 
+use hashi_types::guardian::CeremonyConfirmationRequest;
+use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::KpSigned;
+use hashi_types::guardian::KpSigningIntent;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -42,15 +47,21 @@ impl<L: LogStore> Forwarding<L> {
 
 fn denied(rpc: &str) -> Status {
     Status::permission_denied(format!(
-        "{rpc} is not served by the guardian proxy; operator/ceremony calls reach the \
+        "{rpc} is not served by the guardian proxy; operator calls reach the \
          guardian directly and KP shares use SingleProvisionerInit"
     ))
 }
 
-fn verify_provisioner_rotate_cert_signature(
-    request: &proto::SignedProvisionerRotateCertRequest,
-) -> Result<(), Status> {
-    let signed_request = KpSigned::<ProvisionerRotateCertRequest>::try_from(request.clone())
+/// Admission control for a KP-signed request: reject unsigned or corrupt
+/// traffic before an enclave round-trip. The enclave repeats the verification
+/// and authorizes the signer against the ceremony's committed roster.
+fn verify_kp_signature<T, P>(request: &P) -> Result<(), Status>
+where
+    T: KpSigningIntent,
+    P: Clone,
+    KpSigned<T>: TryFrom<P, Error = GuardianError>,
+{
+    let signed_request = KpSigned::<T>::try_from(request.clone())
         .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
     signed_request
         .verify_signature()
@@ -94,11 +105,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
-        // Admission control only: reject unsigned or corrupt traffic before an
-        // enclave round-trip. The enclave repeats verification and authorizes
-        // the signer against the latest encrypted-share roster.
         // TODO: check the signer against the roster here too.
-        verify_provisioner_rotate_cert_signature(request.get_ref())?;
+        verify_kp_signature::<ProvisionerRotateCertRequest, _>(request.get_ref())?;
         let response = self.client.clone().provisioner_rotate_cert(request).await?;
         // The enclave has committed the replacement cert to the share log, so
         // drop the cached roster: otherwise the new cert is rejected until the
@@ -107,7 +115,19 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         Ok(response)
     }
 
-    // --- Rejected: operator/ceremony surface ---
+    /// A KP's confirmation that it recovered its dealt share; the ceremony
+    /// guardian completes only once every KP has confirmed. The enclave
+    /// binds the confirmation to its session, the pending ceremony digest and
+    /// the roster, so forwarding exposes nothing an unsigned caller can act on.
+    async fn confirm_ceremony(
+        &self,
+        request: Request<proto::SignedCeremonyConfirmationRequest>,
+    ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
+        verify_kp_signature::<CeremonyConfirmationRequest, _>(request.get_ref())?;
+        self.client.clone().confirm_ceremony(request).await
+    }
+
+    // --- Rejected: operator surface ---
 
     async fn operator_init(
         &self,
@@ -121,13 +141,6 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         _request: Request<proto::SetupNewKeyRequest>,
     ) -> Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
         Err(denied("SetupNewKey"))
-    }
-
-    async fn confirm_ceremony(
-        &self,
-        _request: Request<proto::SignedCeremonyConfirmationRequest>,
-    ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
-        Err(denied("ConfirmCeremony"))
     }
 
     async fn provisioner_init(
@@ -175,6 +188,7 @@ mod tests {
     struct StubGuardian {
         standard_withdrawal_calls: Arc<AtomicUsize>,
         get_guardian_info_calls: Arc<AtomicUsize>,
+        confirm_ceremony_calls: Arc<AtomicUsize>,
     }
 
     #[tonic::async_trait]
@@ -212,7 +226,12 @@ mod tests {
             &self,
             _: Request<proto::SignedCeremonyConfirmationRequest>,
         ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
-            unimplemented!("a real guardian would serve this; the proxy must never reach it")
+            self.confirm_ceremony_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(proto::CeremonyConfirmationResponse {
+                have: Some(1),
+                need: Some(3),
+                completed: Some(false),
+            }))
         }
         async fn operator_init(
             &self,
@@ -329,10 +348,53 @@ mod tests {
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 
+    fn signed_confirmation() -> proto::SignedCeremonyConfirmationRequest {
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let domain = CeremonyConfirmationRequest::new("session".into(), [3u8; 32]);
+        let signature = sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain));
+        proto::SignedCeremonyConfirmationRequest::from(KpSigned::from_parts(
+            domain, cert, signature,
+        ))
+    }
+
+    #[tokio::test]
+    async fn forwards_a_signed_ceremony_confirmation() {
+        let (stub, proxy) = spawn_stub_proxy().await;
+
+        let status = proxy
+            .confirm_ceremony(Request::new(signed_confirmation()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(status.have, Some(1));
+        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
+
+        // A corrupt confirmation is refused before the backend sees it.
+        let err = proxy
+            .confirm_ceremony(Request::new(
+                proto::SignedCeremonyConfirmationRequest::default(),
+            ))
+            .await
+            .expect_err("an unsigned confirmation must not be forwarded");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn verifies_ceremony_confirmation_signature_before_forwarding() {
+        let mut request = signed_confirmation();
+        verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap();
+
+        request.expected_session_id.push('0');
+        let err = verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
     // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic
     // the server rather than return `PERMISSION_DENIED` — proof the proxy short-circuits.
     #[tokio::test]
-    async fn rejects_operator_and_ceremony_rpcs() {
+    async fn rejects_operator_rpcs() {
         let (_stub, proxy) = spawn_stub_proxy().await;
 
         let denied = proxy
@@ -357,14 +419,6 @@ mod tests {
             .setup_new_key(Request::new(proto::SetupNewKeyRequest::default()))
             .await
             .expect_err("setup_new_key must be denied");
-        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
-
-        let denied = proxy
-            .confirm_ceremony(Request::new(
-                proto::SignedCeremonyConfirmationRequest::default(),
-            ))
-            .await
-            .expect_err("confirm_ceremony must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy
@@ -398,10 +452,10 @@ mod tests {
             domain, cert, signature,
         ));
 
-        verify_provisioner_rotate_cert_signature(&request).unwrap();
+        verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap();
 
         request.target_kp_pgp_fingerprint.push('0');
-        let err = verify_provisioner_rotate_cert_signature(&request).unwrap_err();
+        let err = verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }
