@@ -691,6 +691,22 @@ impl Hashi {
         Ok(())
     }
 
+    /// Refuse to run on a Sui chain / Bitcoin chain pairing the protocol
+    /// never deploys (`constants::check_sui_bitcoin_chain_pairing`). Reads
+    /// only the local config (whose `sui_chain_id` `verify_sui_chain_id` has
+    /// just confirmed against the RPC) and no on-chain state, so it runs on
+    /// every boot including the pre-launch key-registration boots.
+    /// Deliberately separate from `verify_bitcoin_chain_id`, which skips
+    /// before the launch tx: this is the check that keeps a signet-configured
+    /// node from ever joining a mainnet committee.
+    pub fn verify_chain_pairing(&self) -> anyhow::Result<()> {
+        let sui_chain_id = self.config.sui_chain_id();
+        let bitcoin_chain_id = self.config.bitcoin_chain_id();
+        constants::check_sui_bitcoin_chain_pairing(sui_chain_id, bitcoin_chain_id)?;
+        tracing::info!("Sui/Bitcoin chain pairing verified: {sui_chain_id} / {bitcoin_chain_id}");
+        Ok(())
+    }
+
     /// Verify the local config's `bitcoin_chain_id` matches the value stored on-chain.
     ///
     /// Before the launch tx (`finish_publish`) the value does not exist
@@ -808,8 +824,10 @@ impl Hashi {
             .set(screener)
             .map_err(|_| anyhow!("Screener client already initialized"))?;
 
-        // Verify Sui RPC is on the expected chain before loading any state.
+        // Verify Sui RPC is on the expected chain before loading any state,
+        // then that the chain pair is one the protocol deploys.
         self.verify_sui_chain_id().await?;
+        self.verify_chain_pairing()?;
 
         // Initialize on-chain state first so we can read guardian config from it.
         let onchain_service = self.initialize_onchain_state().await?;

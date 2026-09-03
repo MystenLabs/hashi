@@ -1757,6 +1757,14 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         deposit_time_delay_ms: opts.bitcoin_deposit_time_delay_ms,
     };
 
+    // The chain the launch lands on, from the fullnode itself (the RPC URL
+    // defaults to mainnet). Refuse a Bitcoin chain the protocol never pairs
+    // with it here, before the UpgradeCap lookup and the confirmation
+    // prompt; the builder's own check only runs after the operator answers.
+    let sui_chain_id = crate::sui_rpc_client::fetch_sui_chain_id(&mut client).await?;
+    print_info(&format!("Sui chain ID: {sui_chain_id}"));
+    crate::constants::check_sui_bitcoin_chain_pairing(&sui_chain_id, &bitcoin_chain_id)?;
+
     // Resolve the sender (the UpgradeCap owner): a local keypair, or an
     // explicit --sender for the serialize-unsigned (multisig) path.
     let signer = opts
@@ -1798,6 +1806,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
             &ids,
             upgrade_cap_id,
             &bitcoin_chain_id,
+            &sui_chain_id,
             &guardian,
             &bitcoin_overrides,
         )
@@ -1843,6 +1852,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         &ids,
         upgrade_cap_id,
         &bitcoin_chain_id,
+        &sui_chain_id,
         &guardian,
         &bitcoin_overrides,
     )
@@ -1896,8 +1906,14 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     // In serialize mode keep stdout clean (base64 only); notes go to stderr.
     set_notes_to_stderr(opts.serialize_unsigned);
 
-    // Load the validator config
+    // Load the validator config and refuse a chain pairing the protocol
+    // never deploys. The config's Sui chain ID is confirmed against the RPC
+    // below, as the node does at startup.
     let config = crate::config::Config::load(&opts.config)?;
+    crate::constants::check_sui_bitcoin_chain_pairing(
+        config.sui_chain_id(),
+        config.bitcoin_chain_id(),
+    )?;
 
     // Resolve Sui RPC URL: CLI flag > config file
     let sui_rpc_url = opts
@@ -1917,6 +1933,14 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     print_info(&format!("Validator address: {validator_address}"));
     print_info(&format!("Sui RPC: {sui_rpc_url}"));
 
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
+    let rpc_chain_id = crate::sui_rpc_client::fetch_sui_chain_id(&mut client).await?;
+    anyhow::ensure!(
+        rpc_chain_id == config.sui_chain_id(),
+        "Sui chain ID mismatch: config has {}, but RPC endpoint reports {rpc_chain_id}",
+        config.sui_chain_id()
+    );
+
     // Every `validator::*` entry gates on the CALLED package's
     // `assert_version_enabled`, so the calls must target a live package.
     // `hashi_ids.package_id` is the original publish id, whose entries abort
@@ -1930,8 +1954,6 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         // Build the transaction without executing: print it as base64
         // (serialize) or report the simulated gas estimate (dry-run).
         // No private key is required for either path.
-        let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
-
         print_info("Building registration transaction ...");
         let transaction = crate::sui_tx_executor::build_register_or_update_validator_tx(
             &mut client,
@@ -1977,7 +1999,6 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         }
     }
 
-    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
     let signer = config.operator_private_key()?;
     let sender = signer.verifying_key().derive_address();
 
