@@ -79,55 +79,92 @@ impl KpPgpCertPaths {
 
 impl KpRosterConfig {
     pub fn validate(&self) -> Result<()> {
-        SecretSharingParams::new(self.num_shares, self.threshold)
-            .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
-
-        let roster_entry_count = self.kp_pgp_cert_paths.len();
-        anyhow::ensure!(
-            self.num_shares == roster_entry_count,
-            "num_shares ({}) must equal the number of KP cert roster entries ({roster_entry_count})",
-            self.num_shares
-        );
-        for (idx, cert_paths) in self.kp_pgp_cert_paths.iter().enumerate() {
-            anyhow::ensure!(
-                !cert_paths.is_empty(),
-                "kp_pgp_cert_paths entry {} must contain at least one cert path",
-                idx + 1
-            );
-        }
-
-        Ok(())
+        validate_kp_set(self.num_shares, self.threshold, &self.kp_pgp_cert_paths)
     }
 
     pub fn cert_count(&self) -> usize {
-        self.kp_pgp_cert_paths
-            .iter()
-            .map(|cert_paths| cert_paths.paths().len())
-            .sum()
+        count_certs(&self.kp_pgp_cert_paths)
     }
 
     pub fn load_certs_roster(&self) -> Result<KpCertsRoster> {
-        let roster_entries = self
-            .kp_pgp_cert_paths
-            .iter()
-            .enumerate()
-            .map(|(idx, cert_paths)| {
-                let certs = cert_paths
-                    .paths()
-                    .into_iter()
-                    .map(load_cert)
-                    .collect::<Result<Vec<_>>>()?;
-                KpCerts::new(certs)
-                    .with_context(|| format!("invalid KP cert roster entry {}", idx + 1))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        KpCertsRoster::new(roster_entries).context("invalid KP certificate roster")
+        load_kp_certs_roster(&self.kp_pgp_cert_paths)
     }
 
     /// The PCR allowlist decoded from `current_build` + `prev_builds`.
     pub fn pcr_allowlist(&self) -> PcrAllowlist {
         self.pcr_allowlist.clone()
     }
+}
+
+/// The KP set a `rotate-kp-set` proposes: sharing params and cert sets, in
+/// share order. The proposal carries `kp_roster`'s PCR allowlist.
+#[derive(Deserialize)]
+pub struct KpSetConfig {
+    pub num_shares: usize,
+    pub threshold: usize,
+    pub kp_pgp_cert_paths: Vec<KpPgpCertPaths>,
+}
+
+impl KpSetConfig {
+    pub fn validate(&self) -> Result<()> {
+        validate_kp_set(self.num_shares, self.threshold, &self.kp_pgp_cert_paths)
+    }
+
+    pub fn params(&self) -> Result<SecretSharingParams> {
+        SecretSharingParams::new(self.num_shares, self.threshold)
+            .map_err(|e| anyhow!("invalid sharing params: {e:?}"))
+    }
+
+    pub fn load_certs_roster(&self) -> Result<KpCertsRoster> {
+        load_kp_certs_roster(&self.kp_pgp_cert_paths)
+    }
+}
+
+fn validate_kp_set(
+    num_shares: usize,
+    threshold: usize,
+    cert_paths: &[KpPgpCertPaths],
+) -> Result<()> {
+    SecretSharingParams::new(num_shares, threshold)
+        .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
+
+    let roster_entry_count = cert_paths.len();
+    anyhow::ensure!(
+        num_shares == roster_entry_count,
+        "num_shares ({num_shares}) must equal the number of KP cert roster entries ({roster_entry_count})"
+    );
+    for (idx, cert_paths) in cert_paths.iter().enumerate() {
+        anyhow::ensure!(
+            !cert_paths.is_empty(),
+            "kp_pgp_cert_paths entry {} must contain at least one cert path",
+            idx + 1
+        );
+    }
+
+    Ok(())
+}
+
+fn count_certs(cert_paths: &[KpPgpCertPaths]) -> usize {
+    cert_paths
+        .iter()
+        .map(|cert_paths| cert_paths.paths().len())
+        .sum()
+}
+
+fn load_kp_certs_roster(cert_paths: &[KpPgpCertPaths]) -> Result<KpCertsRoster> {
+    let roster_entries = cert_paths
+        .iter()
+        .enumerate()
+        .map(|(idx, cert_paths)| {
+            let certs = cert_paths
+                .paths()
+                .into_iter()
+                .map(load_cert)
+                .collect::<Result<Vec<_>>>()?;
+            KpCerts::new(certs).with_context(|| format!("invalid KP cert roster entry {}", idx + 1))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    KpCertsRoster::new(roster_entries).context("invalid KP certificate roster")
 }
 
 fn load_cert(path: &PathBuf) -> Result<PgpPublicCert> {
