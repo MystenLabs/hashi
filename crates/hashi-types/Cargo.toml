@@ -42,6 +42,7 @@ tracing-subscriber.workspace = true
 time = "0.3"
 hex.workspace = true
 sequoia-openpgp.workspace = true
+x509-parser.workspace = true
 tempfile.workspace = true
 
 [features]
@@ -52,6 +53,7 @@ non-enclave-dev = []
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+rcgen.workspace = true
 test-strategy.workspace = true
 proptest.workspace = true
 rand.workspace = true
