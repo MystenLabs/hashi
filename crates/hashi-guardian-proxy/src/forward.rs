@@ -5,7 +5,7 @@
 //! and rejects the operator surface with `PERMISSION_DENIED`: the proxy is
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
-//! forwarded after a signature check. Wrapped by
+//! forwarded after a signature and roster check. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use std::sync::Arc;
@@ -31,7 +31,8 @@ use crate::widlog::LogStore;
 #[derive(Clone)]
 pub struct Forwarding<L> {
     client: GuardianServiceClient<Channel>,
-    /// Shared with the relay so a cert rotation can drop the cached roster.
+    /// Shared with the relay: one gate admits every KP-signed RPC, and a cert
+    /// rotation drops the cached roster for both.
     roster: Arc<RosterCache<L>>,
 }
 
@@ -42,6 +43,18 @@ impl<L: LogStore> Forwarding<L> {
             roster,
         }
     }
+
+    /// Admission control only: the enclave repeats both checks. Signature
+    /// first because it needs no roster read.
+    async fn admit<T, P>(&self, request: &P) -> Result<(), Status>
+    where
+        T: KpSigningIntent,
+        P: Clone,
+        KpSigned<T>: TryFrom<P, Error = GuardianError>,
+    {
+        let signer = verify_kp_signature::<T, P>(request)?.signer_fingerprint();
+        self.roster.authorize(&signer).await
+    }
 }
 
 fn denied(rpc: &str) -> Status {
@@ -51,21 +64,18 @@ fn denied(rpc: &str) -> Status {
     ))
 }
 
-/// Admission control only: the enclave repeats the verification and
-/// authorizes the signer against its roster.
-fn verify_kp_signature<T, P>(request: &P) -> Result<(), Status>
+fn verify_kp_signature<T, P>(request: &P) -> Result<KpSigned<T>, Status>
 where
     T: KpSigningIntent,
     P: Clone,
     KpSigned<T>: TryFrom<P, Error = GuardianError>,
 {
-    // TODO: check the signer against the roster here too.
     let signed_request = KpSigned::<T>::try_from(request.clone())
         .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
     signed_request
         .verify_signature()
         .map_err(|e| Status::unauthenticated(e.to_string()))?;
-    Ok(())
+    Ok(signed_request)
 }
 
 // Each method clones the cheap channel-backed client and forwards the whole
@@ -104,7 +114,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
-        verify_kp_signature::<ProvisionerRotateCertRequest, _>(request.get_ref())?;
+        self.admit::<ProvisionerRotateCertRequest, _>(request.get_ref())
+            .await?;
         let response = self.client.clone().provisioner_rotate_cert(request).await?;
         // The enclave has committed the replacement cert to the share log, so
         // drop the cached roster: otherwise the new cert is rejected until the
@@ -119,7 +130,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedCeremonyConfirmationRequest>,
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
-        verify_kp_signature::<CeremonyConfirmationRequest, _>(request.get_ref())?;
+        self.admit::<CeremonyConfirmationRequest, _>(request.get_ref())
+            .await?;
         self.client.clone().confirm_ceremony(request).await
     }
 
@@ -165,6 +177,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 mod tests {
     use super::*;
     use crate::cache::CachingGuardianGrpc;
+    use crate::roster::test_utils::seed_roster;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::ShareID;
@@ -287,7 +300,9 @@ mod tests {
 
     type StubStore = crate::widlog::test_store::MemStore;
 
-    async fn spawn_stub_proxy() -> (
+    async fn spawn_stub_proxy(
+        store: StubStore,
+    ) -> (
         StubGuardian,
         CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
     ) {
@@ -309,7 +324,7 @@ mod tests {
             .unwrap()
             .connect_lazy();
         let cache = CachingGuardianGrpc::new(
-            Forwarding::new(channel, Arc::new(RosterCache::new(StubStore::default()))),
+            Forwarding::new(channel, Arc::new(RosterCache::new(store))),
             StubStore::default(),
             bitcoin::Network::Regtest,
             std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
@@ -319,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn forwards_and_caches_over_real_grpc() {
-        let (stub, proxy) = spawn_stub_proxy().await;
+        let (stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
 
         // First withdrawal forwards to the stub; a same-wid retry at a bumped
         // seq replays the cached response without re-calling the stub.
@@ -344,22 +359,29 @@ mod tests {
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 
-    fn signed_confirmation() -> proto::SignedCeremonyConfirmationRequest {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
+    fn signed_confirmation(
+        cert: &PgpPublicCert,
+        secret_armored: &str,
+    ) -> proto::SignedCeremonyConfirmationRequest {
         let domain = CeremonyConfirmationRequest::new("session".into(), [3u8; 32]);
-        let signature = sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain));
+        let signature = sign_detached_in_process(secret_armored, &KpSigned::signed_bytes(&domain));
         proto::SignedCeremonyConfirmationRequest::from(KpSigned::from_parts(
-            domain, cert, signature,
+            domain,
+            cert.clone(),
+            signature,
         ))
     }
 
     #[tokio::test]
-    async fn forwards_a_signed_ceremony_confirmation() {
-        let (stub, proxy) = spawn_stub_proxy().await;
+    async fn forwards_a_rostered_ceremony_confirmation() {
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let store = StubStore::default();
+        seed_roster(&store, &[&cert.fingerprint().to_hex()]);
+        let (stub, proxy) = spawn_stub_proxy(store).await;
 
         let status = proxy
-            .confirm_ceremony(Request::new(signed_confirmation()))
+            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
             .await
             .unwrap()
             .into_inner();
@@ -377,9 +399,27 @@ mod tests {
         assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn rejects_an_unrostered_ceremony_confirmation() {
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let store = StubStore::default();
+        seed_roster(&store, &["AAAABBBBCCCCDDDDEEEE11112222333344445555"]);
+        let (stub, proxy) = spawn_stub_proxy(store).await;
+
+        let err = proxy
+            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
+            .await
+            .expect_err("a signer outside the roster must not be forwarded");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn verifies_ceremony_confirmation_signature_before_forwarding() {
-        let mut request = signed_confirmation();
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let mut request = signed_confirmation(&cert, &secret_armored);
         verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap();
 
         request.expected_session_id.push('0');
@@ -391,7 +431,7 @@ mod tests {
     // the server rather than return `PERMISSION_DENIED` — proof the proxy short-circuits.
     #[tokio::test]
     async fn rejects_operator_rpcs() {
-        let (_stub, proxy) = spawn_stub_proxy().await;
+        let (_stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
 
         let denied = proxy
             .operator_init(Request::new(proto::OperatorInitRequest::default()))

@@ -30,7 +30,6 @@ use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SessionID;
-use hashi_types::pgp::Fingerprint;
 use hashi_types::proto;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayService;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -143,26 +142,10 @@ impl<L: LogStore> Relay<L> {
             .map_err(|error| Status::unauthenticated(error.to_string()))?;
         // The ceremony's committed roster, not deploy config: a rotation
         // re-deals shares without a proxy redeploy.
-        check_rostered(
-            &signed_request.signer_fingerprint(),
-            &self.authorized_kps().await?,
-        )?;
+        self.roster
+            .authorize(&signed_request.signer_fingerprint())
+            .await?;
         Ok(request)
-    }
-
-    /// The ceremony's committed roster, mapped onto the relay's failure modes:
-    /// no share log yet is a definitive "not ready", a read error is transient.
-    async fn authorized_kps(&self) -> Result<Arc<Vec<Fingerprint>>, Status> {
-        match self.roster.get().await {
-            Ok(Some(roster)) => Ok(roster),
-            Ok(None) => Err(Status::failed_precondition(
-                "no KP share log in the guardian bucket; run the key ceremony first",
-            )),
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "KP roster read failed");
-                Err(Status::unavailable("KP roster unavailable; retry"))
-            }
-        }
     }
 
     /// Backend's self-reported session, provisioning threshold, and provisioned flag.
@@ -260,15 +243,6 @@ fn match_backend<'a>(
         return Ok(Matched::Provisioned);
     }
     Ok(Matched::Armed(arming))
-}
-
-fn check_rostered(fingerprint: &Fingerprint, roster: &[Fingerprint]) -> Result<(), Status> {
-    if roster.contains(fingerprint) {
-        return Ok(());
-    }
-    Err(Status::permission_denied(format!(
-        "signer {fingerprint} is not in the relay's authorized KP roster"
-    )))
 }
 
 fn done() -> Response<proto::SingleProvisionerInitResponse> {
@@ -615,32 +589,6 @@ mod tests {
         let signed = KpSigned::from_parts(request("sess-a", 1), cert, good_sig);
         let err = relay.verify_kp_submission(&signed).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[test]
-    fn roster_membership_is_by_fingerprint_value() {
-        let cert = PgpPublicCert::new(mock_pgp_keypair().0).unwrap();
-        let fingerprint = cert.fingerprint();
-        check_rostered(&fingerprint, std::slice::from_ref(&fingerprint)).unwrap();
-
-        // Share-log labels are bare hex, so case must not matter.
-        let lowercase: Fingerprint = fingerprint.to_hex().to_lowercase().parse().unwrap();
-        check_rostered(&fingerprint, &[lowercase]).unwrap();
-
-        let err = check_rostered(&fingerprint, &[]).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn roster_store_failure_is_unavailable_and_unclassified() {
-        let store = MemStore::default();
-        store.fail_lists.store(true, Ordering::SeqCst);
-        let err = relay_with_roster(store).authorized_kps().await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unavailable);
-        // The node classifies guardian errors by substring; this must stay in
-        // its retriable bucket.
-        assert!(!err.message().contains("seq mismatch"));
-        assert!(!err.message().contains("Rate limit exceeded"));
     }
 
     /// A stub guardian whose `GetGuardianInfo` carries a tag, so a test can

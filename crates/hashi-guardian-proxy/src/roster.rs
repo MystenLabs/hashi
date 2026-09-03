@@ -1,12 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The relay's KP roster, read from the guardian's S3 share log. A ceremony
+//! The proxy's KP roster, read from the guardian's S3 share log. A ceremony
 //! commits who holds shares — every encrypted share is labeled with its
 //! recipient's PGP fingerprint — so the latest share log IS the authorization
 //! roster. The read is deliberately unverified: the bucket only admits enclave
 //! writes and this gate is DoS-tier, with the enclave still verifying every
-//! share cryptographically (config_hash AAD + commitments).
+//! KP-signed request against its own roster.
 //!
 //! Two layouts are in flight (#779 migrates the first to the second):
 //!   `shares/{sharing_seq:020}-{session}.json` (message `Shares`)
@@ -32,6 +32,8 @@ use hashi_types::guardian::log::KpShareStateLogMessage;
 use hashi_types::pgp::Fingerprint;
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tonic::Status;
+use tracing::warn;
 
 use crate::widlog::LogStore;
 
@@ -92,6 +94,66 @@ impl<L: LogStore> RosterCache<L> {
     /// Drop the cached roster so the next read observes a just-committed change.
     pub async fn invalidate(&self) {
         *self.cached.lock().await = None;
+    }
+
+    /// Admit `signer` only if the latest committed share set names it. No share
+    /// log yet is a definitive "not ready"; a read error is transient.
+    pub async fn authorize(&self, signer: &Fingerprint) -> Result<(), Status> {
+        let roster = match self.get().await {
+            Ok(Some(roster)) => roster,
+            Ok(None) => {
+                return Err(Status::failed_precondition(
+                    "no KP share log in the guardian bucket; run the key ceremony first",
+                ))
+            }
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "KP roster read failed");
+                return Err(Status::unavailable("KP roster unavailable; retry"));
+            }
+        };
+        if roster.contains(signer) {
+            return Ok(());
+        }
+        Err(Status::permission_denied(format!(
+            "signer {signer} is not in the ceremony's committed KP roster"
+        )))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use crate::widlog::test_store::MemStore;
+
+    /// Commit a one-cert-per-share roster at sharing_seq 0, in the layout the
+    /// enclave writes today.
+    pub(crate) fn seed_roster(store: &MemStore, fingerprints: &[&str]) {
+        let shares: Vec<serde_json::Value> = fingerprints
+            .iter()
+            .enumerate()
+            .map(|(i, fp)| {
+                let ciphertexts: serde_json::Map<String, serde_json::Value> =
+                    std::iter::once(((*fp).to_string(), serde_json::json!(""))).collect();
+                serde_json::json!({ "id": i + 1, "ciphertexts_by_fingerprint": ciphertexts })
+            })
+            .collect();
+        let record = serde_json::json!({
+            "session_id": "test-session",
+            "timestamp_ms": 0,
+            "message": { "KpShareState": {
+                "sharing_seq": 0,
+                "cert_seq": 0,
+                "encrypted_shares": shares,
+            }},
+            "signature": null,
+        });
+        store.insert(
+            "kp-shares/00000000000000000000/00000000000000000000-test-session.json".to_string(),
+            serde_json::to_vec(&record).unwrap(),
+        );
+        store.insert(
+            "ceremony/00000000000000000000-test-session.json".to_string(),
+            b"{}".to_vec(),
+        );
     }
 }
 
@@ -564,6 +626,42 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn authorize_matches_fingerprints_by_value() {
+        let store = MemStore::default();
+        // Share-log labels are bare hex, so case must not matter.
+        super::test_utils::seed_roster(&store, &[&FP_A.to_lowercase()]);
+        let cache = RosterCache::new(store);
+
+        cache.authorize(&fp(FP_A)).await.unwrap();
+        let err = cache.authorize(&fp(FP_B)).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn authorize_before_any_ceremony_is_a_failed_precondition() {
+        let err = RosterCache::new(MemStore::default())
+            .authorize(&fp(FP_A))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn authorize_maps_a_store_failure_to_unavailable() {
+        let store = MemStore::default();
+        store.fail_lists.store(true, Ordering::SeqCst);
+        let err = RosterCache::new(store)
+            .authorize(&fp(FP_A))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        // The node classifies guardian errors by substring; this must stay in
+        // its retriable bucket.
+        assert!(!err.message().contains("seq mismatch"));
+        assert!(!err.message().contains("Rate limit exceeded"));
     }
 
     #[tokio::test]
