@@ -14,6 +14,7 @@ use tabled::Tabled;
 use crate::cli::TxOptions;
 use crate::cli::client::CreateProposalParams;
 use crate::cli::client::HashiClient;
+use crate::cli::client::ProposalLocation;
 use crate::cli::config::CliConfig;
 use crate::cli::print_detail;
 use crate::cli::print_info;
@@ -55,6 +56,181 @@ pub(crate) fn print_acting_validator(client: &HashiClient) -> Result<()> {
     Ok(())
 }
 
+/// Mirrors `MAX_PROPOSAL_DURATION_MS` in `proposal.move`: a proposal can be
+/// voted on and executed for seven days after creation, then only deleted.
+const PROPOSAL_MAX_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7;
+
+/// What the operator is trying to do to a proposal, for the refusal text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalAction {
+    Vote,
+    RemoveVote,
+    Execute,
+}
+
+/// Return the proposal when it is open, and otherwise refuse with a message
+/// that names the proposal, its type and why the action cannot happen.
+///
+/// Executed proposals stay on chain in a second bag, so without this the
+/// command finds the proposal, prints its details, prompts, and only then
+/// fails in simulation with a framework abort (`dynamic_field` code 1) that
+/// never mentions the word "executed" and shares its code with the
+/// vote-already-counted error.
+pub fn open_proposal(
+    location: ProposalLocation,
+    proposal_id: &str,
+    action: ProposalAction,
+    sui_rpc_url: &str,
+) -> Result<Proposal> {
+    match location {
+        ProposalLocation::Active(proposal) => Ok(proposal),
+        ProposalLocation::Executed(proposal) => {
+            let kind = display::format_proposal_type(&proposal.proposal_type);
+            let consequence = match action {
+                ProposalAction::Vote => {
+                    "voting is closed and there is nothing to submit".to_owned()
+                }
+                ProposalAction::RemoveVote => {
+                    "its votes are final and cannot be removed".to_owned()
+                }
+                ProposalAction::Execute => {
+                    "nothing to execute; its effect is already on chain".to_owned()
+                }
+            };
+            anyhow::bail!(
+                "proposal {proposal_id} ({kind}) has already been executed; {consequence}. \
+                 Run `hashi proposal view {proposal_id}` for the final tally."
+            )
+        }
+        ProposalLocation::Missing => anyhow::bail!(
+            "proposal {proposal_id} was not found in the active or executed proposals on \
+             {sui_rpc_url}: either the id is wrong, or the proposal expired (7 days after \
+             creation) and was deleted. Run `hashi proposal list` to see the open proposals."
+        ),
+    }
+}
+
+/// One-line lifecycle status for `proposal view`, from bag membership and
+/// the seven-day expiry.
+pub fn proposal_status(location: &ProposalLocation, now_ms: u64) -> String {
+    match location {
+        ProposalLocation::Executed(_) => "Executed".to_owned(),
+        ProposalLocation::Active(proposal) => {
+            let expires_ms = proposal.timestamp_ms.saturating_add(PROPOSAL_MAX_AGE_MS);
+            if now_ms > expires_ms {
+                format!(
+                    "Expired on {} (no longer votable; awaiting deletion)",
+                    display::format_timestamp(expires_ms)
+                )
+            } else {
+                format!("Active (expires {})", display::format_timestamp(expires_ms))
+            }
+        }
+        ProposalLocation::Missing => "Not found".to_owned(),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A human explanation for a governance transaction that failed in
+/// simulation or on chain, or `None` when the failure is not a Move abort.
+///
+/// Two sources: a clever `#[error]` constant from the hashi package, which is
+/// named and given a one-line hint; and the one framework abort every
+/// governance entry can hit, `dynamic_field` code 1 when the proposal has
+/// left the active bag between the pre-flight and the simulate. Matching is
+/// on module and constant name, never on the bare code: `1` is also
+/// `EVoteAlreadyCounted`, and `0` is both `EVersionDisabled` and
+/// `EUnauthorizedCaller`.
+pub fn explain_execution_error(
+    error: &sui_rpc::proto::sui::rpc::v2::ExecutionError,
+) -> Option<String> {
+    use sui_rpc::proto::sui::rpc::v2::clever_error::Value;
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+    if error
+        .kind
+        .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
+        != Some(ExecutionErrorKind::MoveAbort)
+    {
+        return None;
+    }
+    let abort = error.abort_opt()?;
+    let module = abort.location().module_opt();
+    let clever = abort.clever_error.as_ref();
+    let constant = clever.and_then(|c| c.constant_name.as_deref());
+    let rendered = clever.and_then(|c| match &c.value {
+        Some(Value::Rendered(text)) => Some(text.as_str()),
+        _ => None,
+    });
+
+    match (module, abort.abort_code, constant) {
+        (Some("dynamic_field"), Some(1), None) => Some(
+            "the proposal is no longer in the active proposal bag: it was executed, or \
+             deleted after expiring, while this command was running. Run \
+             `hashi proposal view <proposal-id>` to see its state."
+                .to_owned(),
+        ),
+        (_, _, Some(name)) => {
+            let hint = match name {
+                "EVoteAlreadyCounted" => Some("this validator has already voted on the proposal"),
+                "ENoVoteFound" => Some("this validator has no vote on the proposal to remove"),
+                "EQuorumNotReached" => Some(
+                    "the proposal has not reached quorum yet; `hashi proposal view` shows the tally",
+                ),
+                "EProposalExpired" => {
+                    Some("proposals expire 7 days after creation; this one can only be deleted")
+                }
+                "EProposalAlreadyExecuted" => Some("the proposal has already been executed"),
+                "ENotCommitteeMember" => {
+                    Some("the validator is registered but not seated in the current committee")
+                }
+                "EUnauthorizedCaller" => {
+                    Some("the signer is neither the validator's address nor its delegated operator")
+                }
+                "EVersionDisabled" => Some(
+                    "this binary targets a package version governance has disabled; upgrade hashi",
+                ),
+                _ => None,
+            };
+            let mut text = match rendered {
+                Some(rendered) => format!("{name}: {rendered}"),
+                None => name.to_owned(),
+            };
+            if let Some(hint) = hint {
+                text.push_str(" (");
+                text.push_str(hint);
+                text.push(')');
+            }
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+/// [`explain_execution_error`] for the error `finalize_tx` returns, whichever
+/// mode produced it: the executor wraps the execute path's build error in
+/// `TxFailure::NotSubmitted`, while dry-run and serialize-unsigned return the
+/// SDK build error bare, so both shapes are searched.
+fn explain_move_abort(err: &anyhow::Error) -> Option<String> {
+    let from_executor = crate::sui_tx_executor::transaction_execution_error(err);
+    let from_builder =
+        err.chain().find_map(
+            |e| match e.downcast_ref::<sui_transaction_builder::Error>() {
+                Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
+                    Some(failure.execution_error())
+                }
+                _ => None,
+            },
+        );
+    explain_execution_error(from_executor.or(from_builder)?)
+}
+
 /// Finalize a transaction according to `tx_opts`: serialize it unsigned,
 /// dry-run it, or sign and submit it.
 ///
@@ -84,7 +260,14 @@ pub(crate) async fn execute_or_simulate(
         TxMode::Execute => print_info("Executing transaction..."),
     }
 
-    let outcome = client.finalize_tx(tx, tx_opts).await?;
+    let outcome =
+        client
+            .finalize_tx(tx, tx_opts)
+            .await
+            .map_err(|e| match explain_move_abort(&e) {
+                Some(explanation) => e.context(explanation),
+                None => e,
+            })?;
     Ok(crate::cli::print_tx_outcome(outcome, client.sui_rpc_url()).map(|response| *response))
 }
 
@@ -152,7 +335,8 @@ pub async fn list_proposals(
         // List mode skips the per-proposal vote/quorum fetch to avoid N extra
         // network calls; use `proposal view <id>` for full vote progress.
         for proposal in &proposals {
-            print_proposal_detailed(proposal, None, None);
+            let status = proposal_status(&ProposalLocation::Active(proposal.clone()), now_ms());
+            print_proposal_detailed(proposal, &status, None, None);
             println!();
         }
     } else {
@@ -197,15 +381,25 @@ pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> 
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let location = client.locate_proposal(&proposal_addr);
+    let proposal = match &location {
+        ProposalLocation::Active(proposal) | ProposalLocation::Executed(proposal) => {
+            proposal.clone()
+        }
+        ProposalLocation::Missing => anyhow::bail!(
+            "proposal {proposal_id} was not found in the active or executed proposals on {}: \
+             either the id is wrong, or the proposal expired (7 days after creation) and \
+             was deleted. Run `hashi proposal list` to see the open proposals.",
+            client.sui_rpc_url()
+        ),
+    };
+    let status = proposal_status(&location, now_ms());
 
     let details = client.fetch_proposal_details(proposal_addr).await.ok();
     let committee = client.fetch_current_committee();
 
     println!();
-    print_proposal_detailed(&proposal, details.as_ref(), committee.as_ref());
+    print_proposal_detailed(&proposal, &status, details.as_ref(), committee.as_ref());
 
     Ok(())
 }
@@ -225,9 +419,12 @@ pub async fn vote(
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let proposal = open_proposal(
+        client.locate_proposal(&proposal_addr),
+        proposal_id,
+        ProposalAction::Vote,
+        client.sui_rpc_url(),
+    )?;
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
@@ -329,9 +526,12 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let proposal = open_proposal(
+        client.locate_proposal(&proposal_addr),
+        proposal_id,
+        ProposalAction::RemoveVote,
+        client.sui_rpc_url(),
+    )?;
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
@@ -365,9 +565,12 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let proposal = open_proposal(
+        client.locate_proposal(&proposal_addr),
+        proposal_id,
+        ProposalAction::Execute,
+        client.sui_rpc_url(),
+    )?;
 
     let proposal_type = &proposal.proposal_type;
     let proposal_type_str = display::format_proposal_type(proposal_type);
@@ -1085,6 +1288,7 @@ pub async fn create_ignore_member_proposal(
 
 fn print_proposal_detailed(
     proposal: &Proposal,
+    status: &str,
     details: Option<&crate::cli::client::ProposalDetails>,
     committee: Option<&hashi_types::committee::Committee>,
 ) {
@@ -1099,6 +1303,7 @@ fn print_proposal_detailed(
         "Type:".bold(),
         display::format_proposal_type(&proposal.proposal_type).green()
     );
+    println!("  {} {}", "Status:".bold(), status);
     println!(
         "  {} {}",
         "Created:".bold(),
@@ -1196,28 +1401,5 @@ pub(crate) async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exclusive_digest_is_refused_without_acknowledgement() {
-        let err = check_exclusive_digest_acknowledged(Some("ab"), true, false).unwrap_err();
-        // Pin both remedies the message offers: the verified path and the
-        // explicit acknowledgement.
-        assert!(err.to_string().contains("--package-path"));
-        assert!(err.to_string().contains("--allow-unverified-exclusive"));
-    }
-
-    #[test]
-    fn exclusive_digest_is_allowed_with_acknowledgement() {
-        check_exclusive_digest_acknowledged(Some("ab"), true, true).unwrap();
-    }
-
-    #[test]
-    fn other_flag_combinations_are_unaffected() {
-        // A non-exclusive upgrade digest stays recoverable on-chain.
-        check_exclusive_digest_acknowledged(Some("ab"), false, false).unwrap();
-        // --package-path runs the pre-flight, so nothing needs acknowledging.
-        check_exclusive_digest_acknowledged(None, true, false).unwrap();
-    }
-}
+#[path = "proposal_tests.rs"]
+mod tests;

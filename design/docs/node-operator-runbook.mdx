@@ -929,6 +929,8 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 ### 7.3 Lifecycle example: UpdateConfig
 
+Executed proposals stay on chain for inspection. Voting on, removing a vote from, or executing one is refused before anything is signed, with a message that names the proposal and its type; `hashi proposal view <id>` shows `Status: Executed`, `Active (expires <date>)`, or `Expired` for a proposal past its seven-day window.
+
 ```bash
 # 1. Create the proposal
 hashi proposal create update-config bitcoin_deposit_minimum u64:50000 \
