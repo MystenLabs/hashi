@@ -1526,38 +1526,25 @@ impl Metrics {
         //                               is not yet Bitcoin-confirmed
         //   confirmed_pending_archive = the request's withdrawal txn is
         //                               Bitcoin-confirmed, awaiting the
-        //                               archival GC. The request's own status
-        //                               stays Signed until archival (confirm
-        //                               only stamps the txn), so this is
-        //                               derived from the txn's confirmed
-        //                               timestamp.
+        //                               archival GC. A request carries no
+        //                               state of its own past commitment
+        //                               (confirm only stamps the txn), so
+        //                               this is derived from the txn's
+        //                               confirmed timestamp.
         {
-            use crate::onchain::types::WithdrawalStatus;
             let mut requested = Vec::new();
             let mut approved = Vec::new();
             let mut committed = Vec::new();
             let mut confirmed_pending_archive = Vec::new();
             let txns = hashi.bitcoin().withdrawal_queue.withdrawal_txns();
             for r in hashi.bitcoin().withdrawal_queue.requests().values() {
-                match r.status {
-                    WithdrawalStatus::Requested => requested.push(r),
-                    WithdrawalStatus::Approved => approved.push(r),
-                    WithdrawalStatus::Processing | WithdrawalStatus::Signed => {
-                        if r.withdrawal_txn_id
-                            .as_ref()
-                            .and_then(|id| txns.get(id))
-                            .is_some_and(|t| t.is_confirmed())
-                        {
-                            confirmed_pending_archive.push(r)
-                        } else {
-                            committed.push(r)
-                        }
+                match r.withdrawal_txn_id {
+                    None if r.is_approved() => approved.push(r),
+                    None => requested.push(r),
+                    Some(txn_id) if txns.get(&txn_id).is_some_and(|t| t.is_confirmed()) => {
+                        confirmed_pending_archive.push(r)
                     }
-                    // Defensive: `archive_request` flips a request to
-                    // Confirmed in the same Move call that moves it out of
-                    // the hot bag, so this arm is unreachable from mirrored
-                    // post-transaction state.
-                    WithdrawalStatus::Confirmed => confirmed_pending_archive.push(r),
+                    Some(_) => committed.push(r),
                 }
             }
             for (label, class) in [

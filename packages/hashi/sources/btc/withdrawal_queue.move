@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Storage and state machine for Bitcoin withdrawals. Holds `WithdrawalRequest`
-/// objects as they move from Requested through Approved, Processing, Signed,
-/// and Confirmed, plus the `WithdrawalTransaction` objects that batch them:
+/// objects as they move from requested through approved and committed to
+/// archived, plus the `WithdrawalTransaction` objects that batch them:
 /// each transaction tracks its input UTXOs, withdrawal and change outputs, and
 /// the incrementally collected MPC and guardian signatures. Certificate
 /// verification and funds movement are driven by `hashi::withdraw`.
@@ -25,6 +25,9 @@ use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
 
 #[error]
 const ERequestNotApproved: vector<u8> = b"Withdrawal request has not been approved";
+#[error]
+const ERequestAlreadyCommitted: vector<u8> =
+    b"Withdrawal request has already been committed to a withdrawal transaction";
 #[error]
 const EOutputBelowDust: vector<u8> =
     b"Withdrawal output would be below dust threshold after miner fee deduction";
@@ -66,24 +69,18 @@ const ERequestTxnMismatch: vector<u8> =
 
 // ~~~~~~~ Structs ~~~~~~~
 
-public enum WithdrawalStatus has copy, drop, store {
-    Requested,
-    Approved,
-    Processing,
-    Signed,
-    Confirmed,
-}
-
 /// Unified withdrawal request object. Tracks the full lifecycle of a withdrawal,
 /// from initial request through to confirmation or cancellation.
 ///
-/// The `status` field is authoritative for lifecycle state. A request lives in
-/// the `requests` bag for its whole live lifecycle (Requested through
-/// Confirmed-awaiting-archival) and is moved to the `processed` archive only by
-/// the deferred `archive_withdrawal_txn` GC — keeping the per-request cost of
-/// commit/confirm to an in-place borrow instead of a bag move. Requests
-/// committed before the v2 upgrade were moved to `processed` at commit time
-/// and stay there; dual-location helpers cover both homes.
+/// Lifecycle state is derived, not stored: `approval_cert` marks approval and
+/// `withdrawal_txn_id` marks commitment into a `WithdrawalTransaction`, whose
+/// own signing and confirmation fields carry the rest of the lifecycle. A
+/// request lives in the `requests` bag for its whole live lifecycle (requested
+/// through confirmed-awaiting-archival) and is moved to the `processed`
+/// archive only by the deferred `archive_withdrawal_txn` GC — keeping the
+/// per-request cost of commit/confirm to an in-place borrow instead of a bag
+/// move. Requests committed before the v2 upgrade were moved to `processed`
+/// at commit time and stay there; dual-location helpers cover both homes.
 ///
 /// The BTC balance starts full and is drained to zero at commit (burned) or cancel (returned).
 public struct WithdrawalRequest has key, store {
@@ -92,24 +89,28 @@ public struct WithdrawalRequest has key, store {
     btc_amount: u64,
     bitcoin_address: vector<u8>,
     created_timestamp_ms: u64,
-    status: WithdrawalStatus,
     /// Committee certificate recorded at approval time. `None` until
     /// `approve_request` has been called.
     approval_cert: Option<CommitteeSignature>,
     /// Clock timestamp at the moment of approval. `None` until
     /// `approve_request` has been called.
     approved_timestamp_ms: Option<u64>,
+    /// The `WithdrawalTransaction` this request was committed into. `None`
+    /// until `commit_requests`; once set, the BTC is drained and the request
+    /// can no longer be approved or cancelled.
     withdrawal_txn_id: Option<address>,
     sui_tx_digest: vector<u8>,
     btc: Balance<BTC>,
 }
 
 public struct WithdrawalRequestQueue has store {
-    /// Active requests awaiting action (Requested, Approved).
+    /// Live requests: awaiting approval or commitment, plus requests committed
+    /// in place and awaiting the archival GC.
     /// ObjectBag so WithdrawalRequest UIDs are directly accessible via getObject.
     requests: ObjectBag,
-    /// Processed requests — BTC consumed, lifecycle continuing or complete
-    /// (Processing, Signed, Confirmed).
+    /// Archived requests — BTC consumed and their withdrawal transaction
+    /// confirmed (plus requests committed before the deferred-archival
+    /// upgrade, which were moved here at commit time).
     processed: ObjectBag,
     /// In-flight withdrawal transactions (unsigned, signed but unconfirmed).
     /// ObjectBag so WithdrawalTransaction UIDs are directly accessible via getObject.
@@ -278,7 +279,6 @@ public(package) fun create_withdrawal(
         btc_amount,
         bitcoin_address,
         created_timestamp_ms: clock.timestamp_ms(),
-        status: WithdrawalStatus::Requested,
         approval_cert: option::none(),
         approved_timestamp_ms: option::none(),
         withdrawal_txn_id: option::none(),
@@ -298,7 +298,7 @@ public(package) fun insert_withdrawal(
     self.requests.add(request_id, request);
 }
 
-/// Approve a withdrawal request. Updates status in the requests bag.
+/// Approve a withdrawal request: record the cert and approval time in place.
 /// The caller must have verified `cert` against the current committee.
 public(package) fun approve_withdrawal(
     self: &mut WithdrawalRequestQueue,
@@ -308,16 +308,10 @@ public(package) fun approve_withdrawal(
 ) {
     let request: &mut WithdrawalRequest = self.requests.borrow_mut(request_id);
     // A committed request stays in `requests` until archival, so an approval
-    // cert replayed after commit would otherwise reset Processing back to
-    // Approved — re-arming `commit_requests` on a request whose BTC is
-    // already drained. Before deferred archival this protection came from
+    // cert replayed after commit would otherwise re-stamp a request whose BTC
+    // is already drained. Before deferred archival this protection came from
     // the request having left the bag.
-    assert!(request.status.is_active(), ECannotApproveCommittedRequest);
-    // `withdrawal_txn_id` is written together with the Processing status at
-    // commit; assert it separately so approval can never touch a request a
-    // withdrawal transaction already references, even if the status were
-    // ever to fall out of sync with the link.
-    assert!(request.withdrawal_txn_id.is_none(), ECannotApproveCommittedRequest);
+    assert!(!request.is_committed(), ECannotApproveCommittedRequest);
     // Re-approval is only allowed with a cert from a strictly later epoch
     // than the stored one: a new committee refreshing a cert left stale by
     // reconfiguration. A same-epoch cert is a replay that would only reset
@@ -327,7 +321,6 @@ public(package) fun approve_withdrawal(
             request.approval_cert.borrow().signature_epoch() < cert.signature_epoch(),
         EApprovalCertNotNewer,
     );
-    request.status = WithdrawalStatus::Approved;
     request.approval_cert = option::some(cert);
     request.approved_timestamp_ms = option::some(clock.timestamp_ms());
 }
@@ -360,8 +353,9 @@ public(package) fun extract_request_infos(
     })
 }
 
-/// Commit approved requests for a withdrawal transaction: drain BTC and
-/// update status in place. Returns the merged BTC balance for burning.
+/// Commit approved requests for a withdrawal transaction: drain BTC and link
+/// each request to the transaction in place. Returns the merged BTC balance
+/// for burning.
 /// The request stays in `requests` — the move to `processed` is deferred to
 /// `archive_withdrawal_txn` so this transaction pays two runtime objects per
 /// request instead of three.
@@ -374,42 +368,16 @@ public(package) fun commit_requests(
 
     withdrawal_txn.request_ids.do_ref!(|id| {
         let request: &mut WithdrawalRequest = self.requests.borrow_mut(*id);
-        assert!(request.status == WithdrawalStatus::Approved, ERequestNotApproved);
+        assert!(request.is_approved(), ERequestNotApproved);
+        // The link doubles as the drained marker: a second commit would pay
+        // the user's Bitcoin output again without burning any BTC.
+        assert!(!request.is_committed(), ERequestAlreadyCommitted);
 
-        // Drain the BTC balance and merge
         total_btc.join(request.btc.withdraw_all());
-
-        // Update status and link to the withdrawal transaction
-        request.status = WithdrawalStatus::Processing;
         request.withdrawal_txn_id = option::some(withdrawal_txn_id);
     });
 
     total_btc
-}
-
-/// Update request statuses to Signed after MPC signing completes.
-public(package) fun update_requests_signed(
-    self: &mut WithdrawalRequestQueue,
-    request_ids: &vector<address>,
-) {
-    request_ids.do_ref!(|id| {
-        let request = self.borrow_request_mut_any(*id);
-        request.status = WithdrawalStatus::Signed;
-    });
-}
-
-/// Borrow a committed request wherever it lives: `requests` (in-place
-/// lifecycle) first, falling back to `processed` (requests committed before
-/// the deferred-archival upgrade, and archived requests).
-fun borrow_request_mut_any(
-    self: &mut WithdrawalRequestQueue,
-    request_id: address,
-): &mut WithdrawalRequest {
-    if (self.requests.contains(request_id)) {
-        self.requests.borrow_mut(request_id)
-    } else {
-        self.processed.borrow_mut(request_id)
-    }
 }
 
 /// Cancel a withdrawal: drain BTC, clean up user index, destroy the request.
@@ -424,7 +392,7 @@ public(package) fun cancel_withdrawal(
     // WithdrawalTransaction; destroying it would permanently abort that
     // txn's archival. The entry-level `is_request_processing` gate refuses
     // first — this backstops it.
-    assert!(request.status.is_active(), ERequestNotCancellable);
+    assert!(!request.is_committed(), ERequestNotCancellable);
 
     let WithdrawalRequest {
         id,
@@ -432,7 +400,6 @@ public(package) fun cancel_withdrawal(
         btc_amount: _,
         bitcoin_address: _,
         created_timestamp_ms: _,
-        status: _,
         approval_cert: _,
         approved_timestamp_ms: _,
         withdrawal_txn_id: _,
@@ -452,9 +419,9 @@ public(package) fun borrow_request(
 }
 
 /// Check if a request has already been committed to a WithdrawalTransaction.
-/// Status-first: a committed request stays in `requests` (as
-/// Processing/Signed/Confirmed) until archival; the `processed` fallback
-/// covers requests committed before the deferred-archival upgrade and
+/// Link-first: a committed request stays in `requests` until archival, so
+/// its `withdrawal_txn_id` is the authority; the `processed` fallback covers
+/// requests committed before the deferred-archival upgrade and
 /// already-archived requests.
 public(package) fun is_request_processing(
     self: &WithdrawalRequestQueue,
@@ -462,7 +429,7 @@ public(package) fun is_request_processing(
 ): bool {
     if (self.requests.contains(request_id)) {
         let request: &WithdrawalRequest = self.requests.borrow(request_id);
-        !request.status.is_active()
+        request.is_committed()
     } else {
         self.processed.contains(request_id)
     }
@@ -638,12 +605,12 @@ public(package) fun mark_txn_confirmed(
 }
 
 /// Deferred archival for one confirmed withdrawal: move the txn to
-/// `confirmed_txns` and each of its requests to `processed` with status
-/// Confirmed. Idempotent — no-ops if the txn already archived (re-run or
-/// raced GC). Aborts if the txn exists but is not confirmed (caller error).
+/// `confirmed_txns` and each of its requests to `processed`. Idempotent —
+/// no-ops if the txn already archived (re-run or raced GC). Aborts if the txn
+/// exists but is not confirmed (caller error).
 ///
 /// Requests committed before the deferred-archival upgrade already live in
-/// `processed`; for those only the status write applies.
+/// `processed` and need no write.
 public(package) fun archive_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -663,25 +630,21 @@ public(package) fun archive_withdrawal_txn(
     self.confirmed_txns.add(withdrawal_id, txn);
 }
 
-/// Archive one request of a confirmed withdrawal wherever it lives. The
-/// `withdrawal_txn_id` cross-check runs in BOTH branches: the chunked entry
-/// takes caller-supplied ids, and without the check in the fallback branch a
-/// caller could flip an unrelated archived request's status.
+/// Archive one request of a confirmed withdrawal: move it from `requests` to
+/// `processed`. A request already in `processed` (archived earlier, or
+/// committed before the deferred-archival upgrade) needs no write, so it is
+/// skipped without being touched. The `withdrawal_txn_id` cross-check matters
+/// because the chunked entry takes caller-supplied ids: without it a caller
+/// could archive a live request of an unrelated withdrawal.
 fun archive_request(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     request_id: address,
 ) {
-    if (self.requests.contains(request_id)) {
-        let mut request: WithdrawalRequest = self.requests.remove(request_id);
-        assert!(request.withdrawal_txn_id == option::some(withdrawal_id), ERequestTxnMismatch);
-        request.status = WithdrawalStatus::Confirmed;
-        self.processed.add(request_id, request);
-    } else {
-        let request: &mut WithdrawalRequest = self.processed.borrow_mut(request_id);
-        assert!(request.withdrawal_txn_id == option::some(withdrawal_id), ERequestTxnMismatch);
-        request.status = WithdrawalStatus::Confirmed;
-    }
+    if (!self.requests.contains(request_id)) return;
+    let request: WithdrawalRequest = self.requests.remove(request_id);
+    assert!(request.withdrawal_txn_id == option::some(withdrawal_id), ERequestTxnMismatch);
+    self.processed.add(request_id, request);
 }
 
 /// Chunked archival: archive only the listed requests of a confirmed
@@ -689,7 +652,8 @@ fun archive_request(
 /// count exceeds one Sui transaction's runtime-object budget archive across
 /// several transactions; `finish_archive_withdrawal_txn` moves the txn once
 /// every request is archived. No-ops if the txn is already fully archived
-/// (re-run or raced GC); idempotent per request via the `processed` branch.
+/// (re-run or raced GC); idempotent per request (an already-archived request
+/// is skipped).
 public(package) fun archive_withdrawal_requests(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -704,19 +668,15 @@ public(package) fun archive_withdrawal_requests(
 }
 
 /// Finish a chunked archival: move the txn to `confirmed_txns` once every
-/// one of its requests has been archived — absent from the hot `requests`
-/// bag and, when resident in `processed`, flipped to `Confirmed`. Bag
-/// location alone is not completion: `processed` also holds requests
-/// committed before the v2 upgrade, still `Processing`/`Signed` until
-/// `archive_request` confirms them in place, so a location-only probe would
-/// let the permissionless finisher retire the txn immediately after
-/// confirmation and strand those requests with stale statuses. Silently
-/// no-ops while any request is still unarchived (or if the txn is already
-/// archived), so batched GC calls survive races with in-flight chunk
-/// transactions; the caller re-arms and retries from mirror state. The walk
-/// costs two runtime objects per request (the `processed` field wrapper and
-/// the borrowed child), which fits Sui's object budget at the largest batch
-/// size — see the probe comment in the body.
+/// one of its requests is resident in `processed`. Bag location is the whole
+/// of archival, since a request carries no lifecycle state of its own:
+/// requests committed before the v2 upgrade already live in `processed` and
+/// count as archived from the start. Silently no-ops while any request is
+/// still unarchived (or if the txn is already archived), so batched GC calls
+/// survive races with in-flight chunk transactions; the caller re-arms and
+/// retries from mirror state. The walk costs at most one runtime object per
+/// request (the `processed` field wrapper), inside Sui's object budget at
+/// the largest batch size — see the probe comment in the body.
 public(package) fun finish_archive_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
@@ -727,21 +687,12 @@ public(package) fun finish_archive_withdrawal_txn(
         assert!(txn.confirmed_timestamp_ms.is_some(), EWithdrawalNotConfirmed);
         txn.request_ids
     };
-    let mut i = 0;
-    let n = request_ids.length();
-    while (i < n) {
-        let id = request_ids[i];
-        // A committed request lives in exactly one bag and archival only
-        // ever adds to `processed`, so probing `processed` alone suffices: a
-        // request still in `requests` is simply not there yet. Skipping the
-        // `requests` probe keeps the walk at two runtime objects per request
-        // (field wrapper + child), inside Sui's object budget even at the
-        // largest batch size; a third probe per request would blow it.
-        if (!self.processed.contains(id)) return;
-        let request: &WithdrawalRequest = self.processed.borrow(id);
-        if (request.status != WithdrawalStatus::Confirmed) return;
-        i = i + 1;
-    };
+    // A committed request lives in exactly one bag and archival only ever
+    // adds to `processed`, so probing `processed` alone suffices: a request
+    // still in `requests` is simply not there yet. Skipping the `requests`
+    // probe keeps the walk at one runtime object per request (the field
+    // wrapper), inside Sui's object budget even at the largest batch size.
+    if (request_ids.any!(|id| !self.processed.contains(*id))) return;
     let txn: WithdrawalTransaction = self.withdrawal_txns.remove(withdrawal_id);
     sui::event::emit(WithdrawalArchived {
         withdrawal_txn_id: withdrawal_id,
@@ -881,28 +832,25 @@ public(package) fun request_btc_amount(self: &WithdrawalRequest): u64 {
     self.btc_amount
 }
 
-public(package) fun request_status(self: &WithdrawalRequest): &WithdrawalStatus {
-    &self.status
-}
-
 public(package) fun request_bitcoin_address(self: &WithdrawalRequest): &vector<u8> {
     &self.bitcoin_address
 }
 
-public(package) fun is_approved(self: &WithdrawalStatus): bool {
-    match (self) {
-        WithdrawalStatus::Approved => true,
-        _ => false,
-    }
+/// The withdrawal transaction this request was committed into, if any.
+public(package) fun request_withdrawal_txn_id(self: &WithdrawalRequest): Option<address> {
+    self.withdrawal_txn_id
 }
 
-/// Status is Requested or Approved: the request has not been committed to a
-/// withdrawal transaction, so it can still be approved or cancelled.
-public(package) fun is_active(self: &WithdrawalStatus): bool {
-    match (self) {
-        WithdrawalStatus::Requested | WithdrawalStatus::Approved => true,
-        _ => false,
-    }
+/// The committee has recorded an approval cert. Stays true after commitment;
+/// pair with `is_committed` to find requests still awaiting commitment.
+public(package) fun is_approved(self: &WithdrawalRequest): bool {
+    self.approval_cert.is_some()
+}
+
+/// Committed into a withdrawal transaction: the BTC is drained and the
+/// request can no longer be approved or cancelled.
+public(package) fun is_committed(self: &WithdrawalRequest): bool {
+    self.withdrawal_txn_id.is_some()
 }
 
 // === Event Emitters ===
@@ -996,45 +944,6 @@ public(package) fun has_confirmed_txn(self: &WithdrawalRequestQueue, id: address
     self.confirmed_txns.contains(id)
 }
 
-/// Status of a request wherever it lives (requests first, processed fallback).
-#[test_only]
-public(package) fun request_status_any(
-    self: &WithdrawalRequestQueue,
-    id: address,
-): WithdrawalStatus {
-    if (self.requests.contains(id)) {
-        let request: &WithdrawalRequest = self.requests.borrow(id);
-        request.status
-    } else {
-        let request: &WithdrawalRequest = self.processed.borrow(id);
-        request.status
-    }
-}
-
-#[test_only]
-public(package) fun is_processing(self: &WithdrawalStatus): bool {
-    match (self) {
-        WithdrawalStatus::Processing => true,
-        _ => false,
-    }
-}
-
-#[test_only]
-public(package) fun is_signed(self: &WithdrawalStatus): bool {
-    match (self) {
-        WithdrawalStatus::Signed => true,
-        _ => false,
-    }
-}
-
-#[test_only]
-public(package) fun is_confirmed(self: &WithdrawalStatus): bool {
-    match (self) {
-        WithdrawalStatus::Confirmed => true,
-        _ => false,
-    }
-}
-
 /// Replicates the pre-deferred-archival commit (remove from `requests`, add
 /// to `processed`) so tests can simulate requests committed before the
 /// upgrade.
@@ -1047,9 +956,9 @@ public(package) fun commit_requests_v1_style_for_testing(
     let mut total_btc = sui::balance::zero<BTC>();
     withdrawal_txn.request_ids.do_ref!(|id| {
         let mut request: WithdrawalRequest = self.requests.remove(*id);
-        assert!(request.status == WithdrawalStatus::Approved, ERequestNotApproved);
+        assert!(request.is_approved(), ERequestNotApproved);
+        assert!(!request.is_committed(), ERequestAlreadyCommitted);
         total_btc.join(request.btc.withdraw_all());
-        request.status = WithdrawalStatus::Processing;
         request.withdrawal_txn_id = option::some(withdrawal_txn_id);
         self.processed.add(*id, request);
     });

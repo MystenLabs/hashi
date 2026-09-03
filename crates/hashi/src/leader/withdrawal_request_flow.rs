@@ -38,7 +38,7 @@ impl LeaderService {
     // Step 1: Approve unapproved withdrawal requests
     // ========================================================================
 
-    /// Approve every actionable Requested withdrawal, one task and one
+    /// Approve every unapproved withdrawal, one task and one
     /// transaction per request (mirroring the deposit approval pool). Each
     /// task holds its request in `inflight_withdrawal_approvals` through the
     /// object-mirror wait, so a later cycle cannot re-approve it while other
@@ -56,7 +56,7 @@ impl LeaderService {
             .onchain_state()
             .withdrawal_requests()
             .into_iter()
-            .filter(|r| r.status.is_requested())
+            .filter(|r| r.awaits_approval())
             .collect();
         unapproved.sort_by_key(|r| r.created_timestamp_ms);
 
@@ -387,7 +387,7 @@ impl LeaderService {
             .onchain_state()
             .withdrawal_requests()
             .into_iter()
-            .filter(|r| r.status.is_approved())
+            .filter(|r| r.awaits_commitment())
             .collect();
         approved.sort_by_key(|r| r.created_timestamp_ms);
 
