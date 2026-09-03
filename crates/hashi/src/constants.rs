@@ -76,18 +76,18 @@ pub fn check_sui_bitcoin_chain_pairing(
         .ok_or_else(|| anyhow::anyhow!("unrecognized bitcoin chain id: {bitcoin_chain_id}"))?;
     let sui_is_mainnet = sui_chain_id == SUI_MAINNET_CHAIN_ID;
     let bitcoin_is_mainnet = network == Network::Bitcoin;
-    anyhow::ensure!(
-        !sui_is_mainnet || bitcoin_is_mainnet,
-        "refusing Bitcoin {network:?} ({bitcoin_chain_id}) on Sui mainnet: \
-         Sui mainnet requires Bitcoin mainnet"
-    );
-    anyhow::ensure!(
-        !bitcoin_is_mainnet || sui_is_mainnet,
-        "refusing Bitcoin mainnet ({bitcoin_chain_id}) on Sui chain {sui_chain_id}: \
-         Bitcoin mainnet is allowed on Sui mainnet only; every other Sui network \
-         needs a non-mainnet bitcoin_chain_id, which defaults to mainnet when unset"
-    );
-    Ok(())
+    match (sui_is_mainnet, bitcoin_is_mainnet) {
+        (true, true) | (false, false) => Ok(()),
+        (true, false) => anyhow::bail!(
+            "refusing Bitcoin {network:?} ({bitcoin_chain_id}) on Sui mainnet: \
+             Sui mainnet requires Bitcoin mainnet"
+        ),
+        (false, true) => anyhow::bail!(
+            "refusing Bitcoin mainnet ({bitcoin_chain_id}) on Sui chain {sui_chain_id}: \
+             Bitcoin mainnet is allowed on Sui mainnet only; every other Sui network \
+             needs a non-mainnet bitcoin_chain_id, which defaults to mainnet when unset"
+        ),
+    }
 }
 
 #[cfg(test)]
