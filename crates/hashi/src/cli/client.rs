@@ -183,6 +183,28 @@ pub fn locate_proposal(
     ProposalLocation::Missing
 }
 
+/// A gRPC `NotFound` while loading the Hashi object almost always means the
+/// configured ids and the RPC URL come from different networks; say so instead
+/// of surfacing the bare status.
+pub fn explain_missing_object(
+    err: anyhow::Error,
+    hashi_ids: HashiIds,
+    sui_rpc_url: &str,
+) -> anyhow::Error {
+    let not_found = err.chain().any(|e| {
+        matches!(e.downcast_ref::<tonic::Status>(), Some(s) if s.code() == tonic::Code::NotFound)
+    });
+    if not_found {
+        err.context(format!(
+            "Hashi object {} (package {}) was not found on {sui_rpc_url}: check that package-id, \
+             hashi-object-id and the RPC URL all belong to the same network",
+            hashi_ids.hashi_object_id, hashi_ids.package_id
+        ))
+    } else {
+        err
+    }
+}
+
 impl HashiClient {
     /// Client for governance and config commands. Skips the Bitcoin
     /// collections, which none of them read.
@@ -204,6 +226,11 @@ impl HashiClient {
             hashi_object_id: config.hashi_object_id(),
         };
 
+        // Say which network every command is talking to: the RPC URL defaults
+        // to mainnet when no config is found, and a wrong-network object id is
+        // otherwise indistinguishable from a typo.
+        crate::cli::print_info(&format!("Sui RPC: {}", config.sui_rpc_url));
+
         let onchain_state = OnchainState::new_reader(
             &config.sui_rpc_url,
             hashi_ids,
@@ -211,11 +238,13 @@ impl HashiClient {
             scope,
         )
         .await
+        .map_err(|e| explain_missing_object(e, hashi_ids, &config.sui_rpc_url))
         .context("Failed to initialize on-chain state")?;
 
         let hashi_initial_shared_version =
             fetch_initial_shared_version(&mut onchain_state.client(), hashi_ids.hashi_object_id)
-                .await?;
+                .await
+                .map_err(|e| explain_missing_object(e, hashi_ids, &config.sui_rpc_url))?;
 
         // Try to create executor if keypair is available
         let executor = match config.load_keypair()? {
