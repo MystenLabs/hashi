@@ -153,9 +153,6 @@ impl MpcService {
         self.run_major_compaction(self.inner.onchain_state().epoch())
             .await;
         let mut notifications = self.inner.onchain_state().subscribe();
-        if let Err(e) = self.inner.note_resignation_if_flagged() {
-            warn!("could not record resignation state at startup: {e}");
-        }
         if let Some(epoch) = pending {
             info!("Entering handle_reconfig for epoch {epoch}");
             self.handle_reconfig(epoch).await;
@@ -211,22 +208,10 @@ impl MpcService {
                             Notification::SuiEpochChanged(sui_epoch) => {
                                 self.try_submit_start_reconfig(sui_epoch).await;
                             }
-                            Notification::ValidatorInfoUpdated(validator)
-                                if Some(validator)
-                                    == self.inner.config.validator_address().ok() =>
-                            {
-                                if let Err(e) = self.inner.note_resignation_if_flagged() {
-                                    warn!("could not record resignation state: {e}");
-                                }
-                            }
                             _ => {}
                         },
                         Err(e) => {
                             error!("MPC notification recv error: {e:?}, resubscribing");
-                            // The dropped backlog may have held our own flag flip; sample it.
-                            if let Err(e) = self.inner.note_resignation_if_flagged() {
-                                warn!("could not record resignation state after lag: {e}");
-                            }
                             notifications = self.inner.onchain_state().subscribe();
                         }
                     }
@@ -291,9 +276,6 @@ impl MpcService {
 
     async fn sleep_if_still_pending(&self, epoch: u64) {
         if self.get_pending_epoch_change() == Some(epoch) {
-            if let Err(e) = self.inner.note_resignation_if_flagged() {
-                warn!("could not record resignation state for epoch {epoch}: {e}");
-            }
             tokio::time::sleep(RETRY_INTERVAL).await;
         }
     }
@@ -1530,20 +1512,10 @@ impl MpcService {
             );
             return;
         }
-        // A pending epoch change implies the launch (finish_publish) has
-        // happened, so the on-chain bitcoin_chain_id exists now even if this
-        // node booted pre-launch and the startup check was skipped. Refuse
-        // to participate on mismatch — signing for the wrong Bitcoin network
-        // must not happen; the caller re-enters while the epoch change is
-        // pending, surfacing the error every RETRY_INTERVAL until an
-        // operator fixes the config.
         if let Err(e) = self.inner.verify_bitcoin_chain_id() {
             error!("refusing to participate in reconfig for epoch {target_epoch}: {e}");
             self.sleep_if_still_pending(target_epoch).await;
             return;
-        }
-        if let Err(e) = self.inner.note_resignation_if_flagged() {
-            warn!("could not record resignation state for epoch {target_epoch}: {e}");
         }
         let metrics = &self.inner.metrics;
         let _reconfig_timer = metrics
@@ -1613,9 +1585,6 @@ impl MpcService {
                     while self.get_pending_epoch_change() == Some(target_epoch) {
                         metrics.task_heartbeat("mpc_service");
                         self.sleep_if_still_pending(target_epoch).await;
-                    }
-                    if let Err(e) = self.inner.note_resignation_if_flagged() {
-                        warn!("could not record resignation state for epoch {target_epoch}: {e}");
                     }
                     if !matches!(outcome, ReconfigOutcome::NoRole) {
                         self.post_reconfig_housekeeping(target_epoch, false).await;

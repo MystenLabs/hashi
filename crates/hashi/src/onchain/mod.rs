@@ -528,11 +528,7 @@ impl OnchainState {
         if let Some(metrics) = &self.0.metrics {
             hashi.committees.set_metrics(metrics.clone());
         }
-        let mut state = self.state_mut();
-        hashi
-            .committees
-            .carry_over_resignations(&state.hashi.committees);
-        state.hashi = hashi;
+        self.state_mut().hashi = hashi;
     }
 
     /// Record an on-chain package upgrade. The root's `UpgradeCap`
@@ -780,10 +776,6 @@ impl OnchainState {
             .members()
             .get(validator)
             .cloned()
-    }
-
-    pub fn last_known_resigned(&self, validator: &Address) -> Option<bool> {
-        self.state().hashi.committees.last_known_resigned(validator)
     }
 
     pub fn current_committee(&self) -> Option<Committee> {
@@ -2486,87 +2478,6 @@ mod tests {
         let converted = convert_move_member_info(member(false, true));
         assert!(!converted.ignored);
         assert!(converted.resigned);
-    }
-
-    #[test]
-    fn test_removed_member_keeps_its_resigned_flag() {
-        let mut rng = rand::thread_rng();
-        let validator_address =
-            Address::from_hex("0x1234567890abcdef1234567890abcdef12345678").unwrap();
-        let signing_keypair = fastcrypto::bls12381::min_pk::BLS12381KeyPair::generate(&mut rng);
-        let uncompressed_pubkey =
-            blst::min_pk::PublicKey::uncompress(signing_keypair.public().as_bytes())
-                .unwrap()
-                .serialize()
-                .to_vec();
-        let member = |resigned: bool| {
-            convert_move_member_info(move_types::MemberInfo {
-                validator_address,
-                operator_address: validator_address,
-                next_epoch_public_key: uncompressed_pubkey.clone(),
-                endpoint_url: String::new(),
-                tls_public_key: vec![],
-                next_epoch_encryption_public_key: vec![],
-                ignored: false,
-                resigned,
-                extra_fields: move_types::Config::from_entries(vec![]),
-            })
-        };
-        let mut set = types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        assert_eq!(set.last_known_resigned(&validator_address), None);
-
-        set.update_validator(member(true));
-        assert_eq!(set.last_known_resigned(&validator_address), Some(true));
-        set.remove_validator(&validator_address);
-        assert_eq!(set.last_known_resigned(&validator_address), Some(true));
-
-        set.update_validator(member(false));
-        assert_eq!(set.last_known_resigned(&validator_address), Some(false));
-        set.remove_validator(&validator_address);
-        assert_eq!(set.last_known_resigned(&validator_address), None);
-
-        set.update_validator(member(true));
-        set.remove_validator(&validator_address);
-        let mut rebuilt =
-            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        rebuilt.carry_over_resignations(&set);
-        assert_eq!(rebuilt.last_known_resigned(&validator_address), Some(true));
-
-        let mut rejoined =
-            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        rejoined.update_validator(member(false));
-        rejoined.carry_over_resignations(&set);
-        assert_eq!(
-            rejoined.last_known_resigned(&validator_address),
-            Some(false)
-        );
-
-        let mut unresigned =
-            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        unresigned.update_validator(member(false));
-        unresigned.remove_validator(&validator_address);
-        assert_eq!(unresigned.last_known_resigned(&validator_address), None);
-
-        let mut live = types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        live.update_validator(member(true));
-        let mut from_live =
-            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        from_live.carry_over_resignations(&live);
-        assert_eq!(
-            from_live.last_known_resigned(&validator_address),
-            Some(true)
-        );
-
-        let mut live_unresigned =
-            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        live_unresigned.update_validator(member(false));
-        let mut from_live_unresigned =
-            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
-        from_live_unresigned.carry_over_resignations(&live_unresigned);
-        assert_eq!(
-            from_live_unresigned.last_known_resigned(&validator_address),
-            None
-        );
     }
 
     #[test]

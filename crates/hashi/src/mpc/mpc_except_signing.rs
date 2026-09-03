@@ -6255,11 +6255,6 @@ impl MpcManager {
             match reconstruction_result {
                 Ok(output) => output,
                 Err(e) => {
-                    // The fallback exists so a node that cannot reconstruct can still take the
-                    // party phase on the public key alone. A dealer-only run has no party phase,
-                    // so falling back would turn a retryable reconstruction failure into a
-                    // permanent one: the caller parks on `NoShares` and never re-attempts, and
-                    // this node's previous weight may be exactly what the rotation is short of.
                     if role == RotationRole::DealerOnly {
                         return Err(e);
                     }

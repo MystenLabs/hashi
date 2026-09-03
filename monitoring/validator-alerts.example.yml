@@ -105,3 +105,14 @@ groups:
             full disk) and will refuse every write until the process
             restarts; reads and signing carry on looking healthy. Free the
             disk, then restart the node.
+
+      - alert: HashiRotationPreviousSharesMissing
+        expr: increase(hashi_mpc_rotation_previous_shares_missing_total[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "held previous-epoch weight but reshared nothing"
+          description: >-
+            This node owned share indices in the previous committee but entered
+            the rotation with none to reshare, so its weight did not reach the
+            new key.

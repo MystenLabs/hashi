@@ -1656,173 +1656,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resignation_during_pending_reconfig_is_recorded() -> Result<()> {
-        init_test_logging();
-
-        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
-        let hashi_ids = networks.hashi_network.ids();
-
-        let (latest_package_id, hashi_isv) = {
-            let nodes = networks.hashi_network.nodes();
-            let latest_package_id = nodes[0]
-                .hashi()
-                .onchain_state()
-                .package_id()
-                .ok_or_else(|| anyhow!("no package versions known"))?;
-            let hashi_isv = hashi::cli::client::fetch_initial_shared_version(
-                &mut networks.sui_network.client.clone(),
-                hashi_ids.hashi_object_id,
-            )
-            .await?;
-            (latest_package_id, hashi_isv)
-        };
-
-        let target = {
-            let nodes = networks.hashi_network.nodes();
-            let mut executors: Vec<SuiTxExecutor> = nodes
-                .iter()
-                .map(|node| {
-                    let hashi = node.hashi();
-                    SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
-                })
-                .collect::<Result<_>>()?;
-            let target = executors
-                .last()
-                .ok_or_else(|| anyhow!("no executors"))?
-                .sender();
-            let ignore_member_type_tag =
-                sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
-                    latest_package_id,
-                    sui_sdk_types::Identifier::from_static("ignore_member"),
-                    sui_sdk_types::Identifier::from_static("IgnoreMember"),
-                    vec![],
-                )));
-            crate::submit_proposal_through_quorum(
-                hashi_ids,
-                hashi_isv,
-                latest_package_id,
-                &mut executors,
-                hashi::cli::client::CreateProposalParams::IgnoreMember {
-                    target_validator_address: target,
-                    ignored: true,
-                    metadata: vec![],
-                },
-                ignore_member_type_tag,
-                "ignore_member",
-                "IgnoreMember",
-            )
-            .await?;
-            target
-        };
-        info!(?target, "node 3 ignored; the next formation excludes it");
-
-        let initial_epoch = networks.hashi_network.nodes()[0]
-            .current_epoch()
-            .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
-        let target_epoch = initial_epoch + 1;
-
-        networks.sui_network.force_close_epoch().await?;
-        {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-            loop {
-                let pending = networks.hashi_network.nodes()[3]
-                    .hashi()
-                    .onchain_state()
-                    .pending_epoch_change();
-                if pending == Some(target_epoch) {
-                    break;
-                }
-                anyhow::ensure!(
-                    tokio::time::Instant::now() < deadline,
-                    "node 3 never observed the pending reconfig"
-                );
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-        info!("reconfig pending on node 3; resigning mid-window");
-
-        let marker = {
-            let nodes = networks.hashi_network.nodes();
-            let resigning = nodes[3].hashi().clone();
-            let mut executor =
-                SuiTxExecutor::from_config(&resigning.config, resigning.onchain_state())?;
-            assert_eq!(executor.sender(), target);
-            let mut b = sui_transaction_builder::TransactionBuilder::new();
-            let hashi_arg = b.object(
-                sui_transaction_builder::ObjectInput::new(hashi_ids.hashi_object_id)
-                    .with_version(hashi_isv)
-                    .as_shared()
-                    .with_mutable(true),
-            );
-            let validator_arg = b.pure(&target);
-            b.move_call(
-                sui_transaction_builder::Function::new(
-                    latest_package_id,
-                    sui_sdk_types::Identifier::from_static("validator"),
-                    sui_sdk_types::Identifier::from_static("resign"),
-                ),
-                vec![hashi_arg, validator_arg],
-            );
-            let resp = executor.execute(b).await?;
-            anyhow::ensure!(
-                resp.transaction().effects().status().success(),
-                "resign transaction failed"
-            );
-            resigning
-                .config
-                .resignation_marker_path()
-                .ok_or_else(|| anyhow!("node 3 has no db path"))?
-        };
-
-        {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-            loop {
-                if marker.exists() {
-                    break;
-                }
-                let still_pending = networks.hashi_network.nodes()[3]
-                    .hashi()
-                    .onchain_state()
-                    .pending_epoch_change()
-                    == Some(target_epoch);
-                anyhow::ensure!(
-                    still_pending,
-                    "epoch flipped before the mid-window resignation was recorded (marker \
-                     missing at {})",
-                    marker.display()
-                );
-                anyhow::ensure!(
-                    tokio::time::Instant::now() < deadline,
-                    "mid-window resignation never recorded while pending"
-                );
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-        info!("marker written while pending; letting the rotation finish");
-
-        let futs: Vec<_> = networks
-            .hashi_network()
-            .nodes()
-            .iter()
-            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(480)))
-            .collect();
-        for (i, r) in futures::future::join_all(futs)
-            .await
-            .into_iter()
-            .enumerate()
-        {
-            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
-        }
-        let committee = networks.hashi_network.nodes()[0]
-            .hashi()
-            .onchain_state()
-            .current_committee()
-            .ok_or_else(|| anyhow!("no committee after the epoch change"))?;
-        assert!(committee.index_of(&target).is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_resigned_member_excluded_then_removed_permissionlessly() -> Result<()> {
         init_test_logging();
 
@@ -1843,8 +1676,6 @@ mod tests {
             )
             .await?;
 
-            // Node 3 resigns through its own executor (validator::resign is
-            // v2-only surface: latest package + resolved shared inputs).
             let resigning = nodes[3].hashi().clone();
             let mut executor =
                 SuiTxExecutor::from_config(&resigning.config, resigning.onchain_state())?;
@@ -1879,8 +1710,6 @@ mod tests {
         };
         info!(?target, "resignation submitted; closing the epoch");
 
-        // First boundary: formation skips the resigned member; the
-        // registration survives the transition untouched.
         networks.sui_network.force_close_epoch().await?;
         let target_epoch = initial_epoch + 1;
         let futs: Vec<_> = networks
@@ -1920,11 +1749,6 @@ mod tests {
 
         info!("boundary assertions done; submitting permissionless removal");
 
-        // The registration is now duty-free: remove it through the
-        // permissionless entry, submitted by a DIFFERENT node's executor.
-        // Under CI load the executor's short checkpoint wait can time out on
-        // a transaction that still lands, so treat "mirror shows the member
-        // gone" as the success condition and retry the submission otherwise.
         {
             let nodes = networks.hashi_network.nodes();
             let remover = nodes[0].hashi().clone();
@@ -2011,9 +1835,6 @@ mod tests {
         }
         info!("registration removed; closing the second epoch");
 
-        // Second boundary with the ex-member's node STILL RUNNING: the
-        // resignation latch must keep it from auto-re-registering on the
-        // epoch trigger.
         networks.sui_network.force_close_epoch().await?;
         let second_epoch = target_epoch + 1;
         let futs: Vec<_> = networks
@@ -2039,7 +1860,7 @@ mod tests {
                     .onchain_state()
                     .committee_member(&target)
                     .is_none(),
-                "latched node must not re-register across epoch boundaries"
+                "a removed node must not re-register across epoch boundaries"
             );
             let committee = nodes[0]
                 .hashi()
@@ -2065,8 +1886,6 @@ mod tests {
             );
         }
 
-        // Explicit re-registration re-admits the member (and clears the
-        // node's latch once the mirror shows it registered and unflagged).
         {
             let nodes = networks.hashi_network.nodes();
             let rejoining = nodes[3].hashi().clone();
@@ -2120,9 +1939,6 @@ mod tests {
         Ok(())
     }
 
-    /// Waits for a `WithdrawalPickedForProcessing` that contains at least
-    /// `min_requests` request IDs in a single batch, indicating that the new
-    /// multi-request coin selection algorithm batched them together.
     async fn wait_for_batched_withdrawal_picked(
         sui_client: &mut sui_rpc::Client,
         min_requests: usize,
