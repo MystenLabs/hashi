@@ -56,6 +56,13 @@ pub struct CliConfig {
     /// Optional: Gas coin object ID to use for transactions
     pub gas_coin: Option<Address>,
 
+    /// `--sender` from the command line: the address the transaction is built
+    /// for, and the identity the governance commands act as when no keypair
+    /// is configured (the serialize-unsigned and dry-run paths). Never read
+    /// from or written to the file.
+    #[serde(skip)]
+    pub acting_sender: Option<Address>,
+
     /// Optional Bitcoin configuration for deposit/withdrawal commands
     #[serde(default)]
     pub bitcoin: Option<BitcoinConfig>,
@@ -77,6 +84,7 @@ impl Default for CliConfig {
             hashi_object_id: None,
             keypair_path: None,
             gas_coin: None,
+            acting_sender: None,
             bitcoin: None,
         }
     }

@@ -43,9 +43,9 @@ fn print_metadata(metadata: &[(String, String)]) {
 /// [`HashiClient::resolve_validator_address`] for the rules.
 pub(crate) fn print_acting_validator(client: &HashiClient) -> Result<()> {
     let validator_address = client.resolve_validator_address()?;
-    let via_operator = match client.signer_address() {
-        Some(signer) if signer != validator_address => {
-            format!(" (delegated operator {})", signer.to_hex().dimmed())
+    let via_operator = match client.acting_address() {
+        Some(acting) if acting != validator_address => {
+            format!(" (delegated operator {})", acting.to_hex().dimmed())
         }
         _ => String::new(),
     };
@@ -262,6 +262,107 @@ fn seated_members(
             c.members().iter().map(|m| m.validator_address()).collect(),
         )
     })
+}
+
+/// Which governed store a config proposal targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigStore {
+    Instant,
+    Epoch,
+}
+
+impl ConfigStore {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::Epoch => "epoch",
+        }
+    }
+    fn other(self) -> Self {
+        match self {
+            Self::Instant => Self::Epoch,
+            Self::Epoch => Self::Instant,
+        }
+    }
+    fn update_command(self) -> &'static str {
+        match self {
+            Self::Instant => "hashi proposal create update-config",
+            Self::Epoch => "hashi proposal create update-epoch-config",
+        }
+    }
+}
+
+fn config_value_type(value: &hashi_types::move_types::ConfigValue) -> &'static str {
+    use hashi_types::move_types::ConfigValue;
+    match value {
+        ConfigValue::U64(_) => "u64",
+        ConfigValue::U128(_) => "u128",
+        ConfigValue::U256(_) => "u256",
+        ConfigValue::Address(_) => "address",
+        ConfigValue::String(_) => "string",
+        ConfigValue::Bool(_) => "bool",
+        ConfigValue::Bytes(_) => "bytes",
+    }
+}
+
+/// Refuse an update the chain would reject with `EInvalidConfigEntry`: the
+/// key must already exist in the targeted store, and its value type cannot
+/// change. When the key lives in the other store, name the right command.
+pub fn refuse_bad_config_update(
+    key: &str,
+    proposed: &hashi_types::move_types::ConfigValue,
+    target: ConfigStore,
+    current: Option<&hashi_types::move_types::ConfigValue>,
+    in_other_store: bool,
+) -> Result<()> {
+    let Some(current) = current else {
+        if in_other_store {
+            anyhow::bail!(
+                "key {key} is not in the {} config; it lives in the {} config. Use `{}` instead.",
+                target.name(),
+                target.other().name(),
+                target.other().update_command()
+            );
+        }
+        anyhow::bail!(
+            "key {key} does not exist in the {} config, and updates can only change existing \
+             keys. Use `hashi proposal create add-config` to introduce a new key, or \
+             `hashi config on-chain` to see the current keys.",
+            target.name()
+        );
+    };
+    anyhow::ensure!(
+        std::mem::discriminant(current) == std::mem::discriminant(proposed),
+        "key {key} holds a {} value on chain but the proposed value is {}; a key's value \
+         type cannot change",
+        config_value_type(current),
+        config_value_type(proposed)
+    );
+    Ok(())
+}
+
+/// Refuse an add the chain would reject with `EKeyAlreadyExists`, and warn
+/// when the same name already exists in the other store.
+pub fn refuse_bad_config_add(
+    key: &str,
+    target: ConfigStore,
+    in_target_store: bool,
+    in_other_store: bool,
+) -> Result<Option<String>> {
+    anyhow::ensure!(
+        !in_target_store,
+        "key {key} already exists in the {} config; use `{}` to change it",
+        target.name(),
+        target.update_command()
+    );
+    Ok(in_other_store.then(|| {
+        format!(
+            "key {key} already exists in the {} config; adding it to the {} config as well \
+             creates two same-named keys that nodes read from different places",
+            target.other().name(),
+            target.name()
+        )
+    }))
 }
 
 fn now_ms() -> u64 {
@@ -630,7 +731,7 @@ pub async fn vote(
     // first, from one live read of the proposal.
     let details = client.fetch_proposal_details(proposal_addr).await?;
     let committee = client.fetch_current_committee();
-    if client.signer_address().is_some() {
+    if client.acting_address().is_some() {
         let validator = client.resolve_validator_address()?;
         let seated = seated_members(committee.as_ref());
         refuse_if_not_seated(validator, seated.as_ref().map(|(e, m)| (*e, m.as_slice())))?;
@@ -735,7 +836,7 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
         client.sui_rpc_url(),
     )?;
     refuse_if_expired(&proposal, proposal_id, now_ms())?;
-    if client.signer_address().is_some() {
+    if client.acting_address().is_some() {
         let validator = client.resolve_validator_address()?;
         let details = client.fetch_proposal_details(proposal_addr).await?;
         refuse_vote_state(
@@ -818,7 +919,7 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     print_detail(&format!("  ID:   {}", proposal_id));
     print_detail(&format!("  Votes: {}", progress.describe()));
     // Execution is permissionless, so the sender is whoever pays gas.
-    if let Some(sender) = tx_opts.sender.or_else(|| client.signer_address()) {
+    if let Some(sender) = client.acting_address() {
         print_detail(&format!("  Sender: {}", sender.to_hex().cyan()));
     }
 
@@ -1128,6 +1229,13 @@ pub async fn create_update_config_proposal(
     print_metadata(&metadata);
 
     let mut client = HashiClient::new(config).await?;
+    refuse_bad_config_update(
+        key,
+        &value,
+        ConfigStore::Instant,
+        client.instant_config_value(key).as_ref(),
+        client.epoch_config_value(key).is_some(),
+    )?;
     print_acting_validator(&client)?;
 
     if !prompt_continue("create this config update proposal", tx_opts).await? {
@@ -1167,12 +1275,21 @@ pub async fn create_update_epoch_config_proposal(
     print_detail("  Takes effect: next committee formed after execution");
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    refuse_bad_config_update(
+        key,
+        &value,
+        ConfigStore::Epoch,
+        client.epoch_config_value(key).as_ref(),
+        client.instant_config_value(key).is_some(),
+    )?;
+    print_acting_validator(&client)?;
+
     if !prompt_continue("create this epoch config update proposal", tx_opts).await? {
         crate::cli::print_warning("Aborted.");
         return Ok(());
     }
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateEpochConfig {
         key: key.to_string(),
         value,
@@ -1210,12 +1327,32 @@ pub async fn create_add_config_proposal(
     ));
     print_metadata(&metadata);
 
+    let mut client = HashiClient::new(config).await?;
+    let target = if epoch {
+        ConfigStore::Epoch
+    } else {
+        ConfigStore::Instant
+    };
+    let (in_target, in_other) = match target {
+        ConfigStore::Epoch => (
+            client.epoch_config_value(key).is_some(),
+            client.instant_config_value(key).is_some(),
+        ),
+        ConfigStore::Instant => (
+            client.instant_config_value(key).is_some(),
+            client.epoch_config_value(key).is_some(),
+        ),
+    };
+    if let Some(warning) = refuse_bad_config_add(key, target, in_target, in_other)? {
+        print_warning(&warning);
+    }
+    print_acting_validator(&client)?;
+
     if !prompt_continue("create this add config proposal", tx_opts).await? {
         crate::cli::print_warning("Aborted.");
         return Ok(());
     }
 
-    let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::AddConfig {
         epoch,
         key: key.to_string(),

@@ -979,6 +979,7 @@ fn build_cli_config(
         hashi_object_id: state.hashi_object_id.parse().ok(),
         keypair_path,
         gas_coin: None,
+        acting_sender: None,
         bitcoin: Some(hashi::cli::config::BitcoinConfig {
             rpc_url: Some(state.btc_rpc_url.clone()),
             rpc_user: Some(state.btc_rpc_user.clone()),

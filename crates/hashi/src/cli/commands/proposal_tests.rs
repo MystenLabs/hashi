@@ -251,6 +251,89 @@ fn quorum_progress_rounds_the_threshold_up_and_describes_both_states() {
     assert!(!empty.met());
 }
 
+// ===== config proposal pre-flights =====
+
+#[test]
+fn updating_an_existing_key_of_the_same_type_passes() {
+    use hashi_types::move_types::ConfigValue;
+    refuse_bad_config_update(
+        "bitcoin_deposit_minimum",
+        &ConfigValue::U64(1),
+        ConfigStore::Instant,
+        Some(&ConfigValue::U64(25_000)),
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn updating_a_key_that_lives_in_the_other_store_names_the_right_command() {
+    use hashi_types::move_types::ConfigValue;
+    let err = refuse_bad_config_update(
+        "mpc_max_faulty_in_basis_points",
+        &ConfigValue::U64(1),
+        ConfigStore::Instant,
+        None,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("lives in the epoch config"), "{err}");
+    assert!(err.contains("update-epoch-config"), "{err}");
+}
+
+#[test]
+fn updating_an_unknown_key_points_at_add_config() {
+    use hashi_types::move_types::ConfigValue;
+    let err = refuse_bad_config_update(
+        "nope",
+        &ConfigValue::U64(1),
+        ConfigStore::Epoch,
+        None,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("does not exist in the epoch config"), "{err}");
+    assert!(err.contains("add-config"), "{err}");
+}
+
+#[test]
+fn changing_a_keys_value_type_is_refused() {
+    use hashi_types::move_types::ConfigValue;
+    let err = refuse_bad_config_update(
+        "bitcoin_deposit_minimum",
+        &ConfigValue::Bool(true),
+        ConfigStore::Instant,
+        Some(&ConfigValue::U64(25_000)),
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("holds a u64 value"), "{err}");
+    assert!(err.contains("proposed value is bool"), "{err}");
+}
+
+#[test]
+fn adding_an_existing_key_is_refused_and_a_same_name_elsewhere_only_warns() {
+    let err = refuse_bad_config_add("k", ConfigStore::Epoch, true, false)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already exists in the epoch config"), "{err}");
+    assert!(err.contains("update-epoch-config"), "{err}");
+    let warning = refuse_bad_config_add("k", ConfigStore::Epoch, false, true).unwrap();
+    assert!(
+        warning
+            .unwrap()
+            .contains("already exists in the instant config")
+    );
+    assert!(
+        refuse_bad_config_add("k", ConfigStore::Instant, false, false)
+            .unwrap()
+            .is_none()
+    );
+}
+
 // ===== decoding Move aborts =====
 
 fn move_abort(module: &str, code: u64, clever: Option<(&str, &str)>) -> ExecutionError {
