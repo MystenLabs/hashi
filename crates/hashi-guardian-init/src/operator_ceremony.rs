@@ -5,8 +5,8 @@
 //!
 //! `operator ceremony` drives a fresh ceremony-mode guardian through genesis BTC key setup:
 //! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
-//! share's recipient roster matches its expected KP cert set and every
-//! ciphertext targets its keyed cert (without decrypting) -> cross-check the
+//! share's recipient matches its expected KP cert and its ciphertext targets
+//! that cert (without decrypting) -> cross-check the
 //! guardian's `ceremony/` audit log and `kp-shares/` recovery log -> wait for
 //! every KP to confirm successful recovery.
 //!
@@ -57,7 +57,6 @@ pub async fn run(cfg: Config) -> Result<()> {
         phase = "setup",
         share_count = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
-        certificate_count = cfg.kp_roster.cert_count(),
         bucket = guardian_s3.bucket_name(),
         region = guardian_s3.region(),
         ?retention_environment,
@@ -73,18 +72,16 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    SetupNewKeyRequest::new).
     cfg.kp_roster.validate()?;
 
-    // 2. Load + validate each KP's PGP cert set.
+    // 2. Load + validate each KP's PGP cert.
     info!(
         phase = "roster load",
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "loading + validating full KP certificate roster",
     );
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "KP certificate roster loaded"
     );
     let setup_req = SetupNewKeyRequest::new(
@@ -189,7 +186,6 @@ pub async fn run(cfg: Config) -> Result<()> {
         n = cfg.kp_roster.num_shares,
         t = cfg.kp_roster.threshold,
         share_count = response.encrypted_shares.share_count(),
-        ciphertext_count = response.encrypted_shares.ciphertext_count(),
         "setup_new_key response received",
     );
 
@@ -201,13 +197,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         "verified SetupNewKeyResponse signature + shape",
     );
 
-    // 8. Inspect each share's recipient roster and every ciphertext
-    //    WITHOUT decrypting.
+    // 8. Inspect each share's recipient and ciphertext WITHOUT decrypting.
     info!(
         phase = "roster verify",
         share_count = live.encrypted_shares.share_count(),
-        ciphertext_count = live.encrypted_shares.ciphertext_count(),
-        "verifying every returned PGP-encrypted share ciphertext against the expected KP cert sets (without decrypting)",
+        "verifying every returned PGP-encrypted share against the expected KP certs (without decrypting)",
     );
     live.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(

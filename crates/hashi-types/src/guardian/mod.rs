@@ -258,13 +258,11 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
 }
 
 /// `KpSigned<ProvisionerRotateCertRequest>`.
-/// Replaces one certificate in a KP roster entry. Request must be signed
-/// with a certificate assigned to the same KP (including the to-be-deleted one).
+/// Replaces the signing KP's sole certificate.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProvisionerRotateCertRequest {
     expected_session_id: SessionID,
     expected_cert_seq: u64,
-    target_kp_pgp_fingerprint: KPFingerprint,
     new_kp_pgp_cert: PgpPublicCert,
     encrypted_share: GuardianEncryptedShare,
 }
@@ -274,7 +272,7 @@ pub struct ProvisionerRotateCertRequest {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ProvisionerRotateCertResponse {
     pub cert_seq: u64,
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_share: KpEncryptedShare,
 }
 
 // ---------------------------------------
@@ -291,8 +289,8 @@ pub struct CeremonyOperatorInitRequest {
 /// approvals binding the session, roster, sharing params, and S3 policy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    /// The KP certs. Each KP can have more than one cert.
-    key_provisioner_certs_roster: KpCertsRoster,
+    /// One ordered KP certificate per secret share.
+    key_provisioner_certs_roster: KpCertRoster,
     /// The secret-sharing params (n, t).
     params: SecretSharingParams,
 }
@@ -300,8 +298,8 @@ pub struct SetupNewKeyRequest {
 /// `GuardianSignedResponse<SetupNewKeyResponse>`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    /// Encryptions to each KP's cert. Each KP can have more than one cert.
-    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// One encrypted share per KP certificate.
+    pub encrypted_shares: KpEncryptedShareRoster,
     /// Params + share commitments.
     pub secret_sharing_instance: SecretSharingInstance,
     /// The Guardian BTC pubkey.
@@ -338,7 +336,7 @@ pub struct ProvisionerRotateKpSetRequest {
     encrypted_old_share: GuardianEncryptedShare,
     /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
     /// `new_params.num_shares()`.
-    new_kp_certs_roster: KpCertsRoster,
+    new_kp_certs_roster: KpCertRoster,
     /// The new secret-sharing params (n, t).
     new_params: SecretSharingParams,
 }
@@ -347,8 +345,8 @@ pub struct ProvisionerRotateKpSetRequest {
 /// shares, returned by `rotate_kp_set`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpSetResponse {
-    /// Encryptions to each new KP's cert. Each KP can have more than one cert.
-    pub encrypted_shares: KPEncryptedSharesRoster,
+    /// One encrypted share per new KP certificate.
+    pub encrypted_shares: KpEncryptedShareRoster,
     /// The new secret-sharing params and commitments.
     pub new_instance: SecretSharingInstance,
 }
@@ -385,7 +383,7 @@ impl OperatorInitRequest {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        kp_certs_roster: KpCertsRoster,
+        kp_certs_roster: KpCertRoster,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
@@ -403,7 +401,7 @@ impl SetupNewKeyRequest {
         })
     }
 
-    pub fn kp_certs_roster(&self) -> &KpCertsRoster {
+    pub fn kp_certs_roster(&self) -> &KpCertRoster {
         &self.key_provisioner_certs_roster
     }
 
@@ -726,7 +724,7 @@ impl ProvisionerRotateKpSetRequest {
         expected_session_id: SessionID,
         pcr_allowlist: PcrAllowlist,
         encrypted_old_share: GuardianEncryptedShare,
-        new_kp_certs_roster: KpCertsRoster,
+        new_kp_certs_roster: KpCertRoster,
         new_num_shares: usize,
         new_threshold: usize,
     ) -> GuardianResult<Self> {
@@ -754,7 +752,7 @@ impl ProvisionerRotateKpSetRequest {
         pcr_allowlist: PcrAllowlist,
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        new_kp_certs_roster: KpCertsRoster,
+        new_kp_certs_roster: KpCertRoster,
         new_params: SecretSharingParams,
         rng: &mut R,
     ) -> GuardianResult<Self> {
@@ -780,7 +778,7 @@ impl ProvisionerRotateKpSetRequest {
         &self.encrypted_old_share
     }
 
-    pub fn new_kp_certs_roster(&self) -> &KpCertsRoster {
+    pub fn new_kp_certs_roster(&self) -> &KpCertRoster {
         &self.new_kp_certs_roster
     }
 
@@ -794,7 +792,7 @@ impl ProvisionerRotateKpSetRequest {
         SessionID,
         PcrAllowlist,
         GuardianEncryptedShare,
-        KpCertsRoster,
+        KpCertRoster,
         SecretSharingParams,
     ) {
         (
@@ -819,7 +817,6 @@ impl ProvisionerRotateCertRequest {
     pub fn new<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        target_kp_pgp_fingerprint: KPFingerprint,
         new_kp_pgp_cert: PgpPublicCert,
         share: &Share,
         enclave_pub_key: &EncPubKey,
@@ -829,7 +826,6 @@ impl ProvisionerRotateCertRequest {
         Self {
             expected_session_id,
             expected_cert_seq,
-            target_kp_pgp_fingerprint,
             new_kp_pgp_cert,
             encrypted_share,
         }
@@ -838,14 +834,12 @@ impl ProvisionerRotateCertRequest {
     pub(crate) fn from_encrypted_share(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        target_kp_pgp_fingerprint: KPFingerprint,
         new_kp_pgp_cert: PgpPublicCert,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self {
             expected_session_id,
             expected_cert_seq,
-            target_kp_pgp_fingerprint,
             new_kp_pgp_cert,
             encrypted_share,
         }
@@ -857,10 +851,6 @@ impl ProvisionerRotateCertRequest {
 
     pub fn new_kp_pgp_cert(&self) -> &PgpPublicCert {
         &self.new_kp_pgp_cert
-    }
-
-    pub fn target_kp_pgp_fingerprint(&self) -> &str {
-        &self.target_kp_pgp_fingerprint
     }
 
     pub fn new_recipient_fingerprint(&self) -> KPFingerprint {
@@ -879,19 +869,10 @@ impl ProvisionerRotateCertRequest {
         self.expected_cert_seq
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        SessionID,
-        u64,
-        KPFingerprint,
-        PgpPublicCert,
-        GuardianEncryptedShare,
-    ) {
+    pub fn into_parts(self) -> (SessionID, u64, PgpPublicCert, GuardianEncryptedShare) {
         (
             self.expected_session_id,
             self.expected_cert_seq,
-            self.target_kp_pgp_fingerprint,
             self.new_kp_pgp_cert,
             self.encrypted_share,
         )
@@ -1119,6 +1100,7 @@ impl From<&ActivationState> for ActivationStateRepr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pgp::test_utils::mock_pgp_certs;
 
     #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {
@@ -1175,9 +1157,9 @@ mod tests {
 
     #[test]
     fn provisioner_rotate_kp_set_request_rejects_wrong_cert_count() {
-        let mut cert_sets = test_utils::mock_kp_certs(5);
+        let mut cert_sets = mock_pgp_certs(5);
         cert_sets.pop();
-        let certs_roster = KpCertsRoster::new(cert_sets).unwrap();
+        let certs_roster = KpCertRoster::new(cert_sets).unwrap();
         assert!(matches!(
             ProvisionerRotateKpSetRequest::new(
                 "session".into(),
@@ -1200,18 +1182,18 @@ mod tests {
 
     #[test]
     fn kp_certs_roster_rejects_duplicate_certs() {
-        let mut cert_sets = test_utils::mock_kp_certs(5);
+        let mut cert_sets = mock_pgp_certs(5);
         cert_sets[1] = cert_sets[0].clone();
         assert!(matches!(
-            KpCertsRoster::new(cert_sets).unwrap_err(),
+            KpCertRoster::new(cert_sets).unwrap_err(),
             InvalidInputs(_)
         ));
     }
 
     #[test]
     fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
-        let cert_sets = test_utils::mock_kp_certs(5);
-        let reversed: Vec<KpCerts> = cert_sets.iter().rev().cloned().collect();
+        let cert_sets = mock_pgp_certs(5);
+        let reversed: Vec<PgpPublicCert> = cert_sets.iter().rev().cloned().collect();
         let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap();
         let encrypted_old_share = GuardianEncryptedShare {
             id: ShareID::new(1).unwrap(),
@@ -1224,7 +1206,7 @@ mod tests {
             "session".into(),
             pcr_allowlist.clone(),
             encrypted_old_share.clone(),
-            KpCertsRoster::new(cert_sets).unwrap(),
+            KpCertRoster::new(cert_sets).unwrap(),
             5,
             3,
         )
@@ -1233,7 +1215,7 @@ mod tests {
             "session".into(),
             pcr_allowlist,
             encrypted_old_share,
-            KpCertsRoster::new(reversed).unwrap(),
+            KpCertRoster::new(reversed).unwrap(),
             5,
             3,
         )

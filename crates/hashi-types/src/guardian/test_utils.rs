@@ -15,10 +15,9 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShares;
-use super::KPEncryptedSharesRoster;
-use super::KpCerts;
-use super::KpCertsRoster;
+use super::KpCertRoster;
+use super::KpEncryptedShare;
+use super::KpEncryptedShareRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
@@ -136,15 +135,8 @@ impl SetupNewKeyRequest {
     }
 }
 
-pub fn mock_kp_certs_roster(n: usize) -> KpCertsRoster {
-    KpCertsRoster::new(mock_kp_certs(n)).unwrap()
-}
-
-pub fn mock_kp_certs(n: usize) -> Vec<KpCerts> {
-    mock_pgp_certs(n)
-        .into_iter()
-        .map(|cert| KpCerts::new(vec![cert]).unwrap())
-        .collect()
+pub fn mock_kp_certs_roster(n: usize) -> KpCertRoster {
+    KpCertRoster::new(mock_pgp_certs(n)).unwrap()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -157,17 +149,14 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
-    KPEncryptedSharesRoster::new(
+fn dummy_encrypted_shares() -> KpEncryptedShareRoster {
+    KpEncryptedShareRoster::new(
         (0..TEST_N)
-            .map(|i| KPEncryptedShares {
+            .map(|i| KpEncryptedShare {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                ciphertexts_by_fingerprint: [(
-                    format!("DUMMY FINGERPRINT {i}"),
-                    "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
-                )]
-                .into_iter()
-                .collect(),
+                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
+                armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----"
+                    .into(),
             })
             .collect(),
     )
@@ -219,7 +208,7 @@ impl ProvisionerRotateCertResponse {
     pub fn mock_for_testing() -> Self {
         Self {
             cert_seq: 7,
-            encrypted_shares: dummy_encrypted_shares()
+            encrypted_share: dummy_encrypted_shares()
                 .into_vec()
                 .into_iter()
                 .next()
@@ -310,14 +299,12 @@ impl ProvisionerRotateCertRequest {
     pub fn from_encrypted_share_for_testing(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        target_kp_pgp_fingerprint: String,
         new_kp_pgp_cert: PgpPublicCert,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self::from_encrypted_share(
             expected_session_id,
             expected_cert_seq,
-            target_kp_pgp_fingerprint,
             new_kp_pgp_cert,
             encrypted_share,
         )
