@@ -5,8 +5,7 @@
 //! and rejects the operator surface with `PERMISSION_DENIED`: the proxy is
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
-//! forwarded after a signature check, so a KP on its own machine reaches the
-//! guardian through the public endpoint. Wrapped by
+//! forwarded after a signature check. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use std::sync::Arc;
@@ -52,20 +51,20 @@ fn denied(rpc: &str) -> Status {
     ))
 }
 
-/// Admission control for a KP-signed request: reject unsigned or corrupt
-/// traffic before an enclave round-trip. The enclave repeats the verification
-/// and authorizes the signer against the ceremony's committed roster.
+/// Admission control only: the enclave repeats the verification and
+/// authorizes the signer against its roster.
 fn verify_kp_signature<T, P>(request: &P) -> Result<(), Status>
 where
     T: KpSigningIntent,
     P: Clone,
     KpSigned<T>: TryFrom<P, Error = GuardianError>,
 {
+    // TODO: check the signer against the roster here too.
     let signed_request = KpSigned::<T>::try_from(request.clone())
         .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
     signed_request
         .verify_signature()
-        .map_err(|error| Status::unauthenticated(error.to_string()))?;
+        .map_err(|e| Status::unauthenticated(e.to_string()))?;
     Ok(())
 }
 
@@ -105,7 +104,6 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         &self,
         request: Request<proto::SignedProvisionerRotateCertRequest>,
     ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
-        // TODO: check the signer against the roster here too.
         verify_kp_signature::<ProvisionerRotateCertRequest, _>(request.get_ref())?;
         let response = self.client.clone().provisioner_rotate_cert(request).await?;
         // The enclave has committed the replacement cert to the share log, so
@@ -115,10 +113,8 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
         Ok(response)
     }
 
-    /// A KP's confirmation that it recovered its dealt share; the ceremony
-    /// guardian completes only once every KP has confirmed. The enclave
-    /// binds the confirmation to its session, the pending ceremony digest and
-    /// the roster, so forwarding exposes nothing an unsigned caller can act on.
+    // Safe to expose: the enclave binds each confirmation to its session, the
+    // ceremony digest and the dealt roster.
     async fn confirm_ceremony(
         &self,
         request: Request<proto::SignedCeremonyConfirmationRequest>,
