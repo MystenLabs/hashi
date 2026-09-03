@@ -38,6 +38,7 @@ use crate::mpc::SigningManager;
 use crate::mpc::mpc_except_signing::VerifiedNonceCerts;
 use crate::mpc::mpc_except_signing::spawn_blocking;
 use crate::mpc::rpc::RpcP2PChannel;
+use crate::mpc::signing::IdentityInputs;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::NonceCertTimestamp;
@@ -534,7 +535,7 @@ impl MpcService {
         &self,
         epoch: u64,
         batch_index: u32,
-    ) -> anyhow::Result<(Committee, Presignatures)> {
+    ) -> anyhow::Result<(Committee, Presignatures, u16)> {
         let onchain_state = self.inner.onchain_state().clone();
         let committee = onchain_state
             .state()
@@ -589,17 +590,7 @@ impl MpcService {
         )
         .await?;
         drop(cert_wait_timer);
-        let canonical = final_certs.filter_map(|dealer, stamped| {
-            let cert = stamped.to_dealer_certificate(epoch).ok()?;
-            Some((
-                *dealer,
-                CertificateV1::NonceGeneration {
-                    batch_index,
-                    cert,
-                    timestamp_ms: stamped.timestamp_ms,
-                },
-            ))
-        });
+        let canonical = nonce_certificates(&final_certs, epoch, batch_index);
         let (cutoff_ms, served_weight, admitted) = {
             let mgr = mpc_manager.read().unwrap();
             match mgr.mpc_config.nonce_generation_protocol {
@@ -697,14 +688,15 @@ impl MpcService {
             "nonce batch {batch_index} for epoch {epoch}: {} presigs from the admitted set",
             presignatures.len(),
         );
-        Ok((committee, presignatures))
+        Ok((committee, presignatures, batch_size_per_weight))
     }
 
     async fn prepare_signing(&self, epoch: u64, output: &MpcOutput) -> anyhow::Result<()> {
-        let (committee, presignatures) = self.generate_presignatures(epoch, 0).await?;
+        let (committee, presignatures, batch_size_per_weight) =
+            self.generate_presignatures(epoch, 0).await?;
         let address = self.inner.config.validator_address()?;
         let share_owners = self.share_owners_for_epoch(epoch)?;
-        let signing_manager = SigningManager::new(
+        let (signing_manager, _identity) = SigningManager::new(
             address,
             committee,
             output.threshold,
@@ -716,6 +708,7 @@ impl MpcService {
             0, // batch_start_index
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
+            self.identity_inputs(epoch, batch_size_per_weight),
         );
         self.inner.store_signing_manager(signing_manager);
         Ok(())
@@ -821,14 +814,13 @@ impl MpcService {
                     params,
                     batch_size_per_weight,
                     floor,
-                    may_wait_for_floor(batch_start, num_consumed),
                 )
                 .await?;
             let Some(size) = size else {
                 anyhow::ensure!(
                     batch_start >= num_consumed,
-                    "nonce batch {batch_index} at start {batch_start} read sub-floor below cursor \
-                     {num_consumed} — fewer certs cleared sizing than the cursor requires",
+                    "nonce batch {batch_index} at start {batch_start} sized below the floor but \
+                     the cursor {num_consumed} has already drawn from it",
                 );
                 break;
             };
@@ -890,7 +882,7 @@ impl MpcService {
         let address = self.inner.config.validator_address()?;
         let retained_count = retained.len();
         let share_owners = self.share_owners_for_epoch(epoch)?;
-        let signing_manager = SigningManager::new_recovered(
+        let (signing_manager, _identities) = SigningManager::new_recovered(
             address,
             committee,
             output.threshold,
@@ -902,6 +894,7 @@ impl MpcService {
             &pending,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
+            self.identity_inputs(epoch, batch_size_per_weight),
         )?;
         self.inner.store_signing_manager(signing_manager);
         info!(
@@ -914,6 +907,13 @@ impl MpcService {
         Ok(())
     }
 
+    fn identity_inputs(&self, epoch: u64, batch_size_per_weight: u16) -> IdentityInputs {
+        IdentityInputs {
+            epoch,
+            batch_size_per_weight,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn nonce_batch_size_from_certs(
         &self,
@@ -924,7 +924,6 @@ impl MpcService {
         params: Parameters,
         batch_size_per_weight: u16,
         floor: u32,
-        wait_for_floor: bool,
     ) -> anyhow::Result<Option<usize>> {
         let onchain_state = self.inner.onchain_state().clone();
         let (certs, settled_cutoff_ms) = Self::fetch_final_nonce_certs(
@@ -932,24 +931,19 @@ impl MpcService {
             mpc_manager,
             epoch,
             batch_index,
-            wait_for_floor,
+            false,
             &self.inner.metrics,
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "nonce cert fetch for epoch {epoch} batch {batch_index} (boundary rebuild): {e}"
+            )
+        })?;
         let weight = match protocol {
             NonceGenerationProtocol::Vanilla => certified_nonce_weight(mpc_manager, &certs),
             NonceGenerationProtocol::Avid => {
-                let avid_certs = certs.filter_map(|dealer, stamped| {
-                    let cert = stamped.to_dealer_certificate(epoch).ok()?;
-                    Some((
-                        *dealer,
-                        CertificateV1::NonceGeneration {
-                            batch_index,
-                            cert,
-                            timestamp_ms: stamped.timestamp_ms,
-                        },
-                    ))
-                });
+                let avid_certs = nonce_certificates(&certs, epoch, batch_index);
                 mpc_manager
                     .read()
                     .unwrap()
@@ -1178,11 +1172,16 @@ impl MpcService {
             );
             return Ok(());
         }
-        let (_, presignatures) = self.generate_presignatures(epoch, batch_index).await?;
+        let (_, presignatures, batch_size_per_weight) =
+            self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {
             return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
         }
-        signing_manager.set_next_batch(batch_index, presignatures);
+        signing_manager.set_next_batch(
+            batch_index,
+            presignatures,
+            self.identity_inputs(epoch, batch_size_per_weight),
+        );
         Ok(())
     }
 
@@ -1374,17 +1373,7 @@ impl MpcService {
                 (outputs, Some(expected_size))
             }
             NonceGenerationProtocol::Avid => {
-                let avid_certs = certs.filter_map(|dealer, stamped| {
-                    let cert = stamped.to_dealer_certificate(epoch).ok()?;
-                    Some((
-                        *dealer,
-                        CertificateV1::NonceGeneration {
-                            batch_index,
-                            cert,
-                            timestamp_ms: stamped.timestamp_ms,
-                        },
-                    ))
-                });
+                let avid_certs = nonce_certificates(&certs, epoch, batch_index);
                 let admitted = mpc_manager
                     .read()
                     .unwrap()
@@ -2094,6 +2083,26 @@ pub(crate) async fn verify_fetched_certificates(
     verified
 }
 
+/// Live, boundary sizing and replay admit the same dealers only if they
+/// convert the served certs identically.
+fn nonce_certificates(
+    certs: &VerifiedNonceCerts<move_types::StampedDealerSubmissionV1>,
+    epoch: u64,
+    batch_index: u32,
+) -> VerifiedNonceCerts<CertificateV1> {
+    certs.filter_map(|dealer, stamped| {
+        let cert = stamped.to_dealer_certificate(epoch).ok()?;
+        Some((
+            *dealer,
+            CertificateV1::NonceGeneration {
+                batch_index,
+                cert,
+                timestamp_ms: stamped.timestamp_ms,
+            },
+        ))
+    })
+}
+
 fn certified_nonce_weight<T: NonceCertTimestamp>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
     certs: &VerifiedNonceCerts<T>,
@@ -2153,23 +2162,6 @@ fn classify_reconfig_execution_error(error: &ExecutionError) -> ReconfigSubmissi
             Some(RECONFIG_E_NOT_RECONFIGURING),
         ) => ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted,
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
-    }
-}
-
-fn may_wait_for_floor(batch_start: u64, cursor: u64) -> bool {
-    batch_start < cursor
-}
-
-#[cfg(test)]
-mod wait_for_floor_tests {
-    use super::may_wait_for_floor;
-
-    #[test]
-    fn waits_below_the_cursor_but_never_at_it() {
-        assert!(may_wait_for_floor(0, 1));
-        assert!(may_wait_for_floor(2519, 2520));
-        assert!(!may_wait_for_floor(0, 0));
-        assert!(!may_wait_for_floor(2520, 2520));
     }
 }
 
