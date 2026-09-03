@@ -6,7 +6,7 @@ name: Guardian Enclave Build
 # which goes in the ramdisk the measurement covers. So a PCR0 only means
 # something next to the deployment it was built for.
 #
-# Three ways in, one job:
+# Three ways in, one pipeline (detect → build → verify):
 #
 #   workflow_dispatch — a MEASUREMENT. Pass the same values that stack's enclave
 #     hosts build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml
@@ -21,35 +21,36 @@ name: Guardian Enclave Build
 #     canonical test values. Its PCR0 is not a deployment measurement; the only
 #     question is whether two builders agree. Every enclave host rebuilds the EIF
 #     from source, so a change that stops reproducing must not merge — the last
-#     one that did was found at a testnet rotation.
+#     one that did was found at a testnet rotation. It runs on EVERY PR: detect
+#     says whether an EIF input changed, the build runs only then, and verify
+#     always reports — green in seconds otherwise. That is what lets it be a
+#     required status check ("EIF reproducibility gate" in branch protection).
+#     A trigger-level `paths:` filter would instead leave the check Pending on
+#     every other PR and block them.
 #
 #   push to main — the same gate on the merge result. A PR passes on its own
 #     merge ref and main can move under it before it lands (the resolve check
 #     runs on push for the same reason), and the commit a stack pins as
-#     hashi-commit is a main commit: this leaves it a result on record.
+#     hashi-commit is a main commit: this leaves it a result on record. Nothing
+#     notifies on failure; look the commit's run up before pinning it.
 #
 # Both runners must agree, or the build is not reproducible and no measurement
-# from it can be trusted.
+# from it can be trusted. No build caching, ever: a cached kernel or cargo
+# stage shared by the two runners would have them compare the same bytes, and
+# the check would test nothing.
 
 on:
   pull_request:
-    paths:
-      - docker/hashi-guardian/**
-      - crates/hashi-guardian/**
-      - crates/hashi-types/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - .github/workflows/guardian-enclave.yml
   push:
     branches: [main]
+    # The same list detect greps for below; move them together. Not
+    # rust-toolchain.toml: the build never copies it, stagex pins rustc.
     paths:
       - docker/hashi-guardian/**
       - crates/hashi-guardian/**
       - crates/hashi-types/**
       - Cargo.toml
       - Cargo.lock
-      - rust-toolchain.toml
       - .github/workflows/guardian-enclave.yml
   workflow_dispatch:
     inputs:
@@ -88,10 +89,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Always runs. On a PR it diffs GitHub's merge of the PR against the base it
+  # would land on; a push or dispatch always builds. The list is what the
+  # Containerfile copies in (root manifest, root lock, the two crates) plus the
+  # Containerfile's own directory and this file — the same set the Makefile's
+  # out/nitro.eif prerequisites name. A miss here fails silently: the gate
+  # stays green on a change it never built.
+  detect:
+    name: Detect EIF input changes
+    runs-on: ubuntu-latest
+    outputs:
+      eif: ${{ github.event_name != 'pull_request' || steps.diff.outputs.eif == 'true' }}
+    steps:
+      # HEAD is GitHub's merge of the PR into its base, HEAD^1 that base.
+      - name: Checkout the merge commit and its parents
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
+        with:
+          fetch-depth: 2
+
+      - name: Diff the PR against its base
+        if: github.event_name == 'pull_request'
+        id: diff
+        run: |
+          git diff --name-only HEAD^1 HEAD > changed
+          if grep -E '^(docker/hashi-guardian/|crates/hashi-guardian/|crates/hashi-types/|Cargo\.(toml|lock)$|\.github/workflows/guardian-enclave\.yml$)' changed; then
+            echo "eif=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "none of the $(wc -l < changed) changed files is an EIF input"
+            echo "eif=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: [detect]
+    if: needs.detect.outputs.eif == 'true'
     strategy:
+      # A leg that fails alone leaves the other's PCRs for triage, and
+      # "re-run failed jobs" then rebuilds only the one that broke.
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-22.04]
+        # Two kernels and two Docker releases. Pinned rather than ubuntu-latest:
+        # when -latest moves to 26.04 the pair would silently become one image.
+        os: [ubuntu-24.04, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # Dispatch inputs are empty on pull_request and push; these are the gate's
@@ -115,7 +154,7 @@ jobs:
       # guardian, so the two must name the same commit or the EIF measures a
       # build that never existed.
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
         with:
           ref: ${{ inputs.git_revision || github.sha }}
 
@@ -158,6 +197,7 @@ jobs:
           echo "nproc         : $(nproc)"
           echo "docker        : $(docker version --format '{{.Server.Version}}')"
           echo "buildx        : $(docker buildx version)"
+          echo "buildkit      : $(docker buildx inspect | awk '/^BuildKit version:/ {print $3}')"
           sha256sum out/rootfs.cpio out/bzImage out/kernel.config
 
       - name: Upload build-input hashes
@@ -175,39 +215,63 @@ jobs:
           name: nitro-pcrs-${{ matrix.os }}
           path: docker/hashi-guardian/out/nitro.pcrs
 
+  # THE STATUS CHECK. Reports on every run that was not cancelled: green when
+  # no EIF input changed, otherwise only when both builds succeeded and their
+  # PCRs agree. Fails closed when detect did not succeed — its output is then
+  # unset, which would otherwise read as "nothing changed". Require this job,
+  # never build: a job skipped because its dependency failed reports Success,
+  # so a required build would not block a broken one.
   verify:
-    needs: [build]
+    name: EIF reproducibility gate
+    needs: [detect, build]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      DETECT_RESULT: ${{ needs.detect.result }}
+      EIF_CHANGED: ${{ needs.detect.outputs.eif }}
+      BUILD_RESULT: ${{ needs.build.result }}
     steps:
-      - name: Download ubuntu-latest PCRs
+      - name: Check the upstream jobs
+        run: |
+          if [ "$DETECT_RESULT" != success ]; then
+            echo "detect did not succeed ($DETECT_RESULT): cannot tell whether an EIF input changed, failing closed"
+            exit 1
+          fi
+          if [ "$EIF_CHANGED" != true ]; then
+            echo "No EIF input changed; nothing to build." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$BUILD_RESULT" != success ]; then
+            echo "An EIF input changed and the build did not succeed ($BUILD_RESULT)"
+            exit 1
+          fi
+
+      - name: Download PCRs
+        if: env.EIF_CHANGED == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
-          name: nitro-pcrs-ubuntu-latest
-          path: pcrs-latest
+          pattern: nitro-pcrs-*
+          path: pcrs
 
-      - name: Download ubuntu-22.04 PCRs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
-        with:
-          name: nitro-pcrs-ubuntu-22.04
-          path: pcrs-22
-
+      # One nitro.pcrs per runner, at pcrs/nitro-pcrs-<runner>/nitro.pcrs.
       - name: Compare PCRs
+        if: env.EIF_CHANGED == 'true'
         id: compare
         run: |
-          if diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
-            echo "match=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "match=false" >> "$GITHUB_OUTPUT"
-          fi
-          # Extract individual PCR values
-          PCR0=$(awk '/PCR0/ {print $1}' pcrs-latest/nitro.pcrs)
-          PCR1=$(awk '/PCR1/ {print $1}' pcrs-latest/nitro.pcrs)
-          PCR2=$(awk '/PCR2/ {print $1}' pcrs-latest/nitro.pcrs)
-          echo "pcr0=$PCR0" >> "$GITHUB_OUTPUT"
-          echo "pcr1=$PCR1" >> "$GITHUB_OUTPUT"
-          echo "pcr2=$PCR2" >> "$GITHUB_OUTPUT"
+          files=(pcrs/*/nitro.pcrs)
+          sha256sum "${files[@]}"
+          distinct=$(sha256sum "${files[@]}" | cut -d' ' -f1 | sort -u | wc -l)
+          if [ "${#files[@]}" -ge 2 ] && [ "$distinct" -eq 1 ]; then match=true; else match=false; fi
+          {
+            echo "match=$match"
+            echo "runners=$(printf '%s\n' "${files[@]}" | sed 's#^pcrs/nitro-pcrs-##; s#/nitro.pcrs$##' | paste -sd, -)"
+            echo "pcr0=$(awk '$2 == "PCR0" {print $1}' "${files[0]}")"
+            echo "pcr1=$(awk '$2 == "PCR1" {print $1}' "${files[0]}")"
+            echo "pcr2=$(awk '$2 == "PCR2" {print $1}' "${files[0]}")"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Print results
+        if: env.EIF_CHANGED == 'true'
         run: |
           {
             echo "## Guardian Enclave PCR Measurements"
@@ -218,7 +282,7 @@ jobs:
             echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |"
             echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |"
             echo ""
-            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)"
+            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (${{ steps.compare.outputs.runners }})"
             echo ""
             echo "**Trigger**: \`${{ github.event_name }}\`${{ github.event_name != 'workflow_dispatch' && ' — reproducibility gate with canonical inputs, NOT a deployment measurement' || '' }}"
             echo ""
@@ -239,32 +303,36 @@ jobs:
       # diagnosis. The last time this fired, the answer was the kernel — it was
       # stamping its built-in initramfs with the wall clock.
       - name: Download build inputs (only when the PCRs disagree)
-        if: steps.compare.outputs.match != 'true'
+        if: env.EIF_CHANGED == 'true' && steps.compare.outputs.match != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
           pattern: build-inputs-*
           path: inputs
 
       - name: Fail if PCRs differ
-        if: steps.compare.outputs.match != 'true'
+        if: env.EIF_CHANGED == 'true' && steps.compare.outputs.match != 'true'
         run: |
-          echo "PCRs differ across platforms!"
-          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs || true
+          echo "PCRs differ across runners (${{ steps.compare.outputs.runners }})!"
+          for f in pcrs/*/nitro.pcrs; do
+            echo "== $f"
+            cat "$f"
+          done
           echo
-          echo "Which build input moved:"
+          echo "Which build input moved (rootfs.cpio is the app ramdisk = PCR2, bzImage the kernel = PCR1):"
+          sha256sum inputs/*/rootfs.cpio inputs/*/bzImage inputs/*/kernel.config || true
           for f in rootfs.cpio bzImage kernel.config; do
-            a="$(sha256sum "inputs/build-inputs-ubuntu-latest/$f" 2>/dev/null | cut -d' ' -f1)"
-            b="$(sha256sum "inputs/build-inputs-ubuntu-22.04/$f" 2>/dev/null | cut -d' ' -f1)"
-            if [ -z "$a" ] || [ -z "$b" ]; then
-              printf '  %-14s ?  (artifact missing)\n' "$f"
-            elif [ "$a" = "$b" ]; then
-              printf '  %-14s same\n' "$f"
+            copies=$(sha256sum inputs/*/"$f" 2>/dev/null | wc -l | tr -d ' ')
+            distinct=$(sha256sum inputs/*/"$f" 2>/dev/null | cut -d' ' -f1 | sort -u | wc -l)
+            if [ "$copies" -lt 2 ]; then
+              echo "  $f: only $copies copy present"
+            elif [ "$distinct" -eq 1 ]; then
+              echo "  $f: same"
             else
-              printf '  %-14s DIFFERS\n    ubuntu-latest %s\n    ubuntu-22.04  %s\n' "$f" "$a" "$b"
+              echo "  $f: DIFFERS"
             fi
           done
           echo
-          echo "rootfs.cpio is the app ramdisk; bzImage the kernel. If only bzImage moved,"
-          echo "suspect something the kernel build absorbs from its environment — a clock"
-          echo "reaching the built-in initramfs is the failure mode that has happened before."
+          echo "If only bzImage moved, suspect something the kernel build absorbs from its"
+          echo "environment — a clock reaching the built-in initramfs is the failure mode"
+          echo "that has happened before."
           exit 1
