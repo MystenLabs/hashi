@@ -265,9 +265,9 @@ impl MpcService {
         }
     }
 
-    async fn post_reconfig_housekeeping(&self, target_epoch: u64) {
+    async fn post_reconfig_housekeeping(&self, target_epoch: u64, epoch_change_confirmed: bool) {
         let current_epoch = self.inner.onchain_state().epoch();
-        if current_epoch >= target_epoch {
+        if epoch_change_confirmed || current_epoch >= target_epoch {
             let pruning_references = {
                 let state = self.inner.onchain_state().state();
                 build_pruning_references(&state.hashi().committees, target_epoch)
@@ -324,11 +324,8 @@ impl MpcService {
             .pending_epoch_change()
     }
 
-    /// Returns true if no committee has ever been formed (genesis state).
     fn is_awaiting_genesis(&self) -> bool {
-        let state = self.inner.onchain_state().state();
-        let committees = &state.hashi().committees;
-        committees.epoch() == 0 && committees.current_committee().is_none()
+        self.inner.is_awaiting_genesis()
     }
 
     /// Wait for enough validators to register, then submit `start_reconfig`
@@ -1599,9 +1596,8 @@ impl MpcService {
                     let reason = outcome.label();
                     if matches!(outcome, ReconfigOutcome::NoShares) {
                         warn!(
-                            "handle_reconfig: epoch {target_epoch} could not reshare: this node \
-                             holds no previous-epoch shares, so its weight did not reach the \
-                             rotation"
+                            "handle_reconfig: epoch {target_epoch} produced no output: this node \
+                             holds no previous-epoch shares to reshare"
                         );
                     } else {
                         info!(
@@ -1622,7 +1618,7 @@ impl MpcService {
                         warn!("could not record resignation state for epoch {target_epoch}: {e}");
                     }
                     if !matches!(outcome, ReconfigOutcome::NoRole) {
-                        self.post_reconfig_housekeeping(target_epoch).await;
+                        self.post_reconfig_housekeeping(target_epoch, false).await;
                     }
                     return;
                 }
@@ -1631,7 +1627,6 @@ impl MpcService {
                         "MPC protocol for epoch {} failed: {e}, retrying...",
                         target_epoch
                     );
-                    metrics.task_heartbeat("mpc_service");
                     self.sleep_if_still_pending(target_epoch).await;
                 }
             }
@@ -1646,12 +1641,16 @@ impl MpcService {
             .mpc_end_reconfig_duration_seconds
             .with_label_values(&[protocol_label])
             .start_timer();
+        let mut end_reconfig_confirmed = false;
         loop {
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 break;
             }
             match self.submit_end_reconfig(target_epoch, &output).await {
-                Ok(()) => break,
+                Ok(()) => {
+                    end_reconfig_confirmed = true;
+                    break;
+                }
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
                         warn!(
@@ -1681,7 +1680,8 @@ impl MpcService {
             );
         }
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
-        self.post_reconfig_housekeeping(target_epoch).await;
+        self.post_reconfig_housekeeping(target_epoch, end_reconfig_confirmed)
+            .await;
         if !self.reconfig_target_live(target_epoch) {
             info!(
                 "handle_reconfig: epoch {target_epoch} no longer pending nor current; \

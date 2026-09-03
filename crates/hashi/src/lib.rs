@@ -348,6 +348,7 @@ impl Hashi {
                 None,
                 Some(&keys.encryption_public_key),
                 Some(&keys.signing_private_key),
+                self.is_awaiting_genesis(),
             )
             .await
     }
@@ -552,7 +553,7 @@ impl Hashi {
             .into_inner();
         let sui_epoch = service_info.epoch();
         let hashi_epoch = self.onchain_state().epoch();
-        let is_genesis = hashi_epoch == 0 && self.onchain_state().current_committee().is_none();
+        let is_genesis = self.is_awaiting_genesis();
         Ok(if is_genesis || hashi_epoch < sui_epoch {
             sui_epoch
         } else {
@@ -908,11 +909,12 @@ impl Hashi {
                     None,
                     next_epoch_keys.as_ref().map(|k| &k.encryption_public_key),
                     next_epoch_keys.as_ref().map(|k| &k.signing_private_key),
+                    self.is_awaiting_genesis(),
                 )
                 .await
                 {
                     Ok(Some(_)) => tracing::info!("Validator registered/updated on-chain"),
-                    Ok(None) => tracing::debug!("Validator metadata is already up-to-date"),
+                    Ok(None) => tracing::debug!("No validator registration or update to send"),
                     Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
                 }
             }
@@ -928,9 +930,7 @@ impl Hashi {
 
         if self.is_in_current_committee() {
             tracing::info!("Node is in the current committee; MPC service will recover state");
-        } else if self.onchain_state().epoch() == 0
-            && self.onchain_state().current_committee().is_none()
-        {
+        } else if self.is_awaiting_genesis() {
             tracing::info!("No initial committee yet; MPC service will handle genesis bootstrap");
         } else {
             tracing::info!(
@@ -1456,6 +1456,12 @@ impl Hashi {
         self.onchain_state()
             .current_committee()
             .is_some_and(|c| c.index_of(&address).is_some())
+    }
+
+    pub(crate) fn is_awaiting_genesis(&self) -> bool {
+        let state = self.onchain_state().state();
+        let committees = &state.hashi().committees;
+        committees.epoch() == 0 && committees.current_committee().is_none()
     }
 }
 

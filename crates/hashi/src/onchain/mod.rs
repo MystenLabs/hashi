@@ -2523,7 +2523,7 @@ mod tests {
         set.update_validator(member(false));
         assert_eq!(set.last_known_resigned(&validator_address), Some(false));
         set.remove_validator(&validator_address);
-        assert_eq!(set.last_known_resigned(&validator_address), Some(false));
+        assert_eq!(set.last_known_resigned(&validator_address), None);
 
         set.update_validator(member(true));
         set.remove_validator(&validator_address);
@@ -2540,6 +2540,12 @@ mod tests {
             rejoined.last_known_resigned(&validator_address),
             Some(false)
         );
+
+        let mut unresigned =
+            types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
+        unresigned.update_validator(member(false));
+        unresigned.remove_validator(&validator_address);
+        assert_eq!(unresigned.last_known_resigned(&validator_address), None);
 
         let mut live = types::CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
         live.update_validator(member(true));
