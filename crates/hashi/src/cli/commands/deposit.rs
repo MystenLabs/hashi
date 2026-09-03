@@ -218,7 +218,8 @@ async fn request(
         tx_opts.mode(),
         std::time::Duration::from_secs(10),
     )
-    .await?;
+    .await
+    .map_err(crate::cli::explain_tx_error)?;
 
     if let Some(response) = crate::cli::print_tx_outcome(outcome, &config.sui_rpc_url) {
         let request_id = crate::sui_tx_executor::deposit_request_id_from_response(&response)?;
@@ -369,7 +370,8 @@ async fn request_all(
 
         let request_ids = executor
             .execute_create_deposit_requests_batch(txid_address, chunk, derivation_path)
-            .await?;
+            .await
+            .map_err(crate::cli::explain_tx_error)?;
         all_request_ids.extend(request_ids);
     }
 

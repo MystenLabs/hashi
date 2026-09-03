@@ -122,7 +122,8 @@ async fn request(
             tx_opts.mode(),
             std::time::Duration::from_secs(10),
         )
-        .await?;
+        .await
+        .map_err(crate::cli::explain_tx_error)?;
 
         if let Some(response) = crate::cli::print_tx_outcome(outcome, &config.sui_rpc_url) {
             let request_id =
@@ -167,7 +168,8 @@ async fn request(
         ));
         let ids = executor
             .execute_create_withdrawal_requests_batch(amount, destination_bytes.clone(), this_batch)
-            .await?;
+            .await
+            .map_err(crate::cli::explain_tx_error)?;
         submitted += ids.len();
         remaining -= this_batch;
     }
@@ -233,7 +235,8 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
         tx_opts.mode(),
         std::time::Duration::from_secs(10),
     )
-    .await?;
+    .await
+    .map_err(crate::cli::explain_tx_error)?;
 
     if crate::cli::print_tx_outcome(outcome, &config.sui_rpc_url).is_some() {
         print_success("Withdrawal cancelled.");

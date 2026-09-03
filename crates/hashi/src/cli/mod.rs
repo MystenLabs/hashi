@@ -104,7 +104,8 @@ pub struct CliGlobalOpts {
 
     /// Sender address to build the transaction for (e.g. a multisig address).
     /// Defaults to the configured keypair's address; required when serializing
-    /// or dry-running without a keypair.
+    /// or dry-running without a keypair, where it is also the committee
+    /// identity the governance commands act as.
     #[clap(global = true, long)]
     pub sender: Option<String>,
 
@@ -1016,7 +1017,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         private_key: opts.btc_private_key,
     };
 
-    let config = config::CliConfig::load(
+    let mut config = config::CliConfig::load(
         opts.config.as_deref(),
         opts.sui_rpc_url,
         opts.package_id,
@@ -1031,6 +1032,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         .map(str::parse::<sui_sdk_types::Address>)
         .transpose()
         .context("Invalid --sender address")?;
+    config.acting_sender = sender;
     let gas_object = opts
         .gas
         .as_deref()
@@ -1383,6 +1385,18 @@ fn init_tracing(verbose: bool) {
 /// stdout into another tool never picks up progress chatter.
 pub fn print_detail(msg: &str) {
     eprintln!("{msg}");
+}
+
+/// Attach a human explanation to a transaction failure when it is a Move
+/// abort (a clever `#[error]` constant with a hint, or the framework's
+/// dynamic-field miss); other errors pass through unchanged. Every CLI path
+/// that finalizes or executes a transaction maps its error through this, so
+/// the operator never has to read a raw `MoveAbort` line first.
+pub fn explain_tx_error(err: anyhow::Error) -> anyhow::Error {
+    match commands::proposal::explain_move_abort(&err) {
+        Some(explanation) => err.context(explanation),
+        None => err,
+    }
 }
 
 /// Ask the operator to confirm. Requires an explicit `y`; anything else is a

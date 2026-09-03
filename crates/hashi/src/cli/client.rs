@@ -124,6 +124,9 @@ pub struct HashiClient {
     /// build fully-resolved shared inputs (see
     /// [`build_create_proposal_transaction`]).
     hashi_initial_shared_version: u64,
+    /// `--sender`, when given: the identity governance commands act as when
+    /// there is no keypair to derive one from.
+    acting_sender: Option<Address>,
     /// Optional executor for signing and submitting transactions
     executor: Option<SuiTxExecutor>,
     /// The RPC endpoint this client talks to (used for explorer deep-links)
@@ -266,6 +269,7 @@ impl HashiClient {
             onchain_state,
             hashi_ids,
             hashi_initial_shared_version,
+            acting_sender: config.acting_sender,
             executor,
             sui_rpc_url: config.sui_rpc_url.clone(),
         })
@@ -320,6 +324,7 @@ impl HashiClient {
             std::time::Duration::from_secs(10),
         )
         .await
+        .map_err(crate::cli::explain_tx_error)
     }
 
     // ========================================================================
@@ -560,15 +565,55 @@ impl HashiClient {
         self.executor.as_ref().map(|e| e.sender())
     }
 
-    /// Resolve the committee member (validator address) the configured
-    /// keypair acts for in governance calls: an exact validator match wins,
-    /// otherwise exactly one operator delegation; more than one is an error
-    /// (see `resolve_governance_identity`).
+    /// The address a transaction is built for: `--sender` when given,
+    /// otherwise the configured keypair's address. This is also the address
+    /// whose committee identity the governance commands act as, so the
+    /// serialize-unsigned and dry-run paths work without a keypair. When both
+    /// are present and differ, the chain rejects the signature anyway, so the
+    /// explicit sender wins here too.
+    pub fn acting_address(&self) -> Option<Address> {
+        self.acting_sender.or_else(|| self.signer_address())
+    }
+
+    /// Resolve the committee member (validator address) the acting address
+    /// acts for in governance calls: an exact validator match wins, otherwise
+    /// exactly one operator delegation; more than one is an error (see
+    /// `resolve_governance_identity`).
     pub fn resolve_validator_address(&self) -> anyhow::Result<Address> {
-        let sender = self
-            .signer_address()
-            .ok_or_else(|| anyhow::anyhow!("Cannot resolve validator: no keypair configured"))?;
+        let sender = self.acting_address().ok_or_else(|| {
+            anyhow::anyhow!("Cannot resolve validator: no keypair configured and no --sender given")
+        })?;
         resolve_governance_identity(&self.fetch_committee_members(), sender)
+    }
+
+    /// The registration record for `validator`, if it is registered.
+    pub fn member_info(&self, validator: &Address) -> Option<MemberInfo> {
+        self.fetch_committee_members()
+            .into_iter()
+            .find(|m| m.validator_address() == validator)
+    }
+
+    /// The current on-chain value of `key` in the instant config store.
+    pub fn instant_config_value(&self, key: &str) -> Option<ConfigValue> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .config
+            .config
+            .get(key)
+            .cloned()
+    }
+
+    /// The current on-chain value of `key` in the epoch config store.
+    pub fn epoch_config_value(&self, key: &str) -> Option<ConfigValue> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .epoch_config
+            .entries()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
     }
 
     /// Build a vote transaction for a proposal.
