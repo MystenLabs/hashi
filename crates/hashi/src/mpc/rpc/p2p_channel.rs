@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::proto_conversions::partial_sigs_response_limit;
 use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
@@ -18,6 +19,7 @@ use crate::mpc::types::SendMessagesRequest;
 use crate::mpc::types::SendMessagesResponse;
 use crate::onchain::OnchainState;
 use async_trait::async_trait;
+use hashi_types::proto;
 use sui_sdk_types::Address;
 use tonic::metadata::MetadataValue;
 
@@ -25,6 +27,7 @@ pub struct RpcP2PChannel {
     onchain_state: OnchainState,
     epoch: u64,
     protocol_label: &'static str,
+    max_owned_shares: Option<usize>,
 }
 
 impl RpcP2PChannel {
@@ -33,7 +36,13 @@ impl RpcP2PChannel {
             onchain_state,
             epoch,
             protocol_label,
+            max_owned_shares: None,
         }
+    }
+
+    pub fn with_max_owned_shares(mut self, shares: usize) -> Self {
+        self.max_owned_shares = Some(shares);
+        self
     }
 
     fn get_client(&self, address: &Address) -> ChannelResult<Client> {
@@ -56,6 +65,22 @@ impl RpcP2PChannel {
         );
         req
     }
+}
+
+fn reject_over_answer(
+    party: &Address,
+    requested: usize,
+    response: &proto::GetPartialSignaturesResponse,
+) -> ChannelResult<()> {
+    if response.partial_sigs.len() > requested || response.signing_nonces.len() > requested {
+        return Err(ChannelError::RequestFailed(format!(
+            "{party} answered {requested} requested id(s) with {} partial-signature and {} nonce \
+             entries",
+            response.partial_sigs.len(),
+            response.signing_nonces.len(),
+        )));
+    }
+    Ok(())
 }
 
 fn map_status(status: tonic::Status) -> ChannelError {
@@ -141,14 +166,22 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &GetPartialSignaturesRequest,
     ) -> ChannelResult<GetPartialSignaturesResponse> {
-        let client = self.get_client(party)?;
+        let mut client = self.get_client(party)?;
+        if let Some(max_owned) = self.max_owned_shares {
+            client = client.tighten_max_decoding_message_size(partial_sigs_response_limit(
+                request.signing_ids.len(),
+                max_owned,
+            ));
+        }
         let proto_request = self.build_request(request.to_proto(self.epoch));
         let response = client
             .mpc_service_client()
             .get_partial_signatures(proto_request)
             .await
             .map_err(map_status)?;
-        GetPartialSignaturesResponse::try_from(response.get_ref())
+        let response = response.get_ref();
+        reject_over_answer(party, request.signing_ids.len(), response)?;
+        GetPartialSignaturesResponse::try_from(response)
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 }
@@ -156,6 +189,27 @@ impl P2PChannel for RpcP2PChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn response(sigs: usize, nonces: usize) -> proto::GetPartialSignaturesResponse {
+        let entries = |n: usize| {
+            (0..n)
+                .map(|i| (format!("0x{i:064x}"), Default::default()))
+                .collect()
+        };
+        proto::GetPartialSignaturesResponse {
+            partial_sigs: entries(sigs),
+            signing_nonces: entries(nonces),
+        }
+    }
+
+    #[test]
+    fn over_answering_a_poll_is_refused_before_its_payloads_are_deserialized() {
+        let party = Address::new([9u8; 32]);
+        assert!(reject_over_answer(&party, 2, &response(2, 2)).is_ok());
+        assert!(reject_over_answer(&party, 2, &response(1, 0)).is_ok());
+        assert!(reject_over_answer(&party, 2, &response(3, 2)).is_err());
+        assert!(reject_over_answer(&party, 2, &response(2, 3)).is_err());
+    }
 
     #[test]
     fn map_status_treats_only_the_not_ready_response_as_not_ready() {

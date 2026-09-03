@@ -1173,14 +1173,15 @@ impl Hashi {
                 epoch,
             );
         }
-        let p2p_channel =
-            RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
         let signing_manager = self.signing_manager_for(epoch).ok_or_else(|| {
             anyhow::anyhow!(
                 "SigningManager not available for epoch {epoch}; \
                  reconciliation may be catching up"
             )
         })?;
+        let p2p_channel =
+            RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
+                .with_max_owned_shares(signing_manager.max_owned_count());
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;

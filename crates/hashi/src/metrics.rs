@@ -157,9 +157,7 @@ pub struct Metrics {
     /// Reduced weight a dealer collected above its stopping threshold,
     /// recorded only when that threshold was met.
     pub mpc_dealer_collected_margin_weight: HistogramVec,
-    /// Failed `get_partial_signatures` polls by peer (transport/TLS/timeout).
-    /// Each failure also puts the peer in a short poll cooldown, so this is
-    /// the per-validator health signal for the MPC signing path.
+    /// Failed `get_partial_signatures` polls by peer.
     pub mpc_partial_sig_poll_failures_total: IntCounterVec,
     /// Signing inputs where a peer's signing nonce differs from ours. Counted
     /// per input before its eval set is inspected, so an empty eval set still
@@ -168,6 +166,10 @@ pub struct Metrics {
     /// Partial signatures that disagreed with the RS-recovered polynomial,
     /// by owner.
     pub mpc_partial_sig_mismatch_total: IntCounterVec,
+    /// Partial-signature lists refused at merge, by peer.
+    pub mpc_partial_sig_lists_rejected_total: IntCounterVec,
+    /// Individual partial signatures dropped at merge, by peer.
+    pub mpc_partial_sig_evals_dropped_total: IntCounterVec,
     /// Reader-side rejections of certificates read from TOB.
     pub mpc_certs_rejected_total: IntCounterVec,
     /// Writer-side outcome of publishing a dealer certificate to the TOB.
@@ -991,6 +993,21 @@ impl Metrics {
                 "hashi_mpc_partial_sig_nonce_mismatch_total",
                 "Signing inputs where a peer's signing nonce differs from ours, so whatever \
                  partials it sent for them are discarded.",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            mpc_partial_sig_evals_dropped_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_partial_sig_evals_dropped_total",
+                "Partial signatures dropped at merge, by peer, counted per (input, eval) (index \
+                 not owned, or repeated; this alone does not cool the peer)",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            mpc_partial_sig_lists_rejected_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_partial_sig_lists_rejected_total",
+                "Partial-signature lists refused at merge, by peer",
                 &["peer"],
                 registry,
             )

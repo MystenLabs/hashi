@@ -55,12 +55,7 @@ const PARTIAL_SIGS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// first attempt). Kept minimal for the same reason as the call timeout.
 const PARTIAL_SIGS_CALL_RETRIES: usize = 1;
 
-/// How long a peer whose poll hard-failed (connect/TLS/timeout) is skipped
-/// before being probed again. Bounds the cost of dead peers to one probe per
-/// cooldown window instead of one per round per concurrent signing task.
-/// Deliberately well below the withdrawal signing deadline (30 s): peers
-/// cooled early in a call must become pollable again within that same call,
-/// or one bad round could black out the rest of it.
+/// How long a peer whose poll failed is skipped before being probed again.
 const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(10);
 
 /// A single contiguous batch of presignatures.
@@ -99,7 +94,38 @@ struct SigningEpochConfig {
     key_shares: avss::SharesForNode,
     verifying_key: G,
     share_owners: HashMap<ShareIndex, Address>,
+    owned_counts: HashMap<Address, usize>,
     refill_divisor: usize,
+}
+
+impl SigningEpochConfig {
+    fn over_owned_count(&self, peer: &Address, sigs: &[Eval<S>]) -> Option<(usize, usize)> {
+        let owned = self.owned_counts.get(peer).copied().unwrap_or(0);
+        (sigs.len() > owned).then_some((sigs.len(), owned))
+    }
+
+    fn retain_owned(&self, peer: &Address, sigs: Vec<Eval<S>>) -> (Vec<Eval<S>>, u64) {
+        let mut seen = HashSet::with_capacity(sigs.len());
+        let mut dropped = 0u64;
+        let kept = sigs
+            .into_iter()
+            .filter(|e| {
+                let ok = self.share_owners.get(&e.index) == Some(peer) && seen.insert(e.index);
+                dropped += u64::from(!ok);
+                ok
+            })
+            .collect();
+        (kept, dropped)
+    }
+}
+
+fn owned_counts_by_member(share_owners: &HashMap<ShareIndex, Address>) -> HashMap<Address, usize> {
+    share_owners
+        .values()
+        .fold(HashMap::new(), |mut counts, owner| {
+            *counts.entry(*owner).or_default() += 1;
+            counts
+        })
 }
 
 enum CacheOrPresig {
@@ -135,14 +161,7 @@ pub struct SigningManager {
     peer_cooldowns: PeerCooldowns,
 }
 
-/// Peers whose `get_partial_signatures` poll recently hard-failed
-/// (connect/TLS/timeout), and when each may be probed again.
-///
-/// Shared across all concurrent signing tasks of an epoch so a dead peer
-/// detected by one task is skipped by all of them instead of being
-/// rediscovered per task per round. A cooling peer is only excluded from
-/// polling; it stays in each input's `peers_remaining`, so it contributes
-/// again as soon as a post-cooldown probe succeeds.
+/// Peers whose `get_partial_signatures` poll recently failed and when each may be probed again.
 struct PeerCooldowns {
     until: Mutex<HashMap<Address, Instant>>,
 }
@@ -227,6 +246,7 @@ impl SigningManager {
                 threshold,
                 key_shares,
                 verifying_key,
+                owned_counts: owned_counts_by_member(&share_owners),
                 share_owners,
                 refill_divisor,
             }),
@@ -297,6 +317,7 @@ impl SigningManager {
                 threshold,
                 key_shares,
                 verifying_key,
+                owned_counts: owned_counts_by_member(&share_owners),
                 share_owners,
                 refill_divisor,
             }),
@@ -422,6 +443,16 @@ impl SigningManager {
 
     pub fn verifying_key(&self) -> G {
         self.config.verifying_key
+    }
+
+    /// The most share indices any single member owns this epoch.
+    pub fn max_owned_count(&self) -> usize {
+        self.config
+            .owned_counts
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn handle_get_partial_signatures_request(
@@ -1161,7 +1192,7 @@ impl SigningManager {
             }
         }
         if peer_ids.is_empty() {
-            // Every remaining peer is cooling from a hard failure (explicit
+            // Every remaining peer is cooling from a failed poll (explicit
             // not-ready answers are never cooled). Storming a struggling
             // fleet with more polls helps nobody: sleep until the first
             // cooldown lapses (clamped to the deadline) and let the next
@@ -1211,10 +1242,22 @@ impl SigningManager {
                     self.peer_cooldowns.record_success(&peer);
                     let mut nonce_mismatches = 0u64;
                     let mut unusable_reports = 0u64;
+                    let mut rejected_lists = 0u64;
+                    let mut dropped_evals = 0u64;
+                    let mut violation_sample: Vec<String> = Vec::new();
                     let peer_reports_nonces = !response.signing_nonces.is_empty();
                     for (signing_id, sigs) in response.partial_sigs {
-                        if let Some(&i) = index.get(&signing_id)
-                            && pending[i].peers_remaining.remove(&peer)
+                        let asked = index
+                            .get(&signing_id)
+                            .filter(|&&i| pending[i].peers_remaining.remove(&peer));
+                        let Some(&i) = asked else {
+                            rejected_lists += 1;
+                            if violation_sample.len() < 8 {
+                                violation_sample
+                                    .push(format!("{signing_id} not outstanding for this peer"));
+                            }
+                            continue;
+                        };
                         {
                             let st = &mut pending[i];
                             let reported = match response.signing_nonces.get(&signing_id) {
@@ -1235,26 +1278,16 @@ impl SigningManager {
                                 nonce_mismatches += 1;
                                 continue;
                             }
+                            if let Some((len, owned)) = self.config.over_owned_count(&peer, &sigs) {
+                                rejected_lists += 1;
+                                if violation_sample.len() < 8 {
+                                    violation_sample.push(format!("{len} evals, owns {owned}"));
+                                }
+                                continue;
+                            }
+                            let (sigs, dropped) = self.config.retain_owned(&peer, sigs);
+                            dropped_evals += dropped;
                             for eval in sigs {
-                                // Only the index's owner may supply its
-                                // value; a peer squatting other peers'
-                                // indices could otherwise push the pool's
-                                // error count past RS capacity.
-                                if self.config.share_owners.get(&eval.index) != Some(&peer) {
-                                    tracing::warn!(
-                                        "Dropping partial signature from {peer} for share \
-                                         index {} it does not own",
-                                        eval.index,
-                                    );
-                                    continue;
-                                }
-                                // A duplicate index would fail aggregation
-                                // outright (`aggregate_signatures` rejects
-                                // duplicates), so keep the first value even
-                                // if the owner sends an index twice.
-                                if st.partials.iter().any(|e| e.index == eval.index) {
-                                    continue;
-                                }
                                 st.partials.push(eval);
                                 progressed = true;
                             }
@@ -1276,6 +1309,33 @@ impl SigningManager {
                             "Signing-nonce disagreement with {peer} on {nonce_mismatches} \
                              input(s); dropped its partials. Does not establish which side \
                              diverged"
+                        );
+                    }
+                    if rejected_lists > 0 {
+                        self.peer_cooldowns.record_failure(peer);
+                        let labels = [&peer.to_string()];
+                        metrics
+                            .mpc_partial_sig_lists_rejected_total
+                            .with_label_values(&labels)
+                            .inc_by(rejected_lists);
+                        metrics
+                            .mpc_partial_sig_poll_failures_total
+                            .with_label_values(&labels)
+                            .inc();
+                        tracing::warn!(
+                            "Rejected {rejected_lists} partial-signature list(s) from {peer} \
+                             (cooling down for {PARTIAL_SIGS_PEER_COOLDOWN:?}): {}",
+                            violation_sample.join("; "),
+                        );
+                    }
+                    if dropped_evals > 0 {
+                        metrics
+                            .mpc_partial_sig_evals_dropped_total
+                            .with_label_values(&[&peer.to_string()])
+                            .inc_by(dropped_evals);
+                        tracing::warn!(
+                            "Dropped {dropped_evals} partial signature(s) from {peer}: share \
+                             index not owned, or repeated within its list"
                         );
                     }
                     if pending
@@ -1301,7 +1361,10 @@ impl SigningManager {
                         .mpc_partial_sig_poll_failures_total
                         .with_label_values(&[&peer.to_string()])
                         .inc();
-                    tracing::info!(
+                    // Warn, not info: an under-sized response limit would
+                    // also surface here, and there it fires for every honest
+                    // peer at once.
+                    tracing::warn!(
                         "Batched get_partial_signatures from {peer} failed \
                          (cooling down for {PARTIAL_SIGS_PEER_COOLDOWN:?}): {e}"
                     );
@@ -2986,27 +3049,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collect_drops_evals_for_shares_the_peer_does_not_own() {
-        // A garbage-flooding peer answers with values for every index. Only
-        // the value for its own share (member 1 owns share 2) may enter the
-        // pool: accepted squats would push the pool's error count past RS
-        // capacity.
+    async fn test_collect_drops_an_unowned_eval_without_penalising_the_peer() {
         let setup = SigningTestSetup::new(4);
         let mgr = &setup.managers[0];
         let metrics = test_metrics();
-        let flooder = test_address(1);
-        let mut rng = StdRng::seed_from_u64(4242);
+        let diverged = test_address(1);
+        let mut rng = StdRng::seed_from_u64(8181);
 
-        let responses = HashMap::from([(
-            flooder,
-            Ok(vec![
-                eval_at(1, S::rand(&mut rng)), // caller's share
-                eval_at(2, S::rand(&mut rng)), // flooder's own share
-                eval_at(3, S::rand(&mut rng)), // another member's share
-                eval_at(4, S::rand(&mut rng)), // another member's share
-                eval_at(9, S::rand(&mut rng)), // nonexistent share
-            ]),
-        )]);
+        let responses = HashMap::from([(diverged, Ok(vec![eval_at(3, S::rand(&mut rng))]))]);
         let p2p = CannedP2PChannel {
             responses,
             ..Default::default()
@@ -3015,7 +3065,65 @@ mod tests {
         let mut pending = vec![test_input_state(
             test_request_id(),
             vec![eval_at(1, S::zero())],
-            vec![flooder],
+            vec![diverged],
+        )];
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        mgr.collect_partial_sigs_from_peers(
+            &p2p,
+            &mut pending,
+            deadline,
+            &HashSet::new(),
+            &metrics,
+        )
+        .await;
+
+        let indices: Vec<u16> = pending[0].partials.iter().map(|e| e.index.get()).collect();
+        assert_eq!(indices, vec![1], "an unowned eval must not enter the pool");
+        assert!(
+            !mgr.peer_cooldowns.is_cooling(&diverged, Instant::now()),
+            "dropping one eval must not cool the peer"
+        );
+        assert_eq!(
+            metrics
+                .mpc_partial_sig_evals_dropped_total
+                .with_label_values(&[&diverged.to_string()])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_rejects_a_list_longer_than_the_peer_owns() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let metrics = test_metrics();
+        let flooder = test_address(1);
+        let honest = test_address(2);
+        let mut rng = StdRng::seed_from_u64(4242);
+
+        let responses = HashMap::from([
+            (
+                flooder,
+                Ok(vec![
+                    eval_at(1, S::rand(&mut rng)), // caller's share
+                    eval_at(2, S::rand(&mut rng)), // flooder's own share
+                    eval_at(3, S::rand(&mut rng)), // another member's share
+                    eval_at(4, S::rand(&mut rng)), // another member's share
+                    eval_at(9, S::rand(&mut rng)), // nonexistent share
+                ]),
+            ),
+            (honest, Ok(vec![eval_at(3, S::rand(&mut rng))])),
+        ]);
+        let p2p = CannedP2PChannel {
+            responses,
+            ..Default::default()
+        };
+
+        let mut pending = vec![test_input_state(
+            test_request_id(),
+            vec![eval_at(1, S::zero())],
+            vec![flooder, honest],
         )];
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3033,8 +3141,17 @@ mod tests {
         indices.sort_unstable();
         assert_eq!(
             indices,
-            vec![1, 2],
-            "only the local share and the flooder's own share may be in the pool"
+            vec![1, 3],
+            "nothing from the flooder may enter the pool, and the honest peer is unaffected"
+        );
+        assert!(mgr.peer_cooldowns.is_cooling(&flooder, Instant::now()));
+        assert!(!mgr.peer_cooldowns.is_cooling(&honest, Instant::now()));
+        assert_eq!(
+            metrics
+                .mpc_partial_sig_lists_rejected_total
+                .with_label_values(&[&flooder.to_string()])
+                .get(),
+            1
         );
         let share_1_values: Vec<&S> = st
             .partials

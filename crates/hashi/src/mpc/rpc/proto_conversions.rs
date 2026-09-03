@@ -30,6 +30,15 @@ fn parse_address(s: &str, field: &str) -> Result<Address, TryFromProtoError> {
         .map_err(|e| TryFromProtoError::invalid(field, e))
 }
 
+pub(crate) fn partial_sigs_response_limit(requested_ids: usize, max_owned: usize) -> usize {
+    const EVAL_BYTES: usize = 34;
+    const PER_ID_OVERHEAD_BYTES: usize = 512;
+    const FLOOR_BYTES: usize = 64 * 1024;
+    requested_ids * (max_owned * EVAL_BYTES + PER_ID_OVERHEAD_BYTES) + FLOOR_BYTES
+}
+
+const MAX_PARTIAL_SIGS_BLOB_BYTES: usize = 3 + u16::MAX as usize * 34;
+
 /// Deserialize a BCS-encoded proto field.
 #[allow(clippy::result_large_err)]
 fn deserialize_bcs<'de, T: Deserialize<'de>>(
@@ -623,6 +632,13 @@ impl TryFrom<&proto::GetPartialSignaturesResponse> for types::GetPartialSignatur
             .iter()
             .map(|(id, bcs)| {
                 let id = parse_address(id, "partial_sigs key")?;
+                let len = bcs.value.as_ref().map_or(0, |v| v.len());
+                if len > MAX_PARTIAL_SIGS_BLOB_BYTES {
+                    return Err(TryFromProtoError::invalid(
+                        "partial_sigs",
+                        format!("{len} bytes exceeds the {MAX_PARTIAL_SIGS_BLOB_BYTES}-byte bound"),
+                    ));
+                }
                 let sigs = deserialize_bcs(bcs, "partial_sigs")?;
                 Ok((id, sigs))
             })
@@ -784,5 +800,55 @@ mod avid_conversion_tests {
             dealer: Address::new([7u8; 32]),
             echo,
         }));
+    }
+}
+
+#[cfg(test)]
+mod partial_sigs_limit_tests {
+    use super::*;
+    use fastcrypto::groups::GroupElement;
+    use fastcrypto_tbls::polynomial::Eval;
+    use fastcrypto_tbls::threshold_schnorr::S;
+    use prost::Message;
+    use sui_sdk_types::Address;
+
+    fn response(inputs: usize, owned: usize) -> proto::GetPartialSignaturesResponse {
+        let mut partial_sigs = BTreeMap::new();
+        let mut signing_nonces = BTreeMap::new();
+        for i in 0..inputs {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            id[1] = (i >> 8) as u8;
+            let id = Address::new(id);
+            let sigs: Vec<Eval<S>> = (1..=owned as u16)
+                .map(|index| Eval {
+                    index: ShareIndex::new(index).unwrap(),
+                    value: S::zero(),
+                })
+                .collect();
+            partial_sigs.insert(id, sigs);
+            signing_nonces.insert(id, vec![2u8; 33]);
+        }
+        (&types::GetPartialSignaturesResponse {
+            partial_sigs,
+            signing_nonces,
+        })
+            .into()
+    }
+
+    #[test]
+    fn partial_sigs_response_limit_covers_the_honest_maximum() {
+        for (ids, owned) in [(1, 1), (64, 240), (400, 60), (700, 1)] {
+            let encoded = response(ids, owned).encoded_len();
+            assert!(
+                encoded <= partial_sigs_response_limit(ids, owned),
+                "{ids} ids x {owned} shares encode to {encoded} bytes"
+            );
+            let overhead = encoded - ids * owned * 34;
+            assert!(
+                overhead <= ids * 512,
+                "{ids} ids x {owned} shares carry {overhead} bytes of non-eval overhead"
+            );
+        }
     }
 }
