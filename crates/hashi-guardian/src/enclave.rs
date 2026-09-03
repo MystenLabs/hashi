@@ -86,6 +86,9 @@ pub struct EnclaveState {
     /// Rate limiter. Set once during operator_activate.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
+    /// Mirrors the limiter's state so status reads never wait on the limiter
+    /// lock, which a withdrawal holds across its durable log write.
+    limiter_snapshot: RwLock<Option<LimiterState>>,
 }
 
 /// Inputs needed only between operator initialization and activation.
@@ -330,9 +333,12 @@ impl EnclaveState {
     fn set_rate_limiter(&self, limiter: RateLimiter) -> GuardianResult<()> {
         info!("Setting rate limiter.");
 
+        let state = *limiter.state();
         self.rate_limiter
             .set(Arc::new(tokio::sync::Mutex::new(limiter)))
-            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))
+            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))?;
+        *self.limiter_snapshot.write().unwrap() = Some(state);
+        Ok(())
     }
 
     /// Timeout for acquiring the limiter lock. If a withdrawal is in progress and
@@ -368,10 +374,16 @@ impl EnclaveState {
         Ok(guard)
     }
 
-    /// Return the limiter state for status reporting, or `None` if the limiter
-    /// is uninitialized or remains locked through the acquisition deadline.
-    pub async fn limiter_state(&self) -> Option<LimiterState> {
-        Some(*self.lock_limiter().await.ok()?.state())
+    /// Record the consumption a withdrawal has just made durable, then release
+    /// the limiter. Consuming the guard orders the record before the release.
+    pub fn set_limiter_snapshot(&self, guard: OwnedMutexGuard<RateLimiter>) {
+        *self.limiter_snapshot.write().unwrap() = Some(*guard.state());
+    }
+
+    /// The limiter state as of the last durably logged withdrawal. `None` means
+    /// no limiter exists; it never reports absence for a limiter that is busy.
+    pub fn limiter_snapshot(&self) -> Option<LimiterState> {
+        *self.limiter_snapshot.read().unwrap()
     }
 }
 
@@ -394,6 +406,7 @@ impl Enclave {
                 }),
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
+                limiter_snapshot: RwLock::new(None),
             },
             temporary_init_state: RwLock::new(None),
             pending_ceremony: OnceLock::new(),
@@ -623,7 +636,7 @@ impl Enclave {
                 .and_then(|state| state.genesis_state.as_ref().map(GenesisState::digest)),
             untrusted_git_revision: self.reported_git_revision(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
-            limiter_state: self.state.limiter_state().await,
+            limiter_state: self.state.limiter_snapshot(),
             limiter_config: self.limiter_config().ok(),
             current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
             mpc_master_g: self.config.hashi_btc_master_pubkey.get().copied(),

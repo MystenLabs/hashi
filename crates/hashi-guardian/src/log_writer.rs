@@ -251,6 +251,30 @@ mod tests {
         assert_eq!(put_flaky.num_calls(), 5);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn retries_under_a_live_fence() {
+        let put_flaky = mock!(Client::put_object)
+            .sequence()
+            .output(|| PutObjectOutput::builder().build())
+            .http_status(500, None)
+            .times(3)
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+        let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky]);
+        let s3 = mock_s3(client);
+        let writer = LogWriter::new();
+        let signing_key = signing_key();
+
+        writer
+            .write(&s3, session_id(&signing_key), heartbeat(1), &signing_key)
+            .await;
+        writer
+            .write(&s3, session_id(&signing_key), signed_init(), &signing_key)
+            .await;
+
+        assert_eq!(put_flaky.num_calls(), 5);
+    }
+
     #[tokio::test]
     async fn write_waits_for_serialization_lock_before_put() {
         let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
