@@ -320,11 +320,6 @@ fn backup_file_paths(
 ) -> Result<Vec<PathBuf>> {
     let mut paths = vec![node_config_path.to_path_buf()];
     paths.extend(node_config_referenced_files(node_config)?);
-    if let Some(marker) = node_config.resignation_marker_path()
-        && marker.exists()
-    {
-        paths.push(marker);
-    }
     Ok(paths)
 }
 

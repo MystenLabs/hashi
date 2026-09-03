@@ -1006,13 +1006,18 @@ impl From<crate::communication::ChannelError> for MpcError {
     }
 }
 
-#[derive(Debug)]
 pub enum ReconfigOutcome {
     Output(MpcOutput),
     Dealt,
     NotNeeded,
     NoShares,
     NoRole,
+}
+
+impl std::fmt::Debug for ReconfigOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 impl ReconfigOutcome {
