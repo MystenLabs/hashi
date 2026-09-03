@@ -12,6 +12,9 @@ use anyhow::Context;
 use anyhow::Result;
 use bitcoin::Network;
 
+use crate::remote_write;
+use crate::remote_write::RemoteWriteConfig;
+
 pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
     /// `http://10.0.1.20:3000` (`GUARDIAN_BACKEND_URL`, required).
@@ -46,6 +49,11 @@ pub struct Config {
     /// bitcoin|testnet|signet|regtest). Must match the guardian's config; used
     /// to recompute sighashes when verifying a log replay.
     pub btc_network: Network,
+    /// Push metrics to a Prometheus remote-write endpoint; `None` leaves them
+    /// on `/metrics`, which nothing can scrape (`MIMIR_URL`, `MIMIR_USERNAME`
+    /// default `incoming_metrics`, `MIMIR_PASSWORD`, `MIMIR_PUSH_INTERVAL_SECS`
+    /// default 60, `MIMIR_EXTERNAL_LABELS` comma-separated `k=v`).
+    pub remote_write: Option<RemoteWriteConfig>,
 }
 
 impl Config {
@@ -75,6 +83,37 @@ impl Config {
             .context("BTC_NETWORK must be set (bitcoin|testnet|signet|regtest)")?
             .parse()
             .context("BTC_NETWORK must be one of bitcoin|testnet|signet|regtest")?;
+        let remote_write = match std::env::var("MIMIR_URL").ok().filter(|u| !u.is_empty()) {
+            None => None,
+            Some(url) => {
+                let username = std::env::var("MIMIR_USERNAME")
+                    .unwrap_or_else(|_| "incoming_metrics".to_string());
+                let password = std::env::var("MIMIR_PASSWORD")
+                    .context("MIMIR_PASSWORD must be set when MIMIR_URL is")?;
+                anyhow::ensure!(
+                    !username.is_empty() && !username.contains(':') && !password.is_empty(),
+                    "MIMIR_USERNAME and MIMIR_PASSWORD must be non-empty (no ':' in the name)"
+                );
+                // Zero panics `tokio::time::interval` (a panic aborts this binary);
+                // huge values overflow the deadline arithmetic.
+                let interval = Duration::from_secs(parse_env_u64("MIMIR_PUSH_INTERVAL_SECS", 60)?);
+                anyhow::ensure!(
+                    interval >= Duration::from_secs(1) && interval <= remote_write::MAX_INTERVAL,
+                    "MIMIR_PUSH_INTERVAL_SECS must be between 1 and {}",
+                    remote_write::MAX_INTERVAL.as_secs()
+                );
+                Some(RemoteWriteConfig {
+                    url: remote_write::parse_url(&url).context("MIMIR_URL")?,
+                    username,
+                    password,
+                    interval,
+                    external_labels: remote_write::parse_external_labels(
+                        &std::env::var("MIMIR_EXTERNAL_LABELS").unwrap_or_default(),
+                    )
+                    .context("MIMIR_EXTERNAL_LABELS")?,
+                })
+            }
+        };
         Ok(Self {
             backend_url,
             standby_backend_url,
@@ -86,6 +125,7 @@ impl Config {
             log_bucket,
             log_region,
             btc_network,
+            remote_write,
         })
     }
 }

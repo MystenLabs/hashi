@@ -22,6 +22,12 @@ serde_json.workspace = true
 tower.workspace = true
 tower-http = { workspace = true, features = ["cors"] }
 hex.workspace = true
+base64ct.workspace = true
+bytes.workspace = true
+prost.workspace = true
+reqwest.workspace = true
+snap.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tokio-stream.workspace = true
