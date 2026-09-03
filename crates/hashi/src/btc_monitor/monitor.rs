@@ -37,6 +37,7 @@ use crate::deposit_tracker::DepositDiscovery;
 use crate::deposit_tracker::DepositStatus;
 use crate::deposit_tracker::DepositTracker;
 use crate::deposit_tracker::DiscoveryResolution;
+use crate::deposit_tracker::effective_deposit_confirmation_threshold;
 use crate::metrics::Metrics;
 
 /// 1 sat/vB expressed as sat/kwu.
@@ -93,7 +94,10 @@ pub enum DepositConfirmation {
     Confirmed(bitcoin::TxOut),
     NotFound,
     InMempool,
-    InsufficientConfirmations { confirmations: u32 },
+    InsufficientConfirmations {
+        confirmations: u32,
+        required_confirmations: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +111,12 @@ enum TxBlockLookup {
     Confirmed(HashCheckpoint),
     InMempool,
     NotFound,
+}
+
+#[derive(serde::Deserialize)]
+struct RawTransactionLocation {
+    #[serde(rename = "blockhash")]
+    block_hash: Option<bitcoin::BlockHash>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1456,13 +1466,22 @@ async fn check_result_from_status(
             txid: outpoint.txid,
             vout: outpoint.vout,
         }),
-        DepositStatus::InBlock { checkpoint, txout } => {
+        DepositStatus::InBlock {
+            checkpoint,
+            is_coinbase,
+            txout,
+        } => {
             let confirmations = tip
                 .height
                 .saturating_add(1)
                 .saturating_sub(checkpoint.height);
-            if confirmations < confirmation_threshold {
-                return Ok(DepositConfirmation::InsufficientConfirmations { confirmations });
+            let required_confirmations =
+                effective_deposit_confirmation_threshold(confirmation_threshold, is_coinbase);
+            if confirmations < required_confirmations {
+                return Ok(DepositConfirmation::InsufficientConfirmations {
+                    confirmations,
+                    required_confirmations,
+                });
             }
             check_unspent_at_tip(
                 bitcoind_rpc,
@@ -1470,7 +1489,7 @@ async fn check_result_from_status(
                 outpoint,
                 txout,
                 confirmations,
-                confirmation_threshold,
+                required_confirmations,
             )
             .await
         }
@@ -1491,7 +1510,13 @@ async fn lookup_tx_block(
     debug!("Looking up block for transaction {txid}");
     require_core_checkpoint(&bitcoind_rpc, tip, "before transaction lookup").await?;
     let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
-        rpc.get_raw_transaction_verbose(txid)
+        rpc.call::<RawTransactionLocation>(
+            "getrawtransaction",
+            &[
+                serde_json::Value::String(txid.to_string()),
+                serde_json::Value::Bool(true),
+            ],
+        )
     })
     .await
     {
@@ -1510,9 +1535,6 @@ async fn lookup_tx_block(
             return Err(anyhow::anyhow!("Failed to look up txid {txid}: {e}").into());
         }
     };
-    let tx_info = tx_info
-        .into_model()
-        .map_err(|e| anyhow::anyhow!("Failed to parse transaction info for {txid}: {e}"))?;
     let Some(block_hash) = tx_info.block_hash else {
         require_core_checkpoint(&bitcoind_rpc, tip, "after transaction lookup").await?;
         return Ok(TxBlockLookup::InMempool);
@@ -1638,6 +1660,7 @@ async fn discover_deposit(
         deposit_lookup_cache.put_transaction(txid, transaction.clone());
         transaction
     };
+    let is_coinbase = transaction.is_coinbase();
 
     let Some(txout) = transaction.output.get(outpoint.vout as usize) else {
         return Ok(DepositStatus::InvalidVout {
@@ -1646,6 +1669,7 @@ async fn discover_deposit(
     };
     Ok(DepositStatus::InBlock {
         checkpoint: block_info,
+        is_coinbase,
         txout: txout.clone(),
     })
 }
@@ -1728,7 +1752,7 @@ async fn check_unspent_at_tip(
     outpoint: bitcoin::OutPoint,
     txout: bitcoin::TxOut,
     confirmations: u32,
-    confirmation_threshold: u32,
+    required_confirmations: u32,
 ) -> Result<DepositConfirmation, DepositConfirmError> {
     // Always make this check fresh; neither successful nor spent results clear
     // the tracker's independently established InBlock observation.
@@ -1773,7 +1797,7 @@ async fn check_unspent_at_tip(
                 .into());
             }
             info!(
-                "Deposit {}:{} confirmed with {confirmations}/{confirmation_threshold} confirmations",
+                "Deposit {}:{} confirmed with {confirmations}/{required_confirmations} confirmations",
                 outpoint.txid, outpoint.vout,
             );
             Ok(DepositConfirmation::Confirmed(txout))
@@ -2463,6 +2487,7 @@ mod tests {
             &outpoint,
             DepositStatus::InBlock {
                 checkpoint: block_info,
+                is_coinbase: false,
                 txout: bitcoin::TxOut {
                     value: bitcoin::Amount::from_sat(1),
                     script_pubkey: bitcoin::ScriptBuf::new(),
@@ -2496,7 +2521,10 @@ mod tests {
 
         assert_eq!(
             result_rxs.remove(0).await.unwrap().unwrap(),
-            DepositConfirmation::InsufficientConfirmations { confirmations: 9 }
+            DepositConfirmation::InsufficientConfirmations {
+                confirmations: 9,
+                required_confirmations: 100,
+            }
         );
         assert_eq!(
             result_rxs.remove(0).await.unwrap().unwrap(),
@@ -2504,6 +2532,37 @@ mod tests {
         );
         assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 0);
         assert_eq!(cache_requests(&metrics, "tx_block", "miss"), 0);
+    }
+
+    #[tokio::test]
+    async fn coinbase_deposit_check_reports_maturity_requirement() {
+        let outpoint = make_outpoint(1);
+        let result = check_result_from_status(
+            DepositStatus::InBlock {
+                checkpoint: HashCheckpoint::new(42, block_hash(2)),
+                is_coinbase: true,
+                txout: bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1),
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                },
+            },
+            HashCheckpoint::new(140, block_hash(3)),
+            6,
+            Arc::new(corepc_client::client_sync::v29::Client::new(
+                "http://127.0.0.1:1",
+            )),
+            outpoint,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result,
+            DepositConfirmation::InsufficientConfirmations {
+                confirmations: 99,
+                required_confirmations: 100,
+            }
+        );
     }
 
     #[tokio::test]

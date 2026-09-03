@@ -9,6 +9,7 @@ mod tests {
     use bitcoin::Txid;
 
     use futures::StreamExt;
+    use hashi::deposits::UnapprovedDepositError;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::bitcoin::BitcoinAddress;
     use hashi_types::move_types::ProtocolType;
@@ -266,6 +267,26 @@ mod tests {
         .await
     }
 
+    async fn wait_for_kyoto_height(
+        networks: &TestNetworks,
+        expected_height: u64,
+        timeout: Duration,
+    ) -> Result<()> {
+        let expected_height = i64::try_from(expected_height)?;
+        wait_until(
+            &format!("every synced Kyoto node to reach Bitcoin height {expected_height}"),
+            timeout,
+            || {
+                networks.hashi_network.nodes().iter().all(|node| {
+                    let metrics = &node.hashi().metrics;
+                    metrics.kyoto_synced.get() == 1
+                        && metrics.kyoto_best_height.get() >= expected_height
+                })
+            },
+        )
+        .await
+    }
+
     fn outpoints_with_status(networks: &TestNetworks, status: &str) -> Vec<i64> {
         networks
             .hashi_network
@@ -322,6 +343,37 @@ mod tests {
             },
         )
         .await
+    }
+
+    async fn assert_deposit_requires_confirmations(
+        networks: &TestNetworks,
+        request_id: Address,
+        confirmations: u32,
+        required_confirmations: u32,
+    ) -> Result<()> {
+        let expected = format!("has {confirmations}/{required_confirmations} confirmations");
+        for (index, node) in networks.hashi_network.nodes().iter().enumerate() {
+            let node_hashi = node.hashi();
+            let deposit_request = node_hashi
+                .onchain_state()
+                .deposit_requests()
+                .into_iter()
+                .find(|request| request.id == request_id)
+                .ok_or_else(|| anyhow!("node {index} has no deposit request {request_id}"))?;
+            match node_hashi.validate_deposit_request(&deposit_request).await {
+                Err(UnapprovedDepositError::BitcoinNotConfirmed(error)) => assert!(
+                    error.to_string().contains(&expected),
+                    "node {index} reported an unexpected confirmation error: {error}"
+                ),
+                Err(error) => panic!(
+                    "node {index} returned an unexpected validation error at {confirmations} confirmations: {error}"
+                ),
+                Ok(()) => panic!(
+                    "node {index} accepted the deposit at {confirmations}/{required_confirmations} confirmations"
+                ),
+            }
+        }
+        Ok(())
     }
 
     fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
@@ -577,6 +629,91 @@ mod tests {
         wait_for_deposit_approval(&networks, request_id, Duration::from_secs(120)).await?;
 
         info!("=== Passive Bitcoin Deposit Discovery Test Passed ===");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_coinbase_deposit_waits_for_maturity() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Coinbase Deposit Maturity Test ===");
+
+        let networks = setup_test_networks(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_onchain_config(
+                    "bitcoin_deposit_time_delay_ms",
+                    hashi_types::move_types::ConfigValue::U64(600_000),
+                ),
+        )
+        .await?;
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let hbtc_recipient = user_key.public_key().derive_address();
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
+        let rpc = networks.bitcoin_node.rpc_client();
+
+        let block_hashes = rpc
+            .generate_to_address(1, &deposit_address)?
+            .into_model()?
+            .0;
+        let [block_hash] = block_hashes.as_slice() else {
+            return Err(anyhow!(
+                "generate_to_address returned {} blocks instead of one",
+                block_hashes.len()
+            ));
+        };
+        let block = rpc.get_block(*block_hash)?;
+        let coinbase_tx = block
+            .txdata
+            .first()
+            .ok_or_else(|| anyhow!("generated block {block_hash} has no transactions"))?;
+        assert!(
+            coinbase_tx.is_coinbase(),
+            "first transaction in generated block {block_hash} is not coinbase"
+        );
+        let (vout, txout) = coinbase_tx
+            .output
+            .iter()
+            .enumerate()
+            .find(|(_, txout)| txout.script_pubkey == deposit_address.script_pubkey())
+            .ok_or_else(|| {
+                anyhow!(
+                    "coinbase transaction {} has no output for {deposit_address}",
+                    coinbase_tx.compute_txid()
+                )
+            })?;
+        let txid = coinbase_tx.compute_txid();
+        let vout = u32::try_from(vout)?;
+        let amount_sats = txout.value.to_sat();
+
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.into());
+        let request_id = executor
+            .execute_create_deposit_request(
+                txid_to_address(&txid),
+                vout,
+                amount_sats,
+                Some(hbtc_recipient),
+            )
+            .await?;
+        wait_for_deposit_request_mirrored(&networks, request_id, Duration::from_secs(30)).await?;
+
+        networks.bitcoin_node.generate_blocks(5)?;
+        let height = networks.bitcoin_node.get_block_count()?;
+        wait_for_kyoto_height(&networks, height, Duration::from_secs(120)).await?;
+        assert_deposit_requires_confirmations(&networks, request_id, 6, 100).await?;
+
+        networks.bitcoin_node.generate_blocks(93)?;
+        let height = networks.bitcoin_node.get_block_count()?;
+        wait_for_kyoto_height(&networks, height, Duration::from_secs(120)).await?;
+        assert_deposit_requires_confirmations(&networks, request_id, 99, 100).await?;
+
+        networks.bitcoin_node.generate_blocks(1)?;
+        let height = networks.bitcoin_node.get_block_count()?;
+        wait_for_kyoto_height(&networks, height, Duration::from_secs(120)).await?;
+        wait_for_deposit_approval(&networks, request_id, Duration::from_secs(120)).await?;
+
+        info!("=== Coinbase Deposit Maturity Test Passed ===");
         Ok(())
     }
 

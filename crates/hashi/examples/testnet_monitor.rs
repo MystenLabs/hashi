@@ -166,11 +166,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(
                                     hashi::btc_monitor::monitor::DepositConfirmation::InsufficientConfirmations {
                                         confirmations,
+                                        required_confirmations,
                                     },
                                 ) => {
                                     info!(
-                                        "Deposit has {confirmations} confirmations for {}",
-                                        outpoint
+                                        "Deposit has {confirmations}/{required_confirmations} confirmations for {outpoint}"
                                     );
                                 }
                                 Err(e) => {

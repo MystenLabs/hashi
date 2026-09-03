@@ -19,6 +19,7 @@ pub(crate) enum DepositStatus {
     InMempool,
     InBlock {
         checkpoint: kyoto::HashCheckpoint,
+        is_coinbase: bool,
         txout: bitcoin::TxOut,
     },
     InvalidVout {
@@ -380,8 +381,13 @@ impl DepositTracker {
             .values()
             .filter(|entry| match &entry.status {
                 DepositStatus::Unchecked => true,
-                DepositStatus::InBlock { checkpoint, .. } => tip_height.is_some_and(|tip_height| {
-                    confirmations(checkpoint.height, tip_height) >= threshold
+                DepositStatus::InBlock {
+                    checkpoint,
+                    is_coinbase,
+                    ..
+                } => tip_height.is_some_and(|tip_height| {
+                    confirmations(checkpoint.height, tip_height)
+                        >= effective_deposit_confirmation_threshold(threshold, *is_coinbase)
                 }),
                 DepositStatus::NotFound
                 | DepositStatus::InMempool
@@ -418,11 +424,13 @@ impl TrackerState {
             let Some(outpoints) = self.scan_candidates_by_txid.get(txid).cloned() else {
                 continue;
             };
+            let is_coinbase = transaction.is_coinbase();
             for outpoint in outpoints {
                 let status = transaction.output.get(outpoint.vout as usize).map_or(
                     DepositStatus::InvalidVout { checkpoint },
                     |txout| DepositStatus::InBlock {
                         checkpoint,
+                        is_coinbase,
                         txout: txout.clone(),
                     },
                 );
@@ -505,6 +513,19 @@ impl TrackerState {
         if old_status == status {
             return false;
         }
+        if matches!(
+            &status,
+            DepositStatus::InBlock {
+                is_coinbase: true,
+                ..
+            }
+        ) && let Some(metrics) = &self.metrics
+        {
+            metrics
+                .coinbase_deposit_observations_total
+                .with_label_values(&[&outpoint.to_string()])
+                .inc();
+        }
         self.adjust_metric(&old_status, -1);
         self.adjust_metric(&status, 1);
         match (is_scan_candidate(&old_status), is_scan_candidate(&status)) {
@@ -569,6 +590,14 @@ fn in_block_bucket(block_height: u32, tip_height: u32) -> usize {
 
 fn confirmations(block_height: u32, tip_height: u32) -> u32 {
     tip_height.saturating_add(1).saturating_sub(block_height)
+}
+
+pub(crate) fn effective_deposit_confirmation_threshold(configured: u32, is_coinbase: bool) -> u32 {
+    if is_coinbase {
+        configured.max(bitcoin::constants::COINBASE_MATURITY)
+    } else {
+        configured
+    }
 }
 
 #[cfg(test)]
@@ -701,6 +730,36 @@ mod tests {
     }
 
     #[test]
+    fn effective_deposit_confirmation_threshold_respects_coinbase_maturity() {
+        assert_eq!(effective_deposit_confirmation_threshold(6, false), 6);
+        assert_eq!(effective_deposit_confirmation_threshold(6, true), 100);
+        assert_eq!(effective_deposit_confirmation_threshold(144, true), 144);
+    }
+
+    #[test]
+    fn coinbase_request_becomes_actionable_at_maturity() {
+        let (tracker, _) = tracker();
+        let tracked = outpoint(1);
+        tracker.upsert_request(request(1), tracked);
+        let token = start_discovery(&tracker, &tracked);
+        record_discovery(
+            &tracker,
+            token,
+            DepositStatus::InBlock {
+                checkpoint: checkpoint(10, 1),
+                is_coinbase: true,
+                txout: txout(),
+            },
+        );
+
+        tracker.set_tip(checkpoint(108, 2));
+        assert!(tracker.actionable_requests(6).is_empty());
+
+        tracker.set_tip(checkpoint(109, 3));
+        assert_eq!(tracker.actionable_requests(6), HashSet::from([request(1)]));
+    }
+
+    #[test]
     fn passive_and_underconfirmed_requests_are_not_actionable() {
         let (tracker, _) = tracker();
         for seed in 1..=4 {
@@ -711,6 +770,7 @@ mod tests {
             DepositStatus::InMempool,
             DepositStatus::InBlock {
                 checkpoint: checkpoint(10, 1),
+                is_coinbase: false,
                 txout: txout(),
             },
         ];
@@ -725,7 +785,7 @@ mod tests {
 
     #[test]
     fn block_scan_promotes_passive_statuses_without_overwriting_terminal_statuses() {
-        let (tracker, _) = tracker();
+        let (tracker, metrics) = tracker();
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
         let block_outpoint = bitcoin::OutPoint::new(block.txdata[0].compute_txid(), 0);
         tracker.upsert_request(request(1), block_outpoint);
@@ -733,6 +793,10 @@ mod tests {
         record_discovery(&tracker, token, DepositStatus::NotFound);
         let mut work = tracker.subscribe_work();
         let block_checkpoint = kyoto::HashCheckpoint::new(0, block.block_hash());
+        let outpoint_label = block_outpoint.to_string();
+        let coinbase_observations = metrics
+            .coinbase_deposit_observations_total
+            .with_label_values(&[&outpoint_label]);
 
         tracker.apply_block_if_current(tracker.bitcoin_generation(), block_checkpoint, &block);
         assert!(work.has_changed().unwrap());
@@ -741,11 +805,14 @@ mod tests {
             tracker.status(&block_outpoint),
             Some(DepositStatus::InBlock {
                 checkpoint: block_checkpoint,
+                is_coinbase: true,
                 txout: block.txdata[0].output[0].clone(),
             })
         );
+        assert_eq!(coinbase_observations.get(), 1);
         tracker.apply_block_if_current(tracker.bitcoin_generation(), block_checkpoint, &block);
         assert!(!work.has_changed().unwrap());
+        assert_eq!(coinbase_observations.get(), 1);
     }
 
     #[test]
@@ -870,6 +937,7 @@ mod tests {
                 token,
                 DepositStatus::InBlock {
                     checkpoint: block,
+                    is_coinbase: false,
                     txout: txout(),
                 },
             );
@@ -895,6 +963,7 @@ mod tests {
             token,
             DepositStatus::InBlock {
                 checkpoint: checkpoint(10, 1),
+                is_coinbase: false,
                 txout: txout(),
             },
         );
