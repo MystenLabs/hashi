@@ -1387,6 +1387,18 @@ pub fn print_detail(msg: &str) {
     eprintln!("{msg}");
 }
 
+/// Attach a human explanation to a transaction failure when it is a Move
+/// abort (a clever `#[error]` constant with a hint, or the framework's
+/// dynamic-field miss); other errors pass through unchanged. Every CLI path
+/// that finalizes or executes a transaction maps its error through this, so
+/// the operator never has to read a raw `MoveAbort` line first.
+pub fn explain_tx_error(err: anyhow::Error) -> anyhow::Error {
+    match commands::proposal::explain_move_abort(&err) {
+        Some(explanation) => err.context(explanation),
+        None => err,
+    }
+}
+
 /// Ask the operator to confirm. Requires an explicit `y`; anything else is a
 /// decline. When stdin is not a terminal there is nobody to answer, so the
 /// command refuses to proceed instead of treating an empty read as consent,

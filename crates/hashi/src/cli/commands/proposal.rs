@@ -452,7 +452,7 @@ pub fn explain_execution_error(
 /// mode produced it: the executor wraps the execute path's build error in
 /// `TxFailure::NotSubmitted`, while dry-run and serialize-unsigned return the
 /// SDK build error bare, so both shapes are searched.
-fn explain_move_abort(err: &anyhow::Error) -> Option<String> {
+pub(crate) fn explain_move_abort(err: &anyhow::Error) -> Option<String> {
     let from_executor = crate::sui_tx_executor::transaction_execution_error(err);
     let from_builder =
         err.chain().find_map(
@@ -495,14 +495,8 @@ pub(crate) async fn execute_or_simulate(
         TxMode::Execute => print_info("Executing transaction..."),
     }
 
-    let outcome =
-        client
-            .finalize_tx(tx, tx_opts)
-            .await
-            .map_err(|e| match explain_move_abort(&e) {
-                Some(explanation) => e.context(explanation),
-                None => e,
-            })?;
+    // `finalize_tx` decodes Move aborts for every command that goes through it.
+    let outcome = client.finalize_tx(tx, tx_opts).await?;
     Ok(crate::cli::print_tx_outcome(outcome, client.sui_rpc_url()).map(|response| *response))
 }
 

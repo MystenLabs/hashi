@@ -324,6 +324,7 @@ impl HashiClient {
             std::time::Duration::from_secs(10),
         )
         .await
+        .map_err(crate::cli::explain_tx_error)
     }
 
     // ========================================================================
