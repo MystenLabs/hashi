@@ -213,7 +213,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
             signing_public_key: signing_pk,
         })
         .await
-        .expect("Unable to log OperatorInitAttestationUnsigned");
+        .expect("S3 logger must be initialized to log the OI attestation");
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     // This pre-transition snapshot reports `Uninitialized`; successfully
@@ -226,7 +226,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
-        .expect("Unable to log GuardianInfo");
+        .expect("S3 logger must be initialized to log GuardianInfo");
 
     let initialized = match enclave.mode() {
         EnclaveMode::Ceremony => CeremonyStage::OperatorInitialized.into(),

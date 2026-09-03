@@ -150,11 +150,11 @@ async fn log_withdrawal_success(
     enclave
         .log_withdraw(msg)
         .await
-        .expect("withdrawal log write failed");
+        .expect("S3 logger must be initialized to log a withdrawal");
     info!("Withdrawal {} logged.", wid);
-    // Rust would drop this guard at function exit; the explicit drop documents
-    // that the next withdrawal may enter only after this one is durably logged.
-    drop(limiter_guard);
+    // Consumes the guard: the now-durable consumption is recorded, and only
+    // then may the next withdrawal enter.
+    enclave.state.set_limiter_snapshot(limiter_guard);
     Ok(())
 }
 
@@ -273,6 +273,79 @@ mod tests {
 
         let result = normal_withdrawal_inner(enclave, signed_request).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn limiter_state_is_readable_while_a_withdrawal_holds_the_guard() {
+        let (signed_request, committee) =
+            StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+                Network::Regtest,
+                WithdrawalID::new([0xac; 32]),
+                now_timestamp_secs(),
+                0,
+            );
+        let amount_sats = signed_request
+            .message()
+            .utxos()
+            .gross_outflow_amount()
+            .to_sat();
+        let (enclave, _captures) =
+            setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
+
+        // A withdrawal holds the limiter across its durable log write.
+        let guard = enclave
+            .state
+            .consume_from_limiter(0, now_timestamp_secs(), amount_sats)
+            .await
+            .expect("limiter accepts the first withdrawal");
+
+        // Readable rather than timing out into `None`, and still reporting the
+        // durable state: this consumption is not logged yet.
+        let state = enclave
+            .state
+            .limiter_snapshot()
+            .expect("limiter state stays readable while the guard is held");
+        assert_eq!(state.next_seq, 0);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn limiter_state_advances_once_the_withdrawal_is_logged() {
+        let (signed_request, committee) =
+            StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
+                Network::Regtest,
+                WithdrawalID::new([0xad; 32]),
+                now_timestamp_secs(),
+                0,
+            );
+        let amount_sats = signed_request
+            .message()
+            .utxos()
+            .gross_outflow_amount()
+            .to_sat();
+        let (enclave, _captures) =
+            setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
+        assert_eq!(
+            enclave
+                .state
+                .limiter_snapshot()
+                .expect("activated")
+                .next_seq,
+            0
+        );
+
+        standard_withdrawal(enclave.clone(), signed_request)
+            .await
+            .expect("withdrawal succeeds");
+
+        assert_eq!(
+            enclave
+                .state
+                .limiter_snapshot()
+                .expect("activated")
+                .next_seq,
+            1
+        );
     }
 
     #[tokio::test]
