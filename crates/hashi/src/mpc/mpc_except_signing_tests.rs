@@ -13023,7 +13023,7 @@ fn test_reconstruct_presignatures_skips_zero_weight_dealer() {
     let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
     let certs = VerifiedNonceCerts::unclassified(vec![cert(3), cert(0), cert(1)]);
     let (certified, _) = mgr.window_certified_nonce_dealers(&certs);
-    assert!(certified.contains(&setup.address(3)));
+    assert!(!certified.contains(&setup.address(3)));
 
     let outcome = mgr.reconstruct_presignatures(batch_index, &certs).unwrap();
 
@@ -15834,6 +15834,45 @@ fn test_optimistic_resend_keeps_the_validation_stamp_and_a_held_output_refuses_a
         held.common_hash,
         MessagesHash::from(message.common.hash().digest)
     );
+}
+
+#[test]
+fn test_handle_avid_nonce_message_rejects_a_zero_weight_sender() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let message = AvidNonceMessage {
+        batch_index,
+        kind: AvidNonceMessageKind::Optimistic(extract_optimistic(&fx.optimistic[1].1).clone()),
+    };
+
+    let mut receiver = setup.create_manager(1);
+    assert!(
+        receiver
+            .handle_avid_nonce_message(fx.dealer_addr, &message)
+            .is_ok()
+    );
+
+    let mut receiver = setup.create_manager(1);
+    let zero_weighted = receiver
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == 0 { 0 } else { n.weight },
+        })
+        .collect::<Vec<_>>();
+    receiver.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
+
+    let Err(MpcError::InvalidMessage { sender, reason }) =
+        receiver.handle_avid_nonce_message(fx.dealer_addr, &message)
+    else {
+        panic!("a zero-weight sender must be rejected");
+    };
+    assert_eq!(sender, fx.dealer_addr);
+    assert!(reason.contains("zero reduced weight"), "{reason}");
 }
 
 #[tokio::test]

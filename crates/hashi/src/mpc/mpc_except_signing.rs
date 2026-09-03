@@ -1397,6 +1397,9 @@ impl MpcManager {
             if let Some(party_id) = self.committee.index_of(&dealer)
                 && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
             {
+                if w == 0 {
+                    continue;
+                }
                 window.record(admission, w as u32);
                 certified.insert(dealer);
             }
@@ -3269,6 +3272,12 @@ impl MpcManager {
         message: &AvidNonceMessage,
     ) -> MpcResult<BLS12381Signature> {
         let batch_index = message.batch_index;
+        if Self::dealer_deals_nothing(&self.committee, &self.mpc_config.nodes, &sender) {
+            return Err(MpcError::InvalidMessage {
+                sender,
+                reason: "sender has zero reduced weight in this committee".into(),
+            });
+        }
         match &message.kind {
             AvidNonceMessageKind::Optimistic(msg) => {
                 if let Some(state) = self.get_avid_round_state(batch_index, &sender)?
