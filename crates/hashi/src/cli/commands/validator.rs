@@ -37,7 +37,10 @@ pub async fn resign(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     );
     print_acting_validator(&client)?;
 
-    prompt_continue("resign from the committee", tx_opts).await?;
+    if !prompt_continue("resign from the committee", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_resign_transaction()?;
     print_info("Transaction: validator::resign");
@@ -59,7 +62,10 @@ pub async fn withdraw_resignation(config: &CliConfig, tx_opts: &TxOptions) -> Re
     );
     print_acting_validator(&client)?;
 
-    prompt_continue("withdraw the resignation", tx_opts).await?;
+    if !prompt_continue("withdraw the resignation", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_withdraw_resignation_transaction()?;
     print_info("Transaction: validator::withdraw_resignation");
@@ -89,7 +95,10 @@ pub async fn remove_inactive(
          in Sui's active validator set.",
     );
 
-    prompt_continue("remove this member's registration", tx_opts).await?;
+    if !prompt_continue("remove this member's registration", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_remove_inactive_member_transaction(validator)?;
     print_info("Transaction: validator::remove_inactive_member");

@@ -432,7 +432,10 @@ pub async fn vote(
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
     print_acting_validator(&client)?;
 
-    prompt_continue("vote on this proposal", tx_opts).await?;
+    if !prompt_continue("vote on this proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     print_info("Building vote transaction...");
 
@@ -539,7 +542,10 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
     print_acting_validator(&client)?;
 
-    prompt_continue("remove your vote from this proposal", tx_opts).await?;
+    if !prompt_continue("remove your vote from this proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     print_info("Building remove_vote transaction...");
 
@@ -586,7 +592,10 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
     print_detail(&format!("  ID:   {}", proposal_id));
 
-    prompt_continue("execute this proposal", tx_opts).await?;
+    if !prompt_continue("execute this proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_execute_proposal_transaction(proposal_addr, proposal_type)?;
 
@@ -699,11 +708,15 @@ pub async fn execute_upgrade(
          build from the same commit with the same `sui` that produced the proposal.",
     );
 
-    prompt_continue(
+    if !prompt_continue(
         "execute this upgrade (execute + publish + finalize in one transaction)",
         tx_opts,
     )
-    .await?;
+    .await?
+    {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let hashi_ids = *client.hashi_ids();
     let tx =
@@ -850,7 +863,10 @@ pub async fn create_upgrade_proposal(
     print_metadata(&metadata);
     print_acting_validator(&client)?;
 
-    prompt_continue("create this upgrade proposal", tx_opts).await?;
+    if !prompt_continue("create this upgrade proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
@@ -884,7 +900,10 @@ pub async fn create_update_config_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this config update proposal", tx_opts).await?;
+    if !prompt_continue("create this config update proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateConfig {
         key: key.to_string(),
@@ -918,7 +937,10 @@ pub async fn create_update_epoch_config_proposal(
     print_detail("  Takes effect: next committee formed after execution");
     print_metadata(&metadata);
 
-    prompt_continue("create this epoch config update proposal", tx_opts).await?;
+    if !prompt_continue("create this epoch config update proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateEpochConfig {
@@ -958,7 +980,10 @@ pub async fn create_add_config_proposal(
     ));
     print_metadata(&metadata);
 
-    prompt_continue("create this add config proposal", tx_opts).await?;
+    if !prompt_continue("create this add config proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::AddConfig {
@@ -1028,7 +1053,10 @@ pub async fn create_update_mpc_config_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this MPC config update proposal", tx_opts).await?;
+    if !prompt_continue("create this MPC config update proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
         max_faulty_bps,
@@ -1078,7 +1106,10 @@ pub async fn create_enable_version_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this enable version proposal", tx_opts).await?;
+    if !prompt_continue("create this enable version proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EnableVersion {
         version,
@@ -1108,7 +1139,10 @@ pub async fn create_disable_version_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this disable version proposal", tx_opts).await?;
+    if !prompt_continue("create this disable version proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::DisableVersion {
         version,
@@ -1135,7 +1169,10 @@ pub async fn create_abort_reconfig_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this abort reconfig proposal", tx_opts).await?;
+    if !prompt_continue("create this abort reconfig proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::AbortReconfig {
         epoch,
@@ -1165,7 +1202,10 @@ pub async fn create_update_guardian_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this update guardian proposal", tx_opts).await?;
+    if !prompt_continue("create this update guardian proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
         url: url.to_string(),
@@ -1198,11 +1238,15 @@ pub async fn create_emergency_pause_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue(
+    if !prompt_continue(
         &format!("create this emergency {} proposal", action.to_lowercase()),
         tx_opts,
     )
-    .await?;
+    .await?
+    {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EmergencyPause {
         pause: !unpause,
@@ -1265,11 +1309,15 @@ pub async fn create_ignore_member_proposal(
 
     print_acting_validator(&client)?;
 
-    prompt_continue(
+    if !prompt_continue(
         &format!("create this {} member proposal", action.to_lowercase()),
         tx_opts,
     )
-    .await?;
+    .await?
+    {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let mut client = client;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::IgnoreMember {
@@ -1377,27 +1425,19 @@ fn print_proposal_detailed(
     println!("{}", "━".repeat(60).dimmed());
 }
 
-/// Pause for user acknowledgement before an actual execution. No-op when the
-/// user passed `-y/--yes`, or in dry-run / serialize-unsigned mode — those
-/// change no on-chain state, and serialize mode must keep stdout clean.
-pub(crate) async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
+/// Ask the operator to confirm before a real execution. Returns `true` to
+/// proceed. Always `true` with `-y/--yes`, or in dry-run and
+/// serialize-unsigned mode, which change no on-chain state. Requires an
+/// explicit `y`, and refuses when stdin is not a terminal (see
+/// [`crate::cli::confirm`]).
+pub(crate) async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<bool> {
     use crate::sui_tx_executor::TxMode;
-    use tokio::io::AsyncBufReadExt;
-    use tokio::io::BufReader;
 
     if tx_opts.skip_confirm || tx_opts.mode() != TxMode::Execute {
-        return Ok(());
+        return Ok(true);
     }
-
-    eprintln!(
-        "\n{}",
-        format!("Press enter to {action}, or Ctrl+C to cancel...").yellow()
-    );
-
-    let mut reader = BufReader::new(tokio::io::stdin());
-    let mut input = String::new();
-    reader.read_line(&mut input).await?;
-    Ok(())
+    eprintln!("\n{}", format!("About to {action}.").yellow());
+    crate::cli::confirm()
 }
 
 #[cfg(test)]
