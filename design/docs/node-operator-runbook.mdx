@@ -95,6 +95,8 @@ For the protocol behavior behind these operations, see [Committee](committee.mdx
 
 Hashi is network-specific: the Sui chain, the Bitcoin chain, and their endpoints all differ per deployment. The runbook's examples use **Testnet** (Sui Testnet + Bitcoin Signet); for any other network, substitute the values from this table. Adding a network later is just a matter of filling in a column here.
 
+The pairing is enforced, not just documented: Bitcoin mainnet goes with Sui mainnet and nothing else. `hashi launch` refuses to build the launch transaction when its `--bitcoin-chain-id` does not match the chain the fullnode reports under that rule, and a node refuses to start (as does `hashi register`) when the validator config's `bitcoin-chain-id` is mainnet on any other Sui network or is not mainnet on Sui mainnet.
+
 | Parameter | Testnet (current) | Mainnet |
 |-----------|-------------------|---------|
 | Sui network | Testnet | Mainnet |
@@ -1134,6 +1136,14 @@ thread 'main' panicked at ...: called `Option::unwrap()` on a `None` value
 sui-rpc = "https://fullnode.testnet.sui.io:443"
 bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"  # signet genesis
 ```
+
+---
+
+**Symptom:** startup fails with `refusing Bitcoin mainnet (...) on Sui chain ...: Bitcoin mainnet is allowed on Sui mainnet only ...` or `refusing Bitcoin Signet (...) on Sui mainnet: Sui mainnet requires Bitcoin mainnet`.
+
+**Likely cause:** the validator config pairs a Sui network with the wrong Bitcoin network. On Sui Testnet the usual case is a missing `bitcoin-chain-id`, which defaults to Bitcoin mainnet. `hashi register` reports the same error for the same config.
+
+**Fix:** set `bitcoin-chain-id` to the genesis hash from the [Networks](#networks) table for your Sui network.
 
 ---
 

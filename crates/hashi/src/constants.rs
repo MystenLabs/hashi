@@ -49,6 +49,47 @@ pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
 }
 
+/// Refuse a Sui chain / Bitcoin chain pairing the protocol never deploys:
+/// Bitcoin mainnet if and only if Sui mainnet. On Sui mainnet anything but
+/// Bitcoin mainnet would mint a real `hashi::btc` against free signet or
+/// regtest deposits; on any other Sui network Bitcoin mainnet would lock real
+/// Bitcoin behind a non-mainnet package (SEC-510, audit D-13).
+///
+/// Move cannot enforce this (`finish_publish` stores whichever id it is
+/// handed and the Sui framework exposes no chain identifier to Move), so it
+/// runs in every Rust path that produces or consumes the pair. The Bitcoin
+/// side is decided by the network the hash resolves to, as every consumer of
+/// the id does, not by string equality, so letter case cannot dodge it. An
+/// empty or unrecognised id fails closed.
+pub fn check_sui_bitcoin_chain_pairing(
+    sui_chain_id: &str,
+    bitcoin_chain_id: &str,
+) -> anyhow::Result<()> {
+    use crate::btc_monitor::config::Network;
+    use crate::btc_monitor::config::network_from_chain_id;
+
+    anyhow::ensure!(
+        !sui_chain_id.is_empty(),
+        "Sui chain ID is empty; refusing to pair it with Bitcoin chain {bitcoin_chain_id}"
+    );
+    let network = network_from_chain_id(bitcoin_chain_id)
+        .ok_or_else(|| anyhow::anyhow!("unrecognized bitcoin chain id: {bitcoin_chain_id}"))?;
+    let sui_is_mainnet = sui_chain_id == SUI_MAINNET_CHAIN_ID;
+    let bitcoin_is_mainnet = network == Network::Bitcoin;
+    anyhow::ensure!(
+        !sui_is_mainnet || bitcoin_is_mainnet,
+        "refusing Bitcoin {network:?} ({bitcoin_chain_id}) on Sui mainnet: \
+         Sui mainnet requires Bitcoin mainnet"
+    );
+    anyhow::ensure!(
+        !bitcoin_is_mainnet || sui_is_mainnet,
+        "refusing Bitcoin mainnet ({bitcoin_chain_id}) on Sui chain {sui_chain_id}: \
+         Bitcoin mainnet is allowed on Sui mainnet only; every other Sui network \
+         needs a non-mainnet bitcoin_chain_id, which defaults to mainnet when unset"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

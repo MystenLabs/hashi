@@ -217,12 +217,19 @@ pub async fn publish_package(
 /// Build the unsigned `hashi::finish_publish` transaction (the launch
 /// switch). Exposed separately from [`finish_publish`] for offline /
 /// multisig signing.
+///
+/// `sui_chain_id` is the chain the transaction will land on, as reported by
+/// the fullnode (`sui_rpc_client::fetch_sui_chain_id`); the builder refuses a
+/// Bitcoin chain that the protocol never pairs with it
+/// (`constants::check_sui_bitcoin_chain_pairing`) before touching the network.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_finish_publish_tx(
     client: &mut Client,
     sender: Address,
     ids: &HashiIds,
     upgrade_cap_id: Address,
     bitcoin_chain_id: &str,
+    sui_chain_id: &str,
     guardian: &GuardianConfig,
     bitcoin_overrides: &BitcoinConfigOverrides,
 ) -> Result<sui_sdk_types::Transaction> {
@@ -231,6 +238,7 @@ pub async fn build_finish_publish_tx(
         network_from_chain_id(bitcoin_chain_id).is_some(),
         "unrecognized bitcoin chain id: {bitcoin_chain_id}"
     );
+    crate::constants::check_sui_bitcoin_chain_pairing(sui_chain_id, bitcoin_chain_id)?;
     let block_hash = BlockHash::from_str(bitcoin_chain_id)?;
     let bitcoin_chain_id_addr = Address::new(*block_hash.as_byte_array());
 
@@ -291,12 +299,14 @@ pub async fn finish_publish(
     bitcoin_overrides: &BitcoinConfigOverrides,
 ) -> Result<()> {
     let sender = signer.verifying_key().derive_address();
+    let sui_chain_id = crate::sui_rpc_client::fetch_sui_chain_id(client).await?;
     let transaction = build_finish_publish_tx(
         client,
         sender,
         ids,
         upgrade_cap_id,
         bitcoin_chain_id,
+        &sui_chain_id,
         guardian,
         bitcoin_overrides,
     )

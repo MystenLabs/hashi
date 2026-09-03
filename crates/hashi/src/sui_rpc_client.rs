@@ -16,6 +16,25 @@ fn new_client_with_deadline(
     Ok(sui_rpc::Client::new(url)?.request_layer(tower::timeout::TimeoutLayer::new(deadline)))
 }
 
+/// The chain id (genesis checkpoint digest) the fullnode behind `client`
+/// reports. Fails closed on an empty answer: the accessor returns `""` when
+/// the field is absent, and an empty id must never pass as "not mainnet".
+pub async fn fetch_sui_chain_id(client: &mut sui_rpc::Client) -> anyhow::Result<String> {
+    use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+
+    let service_info = client
+        .ledger_client()
+        .get_service_info(GetServiceInfoRequest::default())
+        .await?
+        .into_inner();
+    let chain_id = service_info.chain_id();
+    anyhow::ensure!(
+        !chain_id.is_empty(),
+        "Sui RPC endpoint reported an empty chain ID"
+    );
+    Ok(chain_id.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
