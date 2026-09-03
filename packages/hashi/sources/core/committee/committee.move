@@ -3,7 +3,7 @@
 
 /// BLS signing committees and certificate verification. A `Committee` pins an
 /// epoch's members (validator addresses, BLS public keys, encryption keys,
-/// voting weights) together with the MPC parameters snapshotted at reconfig
+/// voting weights) together with the epoch config snapshotted at reconfig
 /// time. `verify_certificate` checks an aggregate BLS12-381 min-pk signature
 /// against a signers bitmap, enforces the stake threshold, and wraps the
 /// payload in a `CertifiedMessage` as proof of committee approval.
@@ -46,10 +46,10 @@ public struct Committee has copy, drop, store {
     members: vector<CommitteeMember>,
     /// Total voting weight of the committee.
     total_weight: u64,
-    /// The config pinned for this epoch (the MPC parameters: threshold,
-    /// weight-reduction delta, max-faulty bound, nonce-generation protocol),
-    /// snapshotted from the governed config at reconfig time.
-    config: Config,
+    /// The epoch config for this epoch (the MPC parameters plus any
+    /// epoch-scoped keys governance added), copied verbatim from the governed
+    /// epoch config when the committee is formed.
+    epoch_config: Config,
 }
 
 public struct CommitteeSignature has copy, drop, store {
@@ -84,7 +84,7 @@ public fun new_committee_signature(
 public(package) fun new_committee(
     epoch: u64,
     members: vector<CommitteeMember>,
-    config: Config,
+    epoch_config: Config,
 ): Committee {
     assert!(!members.is_empty());
 
@@ -100,7 +100,7 @@ public(package) fun new_committee(
         members,
         total_weight,
         epoch,
-        config,
+        epoch_config,
     }
 }
 

@@ -637,6 +637,28 @@ pub(crate) async fn apply_onchain_config_overrides(
         Identifier::from_static("UpdateConfig"),
         vec![],
     )));
+    // `UpdateEpochConfig` was introduced by the package the chain runs at
+    // boot, so its type tag carries that package.
+    let update_epoch_config_type_tag = TypeTag::Struct(Box::new(StructTag::new(
+        execute_package_id,
+        Identifier::from_static("update_epoch_config"),
+        Identifier::from_static("UpdateEpochConfig"),
+        vec![],
+    )));
+    // Overrides are routed to the store that holds the key: epoch keys (the
+    // MPC parameters and anything governance added there) go through
+    // `UpdateEpochConfig`, everything else through `UpdateConfig`.
+    let epoch_keys: std::collections::BTreeSet<String> = {
+        let hashi = nodes[0].hashi();
+        let state = hashi.onchain_state().state();
+        state
+            .hashi()
+            .epoch_config
+            .entries()
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
 
     if has_mpc_overrides {
         tracing::info!(
@@ -655,8 +677,8 @@ pub(crate) async fn apply_onchain_config_overrides(
                 nonce_generation_protocol: None,
                 metadata: vec![],
             },
-            update_config_type_tag.clone(),
-            "update_config",
+            update_epoch_config_type_tag.clone(),
+            "update_epoch_config",
             "UpdateMpcConfig",
         )
         .await?;
@@ -666,19 +688,38 @@ pub(crate) async fn apply_onchain_config_overrides(
     //one at a time?
     for (key, value) in &other_overrides {
         tracing::info!("applying on-chain config override: {key} = {value:?}");
+        let (params, type_tag, module, label) = if epoch_keys.contains(key) {
+            (
+                CreateProposalParams::UpdateEpochConfig {
+                    key: key.clone(),
+                    value: value.clone(),
+                    metadata: vec![],
+                },
+                update_epoch_config_type_tag.clone(),
+                "update_epoch_config",
+                format!("UpdateEpochConfig({key})"),
+            )
+        } else {
+            (
+                CreateProposalParams::UpdateConfig {
+                    key: key.clone(),
+                    value: value.clone(),
+                    metadata: vec![],
+                },
+                update_config_type_tag.clone(),
+                "update_config",
+                format!("UpdateConfig({key})"),
+            )
+        };
         exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
             hashi_initial_shared_version,
             execute_package_id,
             &mut executors,
-            CreateProposalParams::UpdateConfig {
-                key: key.clone(),
-                value: value.clone(),
-                metadata: vec![],
-            },
-            update_config_type_tag.clone(),
-            "update_config",
-            &format!("UpdateConfig({key})"),
+            params,
+            type_tag,
+            module,
+            &label,
         )
         .await?;
     }

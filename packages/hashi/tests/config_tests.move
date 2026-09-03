@@ -177,15 +177,16 @@ fun test_config_value_same_variant_distinguishes_integer_widths() {
     assert!(!u256_value.same_variant(&u64_value));
 }
 
+/// The MPC accessors fall back to the genesis defaults for an absent key and
+/// read a present one as is; the Rust mirror does the same.
 #[test]
-fun test_seed_absent_defaults_fills_gaps_without_clobbering() {
+fun test_mpc_accessors_default_when_absent() {
     let mut config = config::empty();
     let custom_window = 7_777;
     config.upsert(b"mpc_nonce_accumulation_window_ms", config_value::new_u64(custom_window));
-    assert!(!config.contains(b"mpc_max_faulty_in_basis_points"));
-
-    hashi::mpc_config::seed_absent_defaults(&mut config);
 
     assert!(hashi::mpc_config::nonce_accumulation_window_ms(&config) == custom_window);
-    assert!(config.contains(b"mpc_max_faulty_in_basis_points"));
+    assert!(hashi::mpc_config::max_faulty_in_basis_points(&config) == 3333);
+    assert!(hashi::mpc_config::weight_reduction_allowed_delta(&config) == 800);
+    assert!(hashi::mpc_config::nonce_generation_protocol(&config) == 0);
 }

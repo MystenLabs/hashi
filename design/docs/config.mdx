@@ -32,20 +32,33 @@ questions:
   - What is the minimum deposit amount for Hashi?
   - How does Hashi governance update configuration?
 answer: >-
-  Hashi maintains onchain configuration parameters in a Config object that
-  control deposit minimums, withdrawal minimums, confirmation thresholds, fee
-  estimation, and operational behavior. All parameters are updated through
-  UpdateConfig governance proposals requiring 2/3 of committee weight.
+  Hashi keeps its onchain configuration in two key-value stores on the Hashi
+  object: an instant config whose values apply as soon as a proposal executes
+  (deposit and withdrawal minimums, confirmation threshold, pause flag) and an
+  epoch config that is copied wholesale onto each new committee (the MPC
+  parameters). Existing keys are tuned with UpdateConfig or UpdateEpochConfig
+  and new keys are introduced with AddConfig, all requiring 2/3 of committee
+  weight.
 ---
 
-Hashi maintains a set of onchain configuration parameters stored in the
-`Config` object. These parameters control protocol behavior for deposits,
-withdrawals, fee estimation, and system operations.
+Hashi keeps its onchain configuration in two key-value stores on the `Hashi`
+object, distinguished by when a change takes effect:
 
-You can update all configurable parameters through the `UpdateConfig`
-governance proposal, which requires 2/3 of committee weight (see
-[Governance Actions](governance-actions.mdx)). Each key is validated against
-its expected type on update.
+- **Instant config** (`config`): values apply the moment the proposal that
+  changes them executes. Deposit and withdrawal minimums, the confirmation
+  threshold, the pause flag, and the guardian settings live here.
+- **Epoch config** (`epoch_config`): the whole store is copied onto the
+  committee formed at each reconfiguration, and nodes read these values from
+  their committee's pinned copy. A change lands in the next committee formed
+  after the proposal executes and never alters the active committee. The MPC
+  parameters live here.
+
+Existing parameters are tuned with `UpdateConfig` (instant) and
+`UpdateEpochConfig` (epoch). Both require 2/3 of committee weight, accept only
+keys that already exist in their store, and reject a change of value type. New
+keys are introduced with `AddConfig`, which names the store and is insert-only
+(see [Adding a parameter](#adding-a-parameter-without-a-package-upgrade) and
+[Governance Actions](governance-actions.mdx)).
 
 ## Parameters
 
@@ -152,9 +165,10 @@ operation requires a supermajority.
 
 ## MPC parameters
 
-The MPC parameters are snapshotted (pinned) onto each committee at
-reconfiguration. An `UpdateConfig` that changes them mid-epoch never affects
-the active committee; new values take effect when the next committee forms.
+The MPC parameters live in the epoch config and are tuned with
+`UpdateEpochConfig`. The store is pinned onto each committee at
+reconfiguration, so a change mid-epoch never affects the active committee; new
+values take effect when the next committee forms.
 
 ### `mpc_max_faulty_in_basis_points`
 
@@ -244,3 +258,13 @@ worst_case_network_fee = bitcoin_withdrawal_minimum - 546
 The maximum miner fee the contract accepts for a withdrawal transaction,
 derived from `bitcoin_withdrawal_minimum` minus the dust threshold. With
 defaults: `30,000 - 546 = 29,454 sats`.
+
+## Adding a parameter without a package upgrade
+
+The Move package reads only the keys documented on this page; any other key
+is opaque to it and is consumed by the node software. To make a node-side
+setting governable, pass an `AddConfig` proposal naming the key, its initial
+value (which fixes the key's type for later updates), and the store: the epoch
+config when every node must agree on the value for the whole epoch, the
+instant config otherwise. A node reads an absent key as its built-in default,
+so the key can be added before or after the node release that consumes it.

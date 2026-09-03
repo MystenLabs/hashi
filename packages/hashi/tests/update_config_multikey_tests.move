@@ -1,87 +1,60 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// `update_config` semantics on the instant config: multi-key batches apply
+/// atomically, unknown keys and type changes abort, and the MPC parameters
+/// (which live in the epoch config) are not reachable from here.
 #[test_only]
 #[allow(implicit_const_copy, unused_variable)]
 module hashi::update_config_multikey_tests;
 
-use hashi::{config_value, mpc_config, test_utils, update_config};
+use hashi::{btc_config, config_value, test_utils, update_config};
 use sui::{clock, vec_map};
 
 const VOTER1: address = @0x1;
 const VOTER2: address = @0x2;
 const VOTER3: address = @0x3;
 
-fun mpc_max_faulty_key(): std::string::String {
-    b"mpc_max_faulty_in_basis_points".to_string()
+fun deposit_minimum_key(): std::string::String {
+    b"bitcoin_deposit_minimum".to_string()
 }
 
-fun mpc_allowed_delta_key(): std::string::String {
-    b"mpc_weight_reduction_allowed_delta".to_string()
+fun withdrawal_minimum_key(): std::string::String {
+    b"bitcoin_withdrawal_minimum".to_string()
 }
 
-fun mpc_nonce_generation_protocol_key(): std::string::String {
-    b"mpc_nonce_generation_protocol".to_string()
-}
-
-fun mpc_nonce_accumulation_window_key(): std::string::String {
-    b"mpc_nonce_accumulation_window_ms".to_string()
+fun propose_and_execute(
+    hashi: &mut hashi::hashi::Hashi,
+    entries: vec_map::VecMap<std::string::String, config_value::Value>,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+) {
+    let proposal_id = update_config::propose(
+        hashi,
+        VOTER1,
+        entries,
+        vec_map::empty(),
+        clock,
+        ctx,
+    );
+    update_config::execute(hashi, proposal_id, clock);
 }
 
 #[test]
 fun test_single_key_update_via_multikey_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 3333);
+    assert!(btc_config::bitcoin_deposit_minimum(hashi.config()) == 30_000);
 
     let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(2000));
+    entries.insert(deposit_minimum_key(), config_value::new_u64(50_000));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
-    // Seeded by init_defaults and untouched by the update above.
-    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_update_nonce_generation_protocol() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
-
-    let mut entries = vec_map::empty();
-    entries.insert(mpc_nonce_generation_protocol_key(), config_value::new_u64(1));
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 1);
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 3333);
+    assert!(btc_config::bitcoin_deposit_minimum(hashi.config()) == 50_000);
+    // Untouched by the update above.
+    assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) == 30_000);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -90,59 +63,32 @@ fun test_update_nonce_generation_protocol() {
 #[test]
 fun test_multi_key_update_applies_atomically() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(2000));
-    entries.insert(mpc_allowed_delta_key(), config_value::new_u64(1500));
-    entries.insert(mpc_nonce_accumulation_window_key(), config_value::new_u64(5000));
+    entries.insert(deposit_minimum_key(), config_value::new_u64(50_000));
+    entries.insert(withdrawal_minimum_key(), config_value::new_u64(60_000));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 1500);
-    assert!(mpc_config::nonce_accumulation_window_ms(hashi.config()) == 5000);
+    assert!(btc_config::bitcoin_deposit_minimum(hashi.config()) == 50_000);
+    assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) == 60_000);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
 
 #[test]
-fun test_mixed_domain_multi_key_update() {
+fun test_instant_update_never_touches_the_epoch_config() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(2000));
-    entries.insert(
-        b"bitcoin_deposit_minimum".to_string(),
-        config_value::new_u64(50_000),
-    );
+    entries.insert(deposit_minimum_key(), config_value::new_u64(50_000));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
-    assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 50_000);
+    assert!(!hashi.epoch_config().contains(b"bitcoin_deposit_minimum"));
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -152,8 +98,7 @@ fun test_mixed_domain_multi_key_update() {
 #[expected_failure(abort_code = update_config::ENoEntriesProvided)]
 fun test_empty_entries_aborts_at_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let _ = update_config::propose(
@@ -173,22 +118,29 @@ fun test_empty_entries_aborts_at_propose() {
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
 fun test_unknown_key_aborts_at_execute() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
     entries.insert(b"does_not_exist".to_string(), config_value::new_u64(42));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+/// The MPC parameters live in the epoch config; naming one here is an
+/// unknown key for the instant store, not a silent no-op.
+#[test]
+#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
+fun test_mpc_key_aborts_at_execute() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let mut entries = vec_map::empty();
+    entries.insert(b"mpc_max_faulty_in_basis_points".to_string(), config_value::new_u64(2000));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -198,22 +150,28 @@ fun test_unknown_key_aborts_at_execute() {
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
 fun test_wrong_value_type_aborts_at_execute() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_bool(true));
+    entries.insert(deposit_minimum_key(), config_value::new_bool(true));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
+fun test_batch_with_unknown_entry_aborts() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let mut entries = vec_map::empty();
+    entries.insert(deposit_minimum_key(), config_value::new_u64(50_000));
+    entries.insert(b"does_not_exist".to_string(), config_value::new_u64(42));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -227,8 +185,8 @@ fun test_propose_vote_execute_through_quorum() {
     let clock = clock::create_for_testing(ctx1);
 
     let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(2000));
-    entries.insert(mpc_allowed_delta_key(), config_value::new_u64(1500));
+    entries.insert(deposit_minimum_key(), config_value::new_u64(50_000));
+    entries.insert(withdrawal_minimum_key(), config_value::new_u64(60_000));
 
     let proposal_id = update_config::propose(
         &mut hashi,
@@ -259,207 +217,9 @@ fun test_propose_vote_execute_through_quorum() {
 
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 1500);
+    assert!(btc_config::bitcoin_deposit_minimum(hashi.config()) == 50_000);
+    assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) == 60_000);
 
     clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-const MAX_BPS: u64 = 10000;
-const MAX_FAULTY_BPS: u64 = 3333;
-const DEFAULT_MAX_FAULTY_BPS: u64 = 3333;
-const MAX_NONCE_ACCUMULATION_WINDOW_MS: u64 = 10000;
-
-fun reject_single(key: std::string::String, value: config_value::Value) {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    let mut entries = vec_map::empty();
-    entries.insert(key, value);
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_max_faulty_above_max() {
-    reject_single(mpc_max_faulty_key(), config_value::new_u64(MAX_FAULTY_BPS + 1));
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_allowed_delta_above_max() {
-    reject_single(mpc_allowed_delta_key(), config_value::new_u64(MAX_BPS + 1));
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_nonce_protocol_above_one() {
-    reject_single(mpc_nonce_generation_protocol_key(), config_value::new_u64(2));
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_nonce_window_above_max() {
-    reject_single(
-        mpc_nonce_accumulation_window_key(),
-        config_value::new_u64(MAX_NONCE_ACCUMULATION_WINDOW_MS + 1),
-    );
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_max_faulty_zero() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(0));
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_accept_upper_boundary_values() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    let mut entries = vec_map::empty();
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(MAX_FAULTY_BPS));
-    entries.insert(mpc_allowed_delta_key(), config_value::new_u64(MAX_BPS));
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_FAULTY_BPS);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == MAX_BPS);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_batch_with_out_of_range_entry_aborts() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    let mut entries = vec_map::empty();
-    entries.insert(mpc_allowed_delta_key(), config_value::new_u64(1500));
-    entries.insert(mpc_max_faulty_key(), config_value::new_u64(MAX_BPS + 1));
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_removed_threshold_key_even_when_present() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    hashi.config_mut().upsert(b"mpc_threshold_in_basis_points", config_value::new_u64(3334));
-
-    let mut entries = vec_map::empty();
-    entries.insert(b"mpc_threshold_in_basis_points".to_string(), config_value::new_u64(5200));
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_out_of_range_max_faulty_is_repaired_in_place_at_reconfig() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-
-    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(5000));
-    let _ = mpc_config::pin(hashi.config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_FAULTY_BPS);
-    let pinned = mpc_config::pin(hashi.config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(&pinned) == MAX_FAULTY_BPS);
-
-    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(0));
-    let _ = mpc_config::pin(hashi.config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == DEFAULT_MAX_FAULTY_BPS);
-
-    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(2000));
-    let _ = mpc_config::pin(hashi.config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
-
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_delta_is_clamped_below_max_faulty_at_reconfig() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == DEFAULT_MAX_FAULTY_BPS);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
-    let _ = mpc_config::pin(hashi.config_mut());
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
-
-    hashi.config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(500));
-    let _ = mpc_config::pin(hashi.config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 500);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 499);
-
     std::unit_test::destroy(hashi);
 }

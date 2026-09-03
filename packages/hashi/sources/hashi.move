@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// The root shared object of the bridge. `Hashi` aggregates every subsystem —
-/// committee set, config, versioning, treasury, governance proposals, and TOB
-/// certificate storage — and hangs per-chain state (e.g. `BitcoinState`) off
+/// committee set, the instant and epoch configs, versioning, treasury,
+/// governance proposals, and TOB certificate storage — and hangs per-chain
+/// state (e.g. `BitcoinState`) off
 /// its `UID` as dynamic fields. It also provides the package-wide guards
 /// (pause, reconfig, committee-signature verification) that entry functions
 /// in other modules call through, and the one-time `finish_publish` launch
@@ -39,7 +40,14 @@ const EWrongUpgradeCap: vector<u8> = b"Upgrade cap does not belong to this packa
 public struct Hashi has key {
     id: UID,
     committee_set: CommitteeSet,
+    /// Governed values that take effect the moment a proposal executes. Never
+    /// copied onto a committee.
     config: Config,
+    /// Governed values that take effect at the next committee formation:
+    /// `start_reconfig` copies the whole store onto the new committee, so
+    /// every key in it is fixed for that committee's lifetime. Holds the MPC
+    /// parameters plus any epoch-scoped keys governance adds.
+    epoch_config: Config,
     versioning: Versioning,
     treasury: Treasury,
     proposals: Proposals,
@@ -164,6 +172,14 @@ public(package) fun config_mut(self: &mut Hashi): &mut Config {
     &mut self.config
 }
 
+public(package) fun epoch_config(self: &Hashi): &Config {
+    &self.epoch_config
+}
+
+public(package) fun epoch_config_mut(self: &mut Hashi): &mut Config {
+    &mut self.epoch_config
+}
+
 public(package) fun versioning(self: &Hashi): &Versioning {
     &self.versioning
 }
@@ -271,8 +287,12 @@ fun init(ctx: &mut TxContext) {
         config: {
             let mut config = hashi::config::create();
             hashi::btc_config::init_defaults(&mut config);
-            hashi::mpc_config::init_defaults(&mut config);
             config
+        },
+        epoch_config: {
+            let mut epoch_config = hashi::config::empty();
+            hashi::mpc_config::init_defaults(&mut epoch_config);
+            epoch_config
         },
         versioning: versioning::create(),
         treasury: hashi::treasury::create(ctx),
@@ -314,6 +334,7 @@ public(package) fun epoch_certs_stamped_ref(
 public fun create_for_testing(
     committee_set: CommitteeSet,
     config: Config,
+    epoch_config: Config,
     versioning: Versioning,
     treasury: Treasury,
     proposals: Proposals,
@@ -324,6 +345,7 @@ public fun create_for_testing(
         id: object::new(ctx),
         committee_set,
         config,
+        epoch_config,
         versioning,
         treasury,
         proposals,

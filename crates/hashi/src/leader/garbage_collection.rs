@@ -524,6 +524,18 @@ impl LeaderService {
                     Identifier::from_static("UpdateConfig"),
                     vec![],
                 ))),
+                ProposalType::UpdateEpochConfig => TypeTag::Struct(Box::new(StructTag::new(
+                    type_package_id,
+                    Identifier::from_static("update_epoch_config"),
+                    Identifier::from_static("UpdateEpochConfig"),
+                    vec![],
+                ))),
+                ProposalType::AddConfig => TypeTag::Struct(Box::new(StructTag::new(
+                    type_package_id,
+                    Identifier::from_static("add_config"),
+                    Identifier::from_static("AddConfig"),
+                    vec![],
+                ))),
                 ProposalType::EnableVersion => TypeTag::Struct(Box::new(StructTag::new(
                     type_package_id,
                     Identifier::from_static("enable_version"),

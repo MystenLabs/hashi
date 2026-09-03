@@ -149,16 +149,32 @@ pub async fn show_onchain_config(config: &CliConfig) -> Result<()> {
         epoch.to_string().green()
     );
 
-    // TODO: Fetch and display more configuration details using hashi::onchain::OnchainState:
-    // - Enabled versions
-    // - Deposit fee
-    // - Paused state
-    // - Committee info
-    // - etc.
+    let state = client.onchain_state().state();
+    let hashi = state.hashi();
+
+    println!(
+        "  {} {:?}",
+        "Enabled Versions:".bold(),
+        hashi.config.enabled_versions
+    );
+
+    println!(
+        "\n  {}",
+        "Instant config (applies when a proposal executes):".bold()
+    );
+    for (key, value) in &hashi.config.config {
+        println!("    {} = {:?}", key.cyan(), value);
+    }
+
+    println!(
+        "\n  {}",
+        "Epoch config (copied onto each new committee):".bold()
+    );
+    for (key, value) in hashi.epoch_config.entries() {
+        println!("    {} = {:?}", key.cyan(), value);
+    }
 
     println!("{}", "━".repeat(60).dimmed());
-
-    print_info("Full configuration fetching is a TODO - will use OnchainState for more details.");
 
     Ok(())
 }

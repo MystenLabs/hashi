@@ -50,7 +50,12 @@ pub struct BitcoinCollections {
 pub struct Hashi {
     pub id: Address,
     pub committees: CommitteeSet,
+    /// Governed values that apply the moment a proposal executes.
     pub config: Config,
+    /// Governed values copied wholesale onto each new committee. The active
+    /// committee reads its own pinned copy; this is what the NEXT committee
+    /// will be formed with.
+    pub epoch_config: hashi_types::move_types::Config,
     pub treasury: Treasury,
     /// `None` under `ScrapeScope::GovernanceOnly`. An `Option` rather than
     /// empty collections so a scope mistake can't read as "no withdrawals".
@@ -686,6 +691,8 @@ pub struct Proposal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposalType {
     UpdateConfig,
+    UpdateEpochConfig,
+    AddConfig,
     EnableVersion,
     DisableVersion,
     Upgrade,
@@ -714,6 +721,8 @@ impl ProposalType {
     pub fn as_str(&self) -> &str {
         match self {
             ProposalType::UpdateConfig => "update_config",
+            ProposalType::UpdateEpochConfig => "update_epoch_config",
+            ProposalType::AddConfig => "add_config",
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
@@ -728,6 +737,8 @@ impl ProposalType {
     pub fn all_labels() -> &'static [&'static str] {
         &[
             "update_config",
+            "update_epoch_config",
+            "add_config",
             "enable_version",
             "disable_version",
             "upgrade",
@@ -803,33 +814,6 @@ impl Config {
         match self.config.get("bitcoin_deposit_time_delay_ms") {
             Some(ConfigValue::U64(v)) => *v,
             _ => 0,
-        }
-    }
-
-    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
-        match self.config.get("mpc_weight_reduction_allowed_delta") {
-            Some(ConfigValue::U64(v)) => {
-                u16::try_from(*v).expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX")
-            }
-            _ => DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
-        }
-    }
-
-    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
-        match self.config.get("mpc_max_faulty_in_basis_points") {
-            Some(ConfigValue::U64(v)) => {
-                u16::try_from(*v).expect("mpc_max_faulty_in_basis_points exceeds u16::MAX")
-            }
-            _ => DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
-        }
-    }
-
-    pub fn mpc_nonce_generation_protocol(&self) -> u16 {
-        match self.config.get("mpc_nonce_generation_protocol") {
-            Some(ConfigValue::U64(v)) => {
-                u16::try_from(*v).expect("mpc_nonce_generation_protocol exceeds u16::MAX")
-            }
-            _ => hashi_types::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         }
     }
 

@@ -362,7 +362,7 @@ public(package) fun clear_resignation(
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    config: Config,
+    epoch_config: Config,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
@@ -376,7 +376,7 @@ public(package) fun start_reconfig(
 
     let committee = self.new_committee_from_validator_set(
         sui_system,
-        config,
+        epoch_config,
         ctx,
     );
 
@@ -537,13 +537,13 @@ fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
 fun new_committee_from_validator_set(
     self: &CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    config: Config,
+    epoch_config: Config,
     ctx: &TxContext,
 ): Committee {
     self.new_committee_from_voting_powers(
         ctx.epoch(),
         sui_system.active_validator_voting_powers(),
-        config,
+        epoch_config,
     )
 }
 
@@ -557,7 +557,7 @@ fun new_committee_from_voting_powers(
     self: &CommitteeSet,
     epoch: u64,
     mut validator_set: sui::vec_map::VecMap<address, u64>,
-    config: Config,
+    epoch_config: Config,
 ): Committee {
     let g1_identity = g1_to_uncompressed_g1(&sui::bls12381::g1_identity());
 
@@ -612,7 +612,7 @@ fun new_committee_from_voting_powers(
     committee::new_committee(
         epoch,
         committee_members,
-        config,
+        epoch_config,
     )
 }
 
@@ -801,9 +801,9 @@ public fun new_committee_from_voting_powers_for_testing(
     self: &CommitteeSet,
     epoch: u64,
     validator_set: sui::vec_map::VecMap<address, u64>,
-    config: Config,
+    epoch_config: Config,
 ): Committee {
-    self.new_committee_from_voting_powers(epoch, validator_set, config)
+    self.new_committee_from_voting_powers(epoch, validator_set, epoch_config)
 }
 
 #[test_only]
