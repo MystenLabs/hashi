@@ -592,6 +592,7 @@ mod tests {
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
             genesis_state_hash: None,
+            hashi_object_id: None,
             untrusted_git_revision: "test".to_string(),
             enclave_btc_pubkey: Some(enclave_btc_pubkey),
             limiter_state: Some(LimiterState {

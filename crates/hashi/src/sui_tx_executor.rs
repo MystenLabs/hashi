@@ -2598,7 +2598,11 @@ pub(crate) async fn build_validator_tx(
             .await?
             .into_inner();
         let current_epoch = service_info.epoch();
-        let pop = protocol_key.proof_of_possession(current_epoch, validator_address);
+        let pop = protocol_key.proof_of_possession(
+            hashi_ids.hashi_object_id,
+            current_epoch,
+            validator_address,
+        );
 
         let public_key_arg = builder.pure(&protocol_key.public_key().as_ref().to_vec());
         let pop_signature_arg = builder.pure(&pop.signature().as_ref().to_vec());

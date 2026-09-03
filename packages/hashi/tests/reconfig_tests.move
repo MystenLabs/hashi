@@ -56,10 +56,16 @@ fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
     committee::new_committee(epoch, members, mpc_config::new_for_testing(800, 3333, 0, 0))
 }
 
-fun cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {
+fun cert_message<T: copy + drop + store>(
+    hashi_id: address,
+    epoch: u64,
+    intent: u16,
+    message: &T,
+): vector<u8> {
     use sui::bcs;
 
     let mut bytes = bcs::to_bytes(&intent);
+    bytes.append(bcs::to_bytes(&hashi_id));
     bytes.append(bcs::to_bytes(&epoch));
     bytes.append(bcs::to_bytes(message));
     bytes
@@ -82,13 +88,23 @@ fun test_end_reconfig_stores_committee_handoff() {
     );
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
+        &cert_message(
+            object::id_address(&hashi),
+            next_epoch,
+            hashi::intent::reconfig_completion(),
+            &mpc_message,
+        ),
         3,
     );
     let handoff_message = reconfig::committee_transition_request_for_testing(next_committee);
     let committee_handoff_cert = test_utils::sign_certificate(
         0,
-        &cert_message(0, hashi::intent::committee_transition(), &handoff_message),
+        &cert_message(
+            object::id_address(&hashi),
+            0,
+            hashi::intent::committee_transition(),
+            &handoff_message,
+        ),
         3,
     );
 
@@ -118,7 +134,12 @@ fun test_end_reconfig_requires_committee_handoff_after_initial_reconfig() {
     );
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
+        &cert_message(
+            object::id_address(&hashi),
+            next_epoch,
+            hashi::intent::reconfig_completion(),
+            &mpc_message,
+        ),
         3,
     );
 
@@ -139,7 +160,12 @@ fun test_submit_committee_handoff_rejects_initial_reconfig() {
     let handoff_message = reconfig::committee_transition_request_for_testing(next_committee);
     let committee_handoff_cert = test_utils::sign_certificate(
         0,
-        &cert_message(0, hashi::intent::committee_transition(), &handoff_message),
+        &cert_message(
+            object::id_address(&hashi),
+            0,
+            hashi::intent::committee_transition(),
+            &handoff_message,
+        ),
         3,
     );
 
@@ -165,13 +191,23 @@ fun test_submit_committee_handoff_rejects_handoff_signed_by_wrong_committee() {
     );
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
+        &cert_message(
+            object::id_address(&hashi),
+            next_epoch,
+            hashi::intent::reconfig_completion(),
+            &mpc_message,
+        ),
         3,
     );
     let handoff_message = reconfig::committee_transition_request_for_testing(next_committee);
     let committee_handoff_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, hashi::intent::committee_transition(), &handoff_message),
+        &cert_message(
+            object::id_address(&hashi),
+            next_epoch,
+            hashi::intent::committee_transition(),
+            &handoff_message,
+        ),
         3,
     );
 

@@ -540,7 +540,13 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .as_ref()
         .expect("guardian_harness set when finalize_guardian_harness is called");
     harness
-        .finalize(committee, master_pubkey, limiter_config, limiter_state)
+        .finalize(
+            committee,
+            master_pubkey,
+            limiter_config,
+            limiter_state,
+            networks.hashi_network.ids().hashi_object_id,
+        )
         .await?;
     tracing::info!("guardian harness finalized");
 

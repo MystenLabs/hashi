@@ -589,6 +589,18 @@ impl TryFrom<pb::InitConfig> for InitConfig {
         let retention_environment =
             super::S3RetentionEnvironment::try_from(config_pb.retention_environment)?;
 
+        let hashi_object_id_bytes = config_pb
+            .hashi_object_id
+            .ok_or_else(|| missing("hashi_object_id"))?;
+        let hashi_object_id_arr: [u8; 32] =
+            hashi_object_id_bytes.as_ref().try_into().map_err(|_| {
+                InvalidInputs(format!(
+                    "hashi_object_id must be 32 bytes, got {}",
+                    hashi_object_id_bytes.len()
+                ))
+            })?;
+        let hashi_object_id = sui_sdk_types::Address::new(hashi_object_id_arr);
+
         InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
@@ -596,6 +608,7 @@ impl TryFrom<pb::InitConfig> for InitConfig {
             bucket_info,
             retention_environment,
             network,
+            hashi_object_id,
         )
     }
 }
@@ -881,6 +894,7 @@ pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
         bucket_info,
         retention_environment,
         network,
+        hashi_object_id,
     ) = s.into_parts();
 
     Ok(pb::InitConfig {
@@ -890,6 +904,7 @@ pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
         network: Some(network_to_pb(network)?),
         bucket_info: Some(s3_bucket_info_to_pb(bucket_info)),
         retention_environment: retention_environment.into(),
+        hashi_object_id: Some(hashi_object_id.into_inner().to_vec().into()),
     })
 }
 
@@ -1187,6 +1202,15 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             })
             .transpose()?;
 
+        let hashi_object_id = data
+            .hashi_object_id
+            .map(|b| {
+                <[u8; 32]>::try_from(b.as_ref())
+                    .map(sui_sdk_types::Address::new)
+                    .map_err(|_| InvalidInputs("hashi_object_id must be 32 bytes".into()))
+            })
+            .transpose()?;
+
         Ok(Self {
             lifecycle,
             secret_sharing_instance,
@@ -1200,6 +1224,7 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             limiter_config,
             current_committee_epoch: data.current_committee_epoch,
             mpc_master_g,
+            hashi_object_id,
         })
     }
 }
@@ -1233,6 +1258,9 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         mpc_master_g: info
             .mpc_master_g
             .map(|g| bcs::to_bytes(&g).expect("serialize MPC master G").into()),
+        hashi_object_id: info
+            .hashi_object_id
+            .map(|id| id.into_inner().to_vec().into()),
     }
 }
 
@@ -1843,6 +1871,7 @@ mod tests {
 
         let info = GuardianInfo {
             lifecycle: WithdrawStage::ProvisionerInitialized.into(),
+            hashi_object_id: None,
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
@@ -2145,8 +2174,9 @@ mod tests {
         let transition = CommitteeTransitionRequest {
             new_committee: crate::move_types::Committee::from(&new_committee),
         };
-        let sig = sk.sign(5, addr, &transition);
-        let mut agg = BlsSignatureAggregator::new(&outgoing, transition.clone());
+        let hashi_id = sui_sdk_types::Address::new([0xAA; 32]);
+        let sig = sk.sign(hashi_id, 5, addr, &transition);
+        let mut agg = BlsSignatureAggregator::new(hashi_id, &outgoing, transition.clone());
         agg.add_signature(sig).expect("member sig should verify");
         let signed = agg.finish().expect("threshold met");
 

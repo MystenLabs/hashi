@@ -69,10 +69,12 @@ impl PIInstall {
             ensure_no_serving_committee(enclave).await?;
         }
 
+        let hashi_object_id = enclave.hashi_object_id()?;
         Ok(Self {
             enclave_btc_keypair,
             genesis_log: genesis_state.map(|state| GenesisLogMessage {
                 committee: state.into_committee(),
+                hashi_object_id,
             }),
             completion_log: PIEnclaveFullyInitialized {
                 sharing_seq,

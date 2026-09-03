@@ -29,8 +29,14 @@ fun committee_for_testing(epoch: u64, voters: vector<address>): committee::Commi
     committee::new_committee(epoch, members, mpc_config::new_for_testing(800, 3333, 0, 0))
 }
 
-fun cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {
+fun cert_message<T: copy + drop + store>(
+    hashi_id: address,
+    epoch: u64,
+    intent: u16,
+    message: &T,
+): vector<u8> {
     let mut bytes = sui::bcs::to_bytes(&intent);
+    bytes.append(sui::bcs::to_bytes(&hashi_id));
     bytes.append(sui::bcs::to_bytes(&epoch));
     bytes.append(sui::bcs::to_bytes(message));
     bytes
@@ -56,13 +62,19 @@ fun run_epoch_transition(
     );
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
+        &cert_message(
+            object::id_address(hashi),
+            next_epoch,
+            hashi::intent::reconfig_completion(),
+            &mpc_message,
+        ),
         next_voters.length(),
     );
     let handoff_message = reconfig::committee_transition_request_for_testing(next_committee);
     let committee_handoff_cert = test_utils::sign_certificate(
         hashi.committee_set().epoch(),
         &cert_message(
+            object::id_address(hashi),
             hashi.committee_set().epoch(),
             hashi::intent::committee_transition(),
             &handoff_message,
@@ -339,14 +351,24 @@ fun test_resign_mid_reconfig_survives_one_boundary() {
     let mpc_message = reconfig::reconfig_completion_message_for_testing(1, mpc_public_key);
     let mpc_cert = test_utils::sign_certificate(
         1,
-        &cert_message(1, hashi::intent::reconfig_completion(), &mpc_message),
+        &cert_message(
+            object::id_address(&hashi),
+            1,
+            hashi::intent::reconfig_completion(),
+            &mpc_message,
+        ),
         3,
     );
     let next_committee = committee_for_testing(1, vector[VOTER1, VOTER2, VOTER3]);
     let handoff_message = reconfig::committee_transition_request_for_testing(next_committee);
     let handoff_cert = test_utils::sign_certificate(
         0,
-        &cert_message(0, hashi::intent::committee_transition(), &handoff_message),
+        &cert_message(
+            object::id_address(&hashi),
+            0,
+            hashi::intent::committee_transition(),
+            &handoff_message,
+        ),
         3,
     );
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);

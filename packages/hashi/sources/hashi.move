@@ -137,20 +137,22 @@ public(package) fun verify<T>(
 ): CertifiedMessage<T> {
     let threshold =
         threshold::certificate_threshold(self.current_committee().total_weight() as u16) as u64;
-    self.current_committee().verify_certificate(intent, message, sig, threshold)
+    self
+        .current_committee()
+        .verify_certificate(self.id.uid_to_address(), intent, message, sig, threshold)
 }
 
 /// Verify a committee signature against a specific committee (not necessarily current).
 /// Used by reconfig which verifies against the next epoch's committee.
 public(package) fun verify_with_committee<T>(
-    _self: &Hashi,
+    self: &Hashi,
     committee: &Committee,
     intent: u16,
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {
     let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
-    committee.verify_certificate(intent, message, sig, threshold)
+    committee.verify_certificate(self.id.uid_to_address(), intent, message, sig, threshold)
 }
 
 public(package) fun assert_not_reconfiguring(self: &Hashi) {

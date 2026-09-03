@@ -469,7 +469,11 @@ impl LeaderService {
             request_id: deposit_request.id,
             utxo: deposit_request.utxo.clone(),
         };
-        let mut aggregator = BlsSignatureAggregator::new(&committee, confirmation_message);
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &committee,
+            confirmation_message,
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {

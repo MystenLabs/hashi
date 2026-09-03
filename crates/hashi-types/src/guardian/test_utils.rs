@@ -84,6 +84,10 @@ const TEST_T: usize = 3;
 /// Deterministic Sui address used across signing-related mocks.
 const TEST_SIGNER_ADDRESS: SuiAddress = SuiAddress::new([1u8; 32]);
 
+/// Deterministic Hashi object id bound into mock certificate preimages.
+/// Guardian tests that verify these certificates must pin the same id.
+pub const TEST_HASHI_OBJECT_ID: SuiAddress = SuiAddress::new([0xAA; 32]);
+
 /// Deterministic committee signing key material used across tests.
 const TEST_HASHI_BLS_SK_BYTES: [u8; Bls12381PrivateKey::LENGTH] = [9u8; Bls12381PrivateKey::LENGTH];
 
@@ -105,6 +109,7 @@ impl GuardianInfo {
             limiter_config: None,
             current_committee_epoch: None,
             mpc_master_g: None,
+            hashi_object_id: None,
         }
     }
 }
@@ -350,6 +355,7 @@ impl InitConfig {
         limiter_config: LimiterConfig,
         hashi_btc_master_pubkey: HashiMasterG,
         network: super::Network,
+        hashi_object_id: SuiAddress,
     ) -> Self {
         InitConfig::new(
             limiter_config,
@@ -358,6 +364,7 @@ impl InitConfig {
             S3BucketInfo::mock_for_testing(),
             super::S3RetentionEnvironment::Testnet,
             network,
+            hashi_object_id,
         )
         .expect("valid InitConfig")
     }
@@ -383,6 +390,7 @@ impl InitConfig {
             S3BucketInfo::mock_for_testing(),
             super::S3RetentionEnvironment::Testnet,
             super::Network::Regtest,
+            TEST_HASHI_OBJECT_ID,
         )
         .expect("valid InitConfig")
     }
@@ -438,8 +446,8 @@ impl StandardWithdrawalRequest {
 
         let sk = mock_hashi_bls_sk();
         let address = TEST_SIGNER_ADDRESS;
-        let mut agg = BlsSignatureAggregator::new(&committee, req.clone());
-        agg.add_signature(sk.sign(epoch, address, &req))
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_OBJECT_ID, &committee, req.clone());
+        agg.add_signature(sk.sign(TEST_HASHI_OBJECT_ID, epoch, address, &req))
             .expect("member signature should verify");
 
         (agg.finish().expect("finish aggregator"), committee)

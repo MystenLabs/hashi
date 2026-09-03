@@ -75,6 +75,7 @@ impl OIWithdrawModeInstall {
         let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
         let pcr_allowlist = self.init_config.pcr_allowlist().clone();
         let network = self.init_config.network();
+        let hashi_object_id = self.init_config.hashi_object_id();
 
         info!(
             "Setting secret-sharing instance: n={}, t={}, {} commitments.",
@@ -106,6 +107,7 @@ impl OIWithdrawModeInstall {
                 hashi_btc_master_pubkey,
                 pcr_allowlist,
                 limiter_config,
+                hashi_object_id,
             )
             .expect("Unable to set enclave configuration");
     }

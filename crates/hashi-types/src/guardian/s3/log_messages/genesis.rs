@@ -11,6 +11,10 @@ use serde::Serialize;
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GenesisLogMessage {
     pub committee: crate::move_types::Committee,
+    /// The Hashi shared-object id this guardian was bootstrapped for, for
+    /// audit self-description (the authoritative pin lives in `InitConfig`,
+    /// covered by `config_hash`).
+    pub hashi_object_id: sui_sdk_types::Address,
 }
 
 impl GenesisLogMessage {

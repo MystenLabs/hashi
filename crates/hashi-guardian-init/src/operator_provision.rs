@@ -171,6 +171,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         guardian_s3.bucket_info.clone(),
         guardian_s3.retention_environment,
         cfg.bitcoin_network,
+        cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let config_hash = init_config.digest();
     let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);

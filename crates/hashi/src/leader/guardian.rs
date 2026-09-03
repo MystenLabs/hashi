@@ -190,7 +190,11 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, guardian_request);
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &committee,
+            guardian_request,
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
@@ -371,7 +375,11 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(&from_committee, transition);
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &from_committee,
+            transition,
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {

@@ -24,11 +24,12 @@ use hashi_types::guardian::HashiSigned;
 /// stops collecting signatures; a higher configured threshold could reject an
 /// otherwise-valid certificate.
 pub fn verify_hashi_cert<T: hashi_types::intent::IntentMessage>(
+    hashi_id: hashi_types::sui_sdk_types::Address,
     committee: &HashiCommittee,
     signed_request: &HashiSigned<T>,
 ) -> GuardianResult<()> {
     let threshold = certificate_threshold(committee.total_weight());
     committee
-        .verify_signature_and_weight(signed_request, threshold)
+        .verify_signature_and_weight(hashi_id, signed_request, threshold)
         .map_err(|e| Unauthenticated(format!("signature verification failed: {e:?}")))
 }

@@ -1060,7 +1060,12 @@ impl Hashi {
             self.find_signing_key_for_committee(&committee, validator_address, epoch)?;
         let public_key_bytes = private_key.public_key().as_bytes().to_vec().into();
         let signature_bytes = private_key
-            .sign(epoch, validator_address, message)
+            .sign(
+                self.config.hashi_ids().hashi_object_id,
+                epoch,
+                validator_address,
+                message,
+            )
             .signature()
             .as_bytes()
             .to_vec()

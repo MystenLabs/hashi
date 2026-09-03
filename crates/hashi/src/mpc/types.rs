@@ -856,6 +856,8 @@ pub struct AvidCertificate<P: AvidLeg> {
     dealer_cert: SignedMessage<P::Domain>,
     payload: P,
     committee: Arc<Committee>,
+    /// The Hashi deployment the dealer cert's preimage is bound to.
+    hashi_id: Address,
     signers: BTreeSet<PartyId>,
 }
 
@@ -877,13 +879,14 @@ impl<P: Clone + AvidLeg> Certificate for AvidCertificate<P> {
         // Constructors pin `payload` to `dealer_cert`, so the committee signature over the
         // dealer cert authenticates `payload` too.
         self.committee
-            .verify_signature_any_weight(&self.dealer_cert)
+            .verify_signature_any_weight(self.hashi_id, &self.dealer_cert)
             .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
     }
 }
 
 impl AvidCertificate<batch_avss_avid::AvssVote> {
     pub fn confirm(
+        hashi_id: Address,
         dealer_cert: SignedMessage<AvssVoteMessagesHash>,
         committee: Arc<Committee>,
     ) -> MpcResult<Self> {
@@ -895,6 +898,7 @@ impl AvidCertificate<batch_avss_avid::AvssVote> {
             dealer_cert,
             payload,
             committee,
+            hashi_id,
             signers,
         })
     }
@@ -902,6 +906,7 @@ impl AvidCertificate<batch_avss_avid::AvssVote> {
 
 impl AvidCertificate<batch_avss_avid::AvidVote> {
     pub fn vote(
+        hashi_id: Address,
         dealer_cert: SignedMessage<AvidVoteMessagesHash>,
         vote: batch_avss_avid::AvidVote,
         committee: Arc<Committee>,
@@ -916,6 +921,7 @@ impl AvidCertificate<batch_avss_avid::AvidVote> {
             dealer_cert,
             payload: vote,
             committee,
+            hashi_id,
             signers,
         })
     }
@@ -1052,6 +1058,8 @@ pub struct DealerFlowData {
     pub my_signature: Option<MemberSignature>,
     pub required_reduced_weight: u32,
     pub committee: Committee,
+    /// The Hashi deployment every collected signature must be bound to.
+    pub hashi_id: Address,
     pub nodes: Nodes<EncryptionGroupElement>,
 }
 
@@ -1062,6 +1070,8 @@ pub(crate) struct AvidDealerFlowData {
     /// Per-recipient optimistic messages, excluding the dealer's own.
     pub(crate) recipient_messages: Vec<(Address, Messages)>,
     pub(crate) committee: Committee,
+    /// The Hashi deployment every collected signature must be bound to.
+    pub(crate) hashi_id: Address,
     pub(crate) nodes: Nodes<EncryptionGroupElement>,
     pub(crate) total_reduced_weight: u32,
     /// `W − f` in reduced weight.
@@ -1226,6 +1236,7 @@ pub type SigningResult<T> = Result<T, SigningError>;
 
 #[cfg(test)]
 mod tests {
+    const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
     use super::*;
 
     use fastcrypto_tbls::nodes::Node;
@@ -1354,9 +1365,9 @@ mod tests {
         epoch: u64,
         message: T,
     ) -> SignedMessage<T> {
-        let mut aggregator = BlsSignatureAggregator::new(committee, message.clone());
+        let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, message.clone());
         for &i in signer_indices {
-            let sig = keys[i].sign(epoch, Address::new([i as u8; 32]), &message);
+            let sig = keys[i].sign(TEST_HASHI_ID, epoch, Address::new([i as u8; 32]), &message);
             aggregator.add_signature(sig).unwrap();
         }
         aggregator.finish().unwrap()
@@ -1413,7 +1424,7 @@ mod tests {
         let signed = confirm_cert_over(&committee, &keys, &[0, 1, 2], epoch, h_v.into());
         let committee = Arc::new(committee);
 
-        let cert = AvidCertificate::confirm(signed.clone(), committee).unwrap();
+        let cert = AvidCertificate::confirm(TEST_HASHI_ID, signed.clone(), committee).unwrap();
 
         assert_eq!(cert.signers(), &BTreeSet::from([0u16, 1, 2]));
         assert_eq!(cert.payload().common_message_hash.digest, h_v);
@@ -1421,7 +1432,7 @@ mod tests {
         assert!(cert.to_verified().is_ok());
 
         let (other, _) = test_committee(3, epoch);
-        let bad = AvidCertificate::confirm(signed, Arc::new(other)).unwrap();
+        let bad = AvidCertificate::confirm(TEST_HASHI_ID, signed, Arc::new(other)).unwrap();
         assert!(bad.verify().is_err());
     }
 
@@ -1440,7 +1451,8 @@ mod tests {
         let wrong = vote_cert_over(&committee, &keys, &[0, 1, 2], epoch, [0u8; 32].into());
         let committee = Arc::new(committee);
 
-        let cert = AvidCertificate::vote(good, avid_vote.clone(), committee.clone()).unwrap();
+        let cert = AvidCertificate::vote(TEST_HASHI_ID, good, avid_vote.clone(), committee.clone())
+            .unwrap();
         assert!(cert.verify().is_ok());
         assert!(cert.to_verified().is_ok());
         assert_eq!(
@@ -1448,7 +1460,7 @@ mod tests {
             bcs::to_bytes(&avid_vote).unwrap(),
         );
 
-        assert!(AvidCertificate::vote(wrong, avid_vote, committee).is_err());
+        assert!(AvidCertificate::vote(TEST_HASHI_ID, wrong, avid_vote, committee).is_err());
     }
 
     #[test]
@@ -1485,7 +1497,8 @@ mod tests {
         let h_v = MessagesHash::from(own_message.common.hash().digest);
         let confirmers: Vec<usize> = (0..=7).collect();
         let signed = confirm_cert_over(&committee, &keys, &confirmers, epoch, h_v);
-        let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
+        let confirm_cert =
+            AvidCertificate::confirm(TEST_HASHI_ID, signed, Arc::new(committee)).unwrap();
         assert!(confirm_cert.verify().is_ok());
 
         // Disperse with the real cert
@@ -1516,7 +1529,9 @@ mod tests {
             epoch,
             hash_avid_vote(&vote_89),
         );
-        assert!(AvidCertificate::vote(signed, vote_79, Arc::new(committee)).is_err());
+        assert!(
+            AvidCertificate::vote(TEST_HASHI_ID, signed, vote_79, Arc::new(committee)).is_err()
+        );
     }
 
     fn create_test_validator(
@@ -1679,10 +1694,11 @@ mod tests {
         };
 
         // Sign with committee members to create a valid certificate
-        let mut aggregator = BlsSignatureAggregator::new(&committee, dkg_message.clone());
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, dkg_message.clone());
         for (i, key) in signing_keys.iter().enumerate() {
             let addr = Address::new([i as u8; 32]);
-            let sig = key.sign(epoch, addr, &dkg_message);
+            let sig = key.sign(TEST_HASHI_ID, epoch, addr, &dkg_message);
             aggregator.add_signature(sig).unwrap();
         }
         let signed_message = aggregator.finish().unwrap();

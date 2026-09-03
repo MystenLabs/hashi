@@ -132,6 +132,10 @@ message GuardianInfoData {
 
   // Digest of the optional GenesisState pinned during operator_init.
   optional bytes genesis_state_hash = 13;
+
+  // The Hashi shared-object id (32 bytes) this guardian serves (set after
+  // operator_init). Certificates verified by this enclave are bound to it.
+  optional bytes hashi_object_id = 14;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.
@@ -381,6 +385,10 @@ message InitConfig {
 
   // Hashi deployment class selecting the S3 object-lock policy.
   S3RetentionEnvironment retention_environment = 6;
+
+  // The Hashi shared-object id (32 bytes) committee certificates verified by
+  // this guardian must be bound to.
+  optional bytes hashi_object_id = 7;
 }
 
 message LimiterState {

@@ -446,7 +446,12 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let config = InitConfig::from_parts_for_testing(limiter_config, master_pubkey, network);
+    let config = InitConfig::from_parts_for_testing(
+        limiter_config,
+        master_pubkey,
+        network,
+        hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
+    );
     let enclave =
         create_operator_initialized_enclave(OperatorInitTestArgs::default().with_config(config))
             .await;

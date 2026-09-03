@@ -106,9 +106,15 @@ fun test_cancel_withdrawal_cooldown_not_elapsed() {
 // ======== Certificate-based tests ========
 
 /// Helper: build the signing message bytes for a certificate.
-/// Format: BCS(epoch) || BCS(message)
-fun build_cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {
+/// Format: intent (u16 LE) || BCS(hashi object id) || BCS(epoch) || BCS(message)
+fun build_cert_message<T: copy + drop + store>(
+    hashi_id: address,
+    epoch: u64,
+    intent: u16,
+    message: &T,
+): vector<u8> {
     let mut bytes = bcs::to_bytes(&intent);
+    bytes.append(bcs::to_bytes(&hashi_id));
     bytes.append(bcs::to_bytes(&epoch));
     bytes.append(bcs::to_bytes(message));
     bytes
@@ -129,6 +135,7 @@ fun test_approve_request_with_certificate() {
     // Approve each request individually with its own certificate
     let approval1 = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes1 = build_cert_message(
+        object::id_address(&hashi),
         epoch,
         hashi::intent::withdrawal_request_approval(),
         &approval1,
@@ -138,6 +145,7 @@ fun test_approve_request_with_certificate() {
 
     let approval2 = hashi::withdraw::new_request_approval_message(id2);
     let message_bytes2 = build_cert_message(
+        object::id_address(&hashi),
         epoch,
         hashi::intent::withdrawal_request_approval(),
         &approval2,
@@ -203,6 +211,7 @@ fun test_approve_then_cancel() {
     // Approve via certificate
     let approval = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes = build_cert_message(
+        object::id_address(&hashi),
         epoch,
         hashi::intent::withdrawal_request_approval(),
         &approval,
@@ -237,6 +246,7 @@ fun test_cancel_processing_request() {
     // Approve the request.
     let approval = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes = build_cert_message(
+        object::id_address(&hashi),
         epoch,
         hashi::intent::withdrawal_request_approval(),
         &approval,
@@ -315,6 +325,7 @@ fun confirm_via_entry(hashi: &mut hashi::hashi::Hashi, txn_id: address, clock: &
     let epoch = 0u64;
     let message = hashi::withdraw::new_withdrawal_confirmation_message(txn_id);
     let message_bytes = build_cert_message(
+        object::id_address(hashi),
         epoch,
         hashi::intent::withdrawal_confirmation(),
         &message,

@@ -211,6 +211,9 @@ pub struct MpcManager {
     pub previous_reconfig_output_max_faulty: Option<u16>,
     pub previous_reconfig_input_threshold: Option<u16>,
     chain_id: String,
+    /// The Hashi shared-object id, bound into every signing preimage this
+    /// manager produces or verifies.
+    pub hashi_object_id: Address,
     pub previous_epoch: u64,
     previous_output: Option<MpcOutput>,
     current_output: Option<MpcOutput>,
@@ -333,6 +336,7 @@ impl MpcManager {
         signing_key: Option<Bls12381PrivateKey>,
         public_message_store: Arc<dyn PublicMessagesStore>,
         chain_id: &str,
+        hashi_object_id: Address,
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
@@ -507,6 +511,7 @@ impl MpcManager {
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
             chain_id: chain_id.to_string(),
+            hashi_object_id,
             previous_epoch,
             previous_output: None,
             current_output: None,
@@ -1573,6 +1578,7 @@ impl MpcManager {
         };
         drop(_timer);
         let mut aggregator = BlsSignatureAggregator::new_reduced(
+            dealer_data.hashi_id,
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
             &dealer_data.nodes,
@@ -1870,6 +1876,7 @@ impl MpcManager {
         };
         drop(_timer);
         let mut aggregator = BlsSignatureAggregator::new_reduced(
+            dealer_data.hashi_id,
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
             &dealer_data.nodes,
@@ -2176,6 +2183,7 @@ impl MpcManager {
         };
         drop(_timer);
         let mut aggregator = BlsSignatureAggregator::new_reduced(
+            dealer_data.hashi_id,
             &dealer_data.committee,
             dealer_data.messages_hash.clone(),
             &dealer_data.nodes,
@@ -2671,9 +2679,12 @@ impl MpcManager {
                     dealer_address: dealer,
                     messages_hash: messages.compute_hash(),
                 };
-                let signature =
-                    self.signing_key()?
-                        .sign(self.mpc_config.epoch, self.address, &dkg_message);
+                let signature = self.signing_key()?.sign(
+                    self.hashi_object_id,
+                    self.mpc_config.epoch,
+                    self.address,
+                    &dkg_message,
+                );
                 Ok(signature.signature().clone())
             }
             avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
@@ -2766,9 +2777,12 @@ impl MpcManager {
                     dealer_address: dealer,
                     messages_hash: messages.compute_hash(),
                 };
-                let signature =
-                    self.signing_key()?
-                        .sign(self.mpc_config.epoch, self.address, &nonce_message);
+                let signature = self.signing_key()?.sign(
+                    self.hashi_object_id,
+                    self.mpc_config.epoch,
+                    self.address,
+                    &nonce_message,
+                );
                 Ok(signature.signature().clone())
             }
             batch_avss::ProcessedMessage::Complaint(_) => Err(MpcError::InvalidMessage {
@@ -2906,9 +2920,12 @@ impl MpcManager {
             messages_hash: MessagesHash::from(avss_vote.common_message_hash.digest),
             batch_index,
         };
-        let signature = self
-            .signing_key()?
-            .sign(self.mpc_config.epoch, self.address, &confirm);
+        let signature = self.signing_key()?.sign(
+            self.hashi_object_id,
+            self.mpc_config.epoch,
+            self.address,
+            &confirm,
+        );
         Ok(signature.signature().clone())
     }
 
@@ -2936,8 +2953,11 @@ impl MpcManager {
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-        let avid_confirm =
-            AvidCertificate::confirm(confirm_cert.clone(), Arc::new(self.committee.clone()))?;
+        let avid_confirm = AvidCertificate::confirm(
+            self.hashi_object_id,
+            confirm_cert.clone(),
+            Arc::new(self.committee.clone()),
+        )?;
         let avid_builder = dealer
             .create_avid_messages(builder, avid_confirm)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
@@ -2990,8 +3010,11 @@ impl MpcManager {
         )?;
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let verified_common = self.avid_round_verified_common(dealer, batch_index)?;
-        let avid_confirm =
-            AvidCertificate::confirm(confirm_cert, Arc::new(self.committee.clone()))?;
+        let avid_confirm = AvidCertificate::confirm(
+            self.hashi_object_id,
+            confirm_cert,
+            Arc::new(self.committee.clone()),
+        )?;
         let avid_message = batch_avss_avid::AvidMessage {
             dispersal,
             avss_cert: avid_confirm,
@@ -3006,7 +3029,12 @@ impl MpcManager {
         };
         let vote = self
             .signing_key()?
-            .sign(self.mpc_config.epoch, self.address, &target)
+            .sign(
+                self.hashi_object_id,
+                self.mpc_config.epoch,
+                self.address,
+                &target,
+            )
             .signature()
             .clone();
         let echoes = avid_vote
@@ -3112,6 +3140,7 @@ impl MpcManager {
                     }
                 }
                 let cert = AvidCertificate::vote(
+                    self.hashi_object_id,
                     vote_cert.clone(),
                     held_vote,
                     Arc::new(self.committee.clone()),
@@ -3342,6 +3371,7 @@ impl MpcManager {
             my_signature,
             recipient_messages: messages,
             committee: self.committee.clone(),
+            hashi_id: self.hashi_object_id,
             nodes: self.mpc_config.nodes.clone(),
             total_reduced_weight,
             vote_quorum_weight,
@@ -3370,6 +3400,7 @@ impl MpcManager {
         };
         drop(_timer);
         let mut aggregator = BlsSignatureAggregator::new_reduced(
+            dealer_data.hashi_id,
             &dealer_data.committee,
             dealer_data.confirm_target.clone(),
             &dealer_data.nodes,
@@ -3477,6 +3508,7 @@ impl MpcManager {
         };
         drop(_timer);
         let mut vote_aggregator = BlsSignatureAggregator::new_reduced(
+            dealer_data.hashi_id,
             &dealer_data.committee,
             vote_target,
             &dealer_data.nodes,
@@ -3582,7 +3614,12 @@ impl MpcManager {
     ) -> MpcResult<u32> {
         let (committee, nodes, _) = self.cert_verification_context(cert.epoch())?;
         committee
-            .verify_signature_and_reduced_weight(cert, nodes, required_reduced_weight)
+            .verify_signature_and_reduced_weight(
+                self.hashi_object_id,
+                cert,
+                nodes,
+                required_reduced_weight,
+            )
             .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
     }
 
@@ -3667,15 +3704,19 @@ impl MpcManager {
         self.verify_dealer_certificate(cert, required)
     }
 
-    fn avid_cert_kind(committee: &Committee, cert: &UnclassifiedNonceCert) -> MpcResult<CertKind> {
+    fn avid_cert_kind(
+        hashi_id: Address,
+        committee: &Committee,
+        cert: &UnclassifiedNonceCert,
+    ) -> MpcResult<CertKind> {
         if committee
-            .verify_signature_any_weight(&cert.as_avss_vote()?)
+            .verify_signature_any_weight(hashi_id, &cert.as_avss_vote()?)
             .is_ok()
         {
             return Ok(CertKind::AvssVote);
         }
         committee
-            .verify_signature_any_weight(&cert.as_avid_vote()?)
+            .verify_signature_any_weight(hashi_id, &cert.as_avid_vote()?)
             .map(|_| CertKind::AvidVote)
             .map_err(|e| MpcError::InvalidCertificate(e.to_string()))
     }
@@ -3689,7 +3730,8 @@ impl MpcManager {
             NonceGenerationProtocol::Avid => Self::required_cert_weight(
                 nodes,
                 params.f,
-                Self::avid_cert_kind(committee, cert).unwrap_or(CertKind::AvidVote),
+                Self::avid_cert_kind(self.hashi_object_id, committee, cert)
+                    .unwrap_or(CertKind::AvidVote),
             ),
         })
     }
@@ -3706,6 +3748,7 @@ impl MpcManager {
                 let required = Self::dealer_cert_quorum(params);
                 let weight = committee
                     .verify_signature_and_reduced_weight(
+                        self.hashi_object_id,
                         &cert.as_dealer_messages_hash()?,
                         nodes,
                         required,
@@ -3719,7 +3762,7 @@ impl MpcManager {
                     .committee_signature()
                     .reduced_weight(committee, nodes)
                     .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
-                let kind = Self::avid_cert_kind(committee, cert)?;
+                let kind = Self::avid_cert_kind(self.hashi_object_id, committee, cert)?;
                 let required = Self::required_cert_weight(nodes, params.f, kind);
                 if weight < required {
                     return Err(MpcError::InvalidCertificate(format!(
@@ -4007,6 +4050,7 @@ impl MpcManager {
                 UnclassifiedNonceCert::from_dealer_certificate(&nonce_cert, batch_index)
                     .as_avid_vote()?;
             let vote_cert = AvidCertificate::vote(
+                mgr.hashi_object_id,
                 typed_vote_cert.clone(),
                 avid_vote,
                 Arc::new(mgr.committee.clone()),
@@ -5031,6 +5075,7 @@ impl MpcManager {
             my_signature,
             required_reduced_weight,
             committee: self.committee.clone(),
+            hashi_id: self.hashi_object_id,
             nodes: self.mpc_config.nodes.clone(),
         }
     }
@@ -5566,7 +5611,12 @@ impl MpcManager {
         };
         let signature = self
             .signing_key()?
-            .sign(self.mpc_config.epoch, self.address, &rotation_message)
+            .sign(
+                self.hashi_object_id,
+                self.mpc_config.epoch,
+                self.address,
+                &rotation_message,
+            )
             .signature()
             .clone();
         self.rotation_ack_signatures
