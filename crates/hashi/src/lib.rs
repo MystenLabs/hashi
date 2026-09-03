@@ -618,6 +618,7 @@ impl Hashi {
             signing_key,
             store,
             chain_id,
+            self.config.hashi_ids().hashi_object_id,
             self.config.test_weight_divisor,
             batch_size_per_weight,
             self.config.test_corrupt_shares_for,

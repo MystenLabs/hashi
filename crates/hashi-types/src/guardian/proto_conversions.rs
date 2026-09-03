@@ -31,10 +31,9 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShares;
-use super::KPEncryptedSharesRoster;
-use super::KpCerts;
-use super::KpCertsRoster;
+use super::KpCertRoster;
+use super::KpEncryptedShare;
+use super::KpEncryptedShareRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::LimiterState;
@@ -87,28 +86,42 @@ use crate::move_types::Config;
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
 
-impl TryFrom<pb::SingleKpEncryptedShares> for KPEncryptedShares {
+impl TryFrom<pb::KpEncryptedShare> for KpEncryptedShare {
     type Error = GuardianError;
 
-    fn try_from(pb: pb::SingleKpEncryptedShares) -> Result<Self, Self::Error> {
+    fn try_from(pb: pb::KpEncryptedShare) -> Result<Self, Self::Error> {
+        if pb.recipient_fingerprint.is_empty() {
+            return Err(missing("recipient_fingerprint"));
+        }
+        if pb.armored_ciphertext.is_empty() {
+            return Err(missing("armored_ciphertext"));
+        }
         Ok(Self {
             id: pb_to_share_id(pb.id)?,
-            ciphertexts_by_fingerprint: pb.ciphertexts.into_iter().collect(),
+            recipient_fingerprint: pb.recipient_fingerprint,
+            armored_ciphertext: pb.armored_ciphertext,
         })
     }
 }
 
-impl TryFrom<pb::KpPgpCertSet> for KpCerts {
-    type Error = GuardianError;
+fn kp_encrypted_share_roster_from_pb(
+    shares: Vec<pb::KpEncryptedShare>,
+) -> GuardianResult<KpEncryptedShareRoster> {
+    KpEncryptedShareRoster::new(
+        shares
+            .into_iter()
+            .map(KpEncryptedShare::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?,
+    )
+}
 
-    fn try_from(pb: pb::KpPgpCertSet) -> Result<Self, Self::Error> {
-        let certs = pb
-            .pgp_certs
+fn kp_cert_roster_from_armored(certs: Vec<String>) -> GuardianResult<KpCertRoster> {
+    KpCertRoster::new(
+        certs
             .into_iter()
             .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
-            .collect::<GuardianResult<Vec<_>>>()?;
-        Self::new(certs)
-    }
+            .collect::<GuardianResult<Vec<_>>>()?,
+    )
 }
 
 impl TryFrom<pb::GuardianEncryptedShare> for GuardianEncryptedShare {
@@ -126,16 +139,12 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let cert_sets = req
-            .key_provisioner_pgp_cert_sets
-            .into_iter()
-            .map(KpCerts::try_from)
-            .collect::<GuardianResult<Vec<_>>>()?;
+        let certs = kp_cert_roster_from_armored(req.key_provisioner_pgp_certs)?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(KpCertsRoster::new(cert_sets)?, num_shares, threshold)
+        SetupNewKeyRequest::new(certs, num_shares, threshold)
     }
 }
 
@@ -150,12 +159,7 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSignedResponse<SetupNewK
 
         let data = resp.data.ok_or_else(|| missing("data"))?;
 
-        let encrypted_shares = data
-            .encrypted_shares
-            .into_iter()
-            .map(KPEncryptedShares::try_from)
-            .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
+        let encrypted_shares = kp_encrypted_share_roster_from_pb(data.encrypted_shares)?;
 
         let secret_sharing_instance = SecretSharingInstance::try_from(
             data.secret_sharing_instance
@@ -373,9 +377,6 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
-        if req.target_kp_pgp_fingerprint.is_empty() {
-            return Err(missing("target_kp_pgp_fingerprint"));
-        }
         if req.signer_cert.is_empty() {
             return Err(missing("signer_cert"));
         }
@@ -395,7 +396,6 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
             req.expected_session_id.into(),
             req.expected_cert_seq
                 .ok_or_else(|| missing("expected_cert_seq"))?,
-            req.target_kp_pgp_fingerprint,
             new_kp_pgp_cert,
             encrypted_share,
         );
@@ -426,12 +426,7 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
             .new_num_shares
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
-        let new_kp_certs_roster = KpCertsRoster::new(
-            req.new_kp_pgp_cert_sets
-                .into_iter()
-                .map(KpCerts::try_from)
-                .collect::<GuardianResult<Vec<_>>>()?,
-        )?;
+        let new_kp_certs_roster = kp_cert_roster_from_armored(req.new_kp_pgp_certs)?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
         let request = ProvisionerRotateKpSetRequest::new(
@@ -469,12 +464,7 @@ impl TryFrom<pb::SignedRotateKpSetResponse> for GuardianSignedResponse<RotateKpS
             .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
 
         let data = resp.data.ok_or_else(|| missing("data"))?;
-        let encrypted_shares = data
-            .encrypted_shares
-            .into_iter()
-            .map(KPEncryptedShares::try_from)
-            .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
+        let encrypted_shares = kp_encrypted_share_roster_from_pb(data.encrypted_shares)?;
         let new_instance = SecretSharingInstance::try_from(
             data.new_instance.ok_or_else(|| missing("new_instance"))?,
         )?;
@@ -504,16 +494,16 @@ impl TryFrom<pb::SignedProvisionerRotateCertResponse>
         let signature = GuardianSignature::try_from(signature_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
-        let encrypted_shares = KPEncryptedShares::try_from(
-            resp.encrypted_shares
-                .ok_or_else(|| missing("encrypted_shares"))?,
+        let encrypted_share = KpEncryptedShare::try_from(
+            resp.encrypted_share
+                .ok_or_else(|| missing("encrypted_share"))?,
         )?;
 
         Ok(GuardianSigned::from_parts(
             GuardianResponse::new(
                 ProvisionerRotateCertResponse {
                     cert_seq: resp.cert_seq.ok_or_else(|| missing("cert_seq"))?,
-                    encrypted_shares,
+                    encrypted_share,
                 },
                 timestamp_ms,
             ),
@@ -589,6 +579,18 @@ impl TryFrom<pb::InitConfig> for InitConfig {
         let retention_environment =
             super::S3RetentionEnvironment::try_from(config_pb.retention_environment)?;
 
+        let hashi_object_id_bytes = config_pb
+            .hashi_object_id
+            .ok_or_else(|| missing("hashi_object_id"))?;
+        let hashi_object_id_arr: [u8; 32] =
+            hashi_object_id_bytes.as_ref().try_into().map_err(|_| {
+                InvalidInputs(format!(
+                    "hashi_object_id must be 32 bytes, got {}",
+                    hashi_object_id_bytes.len()
+                ))
+            })?;
+        let hashi_object_id = sui_sdk_types::Address::new(hashi_object_id_arr);
+
         InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
@@ -596,6 +598,7 @@ impl TryFrom<pb::InitConfig> for InitConfig {
             bucket_info,
             retention_environment,
             network,
+            hashi_object_id,
         )
     }
 }
@@ -717,7 +720,7 @@ pub fn rotate_kp_set_response_signed_to_pb(
             encrypted_shares: encrypted_shares
                 .into_vec()
                 .into_iter()
-                .map(kp_encrypted_shares_to_pb)
+                .map(kp_encrypted_share_to_pb)
                 .collect(),
             new_instance: Some(secret_sharing_instance_to_pb(&new_instance)),
         }),
@@ -732,7 +735,7 @@ pub fn provisioner_rotate_cert_response_signed_to_pb(
     let (data, signature) = s.into_parts();
     pb::SignedProvisionerRotateCertResponse {
         cert_seq: Some(data.response.cert_seq),
-        encrypted_shares: Some(kp_encrypted_shares_to_pb(data.response.encrypted_shares)),
+        encrypted_share: Some(kp_encrypted_share_to_pb(data.response.encrypted_share)),
         timestamp_ms: Some(data.timestamp_ms),
         signature: Some(signature.to_bytes().to_vec().into()),
     }
@@ -740,11 +743,10 @@ pub fn provisioner_rotate_cert_response_signed_to_pb(
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
-        key_provisioner_pgp_cert_sets: s
+        key_provisioner_pgp_certs: s
             .kp_certs_roster()
             .iter()
-            .cloned()
-            .map(kp_cert_set_to_pb)
+            .map(|cert| cert.armored().to_string())
             .collect(),
         num_shares: Some(s.num_shares() as u32),
         threshold: Some(s.threshold() as u32),
@@ -853,13 +855,8 @@ pub fn ceremony_confirmation_response_to_pb(
 impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotateCertRequest {
     fn from(r: KpSigned<ProvisionerRotateCertRequest>) -> Self {
         let (request, signer_cert, signature) = r.into_parts();
-        let (
-            expected_session_id,
-            expected_cert_seq,
-            target_kp_pgp_fingerprint,
-            new_kp_pgp_cert,
-            encrypted_share,
-        ) = request.into_parts();
+        let (expected_session_id, expected_cert_seq, new_kp_pgp_cert, encrypted_share) =
+            request.into_parts();
         Self {
             new_kp_pgp_cert: new_kp_pgp_cert.armored().to_string(),
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
@@ -867,7 +864,6 @@ impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotat
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
             expected_cert_seq: Some(expected_cert_seq),
-            target_kp_pgp_fingerprint,
         }
     }
 }
@@ -881,6 +877,7 @@ pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
         bucket_info,
         retention_environment,
         network,
+        hashi_object_id,
     ) = s.into_parts();
 
     Ok(pb::InitConfig {
@@ -890,6 +887,7 @@ pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
         network: Some(network_to_pb(network)?),
         bucket_info: Some(s3_bucket_info_to_pb(bucket_info)),
         retention_environment: retention_environment.into(),
+        hashi_object_id: Some(hashi_object_id.into_inner().to_vec().into()),
     })
 }
 
@@ -935,26 +933,16 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
             encrypted_old_share: Some(guardian_encrypted_share_to_pb(encrypted_old_share)),
             expected_session_id: expected_session_id.into(),
             pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
-            new_kp_pgp_cert_sets: new_kp_certs_roster
+            new_kp_pgp_certs: new_kp_certs_roster
                 .into_vec()
                 .into_iter()
-                .map(kp_cert_set_to_pb)
+                .map(|cert| cert.armored().to_string())
                 .collect(),
             new_num_shares: Some(new_params.num_shares() as u32),
             new_threshold: Some(new_params.threshold() as u32),
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
         }
-    }
-}
-
-fn kp_cert_set_to_pb(set: KpCerts) -> pb::KpPgpCertSet {
-    pb::KpPgpCertSet {
-        pgp_certs: set
-            .into_pgp_certs()
-            .into_iter()
-            .map(|cert| cert.armored().to_string())
-            .collect(),
     }
 }
 
@@ -1187,6 +1175,15 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             })
             .transpose()?;
 
+        let hashi_object_id = data
+            .hashi_object_id
+            .map(|b| {
+                <[u8; 32]>::try_from(b.as_ref())
+                    .map(sui_sdk_types::Address::new)
+                    .map_err(|_| InvalidInputs("hashi_object_id must be 32 bytes".into()))
+            })
+            .transpose()?;
+
         Ok(Self {
             lifecycle,
             secret_sharing_instance,
@@ -1200,6 +1197,7 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             limiter_config,
             current_committee_epoch: data.current_committee_epoch,
             mpc_master_g,
+            hashi_object_id,
         })
     }
 }
@@ -1233,6 +1231,9 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         mpc_master_g: info
             .mpc_master_g
             .map(|g| bcs::to_bytes(&g).expect("serialize MPC master G").into()),
+        hashi_object_id: info
+            .hashi_object_id
+            .map(|id| id.into_inner().to_vec().into()),
     }
 }
 
@@ -1421,10 +1422,11 @@ fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
     }
 }
 
-pub fn kp_encrypted_shares_to_pb(s: KPEncryptedShares) -> pb::SingleKpEncryptedShares {
-    pb::SingleKpEncryptedShares {
+pub fn kp_encrypted_share_to_pb(s: KpEncryptedShare) -> pb::KpEncryptedShare {
+    pb::KpEncryptedShare {
         id: Some(share_id_to_pb(s.id)),
-        ciphertexts: s.ciphertexts_by_fingerprint.into_iter().collect(),
+        recipient_fingerprint: s.recipient_fingerprint,
+        armored_ciphertext: s.armored_ciphertext,
     }
 }
 
@@ -1448,7 +1450,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
             .encrypted_shares
             .into_vec()
             .into_iter()
-            .map(kp_encrypted_shares_to_pb)
+            .map(kp_encrypted_share_to_pb)
             .collect(),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&r.secret_sharing_instance)),
         btc_master_pubkey: r.btc_master_pubkey.serialize().to_vec().into(),
@@ -1843,6 +1845,7 @@ mod tests {
 
         let info = GuardianInfo {
             lifecycle: WithdrawStage::ProvisionerInitialized.into(),
+            hashi_object_id: None,
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
@@ -2004,6 +2007,67 @@ mod tests {
     }
 
     #[test]
+    fn signed_provisioner_rotate_cert_request_round_trip_and_binds_scalar_fields() {
+        use crate::pgp::test_utils::mock_pgp_keypair;
+        use crate::pgp::test_utils::sign_detached_in_process;
+
+        let (signer_armored, signer_secret) = mock_pgp_keypair();
+        let signer_cert = PgpPublicCert::new(signer_armored).unwrap();
+        let (new_cert_armored, _) = mock_pgp_keypair();
+        let new_cert = PgpPublicCert::new(new_cert_armored).unwrap();
+        let encrypted_share = GuardianEncryptedShare {
+            id: ShareID::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![1; 32],
+                aes_ciphertext: vec![2; 32],
+            },
+        };
+        let request = ProvisionerRotateCertRequest::from_encrypted_share(
+            "session-a".into(),
+            7,
+            new_cert,
+            encrypted_share.clone(),
+        );
+        let signature = sign_detached_in_process(&signer_secret, &KpSigned::signed_bytes(&request));
+        let signed = KpSigned::from_parts(request, signer_cert, signature);
+
+        let pb = pb::SignedProvisionerRotateCertRequest::from(signed);
+        let round_trip = KpSigned::<ProvisionerRotateCertRequest>::try_from(pb.clone()).unwrap();
+        let data = round_trip.verify_signature().unwrap();
+        assert_eq!(data.expected_cert_seq(), 7);
+        assert_eq!(data.encrypted_share(), &encrypted_share);
+
+        let assert_signature_invalid = |tampered| {
+            assert!(
+                KpSigned::<ProvisionerRotateCertRequest>::try_from(tampered)
+                    .unwrap()
+                    .verify_signature()
+                    .is_err()
+            );
+        };
+
+        let (other_cert_armored, _) = mock_pgp_keypair();
+        let mut tampered_cert = pb.clone();
+        tampered_cert.new_kp_pgp_cert = other_cert_armored;
+        assert_signature_invalid(tampered_cert);
+
+        let mut tampered_seq = pb.clone();
+        tampered_seq.expected_cert_seq = Some(8);
+        assert_signature_invalid(tampered_seq);
+
+        let mut tampered_share = pb;
+        tampered_share
+            .encrypted_share
+            .as_mut()
+            .unwrap()
+            .ciphertext
+            .as_mut()
+            .unwrap()
+            .aes_ciphertext = Some(vec![3; 32].into());
+        assert_signature_invalid(tampered_share);
+    }
+
+    #[test]
     fn signed_provisioner_rotate_kp_set_request_round_trip_and_verifies() {
         use crate::pgp::test_utils::mock_pgp_keypair;
         use crate::pgp::test_utils::sign_detached_in_process;
@@ -2145,8 +2209,9 @@ mod tests {
         let transition = CommitteeTransitionRequest {
             new_committee: crate::move_types::Committee::from(&new_committee),
         };
-        let sig = sk.sign(5, addr, &transition);
-        let mut agg = BlsSignatureAggregator::new(&outgoing, transition.clone());
+        let hashi_id = sui_sdk_types::Address::new([0xAA; 32]);
+        let sig = sk.sign(hashi_id, 5, addr, &transition);
+        let mut agg = BlsSignatureAggregator::new(hashi_id, &outgoing, transition.clone());
         agg.add_signature(sig).expect("member sig should verify");
         let signed = agg.finish().expect("threshold met");
 

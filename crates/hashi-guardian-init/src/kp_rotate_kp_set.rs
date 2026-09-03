@@ -28,7 +28,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::verified_ceremony_guardian_info;
-use crate::kp_roster::decrypt_kp_share_copies;
+use crate::kp_roster::decrypt_kp_share;
 use crate::kp_roster::load_kp_cert;
 use crate::submission;
 
@@ -57,17 +57,17 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let kp_cert = load_kp_cert(cfg.require_kp_pgp_cert_path("key-provisioner rotate-kp-set")?)?;
     ensure!(
         certs_roster
-            .certs_for_fingerprint(&kp_cert.fingerprint())
+            .cert_for_fingerprint(&kp_cert.fingerprint())
             .is_some(),
         "this KP's cert (fingerprint {}) is not among the current kp_roster.kp_pgp_cert_paths",
         kp_cert.fingerprint()
     );
     // What this KP is about to authorize. Compare it with the operator's.
-    for (index, fingerprints) in new_certs_roster.fingerprints().iter().enumerate() {
+    for (index, fingerprint) in new_certs_roster.fingerprints().iter().enumerate() {
         info!(
             phase = "proposal",
             share_id = index + 1,
-            recipient_fingerprints = ?fingerprints,
+            recipient_fingerprint = %fingerprint,
             "proposed new KP set entry",
         );
     }
@@ -122,7 +122,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         cert_seq = state.cert_seq,
         "latest ceremony and kp-shares logs verified against the current roster",
     );
-    let decrypted = decrypt_kp_share_copies(&state, std::slice::from_ref(&kp_cert))?;
+    let decrypted = decrypt_kp_share(&state, &kp_cert)?;
 
     // 3. Bind the re-encrypted share to the proposal and sign.
     let request = ProvisionerRotateKpSetRequest::build_from_share(

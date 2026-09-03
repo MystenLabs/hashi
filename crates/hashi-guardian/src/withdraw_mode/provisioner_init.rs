@@ -69,10 +69,12 @@ impl PIInstall {
             ensure_no_serving_committee(enclave).await?;
         }
 
+        let hashi_object_id = enclave.hashi_object_id()?;
         Ok(Self {
             enclave_btc_keypair,
             genesis_log: genesis_state.map(|state| GenesisLogMessage {
                 committee: state.into_committee(),
+                hashi_object_id,
             }),
             completion_log: PIEnclaveFullyInitialized {
                 sharing_seq,
@@ -154,7 +156,7 @@ fn verify_signed_submissions(
     live_session_id: &SessionID,
     live_config_hash: &[u8; 32],
     live_genesis_state_hash: Option<[u8; 32]>,
-    expected_kp_encrypted_shares: &KPEncryptedSharesRoster,
+    expected_kp_encrypted_shares: &KpEncryptedShareRoster,
 ) -> GuardianResult<Vec<GuardianEncryptedShare>> {
     request
         .0
@@ -215,7 +217,7 @@ mod tests {
         enclave: Arc<Enclave>,
         captures: crate::test_utils::CapturedPuts,
         kp_keys: Vec<(PgpPublicCert, String)>,
-        alternate_first_kp_key: (PgpPublicCert, String),
+        alternate_kp_key: (PgpPublicCert, String),
     }
 
     async fn setup() -> TestContext {
@@ -238,31 +240,18 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let (alternate_cert, alternate_secret) = mock_pgp_keypair();
-        let alternate_first_kp_key = (
+        let alternate_kp_key = (
             PgpPublicCert::new(alternate_cert).unwrap(),
             alternate_secret,
         );
-        let kp_encrypted_shares = KPEncryptedSharesRoster::new(
+        let kp_encrypted_shares = KpEncryptedShareRoster::new(
             kp_keys
                 .iter()
                 .enumerate()
-                .map(|(i, (cert, _))| KPEncryptedShares {
+                .map(|(i, (cert, _))| KpEncryptedShare {
                     id: std::num::NonZeroU16::new((i + 1) as u16).unwrap(),
-                    ciphertexts_by_fingerprint: if i == 0 {
-                        [
-                            (cert.fingerprint().to_hex(), "dummy".into()),
-                            (
-                                alternate_first_kp_key.0.fingerprint().to_hex(),
-                                "dummy".into(),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect()
-                    } else {
-                        [(cert.fingerprint().to_hex(), "dummy".into())]
-                            .into_iter()
-                            .collect()
-                    },
+                    recipient_fingerprint: cert.fingerprint().to_hex(),
+                    armored_ciphertext: "dummy".into(),
                 })
                 .collect(),
         )
@@ -279,7 +268,7 @@ mod tests {
             enclave,
             captures,
             kp_keys,
-            alternate_first_kp_key,
+            alternate_kp_key,
         }
     }
 
@@ -445,19 +434,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_alternate_cert_assigned_to_same_share() {
+    async fn rejects_alternate_cert_for_rostered_share() {
         let ctx = setup().await;
         let mut submissions = vec![ctx.signed_submission_with_key(
             &ctx.shares[0],
-            &ctx.alternate_first_kp_key,
+            &ctx.alternate_kp_key,
             ctx.enclave.s3_session_id(),
             ctx.config_hash(),
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
 
-        ctx.provision(BatchProvisionerInitRequest(submissions))
+        let err = ctx
+            .provision(BatchProvisionerInitRequest(submissions))
             .await
-            .expect("either cert assigned to the share should authorize PI");
+            .expect_err("an alternate certificate must not authorize the rostered share");
+        assert!(matches!(
+            &err,
+            InvalidInputs(message) if message.contains("not present in the encrypted-share roster")
+        ));
     }
 
     #[tokio::test]

@@ -15,9 +15,53 @@ use crate::cli::config::CliConfig;
 use crate::cli::print_detail;
 use crate::cli::print_info;
 
+/// What a resign-family command is about to do, for the pre-check text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResignationAction {
+    Resign,
+    Withdraw,
+}
+
+/// Refuse a resign or withdrawal the chain would reject (`EAlreadyResigned`
+/// / `ENotResigned`), from the registration record already in the scrape.
+/// `resigned` is `None` when the validator is not registered at all.
+pub fn refuse_resignation_state(
+    validator: sui_sdk_types::Address,
+    resigned: Option<bool>,
+    action: ResignationAction,
+) -> Result<()> {
+    let Some(resigned) = resigned else {
+        anyhow::bail!(
+            "validator {} is not registered, so there is nothing to resign from or withdraw",
+            validator.to_hex()
+        );
+    };
+    match action {
+        ResignationAction::Resign => anyhow::ensure!(
+            !resigned,
+            "validator {} has already resigned; nothing to do. Use `hashi validator \
+             withdraw-resignation` to cancel it.",
+            validator.to_hex()
+        ),
+        ResignationAction::Withdraw => anyhow::ensure!(
+            resigned,
+            "validator {} has no pending resignation to withdraw",
+            validator.to_hex()
+        ),
+    }
+    Ok(())
+}
+
+fn refuse_from_registration(client: &HashiClient, action: ResignationAction) -> Result<()> {
+    let validator = client.resolve_validator_address()?;
+    let resigned = client.member_info(&validator).map(|m| m.resigned);
+    refuse_resignation_state(validator, resigned, action)
+}
+
 /// Voluntarily resign from the committee.
 pub async fn resign(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
+    refuse_from_registration(&client, ResignationAction::Resign)?;
 
     print_detail(&format!("\n{}", "Resigning from the committee:".bold()));
     match client.onchain_state().pending_epoch_change() {
@@ -37,7 +81,10 @@ pub async fn resign(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     );
     print_acting_validator(&client)?;
 
-    prompt_continue("resign from the committee", tx_opts).await?;
+    if !prompt_continue("resign from the committee", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_resign_transaction()?;
     print_info("Transaction: validator::resign");
@@ -48,6 +95,7 @@ pub async fn resign(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
 /// Withdraw a pending resignation.
 pub async fn withdraw_resignation(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
+    refuse_from_registration(&client, ResignationAction::Withdraw)?;
 
     print_detail(&format!(
         "\n{}",
@@ -59,7 +107,10 @@ pub async fn withdraw_resignation(config: &CliConfig, tx_opts: &TxOptions) -> Re
     );
     print_acting_validator(&client)?;
 
-    prompt_continue("withdraw the resignation", tx_opts).await?;
+    if !prompt_continue("withdraw the resignation", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_withdraw_resignation_transaction()?;
     print_info("Transaction: validator::withdraw_resignation");
@@ -89,10 +140,17 @@ pub async fn remove_inactive(
          in Sui's active validator set.",
     );
 
-    prompt_continue("remove this member's registration", tx_opts).await?;
+    if !prompt_continue("remove this member's registration", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_remove_inactive_member_transaction(validator)?;
     print_info("Transaction: validator::remove_inactive_member");
     execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "validator_tests.rs"]
+mod tests;

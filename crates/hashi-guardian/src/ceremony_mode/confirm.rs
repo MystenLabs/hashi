@@ -62,7 +62,7 @@ mod tests {
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use crate::test_utils::MockKpSecretKeys;
     use hashi_types::guardian::CeremonyState;
-    use hashi_types::guardian::KpCertsRoster;
+    use hashi_types::guardian::KpCertRoster;
     use hashi_types::guardian::SessionID;
     use hashi_types::guardian::SetupNewKeyRequest;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
@@ -75,7 +75,7 @@ mod tests {
     struct TestContext {
         enclave: Arc<Enclave>,
         ceremony_digest: [u8; 32],
-        roster: KpCertsRoster,
+        roster: KpCertRoster,
         secret_keys: MockKpSecretKeys,
     }
 
@@ -119,15 +119,7 @@ mod tests {
             session_id: SessionID,
             ceremony_digest: [u8; 32],
         ) -> KpSigned<CeremonyConfirmationRequest> {
-            let cert = self
-                .roster
-                .iter()
-                .nth(index)
-                .unwrap()
-                .pgp_certs()
-                .first()
-                .unwrap()
-                .clone();
+            let cert = self.roster.iter().nth(index).unwrap().clone();
             let request = CeremonyConfirmationRequest::new(session_id, ceremony_digest);
             let signature = sign_detached_in_process(
                 self.secret_keys.get(&cert.fingerprint().to_hex()).unwrap(),

@@ -2399,6 +2399,87 @@ mod tests {
         );
         info!("Transaction succeeded: {}", response.transaction().digest());
 
+        // The single member's creation vote is the whole committee, so the
+        // proposal is executable at once. Execute it, then try to vote on it
+        // again: executed proposals move to the executed bag rather than being
+        // deleted, and `proposal::vote` borrows the active bag with no
+        // executed-bag check, so the chain answers with the framework's
+        // `dynamic_field` abort (code 1, no clever payload). The CLI's abort
+        // decoder relies on exactly that shape, so it is pinned here against
+        // the real chain, and the decoder is checked to explain it.
+        let proposal_id = hashi::cli::upgrade::extract_proposal_id_from_response(&response)?;
+        let execute_tx = hashi::cli::upgrade::build_execute_proposal_transaction(
+            hashi_ids,
+            hashi_isv,
+            proposal_id,
+            execute_package_id,
+            "update_config",
+        )?;
+        let exec_resp = executor.execute(execute_tx).await?;
+        assert!(
+            exec_resp.transaction().effects().status().success(),
+            "update_config::execute failed: {:?}",
+            exec_resp.transaction().effects().status()
+        );
+
+        let type_arg = sui_sdk_types::TypeTag::Struct(Box::new(sui_sdk_types::StructTag::new(
+            hashi_ids.package_id,
+            sui_sdk_types::Identifier::new("update_config")?,
+            sui_sdk_types::Identifier::new("UpdateConfig")?,
+            vec![],
+        )));
+        let late_vote = hashi::cli::client::build_vote_transaction(
+            hashi_ids,
+            hashi_isv,
+            execute_package_id,
+            validator_address,
+            proposal_id,
+            type_arg,
+        );
+        let err = executor
+            .execute(late_vote)
+            .await
+            .expect_err("a vote on an executed proposal must not build");
+        let execution_error = {
+            use hashi::sui_tx_executor::TxFailure;
+            let builder_error = match err.downcast_ref::<TxFailure>() {
+                Some(TxFailure::NotSubmitted(inner)) => {
+                    inner.downcast_ref::<sui_transaction_builder::Error>()
+                }
+                _ => err
+                    .chain()
+                    .find_map(|e| e.downcast_ref::<sui_transaction_builder::Error>()),
+            };
+            match builder_error {
+                Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
+                    failure.execution_error()
+                }
+                _ => panic!("expected a simulation failure, got: {err:#}"),
+            }
+        };
+        let abort = execution_error
+            .abort_opt()
+            .expect("the late vote must fail with a Move abort");
+        let clever_constant = abort
+            .clever_error
+            .as_ref()
+            .and_then(|clever| clever.constant_name.as_deref());
+        assert!(
+            (abort.location().module_opt() == Some("dynamic_field")
+                && abort.abort_code == Some(1)
+                && clever_constant.is_none())
+                || clever_constant == Some("EProposalAlreadyExecuted"),
+            "unexpected abort for a vote on an executed proposal: {abort:?}"
+        );
+        let explanation = hashi::cli::commands::proposal::explain_execution_error(execution_error)
+            .expect("the CLI decoder must explain a vote on an executed proposal");
+        assert!(
+            explanation.contains("no longer in the active proposal bag")
+                || explanation.contains("already been executed"),
+            "{explanation}"
+        );
+        info!("late vote refused as expected: {explanation}");
+
         info!("=== UpdateConfig Proposal E2E Test Passed ===");
         Ok(())
     }

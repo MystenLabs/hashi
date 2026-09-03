@@ -98,14 +98,11 @@ enum OperatorRotateKpSetCommand {
 
 #[derive(Subcommand)]
 enum KeyProvisionerCommand {
-    /// Replace one cert in this KP's roster entry.
+    /// Replace this KP's configured signing certificate.
     RotateCert {
         /// Path to key-provisioner YAML config file.
         #[arg(long)]
         config: PathBuf,
-        /// Fingerprint of the current OpenPGP cert being replaced.
-        #[arg(long)]
-        target_kp_pgp_fingerprint: String,
         /// Path to the replacement armored OpenPGP public cert.
         #[arg(long)]
         new_kp_pgp_cert_path: PathBuf,
@@ -198,11 +195,10 @@ async fn main() -> anyhow::Result<()> {
             }
             KeyProvisionerCommand::RotateCert {
                 config,
-                target_kp_pgp_fingerprint,
                 new_kp_pgp_cert_path,
             } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                kp_rotate_cert::run(cfg, target_kp_pgp_fingerprint, new_kp_pgp_cert_path).await?;
+                kp_rotate_cert::run(cfg, new_kp_pgp_cert_path).await?;
             }
             KeyProvisionerCommand::RotateKpSet {
                 config,
@@ -222,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn key_provisioner_ceremony_requires_encrypted_shares_path() {
@@ -261,6 +258,24 @@ mod tests {
         };
         assert_eq!(config, PathBuf::from("config.yaml"));
         assert_eq!(encrypted_shares_path, PathBuf::from("kp-shares.json"));
+    }
+
+    #[test]
+    fn key_provisioner_rotate_cert_help_exposes_only_the_singular_cert_path() {
+        let mut command = Cli::command();
+        let rotate_cert = command
+            .find_subcommand_mut("key-provisioner")
+            .expect("key-provisioner subcommand")
+            .find_subcommand_mut("rotate-cert")
+            .expect("rotate-cert subcommand");
+        let mut rendered = Vec::new();
+        rotate_cert
+            .write_long_help(&mut rendered)
+            .expect("render rotate-cert help");
+        let help = String::from_utf8(rendered).expect("Clap help is UTF-8");
+
+        assert!(help.contains("--new-kp-pgp-cert-path"), "{help}");
+        assert!(!help.contains("--target-kp-pgp-fingerprint"), "{help}");
     }
 
     #[test]

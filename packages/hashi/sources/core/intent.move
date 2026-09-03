@@ -3,11 +3,13 @@
 
 /// Domain-separation intents for everything signed by Hashi member BLS keys.
 ///
-/// The signing preimage is `intent (u16 LE) || bcs(epoch) || bcs(message)`.
-/// Every message type signed under the committee's keys carries a unique
-/// intent value, so a certificate produced for one message type can never
-/// verify as another — regardless of whether two types happen to share a BCS
-/// layout.
+/// The signing preimage is `intent (u16 LE) || bcs(hashi object id) ||
+/// bcs(epoch) || bcs(message)`. Every message type signed under the
+/// committee's keys carries a unique intent value, so a certificate produced
+/// for one message type can never verify as another, regardless of whether
+/// two types happen to share a BCS layout, and the Hashi object id binds
+/// every signature to one deployment, so a certificate minted for another
+/// Hashi instance can never verify here.
 ///
 /// This registry mirrors `crates/hashi-types/src/intent.rs`; the two MUST stay
 /// in sync. Allocation blocks, one per domain, with room to grow within each:

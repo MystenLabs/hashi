@@ -131,14 +131,12 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(
         phase = "roster load",
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "loading + validating full KP certificate roster",
     );
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "KP certificate roster loaded"
     );
 
@@ -160,7 +158,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
         share_count = ceremony_state.encrypted_shares.share_count(),
-        ciphertext_count = ceremony_state.encrypted_shares.ciphertext_count(),
         "ceremony instance and KP share state verified against expected roster",
     );
 
@@ -171,6 +168,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         guardian_s3.bucket_info.clone(),
         guardian_s3.retention_environment,
         cfg.bitcoin_network,
+        cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let config_hash = init_config.digest();
     let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);

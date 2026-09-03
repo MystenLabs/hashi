@@ -132,6 +132,10 @@ message GuardianInfoData {
 
   // Digest of the optional GenesisState pinned during operator_init.
   optional bytes genesis_state_hash = 13;
+
+  // The Hashi shared-object id (32 bytes) this guardian serves (set after
+  // operator_init). Certificates verified by this enclave are bound to it.
+  optional bytes hashi_object_id = 14;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.
@@ -153,20 +157,13 @@ message S3BucketInfo {
 //      SetupNewKey
 // =======================
 
-// One KP's accepted OpenPGP certs. A KP can have multiple certs for the
-// same secret-share id.
-message KpPgpCertSet {
-  // Armored OpenPGP certificates for one key provisioner.
-  repeated string pgp_certs = 1;
-}
-
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // OpenPGP cert sets for key provisioners. Length must equal `num_shares`.
-  repeated KpPgpCertSet key_provisioner_pgp_cert_sets = 1;
+  // Ordered OpenPGP certificates for key provisioners. Each string is the sole
+  // armored certificate for one KP/share, and length must equal `num_shares`.
+  repeated string key_provisioner_pgp_certs = 1;
 
-  // Total number of shares to split the new BTC key into. Must match the number
-  // of KP cert sets, not the total number of certs.
+  // Total number of shares to split the new BTC key into.
   optional uint32 num_shares = 2;
 
   // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -190,11 +187,11 @@ message GuardianEncryptedShare {
   HPKECiphertext ciphertext = 2;
 }
 
-// All PGP-encrypted copies of one KP share.
-message SingleKPEncryptedShares {
+// One PGP-encrypted KP share.
+message KpEncryptedShare {
   GuardianShareID id = 1;
-  // Recipient PGP fingerprint to armored ciphertext.
-  map<string, string> ciphertexts = 2;
+  string recipient_fingerprint = 2;
+  string armored_ciphertext = 3;
 }
 
 // Commitment to a secret share.
@@ -205,7 +202,7 @@ message GuardianShareCommitment {
 
 // Unsigned response payload.
 message SetupNewKeyResponseData {
-  repeated SingleKPEncryptedShares encrypted_shares = 1;
+  repeated KpEncryptedShare encrypted_shares = 1;
   SecretSharingInstance secret_sharing_instance = 2;
   // x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
   bytes btc_master_pubkey = 3;
@@ -381,6 +378,10 @@ message InitConfig {
 
   // Hashi deployment class selecting the S3 object-lock policy.
   S3RetentionEnvironment retention_environment = 6;
+
+  // The Hashi shared-object id (32 bytes) committee certificates verified by
+  // this guardian must be bound to.
+  optional bytes hashi_object_id = 7;
 }
 
 message LimiterState {
@@ -409,8 +410,8 @@ message ProvisionerInitResponse {}
 //        ProvisionerRotateCert
 // ==========================
 
-// Replace one certificate in a KP roster entry. This does not change the BTC
-// key, sharing instance, commitments, share ids, or threshold.
+// Replace the signing KP's sole certificate. This does not change the BTC key,
+// sharing instance, commitments, share ids, or threshold.
 message SignedProvisionerRotateCertRequest {
   // Armored replacement cert.
   string new_kp_pgp_cert = 1;
@@ -428,18 +429,14 @@ message SignedProvisionerRotateCertRequest {
 
   // Latest kp-shares cert_seq observed and authorized by the caller.
   optional uint64 expected_cert_seq = 6;
-
-  // Fingerprint of the current cert to replace. The signing cert may be this
-  // cert or another cert assigned to the same KP/share entry.
-  string target_kp_pgp_fingerprint = 7;
 }
 
 message SignedProvisionerRotateCertResponse {
   // New cert_seq written under kp-shares/{sharing_seq}/.
   optional uint64 cert_seq = 1;
 
-  // The changed KP entry after replacing one certificate ciphertext.
-  SingleKPEncryptedShares encrypted_shares = 2;
+  // The changed KP share after replacing its sole certificate and ciphertext.
+  KpEncryptedShare encrypted_share = 2;
 
   // Milliseconds since Unix epoch.
   optional uint64 timestamp_ms = 3;
@@ -464,8 +461,8 @@ message SignedProvisionerRotateKpSetRequest {
   // Builds allowed to authenticate the existing ceremony and KP-share state.
   PcrAllowlist pcr_allowlist = 3;
 
-  // OpenPGP cert sets for the proposed new KP set.
-  repeated KpPgpCertSet new_kp_pgp_cert_sets = 4;
+  // Ordered sole OpenPGP certificates for the proposed new KP set.
+  repeated string new_kp_pgp_certs = 4;
   optional uint32 new_num_shares = 5;
   optional uint32 new_threshold = 6;
 
@@ -484,7 +481,7 @@ message BatchProvisionerRotateKpSetRequest {
 
 // Unsigned response payload.
 message RotateKpSetResponseData {
-  repeated SingleKPEncryptedShares encrypted_shares = 1;
+  repeated KpEncryptedShare encrypted_shares = 1;
   SecretSharingInstance new_instance = 2;
 }
 

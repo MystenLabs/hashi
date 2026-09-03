@@ -9,12 +9,10 @@
 //! - discover the latest attested ceremony from S3
 //! - validate the ceremony's `secret_sharing_instance` against expected params
 //! - confirm every PGP-encrypted share in `kp-shares/` matches the
-//!   expected certificates for that KP/share id (without decrypting)
+//!   expected certificate for that KP/share id (without decrypting)
 //!
-//! `ceremony` decrypts every copy in this KP's roster entry. `provision` and
-//! `rotate-cert` decrypt only the copy selected by `kp_pgp_cert_path`. The
-//! decryption helper lives here so all commands share the same gpg-streaming
-//! pattern.
+//! The decryption helper lives here so all commands share the same
+//! gpg-streaming pattern.
 
 use std::ops::Deref;
 use std::path::Path;
@@ -24,8 +22,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use hashi_types::guardian::CeremonyState;
-use hashi_types::guardian::KpCerts;
-use hashi_types::guardian::KpCertsRoster;
+use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
@@ -49,32 +46,12 @@ pub struct KpRosterConfig {
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
-    /// Paths to each KP's armored OpenPGP public certificates. Order matters for
-    /// `operator ceremony` (the entry at index `i` is assigned share id
-    /// `i + 1`); for read-only commands, shares are matched by fingerprint.
-    pub kp_pgp_cert_paths: Vec<KpPgpCertPaths>,
+    /// Ordered paths to each KP's armored OpenPGP public certificate. The path
+    /// at index `i` is assigned share id `i + 1`; read-only commands match
+    /// shares by fingerprint.
+    pub kp_pgp_cert_paths: Vec<PathBuf>,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum KpPgpCertPaths {
-    Single(PathBuf),
-    Multiple(Vec<PathBuf>),
-}
-
-impl KpPgpCertPaths {
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Multiple(paths) if paths.is_empty())
-    }
-
-    fn paths(&self) -> Vec<&PathBuf> {
-        match self {
-            Self::Single(path) => vec![path],
-            Self::Multiple(paths) => paths.iter().collect(),
-        }
-    }
 }
 
 impl KpRosterConfig {
@@ -82,11 +59,7 @@ impl KpRosterConfig {
         validate_kp_set(self.num_shares, self.threshold, &self.kp_pgp_cert_paths)
     }
 
-    pub fn cert_count(&self) -> usize {
-        count_certs(&self.kp_pgp_cert_paths)
-    }
-
-    pub fn load_certs_roster(&self) -> Result<KpCertsRoster> {
+    pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
         load_kp_certs_roster(&self.kp_pgp_cert_paths)
     }
 
@@ -96,13 +69,13 @@ impl KpRosterConfig {
     }
 }
 
-/// The KP set a `rotate-kp-set` proposes: sharing params and cert sets, in
-/// share order. The proposal carries `kp_roster`'s PCR allowlist.
+/// The KP set a `rotate-kp-set` proposes: sharing params and one cert per
+/// KP, in share order. The proposal carries `kp_roster`'s PCR allowlist.
 #[derive(Deserialize)]
 pub struct KpSetConfig {
     pub num_shares: usize,
     pub threshold: usize,
-    pub kp_pgp_cert_paths: Vec<KpPgpCertPaths>,
+    pub kp_pgp_cert_paths: Vec<PathBuf>,
 }
 
 impl KpSetConfig {
@@ -115,56 +88,33 @@ impl KpSetConfig {
             .map_err(|e| anyhow!("invalid sharing params: {e:?}"))
     }
 
-    pub fn load_certs_roster(&self) -> Result<KpCertsRoster> {
+    pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
         load_kp_certs_roster(&self.kp_pgp_cert_paths)
     }
 }
 
-fn validate_kp_set(
-    num_shares: usize,
-    threshold: usize,
-    cert_paths: &[KpPgpCertPaths],
-) -> Result<()> {
+fn validate_kp_set(num_shares: usize, threshold: usize, cert_paths: &[PathBuf]) -> Result<()> {
     SecretSharingParams::new(num_shares, threshold)
         .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
 
-    let roster_entry_count = cert_paths.len();
+    let cert_path_count = cert_paths.len();
     anyhow::ensure!(
-        num_shares == roster_entry_count,
-        "num_shares ({num_shares}) must equal the number of KP cert roster entries ({roster_entry_count})"
+        num_shares == cert_path_count,
+        "num_shares ({num_shares}) must equal the number of KP cert paths ({cert_path_count})"
     );
-    for (idx, cert_paths) in cert_paths.iter().enumerate() {
-        anyhow::ensure!(
-            !cert_paths.is_empty(),
-            "kp_pgp_cert_paths entry {} must contain at least one cert path",
-            idx + 1
-        );
-    }
-
     Ok(())
 }
 
-fn count_certs(cert_paths: &[KpPgpCertPaths]) -> usize {
-    cert_paths
-        .iter()
-        .map(|cert_paths| cert_paths.paths().len())
-        .sum()
-}
-
-fn load_kp_certs_roster(cert_paths: &[KpPgpCertPaths]) -> Result<KpCertsRoster> {
-    let roster_entries = cert_paths
+fn load_kp_certs_roster(cert_paths: &[PathBuf]) -> Result<KpCertRoster> {
+    let certs = cert_paths
         .iter()
         .enumerate()
-        .map(|(idx, cert_paths)| {
-            let certs = cert_paths
-                .paths()
-                .into_iter()
-                .map(load_cert)
-                .collect::<Result<Vec<_>>>()?;
-            KpCerts::new(certs).with_context(|| format!("invalid KP cert roster entry {}", idx + 1))
+        .map(|(idx, cert_path)| {
+            load_cert(cert_path)
+                .with_context(|| format!("invalid KP cert at roster position {}", idx + 1))
         })
         .collect::<Result<Vec<_>>>()?;
-    KpCertsRoster::new(roster_entries).context("invalid KP certificate roster")
+    KpCertRoster::new(certs).context("invalid KP certificate roster")
 }
 
 fn load_cert(path: &PathBuf) -> Result<PgpPublicCert> {
@@ -176,88 +126,59 @@ fn load_cert(path: &PathBuf) -> Result<PgpPublicCert> {
     Ok(cert)
 }
 
-/// Decrypt and commitment-check the ciphertext for every supplied KP cert, in
-/// order. All ciphertexts must contain the same share.
-pub fn decrypt_kp_share_copies(
+/// Find, decrypt, and commitment-check the share addressed to `kp_cert`.
+pub fn decrypt_kp_share(state: &CeremonyState, kp_cert: &PgpPublicCert) -> Result<DecryptedShare> {
+    decrypt_kp_share_with(state, kp_cert, decrypt_pgp_ciphertext)
+}
+
+fn decrypt_kp_share_with(
     state: &CeremonyState,
-    kp_certs: &[PgpPublicCert],
+    kp_cert: &PgpPublicCert,
+    decrypt: impl FnOnce(ShareID, &str) -> Result<DecryptedShare>,
 ) -> Result<DecryptedShare> {
-    anyhow::ensure!(!kp_certs.is_empty(), "at least one KP cert is required");
+    let fingerprint = kp_cert.fingerprint().to_hex();
+    let encrypted_share = state
+        .encrypted_shares
+        .find_by_fingerprint(&fingerprint)
+        .ok_or_else(|| {
+            anyhow!(
+                "no share in the kp-shares log is addressed to this KP's \
+                 fingerprint {fingerprint} (recipients by share: {:?})",
+                state.encrypted_shares.recipient_fingerprints()
+            )
+        })?;
+    let share_id = encrypted_share.id;
 
-    let mut selected = Vec::with_capacity(kp_certs.len());
-    for cert in kp_certs {
-        let fingerprint = cert.fingerprint().to_hex();
-        let (share, ciphertext) = state
-            .encrypted_shares
-            .find_by_fingerprint(&fingerprint)
-            .ok_or_else(|| {
-                anyhow!(
-                    "no share in the kp-shares log has a ciphertext for this KP's \
-                     fingerprint {fingerprint} (recipient roster by share: {:?})",
-                    state.encrypted_shares.recipient_roster()
-                )
-            })?;
-        selected.push((fingerprint, share.id, ciphertext));
-    }
-
-    let share_id = selected[0].1;
-    for (fingerprint, actual_share_id, _) in &selected {
-        anyhow::ensure!(
-            *actual_share_id == share_id,
-            "configured KP cert fingerprint {fingerprint} resolves to share id {}, \
-             expected share id {}",
-            actual_share_id.get(),
+    info!(
+        phase = "share decrypt",
+        share_id = share_id.get(),
+        fingerprint = %fingerprint,
+        "decrypting encrypted share via yubikey"
+    );
+    let decrypted = decrypt(share_id, &encrypted_share.armored_ciphertext).with_context(|| {
+        format!(
+            "decrypt share id {} for fingerprint {fingerprint}",
             share_id.get()
-        );
-    }
-
-    let mut verified_share: Option<DecryptedShare> = None;
-    for (index, (fingerprint, _, ciphertext)) in selected.into_iter().enumerate() {
-        info!(
-            phase = "share decrypt",
-            certificate_index = index + 1,
-            certificate_count = kp_certs.len(),
-            share_id = share_id.get(),
-            fingerprint = %fingerprint,
-            "decrypting encrypted share copy via yubikey"
-        );
-        let candidate = decrypt_pgp_ciphertext(share_id, ciphertext).with_context(|| {
+        )
+    })?;
+    state
+        .secret_sharing_instance
+        .commitments()
+        .verify_share(&decrypted)
+        .with_context(|| {
             format!(
-                "decrypt share id {} for fingerprint {fingerprint}",
+                "decrypted share id {} for fingerprint {fingerprint} does not match its commitment",
                 share_id.get()
             )
         })?;
-        state
-            .secret_sharing_instance
-            .commitments()
-            .verify_share(&candidate)
-            .with_context(|| {
-                format!(
-                    "decrypted share id {} for fingerprint {fingerprint} does not match its commitment",
-                    share_id.get()
-                )
-            })?;
+    info!(
+        phase = "share decrypt",
+        share_id = share_id.get(),
+        fingerprint = %fingerprint,
+        "decrypted and verified encrypted share"
+    );
 
-        match &verified_share {
-            Some(expected) => anyhow::ensure!(
-                candidate.id == expected.id && candidate.value == expected.value,
-                "decrypted share copy for fingerprint {fingerprint} differs from the first \
-                 verified copy"
-            ),
-            None => verified_share = Some(candidate),
-        }
-
-        info!(
-            phase = "share decrypt",
-            certificate_index = index + 1,
-            certificate_count = kp_certs.len(),
-            share_id = share_id.get(),
-            fingerprint = %fingerprint,
-            "decrypted and verified encrypted share copy"
-        );
-    }
-
-    verified_share.ok_or_else(|| anyhow!("at least one KP cert is required"))
+    Ok(decrypted)
 }
 
 /// Load the cert selected by this KP for the current command.
@@ -331,26 +252,13 @@ fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_types::guardian::KPEncryptedShares;
-    use hashi_types::guardian::KPEncryptedSharesRoster;
+    use hashi_types::guardian::KpEncryptedShare;
+    use hashi_types::guardian::KpEncryptedShareRoster;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::SetupNewKeyResponse;
-    use hashi_types::guardian::ShareCommitment;
     use hashi_types::guardian::ShareCommitments;
-    use hashi_types::pgp::encrypt_armored;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::num::NonZeroU16;
-
-    fn commitments(ids: &[u16]) -> ShareCommitments {
-        let vec: Vec<ShareCommitment> = ids
-            .iter()
-            .map(|&i| ShareCommitment {
-                id: NonZeroU16::new(i).unwrap(),
-                digest: vec![i as u8],
-            })
-            .collect();
-        ShareCommitments::new(vec).unwrap()
-    }
 
     fn dummy_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
         hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
@@ -363,146 +271,131 @@ mod tests {
         PgpPublicCert::new(public).unwrap()
     }
 
-    fn encrypted_share(id: u16, cert: &PgpPublicCert) -> KPEncryptedShares {
-        KPEncryptedShares {
-            id: NonZeroU16::new(id).unwrap(),
-            ciphertexts_by_fingerprint: [(
-                cert.fingerprint().to_hex(),
-                encrypt_armored(&[id as u8; 32], cert).unwrap(),
-            )]
-            .into_iter()
-            .collect(),
-        }
-    }
-
-    fn encrypted_response(certs_by_share: &[&PgpPublicCert]) -> SetupNewKeyResponse {
-        let n = certs_by_share.len();
-        SetupNewKeyResponse {
-            encrypted_shares: KPEncryptedSharesRoster::new(
-                certs_by_share
-                    .iter()
-                    .enumerate()
-                    .map(|(i, cert)| encrypted_share((i + 1) as u16, cert))
-                    .collect(),
-            )
-            .unwrap(),
+    fn decryptable_state(certs_by_share: &[&PgpPublicCert]) -> (CeremonyState, Vec<Share>) {
+        let shares = certs_by_share
+            .iter()
+            .enumerate()
+            .map(|(i, _)| Share {
+                id: NonZeroU16::new((i + 1) as u16).unwrap(),
+                value: Scalar::from((i + 11) as u64),
+            })
+            .collect::<Vec<_>>();
+        let encrypted_shares = certs_by_share
+            .iter()
+            .zip(&shares)
+            .map(|(cert, share)| KpEncryptedShare {
+                id: share.id,
+                recipient_fingerprint: cert.fingerprint().to_hex(),
+                armored_ciphertext: format!("ciphertext-for-share-{}", share.id.get()),
+            })
+            .collect();
+        let response = SetupNewKeyResponse {
+            encrypted_shares: KpEncryptedShareRoster::new(encrypted_shares).unwrap(),
             secret_sharing_instance: SecretSharingInstance::new(
-                commitments(&(1..=n as u16).collect::<Vec<_>>()),
-                n,
+                ShareCommitments::from_shares(&shares).unwrap(),
+                shares.len(),
                 2,
                 0,
             )
             .unwrap(),
             btc_master_pubkey: dummy_btc_pubkey(),
-        }
+        };
+        (CeremonyState::from(response), shares)
     }
 
-    fn encrypted_response_from_sets(
-        cert_sets_by_share: &[Vec<&PgpPublicCert>],
-    ) -> SetupNewKeyResponse {
-        let n = cert_sets_by_share.len();
-        SetupNewKeyResponse {
-            encrypted_shares: KPEncryptedSharesRoster::new(
-                cert_sets_by_share
-                    .iter()
-                    .enumerate()
-                    .map(|(i, certs)| {
-                        let id = (i + 1) as u16;
-                        KPEncryptedShares {
-                            id: NonZeroU16::new(id).unwrap(),
-                            ciphertexts_by_fingerprint: certs
-                                .iter()
-                                .map(|cert| {
-                                    (
-                                        cert.fingerprint().to_hex(),
-                                        encrypt_armored(&[id as u8; 32], cert).unwrap(),
-                                    )
-                                })
-                                .collect(),
-                        }
-                    })
-                    .collect(),
-            )
-            .unwrap(),
-            secret_sharing_instance: SecretSharingInstance::new(
-                commitments(&(1..=n as u16).collect::<Vec<_>>()),
-                n,
-                2,
-                0,
-            )
-            .unwrap(),
-            btc_master_pubkey: dummy_btc_pubkey(),
-        }
-    }
-
-    fn cert_set(certs: &[&PgpPublicCert]) -> KpCerts {
-        KpCerts::new(certs.iter().map(|cert| (*cert).clone()).collect()).unwrap()
-    }
-
-    fn certs_roster(cert_sets: Vec<KpCerts>) -> KpCertsRoster {
-        KpCertsRoster::new(cert_sets).unwrap()
+    fn roster_yaml(paths: &str) -> String {
+        format!(
+            "num_shares: 2\n\
+             threshold: 2\n\
+             kp_pgp_cert_paths:\n\
+             {paths}\
+             current_build:\n\
+             \x20 git_revision: \"0000000000000000000000000000000000000000\"\n\
+             \x20 pcr0: \"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"\n\
+             prev_builds: []\n"
+        )
     }
 
     #[test]
-    fn verify_encrypted_share_recipients_accepts_single_cert_sets() {
-        let cert1 = mock_cert();
-        let cert2 = mock_cert();
-        let cert3 = mock_cert();
-        let resp = encrypted_response(&[&cert1, &cert2, &cert3]);
-        let state = CeremonyState::from(resp);
+    fn flat_kp_cert_paths_deserialize_in_order() {
+        let cfg: KpRosterConfig =
+            serde_yaml::from_str(&roster_yaml("  - /path/kp1.asc\n  - /path/kp2.asc\n")).unwrap();
 
-        state
-            .encrypted_shares
-            .verify_recipients(&certs_roster(vec![
-                cert_set(&[&cert1]),
-                cert_set(&[&cert2]),
-                cert_set(&[&cert3]),
-            ]))
-            .expect("recipient validation should accept the matching cert roster");
-    }
-
-    #[test]
-    fn verify_encrypted_share_recipients_accepts_multiple_certs_per_share() {
-        let cert1 = mock_cert();
-        let cert2a = mock_cert();
-        let cert2b = mock_cert();
-        let cert3 = mock_cert();
-        let resp =
-            encrypted_response_from_sets(&[vec![&cert1], vec![&cert2a, &cert2b], vec![&cert3]]);
-        let state = CeremonyState::from(resp);
-
-        assert_eq!(state.encrypted_shares.share_count(), 3);
-        assert_eq!(state.encrypted_shares.ciphertext_count(), 4);
-        state
-            .encrypted_shares
-            .verify_recipients(&certs_roster(vec![
-                cert_set(&[&cert1]),
-                cert_set(&[&cert2a, &cert2b]),
-                cert_set(&[&cert3]),
-            ]))
-            .expect("recipient validation should accept multi-cert KP sets");
-    }
-
-    #[test]
-    fn verify_encrypted_share_recipients_rejects_wrong_cert_grouping() {
-        let cert1 = mock_cert();
-        let cert2 = mock_cert();
-        let cert3 = mock_cert();
-        let resp = encrypted_response(&[&cert1, &cert2, &cert3]);
-        let state = CeremonyState::from(resp);
-
-        let err = state
-            .encrypted_shares
-            .verify_recipients(&certs_roster(vec![
-                cert_set(&[&cert2]),
-                cert_set(&[&cert1]),
-                cert_set(&[&cert3]),
-            ]))
-            .unwrap_err();
-        assert!(
-            format!("{err}").contains("recipient roster differs"),
-            "{err}"
+        assert_eq!(
+            cfg.kp_pgp_cert_paths,
+            vec![
+                PathBuf::from("/path/kp1.asc"),
+                PathBuf::from("/path/kp2.asc")
+            ]
         );
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn nested_kp_cert_paths_are_rejected() {
+        let parsed = serde_yaml::from_str::<KpRosterConfig>(&roster_yaml(
+            "  - [/path/kp1-a.asc, /path/kp1-b.asc]\n  - /path/kp2.asc\n",
+        ));
+
+        assert!(parsed.is_err(), "nested certificate paths must be rejected");
+    }
+
+    #[test]
+    fn decrypt_kp_share_selects_singular_recipient_and_verifies_commitment() {
+        let cert1 = mock_cert();
+        let cert2 = mock_cert();
+        let (state, shares) = decryptable_state(&[&cert1, &cert2]);
+
+        let decrypted = decrypt_kp_share_with(&state, &cert2, |id, ciphertext| {
+            assert_eq!(id, shares[1].id);
+            assert_eq!(ciphertext, "ciphertext-for-share-2");
+            Ok(DecryptedShare(shares[1]))
+        })
+        .expect("the selected scalar share should decrypt and match its commitment");
+
+        assert_eq!(decrypted.id, shares[1].id);
+        assert_eq!(decrypted.value, shares[1].value);
+    }
+
+    #[test]
+    fn decrypt_kp_share_rejects_unaddressed_certificate_without_decrypting() {
+        let cert1 = mock_cert();
+        let cert2 = mock_cert();
+        let unaddressed_cert = mock_cert();
+        let (state, _) = decryptable_state(&[&cert1, &cert2]);
+
+        let err = decrypt_kp_share_with(&state, &unaddressed_cert, |_, _| {
+            panic!("decrypt must not run when no scalar share matches the certificate")
+        })
+        .err()
+        .expect("an unaddressed certificate must be rejected");
+
+        assert!(
+            format!("{err:#}").contains("no share in the kp-shares log is addressed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn decrypt_kp_share_rejects_decrypted_value_with_wrong_commitment() {
+        let cert1 = mock_cert();
+        let cert2 = mock_cert();
+        let (state, shares) = decryptable_state(&[&cert1, &cert2]);
+        let wrong_share = Share {
+            id: shares[0].id,
+            value: shares[0].value + Scalar::from(1u64),
+        };
+
+        let err = decrypt_kp_share_with(&state, &cert1, |_, _| Ok(DecryptedShare(wrong_share)))
+            .err()
+            .expect("a decrypted value with the wrong commitment must be rejected");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("does not match its commitment"),
+            "{message}"
+        );
+        assert!(message.contains("No matching share found"), "{message}");
     }
 
     #[test]

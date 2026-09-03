@@ -124,6 +124,9 @@ pub struct HashiClient {
     /// build fully-resolved shared inputs (see
     /// [`build_create_proposal_transaction`]).
     hashi_initial_shared_version: u64,
+    /// `--sender`, when given: the identity governance commands act as when
+    /// there is no keypair to derive one from.
+    acting_sender: Option<Address>,
     /// Optional executor for signing and submitting transactions
     executor: Option<SuiTxExecutor>,
     /// The RPC endpoint this client talks to (used for explorer deep-links)
@@ -155,6 +158,56 @@ pub async fn fetch_initial_shared_version(
     Ok(response.object().owner().version())
 }
 
+/// Which on-chain proposal bag holds a proposal. Executed proposals are not
+/// deleted: `proposal::execute` moves them from the active bag to the
+/// executed bag, where they stay for inspection, so a lookup that only asks
+/// "does it exist" cannot tell an open proposal from a finished one.
+#[derive(Clone, Debug)]
+pub enum ProposalLocation {
+    Active(Proposal),
+    Executed(Proposal),
+    /// In neither bag: the id is wrong, or the proposal expired and was
+    /// deleted.
+    Missing,
+}
+
+/// Locate `proposal_id` in the scraped active and executed bags.
+pub fn locate_proposal(
+    active: &[Proposal],
+    executed: &[Proposal],
+    proposal_id: &Address,
+) -> ProposalLocation {
+    if let Some(proposal) = active.iter().find(|p| p.id == *proposal_id) {
+        return ProposalLocation::Active(proposal.clone());
+    }
+    if let Some(proposal) = executed.iter().find(|p| p.id == *proposal_id) {
+        return ProposalLocation::Executed(proposal.clone());
+    }
+    ProposalLocation::Missing
+}
+
+/// A gRPC `NotFound` while loading the Hashi object almost always means the
+/// configured ids and the RPC URL come from different networks; say so instead
+/// of surfacing the bare status.
+pub fn explain_missing_object(
+    err: anyhow::Error,
+    hashi_ids: HashiIds,
+    sui_rpc_url: &str,
+) -> anyhow::Error {
+    let not_found = err.chain().any(|e| {
+        matches!(e.downcast_ref::<tonic::Status>(), Some(s) if s.code() == tonic::Code::NotFound)
+    });
+    if not_found {
+        err.context(format!(
+            "Hashi object {} (package {}) was not found on {sui_rpc_url}: check that package-id, \
+             hashi-object-id and the RPC URL all belong to the same network",
+            hashi_ids.hashi_object_id, hashi_ids.package_id
+        ))
+    } else {
+        err
+    }
+}
+
 impl HashiClient {
     /// Client for governance and config commands. Skips the Bitcoin
     /// collections, which none of them read.
@@ -176,6 +229,11 @@ impl HashiClient {
             hashi_object_id: config.hashi_object_id(),
         };
 
+        // Say which network every command is talking to: the RPC URL defaults
+        // to mainnet when no config is found, and a wrong-network object id is
+        // otherwise indistinguishable from a typo.
+        crate::cli::print_info(&format!("Sui RPC: {}", config.sui_rpc_url));
+
         let onchain_state = OnchainState::new_reader(
             &config.sui_rpc_url,
             hashi_ids,
@@ -183,11 +241,13 @@ impl HashiClient {
             scope,
         )
         .await
+        .map_err(|e| explain_missing_object(e, hashi_ids, &config.sui_rpc_url))
         .context("Failed to initialize on-chain state")?;
 
         let hashi_initial_shared_version =
             fetch_initial_shared_version(&mut onchain_state.client(), hashi_ids.hashi_object_id)
-                .await?;
+                .await
+                .map_err(|e| explain_missing_object(e, hashi_ids, &config.sui_rpc_url))?;
 
         // Try to create executor if keypair is available
         let executor = match config.load_keypair()? {
@@ -209,6 +269,7 @@ impl HashiClient {
             onchain_state,
             hashi_ids,
             hashi_initial_shared_version,
+            acting_sender: config.acting_sender,
             executor,
             sui_rpc_url: config.sui_rpc_url.clone(),
         })
@@ -263,6 +324,7 @@ impl HashiClient {
             std::time::Duration::from_secs(10),
         )
         .await
+        .map_err(crate::cli::explain_tx_error)
     }
 
     // ========================================================================
@@ -302,6 +364,21 @@ impl HashiClient {
     /// Fetch a specific proposal by ID
     pub fn fetch_proposal(&self, proposal_id: &Address) -> Option<Proposal> {
         self.onchain_state.proposal(proposal_id)
+    }
+
+    /// Fetch all executed (archived) proposals
+    pub fn fetch_executed_proposals(&self) -> Vec<Proposal> {
+        self.onchain_state.executed_proposals()
+    }
+
+    /// Where `proposal_id` sits in the two on-chain proposal bags, as of the
+    /// scrape this client was built from.
+    pub fn locate_proposal(&self, proposal_id: &Address) -> ProposalLocation {
+        locate_proposal(
+            &self.fetch_proposals(),
+            &self.fetch_executed_proposals(),
+            proposal_id,
+        )
     }
 
     /// Fetch committee members for the current epoch
@@ -488,15 +565,55 @@ impl HashiClient {
         self.executor.as_ref().map(|e| e.sender())
     }
 
-    /// Resolve the committee member (validator address) the configured
-    /// keypair acts for in governance calls: an exact validator match wins,
-    /// otherwise exactly one operator delegation; more than one is an error
-    /// (see `resolve_governance_identity`).
+    /// The address a transaction is built for: `--sender` when given,
+    /// otherwise the configured keypair's address. This is also the address
+    /// whose committee identity the governance commands act as, so the
+    /// serialize-unsigned and dry-run paths work without a keypair. When both
+    /// are present and differ, the chain rejects the signature anyway, so the
+    /// explicit sender wins here too.
+    pub fn acting_address(&self) -> Option<Address> {
+        self.acting_sender.or_else(|| self.signer_address())
+    }
+
+    /// Resolve the committee member (validator address) the acting address
+    /// acts for in governance calls: an exact validator match wins, otherwise
+    /// exactly one operator delegation; more than one is an error (see
+    /// `resolve_governance_identity`).
     pub fn resolve_validator_address(&self) -> anyhow::Result<Address> {
-        let sender = self
-            .signer_address()
-            .ok_or_else(|| anyhow::anyhow!("Cannot resolve validator: no keypair configured"))?;
+        let sender = self.acting_address().ok_or_else(|| {
+            anyhow::anyhow!("Cannot resolve validator: no keypair configured and no --sender given")
+        })?;
         resolve_governance_identity(&self.fetch_committee_members(), sender)
+    }
+
+    /// The registration record for `validator`, if it is registered.
+    pub fn member_info(&self, validator: &Address) -> Option<MemberInfo> {
+        self.fetch_committee_members()
+            .into_iter()
+            .find(|m| m.validator_address() == validator)
+    }
+
+    /// The current on-chain value of `key` in the instant config store.
+    pub fn instant_config_value(&self, key: &str) -> Option<ConfigValue> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .config
+            .config
+            .get(key)
+            .cloned()
+    }
+
+    /// The current on-chain value of `key` in the epoch config store.
+    pub fn epoch_config_value(&self, key: &str) -> Option<ConfigValue> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .epoch_config
+            .entries()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
     }
 
     /// Build a vote transaction for a proposal.

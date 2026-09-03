@@ -17,6 +17,9 @@ pub enum CommitteeUpdateLogMessage {
         from_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
+        /// The Hashi shared-object id the transition cert was verified
+        /// against, for audit self-description.
+        hashi_object_id: sui_sdk_types::Address,
     },
     /// `from_epoch` is the guardian's current epoch at the time;
     /// `new_committee` is what was proposed (and rejected).
@@ -25,6 +28,9 @@ pub enum CommitteeUpdateLogMessage {
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
         error: String,
+        /// The Hashi shared-object id the transition cert was checked
+        /// against, for audit self-description.
+        hashi_object_id: sui_sdk_types::Address,
     },
 }
 

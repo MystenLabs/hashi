@@ -23,7 +23,7 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSignedResponse;
-use hashi_types::guardian::KpCertsRoster;
+use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::PcrAllowlist;
@@ -84,8 +84,8 @@ pub async fn init(cfg: Config) -> Result<()> {
         "  new set:        {}-of-{}",
         new_kp_set.threshold, new_kp_set.num_shares
     );
-    for (index, fingerprints) in new_certs_roster.fingerprints().iter().enumerate() {
-        println!("    share {}: {}", index + 1, fingerprints.join(", "));
+    for (index, fingerprint) in new_certs_roster.fingerprints().iter().enumerate() {
+        println!("    share {}: {fingerprint}", index + 1);
     }
     println!("Need {threshold} submissions from the current KPs (key-provisioner rotate-kp-set).");
     Ok(())
@@ -154,8 +154,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
         info!(
             phase = "rotate_kp_set",
             share_count = response.encrypted_shares.share_count(),
-            ciphertext_count = response.encrypted_shares.ciphertext_count(),
-            "every re-encrypted share verified against the new KP cert sets (without decrypting)",
+            "every re-encrypted share verified against the new KP certs (without decrypting)",
         );
 
         // The state the new KPs will read, verify and confirm.
@@ -222,7 +221,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
 struct Proposal<'a> {
     session_id: &'a SessionID,
     pcr_allowlist: &'a PcrAllowlist,
-    new_certs_roster: &'a KpCertsRoster,
+    new_certs_roster: &'a KpCertRoster,
     new_params: SecretSharingParams,
 }
 
@@ -293,8 +292,8 @@ mod tests {
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
-    use hashi_types::guardian::KPEncryptedShares;
-    use hashi_types::guardian::KPEncryptedSharesRoster;
+    use hashi_types::guardian::KpEncryptedShare;
+    use hashi_types::guardian::KpEncryptedShareRoster;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::ShareCommitments;
     use hashi_types::guardian::ShareID;
@@ -314,7 +313,7 @@ mod tests {
         kps: Vec<(PgpPublicCert, String)>,
         session_id: SessionID,
         pcr_allowlist: PcrAllowlist,
-        new_certs_roster: KpCertsRoster,
+        new_certs_roster: KpCertRoster,
         new_params: SecretSharingParams,
     }
 
@@ -329,14 +328,13 @@ mod tests {
                     (PgpPublicCert::new(cert).unwrap(), secret)
                 })
                 .collect::<Vec<_>>();
-            let encrypted_shares = KPEncryptedSharesRoster::new(
+            let encrypted_shares = KpEncryptedShareRoster::new(
                 kps.iter()
                     .enumerate()
-                    .map(|(index, (cert, _))| KPEncryptedShares {
+                    .map(|(index, (cert, _))| KpEncryptedShare {
                         id: ShareID::new((index + 1) as u16).unwrap(),
-                        ciphertexts_by_fingerprint: [(cert.fingerprint().to_hex(), "dummy".into())]
-                            .into_iter()
-                            .collect(),
+                        recipient_fingerprint: cert.fingerprint().to_hex(),
+                        armored_ciphertext: "dummy".into(),
                     })
                     .collect(),
             )

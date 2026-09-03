@@ -80,7 +80,7 @@ async fn normal_withdrawal_inner(
     let committee = enclave.state.get_committee()?;
 
     info!("Verifying request certificate.");
-    verify_hashi_cert(&committee, &signed_request)?;
+    verify_hashi_cert(enclave.hashi_object_id()?, &committee, &signed_request)?;
     info!("Request certificate verified.");
 
     let (_, request) = signed_request.into_parts();
@@ -210,8 +210,12 @@ mod tests {
             max_bucket_capacity: max_bucket_capacity_sats,
         };
         let limiter_state = LimiterState::genesis(&limiter_config);
-        let config =
-            InitConfig::from_parts_for_testing(limiter_config, hashi_btc_master_pubkey, network);
+        let config = InitConfig::from_parts_for_testing(
+            limiter_config,
+            hashi_btc_master_pubkey,
+            network,
+            hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
+        );
 
         // operator_init installs standby config; test activation installs the
         // committee and limiter before withdrawals.

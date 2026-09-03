@@ -22,9 +22,9 @@
 //! 5. The optional genesis state hash is independently derived from S3 and
 //!    current on-chain state and confirmed against the enclave's pin.
 //! 6. This KP's PGP-encrypted share is read from the latest
-//!    `kp-shares/{seq}/` state (attestation-anchored), every encrypted copy's
-//!    recipient is verified against the roster, and this KP's selected
-//!    ciphertext is located by fingerprint.
+//!    `kp-shares/{seq}/` state (attestation-anchored), every share's recipient
+//!    is verified against the roster, and this KP's ciphertext is located by
+//!    fingerprint.
 //! 7. The selected ciphertext is decrypted via its yubikey (`gpg --decrypt`
 //!    over a pipe; plaintext stays in memory) and verified against the
 //!    commitment.
@@ -57,7 +57,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_provisioning_target_info;
-use crate::kp_roster::decrypt_kp_share_copies;
+use crate::kp_roster::decrypt_kp_share;
 use crate::kp_roster::load_kp_cert;
 
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
@@ -109,14 +109,12 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(
         phase = "roster load",
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "loading + validating full KP certificate roster",
     );
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "KP certificate roster loaded"
     );
 
@@ -124,9 +122,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
     let kp_fingerprint = kp_cert.fingerprint();
     anyhow::ensure!(
-        certs_roster
-            .certs_for_fingerprint(&kp_fingerprint)
-            .is_some(),
+        certs_roster.cert_for_fingerprint(&kp_fingerprint).is_some(),
         "this KP's cert (fingerprint {kp_fingerprint}) is not among the configured \
          kp_roster.kp_pgp_cert_paths"
     );
@@ -176,7 +172,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         limiter_config,
         current_committee_epoch: enclave_current_committee_epoch,
         mpc_master_g,
+        hashi_object_id: enclave_hashi_object_id,
     } = &guardian_info;
+    anyhow::ensure!(
+        *enclave_hashi_object_id == Some(cfg.hashi.hashi_ids.hashi_object_id),
+        "Guardian hashi_object_id mismatch: enclave reports {:?}, expected {}",
+        enclave_hashi_object_id,
+        cfg.hashi.hashi_ids.hashi_object_id,
+    );
     anyhow::ensure!(
         *lifecycle == WithdrawStage::OperatorInitialized.into(),
         "Guardian lifecycle is {lifecycle:?}; expected withdraw/operator_initialized"
@@ -309,6 +312,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         guardian_s3.bucket_info.clone(),
         guardian_s3.retention_environment,
         cfg.bitcoin_network,
+        cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let config_hash = expected_config.digest();
     anyhow::ensure!(
@@ -366,13 +370,12 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "share read",
         cert_seq = state.cert_seq,
         share_count = state.encrypted_shares.share_count(),
-        ciphertext_count = state.encrypted_shares.ciphertext_count(),
         all_recipients_verified = true,
-        "kp-shares log verified: every PGP-encrypted share matches the expected KP cert sets",
+        "kp-shares log verified: every PGP-encrypted share matches the expected KP cert",
     );
 
     // 6. Decrypt and commitment-check the ciphertext selected by this KP.
-    let decrypted = decrypt_kp_share_copies(&state, std::slice::from_ref(&kp_cert))?;
+    let decrypted = decrypt_kp_share(&state, &kp_cert)?;
     let expected_commitment = state
         .secret_sharing_instance
         .commitments()

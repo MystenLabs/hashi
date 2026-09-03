@@ -355,6 +355,7 @@ fn verify_provisioned_standby_info(
         guardian_s3.bucket_info.clone(),
         guardian_s3.retention_environment,
         cfg.bitcoin_network,
+        cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let expected_config_hash = init_config.digest();
     ensure!(

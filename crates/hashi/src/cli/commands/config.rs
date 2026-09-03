@@ -20,12 +20,10 @@ pub fn generate_template(output: &Path) -> Result<()> {
 
     if output.exists() {
         print_warning(&format!(
-            "File {} already exists. Overwrite? (y/N)",
+            "File {} already exists and will be overwritten.",
             output.display()
         ));
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
+        if !crate::cli::confirm()? {
             print_info("Cancelled.");
             return Ok(());
         }

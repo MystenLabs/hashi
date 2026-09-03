@@ -530,7 +530,11 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &committee,
+            signed_message.clone(),
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
@@ -777,7 +781,11 @@ impl LeaderService {
                 Self::request_mpc_input_signatures_signature(&inner, proto_request, &member).await
             });
         }
-        let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &committee,
+            signed_message.clone(),
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
@@ -1505,7 +1513,11 @@ impl LeaderService {
             });
         }
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, confirmation);
+        let mut aggregator = BlsSignatureAggregator::new(
+            inner.config.hashi_ids().hashi_object_id,
+            &committee,
+            confirmation,
+        );
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {

@@ -25,20 +25,15 @@ pub async fn setup_new_key(
     let n = params.num_shares();
     let t = params.threshold();
     let key_provisioner_certs_roster = request.kp_certs_roster();
-    let certificate_count: usize = key_provisioner_certs_roster
-        .iter()
-        .map(|set| set.pgp_certs().len())
-        .sum();
     info!(
         share_count = key_provisioner_certs_roster.num_kps(),
-        certificate_count, "Received key provisioner OpenPGP certificate roster."
+        "Received key provisioner OpenPGP certificate roster."
     );
-    for (index, cert_set) in key_provisioner_certs_roster.iter().enumerate() {
+    for (index, cert) in key_provisioner_certs_roster.iter().enumerate() {
         info!(
             share_id = index + 1,
-            certificate_count = cert_set.pgp_certs().len(),
-            recipient_fingerprints = ?cert_set.fingerprints(),
-            "Received KP certificate set."
+            recipient_fingerprint = %cert.fingerprint().to_hex(),
+            "Received KP certificate."
         );
     }
 
@@ -58,8 +53,7 @@ pub async fn setup_new_key(
     info!(
         bitcoin_key_fingerprint = %fingerprint_hex,
         share_count = encrypted_shares.share_count(),
-        ciphertext_count = encrypted_shares.ciphertext_count(),
-        "Bitcoin key generated; encrypted each share once per KP certificate."
+        "Bitcoin key generated; encrypted one share for each key provisioner."
     );
 
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)

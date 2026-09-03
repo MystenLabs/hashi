@@ -54,12 +54,16 @@ instead of plugging the YubiKey into the server itself.
 
 ### Option 1: Create a private key on a YubiKey (recommended)
 
-We recommend generating a PGP private key entirely on a YubiKey, and using its
+We recommend generating a PGP private key entirely on one YubiKey and using its
 public key to encrypt the node backup. This makes it practically impossible for
-anyone to decrypt the backup without physical access to the YubiKey. The risk
-is that you will also be unable to decrypt the backup if you lose access to the
-YubiKey. To minimize this risk, we recommend obtaining at least two YubiKeys and
-repeating the procedure for each.
+anyone to decrypt the backup without physical access to the YubiKey.
+
+:::warning
+
+Do not lose the YubiKey. Without it, you cannot decrypt backups encrypted to
+its public key.
+
+:::
 
 For the initial YubiKey setup, you must use a machine with a physical USB port.
 After initial setup, you can encrypt the share to the public key of the YubiKey
@@ -147,9 +151,7 @@ oct admin --card "$CARD" generate \
   curve25519
 ```
 
-8. Repeat the above steps for any additional YubiKeys.
-
-9. Test encrypting a file to each YubiKey's public key. Import the public key,
+8. Test encrypting a file to the YubiKey's public key. Import the public key,
    then encrypt a test file:
 
 ```sh
@@ -165,7 +167,7 @@ gpg --encrypt --armor \
   test.txt
 ```
 
-10. Test decrypting the file with the YubiKey. With the YubiKey plugged in,
+9. Test decrypting the file with the YubiKey. With the YubiKey plugged in,
    link the card to gpg, then decrypt. You will be prompted for the User PIN,
    and to tap the YubiKey.
 
@@ -185,8 +187,8 @@ even though encryption and decryption still work.
 Confirm the output matches the original file contents, then delete the test
 files.
 
-11. Store the YubiKeys in a secure location, such as a company safe. Also save
-   the public key files in a secure location.
+10. Store the YubiKey in a secure location, such as a company safe. Also save
+    the public key file in a secure location.
 
 ### Option 2: Create a local private key file
 

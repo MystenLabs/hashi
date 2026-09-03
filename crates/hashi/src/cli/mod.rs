@@ -34,61 +34,64 @@ pub enum OutputFormat {
 
 /// CLI-specific global options, flattened into each CLI subcommand.
 #[derive(Args)]
+/// Every flag here is `global`, so it parses in any position:
+/// `hashi proposal vote <id> -y --dry-run` and `hashi -y proposal vote <id>`
+/// both work.
 pub struct CliGlobalOpts {
     /// Path to the CLI configuration file
-    #[clap(long, short, env = "HASHI_CLI_CONFIG")]
+    #[clap(global = true, long, short, env = "HASHI_CLI_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 
     /// Sui RPC URL (overrides config file)
-    #[clap(long, env = "SUI_RPC_URL")]
+    #[clap(global = true, long, env = "SUI_RPC_URL")]
     pub sui_rpc_url: Option<String>,
 
     /// Hashi package ID (overrides config file)
-    #[clap(long, env = "HASHI_PACKAGE_ID")]
+    #[clap(global = true, long, env = "HASHI_PACKAGE_ID")]
     pub package_id: Option<String>,
 
     /// Hashi shared object ID (overrides config file)
-    #[clap(long, env = "HASHI_OBJECT_ID")]
+    #[clap(global = true, long, env = "HASHI_OBJECT_ID")]
     pub hashi_object_id: Option<String>,
 
     /// Path to the keypair file for signing transactions
-    #[clap(long, short = 'k', env = "HASHI_KEYPAIR")]
+    #[clap(global = true, long, short = 'k', env = "HASHI_KEYPAIR")]
     pub keypair: Option<std::path::PathBuf>,
 
     /// Bitcoin RPC URL (overrides config file)
-    #[clap(long, env = "BTC_RPC_URL")]
+    #[clap(global = true, long, env = "BTC_RPC_URL")]
     pub btc_rpc_url: Option<String>,
 
     /// Bitcoin RPC username (overrides config file)
-    #[clap(long, env = "BTC_RPC_USER")]
+    #[clap(global = true, long, env = "BTC_RPC_USER")]
     pub btc_rpc_user: Option<String>,
 
     /// Bitcoin RPC password (overrides config file)
-    #[clap(long, env = "BTC_RPC_PASSWORD")]
+    #[clap(global = true, long, env = "BTC_RPC_PASSWORD")]
     pub btc_rpc_password: Option<String>,
 
     /// Bitcoin network: regtest, testnet4, or mainnet (overrides config file)
-    #[clap(long, env = "BTC_NETWORK")]
+    #[clap(global = true, long, env = "BTC_NETWORK")]
     pub btc_network: Option<String>,
 
     /// Path to Bitcoin private key file in WIF format (overrides config file)
-    #[clap(long, env = "BTC_PRIVATE_KEY")]
+    #[clap(global = true, long, env = "BTC_PRIVATE_KEY")]
     pub btc_private_key: Option<std::path::PathBuf>,
 
     /// Enable verbose output
-    #[clap(long, short)]
+    #[clap(global = true, long, short)]
     pub verbose: bool,
 
     /// Skip all confirmation prompts
-    #[clap(long, short = 'y')]
+    #[clap(global = true, long, short = 'y')]
     pub yes: bool,
 
     /// Gas budget for transactions (in MIST). If not set, estimates via dry-run.
-    #[clap(long, env = "HASHI_GAS_BUDGET")]
+    #[clap(global = true, long, env = "HASHI_GAS_BUDGET")]
     pub gas_budget: Option<u64>,
 
     /// Simulate the transaction without executing (dry-run)
-    #[clap(long)]
+    #[clap(global = true, long)]
     pub dry_run: bool,
 
     /// Build the transaction and print it as base64 (BCS `TransactionData`)
@@ -96,29 +99,31 @@ pub struct CliGlobalOpts {
     /// written to stdout, ready for `sui keytool sign` + `sui client
     /// execute-signed-tx` (e.g. multisig). No keypair required; pair with
     /// --sender to set the signing address.
-    #[clap(long, conflicts_with = "dry_run")]
+    #[clap(global = true, long, conflicts_with = "dry_run")]
     pub serialize_unsigned_transaction: bool,
 
     /// Sender address to build the transaction for (e.g. a multisig address).
     /// Defaults to the configured keypair's address; required when serializing
-    /// or dry-running without a keypair.
-    #[clap(long)]
+    /// or dry-running without a keypair, where it is also the committee
+    /// identity the governance commands act as.
+    #[clap(global = true, long)]
     pub sender: Option<String>,
 
     /// Pin the gas coin (object id) used to pay for the transaction. Only the
     /// id is needed. Defaults to fullnode gas selection, or `gas_coin` from the
     /// config file.
-    #[clap(long)]
+    #[clap(global = true, long)]
     pub gas: Option<String>,
 
     /// Gas price override in MIST per unit. Defaults to the reference gas price.
-    #[clap(long)]
+    #[clap(global = true, long)]
     pub gas_price: Option<u64>,
 }
 
 #[derive(Subcommand)]
 pub enum ProposalCommands {
-    /// List all active proposals
+    /// List proposals (active by default; ids are printed in full so they can
+    /// be pasted into `vote` and `view`)
     List {
         /// Filter by proposal type (upgrade, update-deposit-fee, etc.)
         #[clap(long, short = 't')]
@@ -127,6 +132,18 @@ pub enum ProposalCommands {
         /// Show detailed information
         #[clap(long, short)]
         detailed: bool,
+
+        /// List the executed (archived) proposals instead of the active ones
+        #[clap(long)]
+        executed: bool,
+
+        /// Add a vote tally column (one live read per proposal)
+        #[clap(long)]
+        votes: bool,
+
+        /// Print the list as JSON instead of a table
+        #[clap(long)]
+        json: bool,
     },
 
     /// View details of a specific proposal
@@ -1000,7 +1017,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         private_key: opts.btc_private_key,
     };
 
-    let config = config::CliConfig::load(
+    let mut config = config::CliConfig::load(
         opts.config.as_deref(),
         opts.sui_rpc_url,
         opts.package_id,
@@ -1015,6 +1032,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         .map(str::parse::<sui_sdk_types::Address>)
         .transpose()
         .context("Invalid --sender address")?;
+    config.acting_sender = sender;
     let gas_object = opts
         .gas
         .as_deref()
@@ -1033,14 +1051,19 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         gas_price: opts.gas_price,
     };
 
-    // In serialize-unsigned mode, keep stdout clean (base64 only) by sending
-    // all human-readable notes to stderr.
-    set_notes_to_stderr(tx_opts.serialize_unsigned);
-
     match command {
         CliCommand::Proposal { action } => match action {
-            ProposalCommands::List { r#type, detailed } => {
-                commands::proposal::list_proposals(&config, r#type, detailed).await?;
+            ProposalCommands::List {
+                r#type,
+                detailed,
+                executed,
+                votes,
+                json,
+            } => {
+                commands::proposal::list_proposals(
+                    &config, r#type, detailed, executed, votes, json,
+                )
+                .await?;
             }
             ProposalCommands::View { proposal_id } => {
                 commands::proposal::view_proposal(&config, &proposal_id).await?;
@@ -1356,30 +1379,43 @@ fn init_tracing(verbose: bool) {
         .init();
 }
 
-/// When set, human-readable notes/summaries are written to stderr instead of
-/// stdout. This is enabled in `--serialize-unsigned-transaction` mode so that
-/// stdout carries only the base64 unsigned transaction (safe to pipe into
-/// `sui keytool sign`).
-static NOTES_TO_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Route human-readable notes/summaries to stderr (keeping stdout clean for
-/// machine-readable output). Call once when entering a serialize-unsigned flow.
-pub fn set_notes_to_stderr(enabled: bool) {
-    NOTES_TO_STDERR.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn notes_to_stderr() -> bool {
-    NOTES_TO_STDERR.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Print a human-readable note/summary line. Goes to stderr in serialize mode
-/// (so stdout stays clean for the base64 transaction), stdout otherwise.
+/// Print a human-readable note or summary line. Notes always go to stderr:
+/// stdout carries only results (tables, JSON, a proposal id, a transaction
+/// digest, or the base64 unsigned transaction), so piping any command's
+/// stdout into another tool never picks up progress chatter.
 pub fn print_detail(msg: &str) {
-    if notes_to_stderr() {
-        eprintln!("{msg}");
-    } else {
-        println!("{msg}");
+    eprintln!("{msg}");
+}
+
+/// Attach a human explanation to a transaction failure when it is a Move
+/// abort (a clever `#[error]` constant with a hint, or the framework's
+/// dynamic-field miss); other errors pass through unchanged. Every CLI path
+/// that finalizes or executes a transaction maps its error through this, so
+/// the operator never has to read a raw `MoveAbort` line first.
+pub fn explain_tx_error(err: anyhow::Error) -> anyhow::Error {
+    match commands::proposal::explain_move_abort(&err) {
+        Some(explanation) => err.context(explanation),
+        None => err,
     }
+}
+
+/// Ask the operator to confirm. Requires an explicit `y`; anything else is a
+/// decline. When stdin is not a terminal there is nobody to answer, so the
+/// command refuses to proceed instead of treating an empty read as consent,
+/// and points at `--yes`.
+pub fn confirm() -> anyhow::Result<bool> {
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "this command needs confirmation but stdin is not a terminal; pass --yes / -y \
+             to confirm non-interactively"
+        );
+    }
+    eprint!("Continue? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
 }
 
 /// Print a success message
@@ -1417,11 +1453,8 @@ pub fn explorer_tx_url(sui_rpc_url: &str, digest: &str) -> Option<String> {
 /// Print a transaction digest with its explorer deep-link (when the network
 /// has one) so the result can be verified in a browser with one click.
 pub fn print_tx_digest(sui_rpc_url: &str, digest: &str) {
-    print_detail(&format!(
-        "\n{} Transaction submitted: {}",
-        "✓".green(),
-        digest.cyan()
-    ));
+    // The digest is the command's result, so it is the one line on stdout.
+    println!("\n{} Transaction submitted: {}", "✓".green(), digest.cyan());
     if let Some(url) = explorer_tx_url(sui_rpc_url, digest) {
         print_detail(&format!("  {} {}", "Explorer:".dimmed(), url.cyan()));
     }
@@ -1542,14 +1575,14 @@ pub fn print_tx_outcome(
 /// Print an in-progress status line (no newline) that can be overwritten.
 pub fn print_step(msg: &str) {
     use std::io::Write;
-    print!("\r\x1b[2K{} {}", "ℹ".blue().bold(), msg);
-    let _ = std::io::stdout().flush();
+    eprint!("\r\x1b[2K{} {}", "ℹ".blue().bold(), msg);
+    let _ = std::io::stderr().flush();
 }
 
 /// Overwrite the current status line with a success message.
 pub fn complete_step(msg: &str) {
-    print!("\r\x1b[2K");
-    println!("{} {}", "✓".green().bold(), msg);
+    eprint!("\r\x1b[2K");
+    eprintln!("{} {}", "✓".green().bold(), msg);
 }
 
 /// Run the `publish` command – build, publish, and initialise the Hashi package.
@@ -1605,10 +1638,7 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     if !opts.yes {
         print_info("This will publish the package (1 transaction).");
         print_info("Use --yes / -y to skip this prompt.");
-        eprint!("Continue? [y/N] ");
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
+        if !confirm()? {
             print_warning("Aborted.");
             return Ok(());
         }
@@ -1660,10 +1690,6 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
 
     crate::init_crypto_provider();
     init_tracing(opts.verbose);
-
-    // In serialize/status mode keep stdout clean (base64 / the LAUNCH_STATUS
-    // line only); notes go to stderr.
-    set_notes_to_stderr(opts.serialize_unsigned || opts.status);
 
     // Resolve ids: explicit flags win, else the hashi_ids.json from publish.
     let ids: crate::config::HashiIds = match (&opts.package_id, &opts.hashi_object_id) {
@@ -1907,10 +1933,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
              registered right now (1 transaction).",
         );
         print_info("Use --yes / -y to skip this prompt.");
-        eprint!("Continue? [y/N] ");
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
+        if !confirm()? {
             print_warning("Aborted.");
             return Ok(());
         }
@@ -1974,9 +1997,6 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     use sui_sdk_types::bcs::ToBcs;
 
     init_tracing(opts.verbose);
-
-    // In serialize mode keep stdout clean (base64 only); notes go to stderr.
-    set_notes_to_stderr(opts.serialize_unsigned);
 
     // Load the validator config and refuse a chain pairing the protocol
     // never deploys. The config's Sui chain ID is confirmed against the RPC
@@ -2062,10 +2082,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     if !opts.yes {
         print_info("This will register the validator on-chain (1 transaction).");
         print_info("Use --yes / -y to skip this prompt.");
-        eprint!("Continue? [y/N] ");
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
+        if !confirm()? {
             print_warning("Aborted.");
             return Ok(());
         }

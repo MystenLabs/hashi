@@ -15,10 +15,9 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShares;
-use super::KPEncryptedSharesRoster;
-use super::KpCerts;
-use super::KpCertsRoster;
+use super::KpCertRoster;
+use super::KpEncryptedShare;
+use super::KpEncryptedShareRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
@@ -84,6 +83,10 @@ const TEST_T: usize = 3;
 /// Deterministic Sui address used across signing-related mocks.
 const TEST_SIGNER_ADDRESS: SuiAddress = SuiAddress::new([1u8; 32]);
 
+/// Deterministic Hashi object id bound into mock certificate preimages.
+/// Guardian tests that verify these certificates must pin the same id.
+pub const TEST_HASHI_OBJECT_ID: SuiAddress = SuiAddress::new([0xAA; 32]);
+
 /// Deterministic committee signing key material used across tests.
 const TEST_HASHI_BLS_SK_BYTES: [u8; Bls12381PrivateKey::LENGTH] = [9u8; Bls12381PrivateKey::LENGTH];
 
@@ -105,6 +108,7 @@ impl GuardianInfo {
             limiter_config: None,
             current_committee_epoch: None,
             mpc_master_g: None,
+            hashi_object_id: None,
         }
     }
 }
@@ -131,15 +135,8 @@ impl SetupNewKeyRequest {
     }
 }
 
-pub fn mock_kp_certs_roster(n: usize) -> KpCertsRoster {
-    KpCertsRoster::new(mock_kp_certs(n)).unwrap()
-}
-
-pub fn mock_kp_certs(n: usize) -> Vec<KpCerts> {
-    mock_pgp_certs(n)
-        .into_iter()
-        .map(|cert| KpCerts::new(vec![cert]).unwrap())
-        .collect()
+pub fn mock_kp_certs_roster(n: usize) -> KpCertRoster {
+    KpCertRoster::new(mock_pgp_certs(n)).unwrap()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -152,17 +149,14 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
-    KPEncryptedSharesRoster::new(
+fn dummy_encrypted_shares() -> KpEncryptedShareRoster {
+    KpEncryptedShareRoster::new(
         (0..TEST_N)
-            .map(|i| KPEncryptedShares {
+            .map(|i| KpEncryptedShare {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                ciphertexts_by_fingerprint: [(
-                    format!("DUMMY FINGERPRINT {i}"),
-                    "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
-                )]
-                .into_iter()
-                .collect(),
+                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
+                armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----"
+                    .into(),
             })
             .collect(),
     )
@@ -214,7 +208,7 @@ impl ProvisionerRotateCertResponse {
     pub fn mock_for_testing() -> Self {
         Self {
             cert_seq: 7,
-            encrypted_shares: dummy_encrypted_shares()
+            encrypted_share: dummy_encrypted_shares()
                 .into_vec()
                 .into_iter()
                 .next()
@@ -305,14 +299,12 @@ impl ProvisionerRotateCertRequest {
     pub fn from_encrypted_share_for_testing(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        target_kp_pgp_fingerprint: String,
         new_kp_pgp_cert: PgpPublicCert,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self::from_encrypted_share(
             expected_session_id,
             expected_cert_seq,
-            target_kp_pgp_fingerprint,
             new_kp_pgp_cert,
             encrypted_share,
         )
@@ -350,6 +342,7 @@ impl InitConfig {
         limiter_config: LimiterConfig,
         hashi_btc_master_pubkey: HashiMasterG,
         network: super::Network,
+        hashi_object_id: SuiAddress,
     ) -> Self {
         InitConfig::new(
             limiter_config,
@@ -358,6 +351,7 @@ impl InitConfig {
             S3BucketInfo::mock_for_testing(),
             super::S3RetentionEnvironment::Testnet,
             network,
+            hashi_object_id,
         )
         .expect("valid InitConfig")
     }
@@ -383,6 +377,7 @@ impl InitConfig {
             S3BucketInfo::mock_for_testing(),
             super::S3RetentionEnvironment::Testnet,
             super::Network::Regtest,
+            TEST_HASHI_OBJECT_ID,
         )
         .expect("valid InitConfig")
     }
@@ -438,8 +433,8 @@ impl StandardWithdrawalRequest {
 
         let sk = mock_hashi_bls_sk();
         let address = TEST_SIGNER_ADDRESS;
-        let mut agg = BlsSignatureAggregator::new(&committee, req.clone());
-        agg.add_signature(sk.sign(epoch, address, &req))
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_OBJECT_ID, &committee, req.clone());
+        agg.add_signature(sk.sign(TEST_HASHI_OBJECT_ID, epoch, address, &req))
             .expect("member signature should verify");
 
         (agg.finish().expect("finish aggregator"), committee)

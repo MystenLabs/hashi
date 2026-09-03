@@ -19,7 +19,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::verified_ceremony_guardian_info;
-use crate::kp_roster::decrypt_kp_share_copies;
+use crate::kp_roster::decrypt_kp_share;
 use crate::kp_roster::load_kp_cert;
 
 /// Verify this KP can fetch and decrypt its ceremony share, then submit a
@@ -54,23 +54,20 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     info!(
         phase = "roster load",
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "loading + validating full KP certificate roster",
     );
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),
-        certificate_count = cfg.kp_roster.cert_count(),
         "KP certificate roster loaded"
     );
 
-    // The selected cert identifies this KP's roster entry. Ceremony validation
-    // then exercises every cert assigned to that KP/share.
+    // The selected cert identifies this KP's roster entry.
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
     let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
-    let kp_certs = certs_roster
-        .certs_for_fingerprint(&kp_cert.fingerprint())
+    certs_roster
+        .cert_for_fingerprint(&kp_cert.fingerprint())
         .with_context(|| {
             format!(
                 "this KP's cert (fingerprint {}) is not among the configured \
@@ -78,13 +75,10 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
                 kp_cert.fingerprint()
             )
         })?;
-    let fingerprints = kp_certs.fingerprints();
     info!(
         phase = "setup",
-        selected_fingerprint = %kp_cert.fingerprint(),
-        certificate_count = kp_certs.pgp_certs().len(),
-        fingerprints = ?fingerprints,
-        "identified this KP's complete roster entry",
+        fingerprint = %kp_cert.fingerprint(),
+        "identified this KP's configured certificate",
     );
 
     // 1. Discover and verify the latest ceremony from the immutable log
@@ -116,16 +110,14 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         n = state.secret_sharing_instance.num_shares(),
         t = state.secret_sharing_instance.threshold(),
         share_count = state.encrypted_shares.share_count(),
-        ciphertext_count = state.encrypted_shares.ciphertext_count(),
         "discovered + validated latest ceremony state",
     );
 
-    // 2. Confirm every PGP-encrypted share is addressed to the expected KP cert set.
+    // 2. Confirm every PGP-encrypted share is addressed to the expected KP cert.
     info!(
         phase = "roster verify",
         share_count = state.encrypted_shares.share_count(),
-        ciphertext_count = state.encrypted_shares.ciphertext_count(),
-        "verifying every PGP-encrypted share against the expected KP cert sets (without decrypting)",
+        "verifying every PGP-encrypted share against the expected KP certs (without decrypting)",
     );
     state.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(
@@ -133,8 +125,8 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         "ceremony/ and kp-shares/ logs verified against expected params and KP certs",
     );
 
-    // 3. Decrypt and commitment-check every ciphertext in this KP's roster entry.
-    let reconstructed = decrypt_kp_share_copies(&state, kp_certs.pgp_certs())?;
+    // 3. Decrypt and commitment-check this KP's ciphertext.
+    let reconstructed = decrypt_kp_share(&state, &kp_cert)?;
     let share_id = reconstructed.id;
     let expected_commitment = state
         .secret_sharing_instance
@@ -167,7 +159,6 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         phase = "share save",
         path = %encrypted_shares_path.display(),
         share_count = state.encrypted_shares.share_count(),
-        ciphertext_count = state.encrypted_shares.ciphertext_count(),
         "saved ceremony state with encrypted shares",
     );
 
@@ -191,6 +182,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
             || verified.info.lifecycle == CeremonyStage::Completed.into(),
         "guardian is not accepting key provisioner ceremony confirmations"
     );
+    let kp_fingerprint = kp_cert.fingerprint();
     let confirmation = CeremonyConfirmationRequest::new(verified.session_id, state.digest());
     let signed = KpSigned::sign(confirmation, kp_cert, None)
         .map_err(anyhow::Error::msg)
@@ -217,10 +209,9 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         share_id = share_id.get(),
         sharing_seq = state.secret_sharing_instance.sharing_seq(),
         cert_seq = state.cert_seq,
-        certificate_count = kp_certs.pgp_certs().len(),
-        fingerprints = ?fingerprints,
+        fingerprint = %kp_fingerprint,
         commitment = hex::encode(&expected_commitment.digest),
-        "ceremony share verified through every certificate in this KP's roster entry",
+        "ceremony share verified through this KP's configured certificate",
     );
     Ok(())
 }

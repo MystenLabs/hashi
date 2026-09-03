@@ -188,12 +188,14 @@ public(package) fun has_member(self: &CommitteeSet, validator_address: address):
 /// Set the public key of the member.
 public(package) fun set_next_epoch_public_key(
     self: &mut CommitteeSet,
+    hashi_id: address,
     validator_address: address,
     next_epoch_public_key: vector<u8>,
     proof_of_possession_signature: vector<u8>,
     ctx: &TxContext,
 ) {
     let next_epoch_public_key = verify_bls_public_key(
+        hashi_id,
         ctx.epoch(),
         validator_address,
         next_epoch_public_key,
@@ -726,6 +728,7 @@ fun next_epoch_encryption_public_key(self: &MemberInfo): &vector<u8> {
 // Verifies that the provided bls public key is valid and there is a valid
 // proof of possession.
 fun verify_bls_public_key(
+    hashi_id: address,
     epoch: u64,
     validator_address: address,
     bls_public_key: vector<u8>,
@@ -734,6 +737,7 @@ fun verify_bls_public_key(
     // Verify the proof of possession of the private key
     assert!(
         verify_proof_of_possession(
+            hashi_id,
             epoch,
             &validator_address,
             &bls_public_key,
@@ -746,13 +750,17 @@ fun verify_bls_public_key(
 }
 
 fun verify_proof_of_possession(
+    hashi_id: address,
     epoch: u64,
     validator_address: &address,
     bls_public_key: &vector<u8>,
     proof_of_possession_signature: &vector<u8>,
 ): bool {
+    // Preimage mirrors the certificate layout: intent || hashi_id || epoch ||
+    // message, binding the proof of possession to this deployment.
     let mut message = vector[];
     message.append(bcs::to_bytes(&hashi::intent::proof_of_possession()));
+    message.append(bcs::to_bytes(&hashi_id));
     message.append(bcs::to_bytes(&epoch));
     message.append(bcs::to_bytes(validator_address));
     bls_public_key.do_ref!(|key_byte| message.append(bcs::to_bytes(key_byte)));

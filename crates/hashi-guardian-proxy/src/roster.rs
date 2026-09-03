@@ -11,8 +11,8 @@
 //! Two layouts are in flight (#779 migrates the first to the second):
 //!   `shares/{sharing_seq:020}-{session}.json` (message `Shares`)
 //!   `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session}.json` (`KpShareState`)
-//! The reader prefers `kp-shares/`, parsing a local tolerant shape rather than
-//! the hashi-types enum so it keeps working across that migration.
+//! The reader prefers `kp-shares/` and parses only the fields it needs while
+//! retaining the already-scalar legacy `shares/` fallback.
 //!
 //! Which `sharing_seq` is current comes from `ceremony/`, not from the newest
 //! `kp-shares/` dir: a ceremony publishes its shares before its `ceremony/`
@@ -21,7 +21,6 @@
 //! (`hashi-guardian::s3_reader::read_latest_ceremony_state`), and the relay has
 //! to agree with it or it rejects the very KPs the enclave would accept.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,9 +151,11 @@ pub(crate) mod test_utils {
             .iter()
             .enumerate()
             .map(|(i, fp)| {
-                let ciphertexts: serde_json::Map<String, serde_json::Value> =
-                    std::iter::once(((*fp).to_string(), serde_json::json!(""))).collect();
-                serde_json::json!({ "id": i + 1, "ciphertexts_by_fingerprint": ciphertexts })
+                serde_json::json!({
+                    "id": i + 1,
+                    "recipient_fingerprint": fp,
+                    "armored_ciphertext": "",
+                })
             })
             .collect();
         let record = serde_json::json!({
@@ -248,39 +249,12 @@ struct ShareState {
     encrypted_shares: Vec<LabeledShare>,
 }
 
-/// A share names its recipient in one of two shapes, and both are live: the
-/// guardian deployed on testnet writes `schema_version: 1` records carrying a
-/// single `recipient_fingerprint`, while current builds write
-/// `schema_version: 2` with `ciphertexts_by_fingerprint`, one entry per cert
-/// since a KP may hold several. A rotation reads the old record before it
-/// writes the new one, so the relay has to accept either.
+/// Both the legacy `Shares` envelope and versioned `KpShareState` envelope
+/// contain exactly one required recipient fingerprint per encrypted share.
+/// Removed map-shaped V2 payloads intentionally fail deserialization.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum LabeledShare {
-    MultiCert {
-        ciphertexts_by_fingerprint: BTreeMap<String, serde_json::Value>,
-    },
-    SingleCert {
-        recipient_fingerprint: String,
-    },
-}
-
-impl LabeledShare {
-    /// Every fingerprint naming this share's holder. More than one only in the
-    /// multi-cert shape, where they are all the same KP.
-    fn fingerprints(&self) -> Vec<&str> {
-        match self {
-            Self::MultiCert {
-                ciphertexts_by_fingerprint,
-            } => ciphertexts_by_fingerprint
-                .keys()
-                .map(String::as_str)
-                .collect(),
-            Self::SingleCert {
-                recipient_fingerprint,
-            } => vec![recipient_fingerprint.as_str()],
-        }
-    }
+struct LabeledShare {
+    recipient_fingerprint: String,
 }
 
 fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
@@ -289,8 +263,7 @@ fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
     state
         .encrypted_shares
         .iter()
-        .flat_map(|share| share.fingerprints())
-        .map(parse_recipient_fingerprint)
+        .map(|share| parse_recipient_fingerprint(&share.recipient_fingerprint))
         .collect()
 }
 
@@ -318,9 +291,7 @@ mod tests {
         hex.parse().unwrap()
     }
 
-    /// `schema_version: 1` shares — one cert each, named by a scalar. This is
-    /// what the guardian currently deployed on testnet writes, so a rotation
-    /// reads this shape before it writes anything.
+    /// Scalar shares used by both deployed V1 and current V2 records.
     fn single_cert_shares(fingerprints: &[&str]) -> Vec<serde_json::Value> {
         fingerprints
             .iter()
@@ -330,25 +301,6 @@ mod tests {
                     "id": i + 1,
                     "recipient_fingerprint": fp,
                     "armored_ciphertext": "",
-                })
-            })
-            .collect()
-    }
-
-    /// `schema_version: 2` shares — a map, because one KP may hold several
-    /// certs. This is what current builds write.
-    fn multi_cert_shares(per_share: &[&[&str]]) -> Vec<serde_json::Value> {
-        per_share
-            .iter()
-            .enumerate()
-            .map(|(i, fps)| {
-                let ciphertexts: serde_json::Map<String, serde_json::Value> = fps
-                    .iter()
-                    .map(|fp| ((*fp).to_string(), serde_json::json!("")))
-                    .collect();
-                serde_json::json!({
-                    "id": i + 1,
-                    "ciphertexts_by_fingerprint": ciphertexts,
                 })
             })
             .collect()
@@ -380,17 +332,24 @@ mod tests {
         );
     }
 
-    /// A `kp-shares/` record in #779's shape — the layout the enclave writes
-    /// today. One cert per share; use `kp_shares_record_multi_cert` for a KP
-    /// holding several.
+    /// A scalar `kp-shares/` record written by the current schema version.
     fn kp_shares_record(
         sharing_seq: u64,
         cert_seq: u64,
         fingerprints: &[&str],
     ) -> (String, Vec<u8>) {
-        let per_share: Vec<&[&str]> = fingerprints.iter().map(std::slice::from_ref).collect();
-        let shares = multi_cert_shares(&per_share);
+        versioned_kp_shares_record(2, sharing_seq, cert_seq, fingerprints)
+    }
+
+    fn versioned_kp_shares_record(
+        schema_version: u16,
+        sharing_seq: u64,
+        cert_seq: u64,
+        fingerprints: &[&str],
+    ) -> (String, Vec<u8>) {
+        let shares = single_cert_shares(fingerprints);
         let record = serde_json::json!({
+            "schema_version": schema_version,
             "session_id": "test-session",
             "timestamp_ms": 0,
             "message": { "KpShareState": {
@@ -442,8 +401,8 @@ mod tests {
     #[tokio::test]
     async fn latest_cert_seq_wins_within_a_sharing_seq() {
         let store = MemStore::default();
-        let (key0, bytes0) = kp_shares_record(3, 0, &[FP_A]);
-        let (key1, bytes1) = kp_shares_record(3, 1, &[FP_B]);
+        let (key0, bytes0) = versioned_kp_shares_record(1, 3, 0, &[FP_A]);
+        let (key1, bytes1) = versioned_kp_shares_record(2, 3, 1, &[FP_B]);
         // An older sharing seq must lose regardless of cert_seq.
         let (key_old, bytes_old) = kp_shares_record(2, 9, &[FP_A]);
         store.insert(key0, bytes0);
@@ -550,12 +509,17 @@ mod tests {
         assert_eq!(roster, DEPLOYED.iter().map(|f| fp(f)).collect::<Vec<_>>());
     }
 
-    /// One KP holding several certs contributes every one of them: any of its
-    /// certs can sign a submission that is still that single share holder.
+    /// Removed map-shaped records must not authorize any fingerprint.
     #[tokio::test]
-    async fn multi_cert_share_contributes_every_fingerprint() {
+    async fn map_shaped_kp_share_state_fails_closed() {
         let store = MemStore::default();
-        let shares = multi_cert_shares(&[&[FP_A, FP_B]]);
+        let shares = serde_json::json!([{
+            "id": 1,
+            "ciphertexts_by_fingerprint": {
+                "AAAABBBBCCCCDDDDEEEE11112222333344445555": "",
+                "AAAABBBBCCCCDDDDEEEE1111222233334444FFFF": "",
+            },
+        }]);
         let record = serde_json::json!({
             "schema_version": 2,
             "session_id": "test-session",
@@ -573,8 +537,7 @@ mod tests {
         );
         complete_ceremony(&store, 0);
 
-        let roster = latest_kp_roster(&store).await.unwrap().unwrap();
-        assert_eq!(roster, vec![fp(FP_A), fp(FP_B)]);
+        assert!(latest_kp_roster(&store).await.is_err());
     }
 
     #[tokio::test]

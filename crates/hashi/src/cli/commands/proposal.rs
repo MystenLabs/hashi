@@ -14,6 +14,7 @@ use tabled::Tabled;
 use crate::cli::TxOptions;
 use crate::cli::client::CreateProposalParams;
 use crate::cli::client::HashiClient;
+use crate::cli::client::ProposalLocation;
 use crate::cli::config::CliConfig;
 use crate::cli::print_detail;
 use crate::cli::print_info;
@@ -42,9 +43,9 @@ fn print_metadata(metadata: &[(String, String)]) {
 /// [`HashiClient::resolve_validator_address`] for the rules.
 pub(crate) fn print_acting_validator(client: &HashiClient) -> Result<()> {
     let validator_address = client.resolve_validator_address()?;
-    let via_operator = match client.signer_address() {
-        Some(signer) if signer != validator_address => {
-            format!(" (delegated operator {})", signer.to_hex().dimmed())
+    let via_operator = match client.acting_address() {
+        Some(acting) if acting != validator_address => {
+            format!(" (delegated operator {})", acting.to_hex().dimmed())
         }
         _ => String::new(),
     };
@@ -53,6 +54,416 @@ pub(crate) fn print_acting_validator(client: &HashiClient) -> Result<()> {
         validator_address.to_hex().cyan()
     ));
     Ok(())
+}
+
+/// Mirrors `MAX_PROPOSAL_DURATION_MS` in `proposal.move`: a proposal can be
+/// voted on and executed for seven days after creation, then only deleted.
+const PROPOSAL_MAX_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7;
+
+/// What the operator is trying to do to a proposal, for the refusal text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalAction {
+    Vote,
+    RemoveVote,
+    Execute,
+}
+
+/// Return the proposal when it is open, and otherwise refuse with a message
+/// that names the proposal, its type and why the action cannot happen.
+///
+/// Executed proposals stay on chain in a second bag, so without this the
+/// command finds the proposal, prints its details, prompts, and only then
+/// fails in simulation with a framework abort (`dynamic_field` code 1) that
+/// never mentions the word "executed" and shares its code with the
+/// vote-already-counted error.
+pub fn open_proposal(
+    location: ProposalLocation,
+    proposal_id: &str,
+    action: ProposalAction,
+    sui_rpc_url: &str,
+) -> Result<Proposal> {
+    match location {
+        ProposalLocation::Active(proposal) => Ok(proposal),
+        ProposalLocation::Executed(proposal) => {
+            let kind = display::format_proposal_type(&proposal.proposal_type);
+            let consequence = match action {
+                ProposalAction::Vote => {
+                    "voting is closed and there is nothing to submit".to_owned()
+                }
+                ProposalAction::RemoveVote => {
+                    "its votes are final and cannot be removed".to_owned()
+                }
+                ProposalAction::Execute => {
+                    "nothing to execute; its effect is already on chain".to_owned()
+                }
+            };
+            anyhow::bail!(
+                "proposal {proposal_id} ({kind}) has already been executed; {consequence}. \
+                 Run `hashi proposal view {proposal_id}` for the final tally."
+            )
+        }
+        ProposalLocation::Missing => anyhow::bail!(
+            "proposal {proposal_id} was not found in the active or executed proposals on \
+             {sui_rpc_url}: either the id is wrong, or the proposal expired (7 days after \
+             creation) and was deleted. Run `hashi proposal list` to see the open proposals."
+        ),
+    }
+}
+
+/// One-line lifecycle status for `proposal view`, from bag membership and
+/// the seven-day expiry.
+pub fn proposal_status(location: &ProposalLocation, now_ms: u64) -> String {
+    match location {
+        ProposalLocation::Executed(_) => "Executed".to_owned(),
+        ProposalLocation::Active(proposal) => {
+            let expires_ms = proposal.timestamp_ms.saturating_add(PROPOSAL_MAX_AGE_MS);
+            if now_ms > expires_ms {
+                format!(
+                    "Expired on {} (no longer votable; awaiting deletion)",
+                    display::format_timestamp(expires_ms)
+                )
+            } else {
+                format!("Active (expires {})", display::format_timestamp(expires_ms))
+            }
+        }
+        ProposalLocation::Missing => "Not found".to_owned(),
+    }
+}
+
+/// Vote tally against the quorum threshold, computed once and printed the
+/// same way everywhere (view, list --votes, after a vote, before execute).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumProgress {
+    pub voters: usize,
+    pub voted_weight: u64,
+    pub threshold_weight: u64,
+    pub total_weight: u64,
+}
+
+impl QuorumProgress {
+    pub fn new(
+        votes: &[Address],
+        quorum_threshold_bps: u64,
+        committee: &hashi_types::committee::Committee,
+    ) -> Self {
+        let total_weight = committee.total_weight();
+        let voted_weight = votes
+            .iter()
+            .map(|voter| {
+                committee
+                    .members()
+                    .iter()
+                    .find(|m| m.validator_address() == *voter)
+                    .map(|m| m.weight())
+                    .unwrap_or(0)
+            })
+            .sum();
+        Self {
+            voters: votes.len(),
+            voted_weight,
+            threshold_weight: total_weight
+                .saturating_mul(quorum_threshold_bps)
+                .div_ceil(10_000),
+            total_weight,
+        }
+    }
+
+    pub fn met(&self) -> bool {
+        self.total_weight > 0 && self.voted_weight >= self.threshold_weight
+    }
+
+    pub fn missing_weight(&self) -> u64 {
+        self.threshold_weight.saturating_sub(self.voted_weight)
+    }
+
+    /// `3 voter(s), 120/200 weight (80 more needed)` or
+    /// `3 voter(s), 200/200 weight, quorum reached`.
+    pub fn describe(&self) -> String {
+        if self.met() {
+            format!(
+                "{} voter(s), {}/{} weight, quorum reached",
+                self.voters, self.voted_weight, self.threshold_weight
+            )
+        } else {
+            format!(
+                "{} voter(s), {}/{} weight ({} more needed)",
+                self.voters,
+                self.voted_weight,
+                self.threshold_weight,
+                self.missing_weight()
+            )
+        }
+    }
+}
+
+/// Refuse a proposal past its seven-day window: the chain would abort with
+/// `EProposalExpired` after the prompt, and the only remaining action is
+/// deletion.
+pub fn refuse_if_expired(proposal: &Proposal, proposal_id: &str, now_ms: u64) -> Result<()> {
+    let expires_ms = proposal.timestamp_ms.saturating_add(PROPOSAL_MAX_AGE_MS);
+    anyhow::ensure!(
+        now_ms <= expires_ms,
+        "proposal {proposal_id} ({}) expired on {}; it can no longer be voted on or executed, \
+         only deleted",
+        display::format_proposal_type(&proposal.proposal_type),
+        display::format_timestamp(expires_ms)
+    );
+    Ok(())
+}
+
+/// Refuse a validator that is registered but not seated in the current
+/// committee: only seated members vote (`ENotCommitteeMember` on chain).
+/// `seated` is the current committee's member addresses; `None` before the
+/// first DKG, when there is no committee to check against.
+pub fn refuse_if_not_seated(validator: Address, seated: Option<(u64, &[Address])>) -> Result<()> {
+    if let Some((epoch, members)) = seated {
+        anyhow::ensure!(
+            members.contains(&validator),
+            "validator {} is registered but not seated in the current committee (epoch \
+             {epoch}); only seated members can vote",
+            validator.to_hex()
+        );
+    }
+    Ok(())
+}
+
+/// Refuse a second vote, or the removal of a vote that was never cast, before
+/// anything is signed (`EVoteAlreadyCounted` / `ENoVoteFound` on chain).
+pub fn refuse_vote_state(
+    validator: Address,
+    votes: &[Address],
+    proposal_id: &str,
+    action: ProposalAction,
+) -> Result<()> {
+    let has_voted = votes.contains(&validator);
+    match action {
+        ProposalAction::Vote => anyhow::ensure!(
+            !has_voted,
+            "validator {} has already voted on proposal {proposal_id}; nothing to submit. \
+             Use `hashi proposal remove-vote {proposal_id}` to withdraw the vote.",
+            validator.to_hex()
+        ),
+        ProposalAction::RemoveVote => anyhow::ensure!(
+            has_voted,
+            "validator {} has no vote on proposal {proposal_id} to remove",
+            validator.to_hex()
+        ),
+        ProposalAction::Execute => {}
+    }
+    Ok(())
+}
+
+fn seated_members(
+    committee: Option<&hashi_types::committee::Committee>,
+) -> Option<(u64, Vec<Address>)> {
+    committee.map(|c| {
+        (
+            c.epoch(),
+            c.members().iter().map(|m| m.validator_address()).collect(),
+        )
+    })
+}
+
+/// Which governed store a config proposal targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigStore {
+    Instant,
+    Epoch,
+}
+
+impl ConfigStore {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::Epoch => "epoch",
+        }
+    }
+    fn other(self) -> Self {
+        match self {
+            Self::Instant => Self::Epoch,
+            Self::Epoch => Self::Instant,
+        }
+    }
+    fn update_command(self) -> &'static str {
+        match self {
+            Self::Instant => "hashi proposal create update-config",
+            Self::Epoch => "hashi proposal create update-epoch-config",
+        }
+    }
+}
+
+fn config_value_type(value: &hashi_types::move_types::ConfigValue) -> &'static str {
+    use hashi_types::move_types::ConfigValue;
+    match value {
+        ConfigValue::U64(_) => "u64",
+        ConfigValue::U128(_) => "u128",
+        ConfigValue::U256(_) => "u256",
+        ConfigValue::Address(_) => "address",
+        ConfigValue::String(_) => "string",
+        ConfigValue::Bool(_) => "bool",
+        ConfigValue::Bytes(_) => "bytes",
+    }
+}
+
+/// Refuse an update the chain would reject with `EInvalidConfigEntry`: the
+/// key must already exist in the targeted store, and its value type cannot
+/// change. When the key lives in the other store, name the right command.
+pub fn refuse_bad_config_update(
+    key: &str,
+    proposed: &hashi_types::move_types::ConfigValue,
+    target: ConfigStore,
+    current: Option<&hashi_types::move_types::ConfigValue>,
+    in_other_store: bool,
+) -> Result<()> {
+    let Some(current) = current else {
+        if in_other_store {
+            anyhow::bail!(
+                "key {key} is not in the {} config; it lives in the {} config. Use `{}` instead.",
+                target.name(),
+                target.other().name(),
+                target.other().update_command()
+            );
+        }
+        anyhow::bail!(
+            "key {key} does not exist in the {} config, and updates can only change existing \
+             keys. Use `hashi proposal create add-config` to introduce a new key, or \
+             `hashi config on-chain` to see the current keys.",
+            target.name()
+        );
+    };
+    anyhow::ensure!(
+        std::mem::discriminant(current) == std::mem::discriminant(proposed),
+        "key {key} holds a {} value on chain but the proposed value is {}; a key's value \
+         type cannot change",
+        config_value_type(current),
+        config_value_type(proposed)
+    );
+    Ok(())
+}
+
+/// Refuse an add the chain would reject with `EKeyAlreadyExists`, and warn
+/// when the same name already exists in the other store.
+pub fn refuse_bad_config_add(
+    key: &str,
+    target: ConfigStore,
+    in_target_store: bool,
+    in_other_store: bool,
+) -> Result<Option<String>> {
+    anyhow::ensure!(
+        !in_target_store,
+        "key {key} already exists in the {} config; use `{}` to change it",
+        target.name(),
+        target.update_command()
+    );
+    Ok(in_other_store.then(|| {
+        format!(
+            "key {key} already exists in the {} config; adding it to the {} config as well \
+             creates two same-named keys that nodes read from different places",
+            target.other().name(),
+            target.name()
+        )
+    }))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A human explanation for a governance transaction that failed in
+/// simulation or on chain, or `None` when the failure is not a Move abort.
+///
+/// Two sources: a clever `#[error]` constant from the hashi package, which is
+/// named and given a one-line hint; and the one framework abort every
+/// governance entry can hit, `dynamic_field` code 1 when the proposal has
+/// left the active bag between the pre-flight and the simulate. Matching is
+/// on module and constant name, never on the bare code: `1` is also
+/// `EVoteAlreadyCounted`, and `0` is both `EVersionDisabled` and
+/// `EUnauthorizedCaller`.
+pub fn explain_execution_error(
+    error: &sui_rpc::proto::sui::rpc::v2::ExecutionError,
+) -> Option<String> {
+    use sui_rpc::proto::sui::rpc::v2::clever_error::Value;
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+    if error
+        .kind
+        .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
+        != Some(ExecutionErrorKind::MoveAbort)
+    {
+        return None;
+    }
+    let abort = error.abort_opt()?;
+    let module = abort.location().module_opt();
+    let clever = abort.clever_error.as_ref();
+    let constant = clever.and_then(|c| c.constant_name.as_deref());
+    let rendered = clever.and_then(|c| match &c.value {
+        Some(Value::Rendered(text)) => Some(text.as_str()),
+        _ => None,
+    });
+
+    match (module, abort.abort_code, constant) {
+        (Some("dynamic_field"), Some(1), None) => Some(
+            "the proposal is no longer in the active proposal bag: it was executed, or \
+             deleted after expiring, while this command was running. Run \
+             `hashi proposal view <proposal-id>` to see its state."
+                .to_owned(),
+        ),
+        (_, _, Some(name)) => {
+            let hint = match name {
+                "EVoteAlreadyCounted" => Some("this validator has already voted on the proposal"),
+                "ENoVoteFound" => Some("this validator has no vote on the proposal to remove"),
+                "EQuorumNotReached" => Some(
+                    "the proposal has not reached quorum yet; `hashi proposal view` shows the tally",
+                ),
+                "EProposalExpired" => {
+                    Some("proposals expire 7 days after creation; this one can only be deleted")
+                }
+                "EProposalAlreadyExecuted" => Some("the proposal has already been executed"),
+                "ENotCommitteeMember" => {
+                    Some("the validator is registered but not seated in the current committee")
+                }
+                "EUnauthorizedCaller" => {
+                    Some("the signer is neither the validator's address nor its delegated operator")
+                }
+                "EVersionDisabled" => Some(
+                    "this binary targets a package version governance has disabled; upgrade hashi",
+                ),
+                _ => None,
+            };
+            let mut text = match rendered {
+                Some(rendered) => format!("{name}: {rendered}"),
+                None => name.to_owned(),
+            };
+            if let Some(hint) = hint {
+                text.push_str(" (");
+                text.push_str(hint);
+                text.push(')');
+            }
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+/// [`explain_execution_error`] for the error `finalize_tx` returns, whichever
+/// mode produced it: the executor wraps the execute path's build error in
+/// `TxFailure::NotSubmitted`, while dry-run and serialize-unsigned return the
+/// SDK build error bare, so both shapes are searched.
+pub(crate) fn explain_move_abort(err: &anyhow::Error) -> Option<String> {
+    let from_executor = crate::sui_tx_executor::transaction_execution_error(err);
+    let from_builder =
+        err.chain().find_map(
+            |e| match e.downcast_ref::<sui_transaction_builder::Error>() {
+                Some(sui_transaction_builder::Error::SimulationFailure(failure)) => {
+                    Some(failure.execution_error())
+                }
+                _ => None,
+            },
+        );
+    explain_execution_error(from_executor.or(from_builder)?)
 }
 
 /// Finalize a transaction according to `tx_opts`: serialize it unsigned,
@@ -84,6 +495,7 @@ pub(crate) async fn execute_or_simulate(
         TxMode::Execute => print_info("Executing transaction..."),
     }
 
+    // `finalize_tx` decodes Move aborts for every command that goes through it.
     let outcome = client.finalize_tx(tx, tx_opts).await?;
     Ok(crate::cli::print_tx_outcome(outcome, client.sui_rpc_url()).map(|response| *response))
 }
@@ -107,17 +519,19 @@ pub async fn list_proposals(
     config: &CliConfig,
     type_filter: Option<String>,
     detailed: bool,
+    executed: bool,
+    votes: bool,
+    json: bool,
 ) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     print_info("Fetching proposals...");
 
-    let proposals = client.fetch_proposals();
-
-    if proposals.is_empty() {
-        println!("\n{}", "No active proposals found.".dimmed());
-        return Ok(());
-    }
+    let (proposals, bag) = if executed {
+        (client.fetch_executed_proposals(), "executed")
+    } else {
+        (client.fetch_proposals(), "active")
+    };
 
     // Filter by type if specified
     let proposals: Vec<_> = if let Some(ref filter) = type_filter {
@@ -134,25 +548,77 @@ pub async fn list_proposals(
         proposals
     };
 
-    if proposals.is_empty() {
-        println!(
-            "\n{}",
-            format!(
-                "No proposals found matching type filter: {}",
-                type_filter.unwrap_or_default()
-            )
-            .dimmed()
-        );
+    // The optional per-row tally costs one live read per proposal.
+    let committee = client.fetch_current_committee();
+    let mut tallies: Vec<Option<QuorumProgress>> = Vec::with_capacity(proposals.len());
+    if votes {
+        for proposal in &proposals {
+            let tally = match (client.fetch_proposal_details(proposal.id).await, &committee) {
+                (Ok(details), Some(committee)) => Some(QuorumProgress::new(
+                    &details.votes,
+                    details.quorum_threshold_bps,
+                    committee,
+                )),
+                _ => None,
+            };
+            tallies.push(tally);
+        }
+    }
+
+    let now = now_ms();
+    let location = |p: &Proposal| {
+        if executed {
+            ProposalLocation::Executed(p.clone())
+        } else {
+            ProposalLocation::Active(p.clone())
+        }
+    };
+
+    if json {
+        let rows: Vec<serde_json::Value> = proposals
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let mut row = serde_json::json!({
+                    "id": p.id.to_hex(),
+                    "type": display::format_proposal_type(&p.proposal_type),
+                    "created_ms": p.timestamp_ms,
+                    "status": proposal_status(&location(p), now),
+                });
+                if let Some(Some(tally)) = tallies.get(i) {
+                    row["votes"] = serde_json::json!({
+                        "voters": tally.voters,
+                        "voted_weight": tally.voted_weight,
+                        "threshold_weight": tally.threshold_weight,
+                        "total_weight": tally.total_weight,
+                        "quorum_reached": tally.met(),
+                    });
+                }
+                row
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!("\n📋 Active Proposals:\n");
+    if proposals.is_empty() {
+        let what = match &type_filter {
+            Some(filter) => format!("No {bag} proposals found matching type filter: {filter}"),
+            None => format!("No {bag} proposals found."),
+        };
+        println!("\n{}", what.dimmed());
+        return Ok(());
+    }
+
+    println!(
+        "\n📋 {} Proposals:\n",
+        if executed { "Executed" } else { "Active" }
+    );
 
     if detailed {
-        // List mode skips the per-proposal vote/quorum fetch to avoid N extra
-        // network calls; use `proposal view <id>` for full vote progress.
         for proposal in &proposals {
-            print_proposal_detailed(proposal, None, None);
+            let status = proposal_status(&location(proposal), now);
+            print_proposal_detailed(proposal, &status, None, None);
             println!();
         }
     } else {
@@ -164,14 +630,26 @@ pub async fn list_proposals(
             proposal_type: String,
             #[tabled(rename = "Created")]
             timestamp: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "Votes")]
+            votes: String,
         }
 
         let rows: Vec<ProposalRow> = proposals
             .iter()
-            .map(|p| ProposalRow {
-                id: display::format_address(&p.id),
+            .enumerate()
+            .map(|(i, p)| ProposalRow {
+                // Full ids: this is what gets pasted into `vote` and `view`.
+                id: display::format_address_full(&p.id),
                 proposal_type: display::format_proposal_type(&p.proposal_type),
                 timestamp: display::format_timestamp(p.timestamp_ms),
+                status: proposal_status(&location(p), now),
+                votes: match tallies.get(i) {
+                    Some(Some(tally)) => tally.describe(),
+                    Some(None) => "unavailable".to_owned(),
+                    None => "(pass --votes)".to_owned(),
+                },
             })
             .collect();
 
@@ -180,7 +658,7 @@ pub async fn list_proposals(
     }
 
     println!(
-        "\n{} {} proposal(s) found",
+        "\n{} {} {bag} proposal(s) found",
         "ℹ".blue(),
         proposals.len().to_string().bold()
     );
@@ -197,15 +675,25 @@ pub async fn view_proposal(config: &CliConfig, proposal_id: &str) -> Result<()> 
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let location = client.locate_proposal(&proposal_addr);
+    let proposal = match &location {
+        ProposalLocation::Active(proposal) | ProposalLocation::Executed(proposal) => {
+            proposal.clone()
+        }
+        ProposalLocation::Missing => anyhow::bail!(
+            "proposal {proposal_id} was not found in the active or executed proposals on {}: \
+             either the id is wrong, or the proposal expired (7 days after creation) and \
+             was deleted. Run `hashi proposal list` to see the open proposals.",
+            client.sui_rpc_url()
+        ),
+    };
+    let status = proposal_status(&location, now_ms());
 
     let details = client.fetch_proposal_details(proposal_addr).await.ok();
     let committee = client.fetch_current_committee();
 
     println!();
-    print_proposal_detailed(&proposal, details.as_ref(), committee.as_ref());
+    print_proposal_detailed(&proposal, &status, details.as_ref(), committee.as_ref());
 
     Ok(())
 }
@@ -225,17 +713,39 @@ pub async fn vote(
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let proposal = open_proposal(
+        client.locate_proposal(&proposal_addr),
+        proposal_id,
+        ProposalAction::Vote,
+        client.sui_rpc_url(),
+    )?;
+    refuse_if_expired(&proposal, proposal_id, now_ms())?;
+
+    // Everything the chain would refuse after the prompt is refused here
+    // first, from one live read of the proposal.
+    let details = client.fetch_proposal_details(proposal_addr).await?;
+    let committee = client.fetch_current_committee();
+    if client.acting_address().is_some() {
+        let validator = client.resolve_validator_address()?;
+        let seated = seated_members(committee.as_ref());
+        refuse_if_not_seated(validator, seated.as_ref().map(|(e, m)| (*e, m.as_slice())))?;
+        refuse_vote_state(validator, &details.votes, proposal_id, ProposalAction::Vote)?;
+    }
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
     print_detail(&format!("\n{}", "Proposal Details:".bold()));
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
+    if let Some(committee) = &committee {
+        let progress = QuorumProgress::new(&details.votes, details.quorum_threshold_bps, committee);
+        print_detail(&format!("  Votes so far: {}", progress.describe()));
+    }
     print_acting_validator(&client)?;
 
-    prompt_continue("vote on this proposal", tx_opts).await?;
+    if !prompt_continue("vote on this proposal", tx_opts).await? {
+        print_warning("Aborted.");
+        return Ok(());
+    }
 
     print_info("Building vote transaction...");
 
@@ -250,65 +760,49 @@ pub async fn vote(
 
     let vote_response = execute_or_simulate(&mut client, tx, tx_opts).await?;
 
-    if !execute {
-        return Ok(());
-    }
-
-    // `--execute` was requested. Only meaningful after a real execute (not a
-    // dry-run / missing-keypair).
+    // Nothing landed on chain (dry-run, serialize, or no keypair).
     if vote_response.is_none() {
         return Ok(());
     }
 
-    // Upgrade proposals require the dedicated upgrade flow — the generic
-    // `<module>::execute` path can't construct an UpgradeTicket.
-    if is_upgrade_proposal(&proposal.proposal_type) {
-        print_warning(
-            "--execute is not supported for Upgrade proposals; run \
-             `proposal execute-upgrade` once quorum is reached.",
-        );
-        return Ok(());
-    }
-
-    // Re-fetch live vote state to see whether the vote we just submitted
-    // pushed us over quorum. `HashiClient`'s cached scrape is from CLI start,
-    // so this has to be the live `list_dynamic_fields` call.
+    // Re-fetch live vote state: `HashiClient`'s cached scrape is from CLI
+    // start, so this has to be the live `list_dynamic_fields` call.
     let details = client
         .fetch_proposal_details(proposal_addr)
         .await
         .context("failed to re-fetch proposal state after voting")?;
-    let committee = client
-        .fetch_current_committee()
-        .ok_or_else(|| anyhow::anyhow!("no committee available to compute quorum"))?;
+    let Some(committee) = committee else {
+        print_info("Vote recorded; no committee is formed yet, so quorum cannot be computed.");
+        return Ok(());
+    };
+    let progress = QuorumProgress::new(&details.votes, details.quorum_threshold_bps, &committee);
+    print_info(&format!("Votes: {}", progress.describe()));
 
-    let total_weight = committee.total_weight();
-    let voted_weight: u64 = details
-        .votes
-        .iter()
-        .map(|voter| {
-            committee
-                .members()
-                .iter()
-                .find(|m| m.validator_address() == *voter)
-                .map(|m| m.weight())
-                .unwrap_or(0)
-        })
-        .sum();
-    let threshold_weight = total_weight
-        .saturating_mul(details.quorum_threshold_bps)
-        .div_ceil(10_000);
+    if !progress.met() {
+        if execute {
+            print_info("Quorum not reached yet; skipping --execute.");
+        }
+        return Ok(());
+    }
 
-    if voted_weight < threshold_weight {
+    // Upgrade proposals require the dedicated upgrade flow: the generic
+    // `<module>::execute` path can't construct an UpgradeTicket.
+    if is_upgrade_proposal(&proposal.proposal_type) {
         print_info(&format!(
-            "Quorum not reached yet ({voted_weight}/{threshold_weight} weight); \
-             skipping --execute."
+            "Quorum reached; run `hashi proposal execute-upgrade {proposal_id} \
+             --package-path <dir>` to execute it."
+        ));
+        return Ok(());
+    }
+    if !execute {
+        print_info(&format!(
+            "Quorum reached; run `hashi proposal execute {proposal_id}` to execute it \
+             (or pass --execute to vote next time)."
         ));
         return Ok(());
     }
 
-    print_info(&format!(
-        "Quorum reached ({voted_weight}/{threshold_weight} weight); executing..."
-    ));
+    print_info("Quorum reached; executing...");
     let execute_tx =
         client.build_execute_proposal_transaction(proposal_addr, &proposal.proposal_type)?;
     print_info(&format!(
@@ -329,9 +823,23 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let proposal = open_proposal(
+        client.locate_proposal(&proposal_addr),
+        proposal_id,
+        ProposalAction::RemoveVote,
+        client.sui_rpc_url(),
+    )?;
+    refuse_if_expired(&proposal, proposal_id, now_ms())?;
+    if client.acting_address().is_some() {
+        let validator = client.resolve_validator_address()?;
+        let details = client.fetch_proposal_details(proposal_addr).await?;
+        refuse_vote_state(
+            validator,
+            &details.votes,
+            proposal_id,
+            ProposalAction::RemoveVote,
+        )?;
+    }
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
@@ -339,7 +847,10 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
     print_acting_validator(&client)?;
 
-    prompt_continue("remove your vote from this proposal", tx_opts).await?;
+    if !prompt_continue("remove your vote from this proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     print_info("Building remove_vote transaction...");
 
@@ -365,9 +876,13 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
 
     print_info(&format!("Fetching proposal {}...", proposal_id));
 
-    let proposal = client
-        .fetch_proposal(&proposal_addr)
-        .ok_or_else(|| anyhow::anyhow!("Proposal not found: {}", proposal_id))?;
+    let proposal = open_proposal(
+        client.locate_proposal(&proposal_addr),
+        proposal_id,
+        ProposalAction::Execute,
+        client.sui_rpc_url(),
+    )?;
+    refuse_if_expired(&proposal, proposal_id, now_ms())?;
 
     let proposal_type = &proposal.proposal_type;
     let proposal_type_str = display::format_proposal_type(proposal_type);
@@ -379,11 +894,33 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
         );
     }
 
+    // The chain aborts with EQuorumNotReached after the prompt; say so first,
+    // with the tally.
+    let details = client.fetch_proposal_details(proposal_addr).await?;
+    let committee = client
+        .fetch_current_committee()
+        .ok_or_else(|| anyhow::anyhow!("no committee is formed yet, so nothing can execute"))?;
+    let progress = QuorumProgress::new(&details.votes, details.quorum_threshold_bps, &committee);
+    anyhow::ensure!(
+        progress.met(),
+        "proposal {proposal_id} ({proposal_type_str}) has not reached quorum: {}. \
+         `hashi proposal view {proposal_id}` lists the voters.",
+        progress.describe()
+    );
+
     print_detail(&format!("\n{}", "Execute Proposal:".bold()));
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
     print_detail(&format!("  ID:   {}", proposal_id));
+    print_detail(&format!("  Votes: {}", progress.describe()));
+    // Execution is permissionless, so the sender is whoever pays gas.
+    if let Some(sender) = client.acting_address() {
+        print_detail(&format!("  Sender: {}", sender.to_hex().cyan()));
+    }
 
-    prompt_continue("execute this proposal", tx_opts).await?;
+    if !prompt_continue("execute this proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_execute_proposal_transaction(proposal_addr, proposal_type)?;
 
@@ -496,11 +1033,15 @@ pub async fn execute_upgrade(
          build from the same commit with the same `sui` that produced the proposal.",
     );
 
-    prompt_continue(
+    if !prompt_continue(
         "execute this upgrade (execute + publish + finalize in one transaction)",
         tx_opts,
     )
-    .await?;
+    .await?
+    {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let hashi_ids = *client.hashi_ids();
     let tx =
@@ -647,7 +1188,10 @@ pub async fn create_upgrade_proposal(
     print_metadata(&metadata);
     print_acting_validator(&client)?;
 
-    prompt_continue("create this upgrade proposal", tx_opts).await?;
+    if !prompt_continue("create this upgrade proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
@@ -679,9 +1223,19 @@ pub async fn create_update_config_proposal(
     print_metadata(&metadata);
 
     let mut client = HashiClient::new(config).await?;
+    refuse_bad_config_update(
+        key,
+        &value,
+        ConfigStore::Instant,
+        client.instant_config_value(key).as_ref(),
+        client.epoch_config_value(key).is_some(),
+    )?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this config update proposal", tx_opts).await?;
+    if !prompt_continue("create this config update proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateConfig {
         key: key.to_string(),
@@ -715,9 +1269,21 @@ pub async fn create_update_epoch_config_proposal(
     print_detail("  Takes effect: next committee formed after execution");
     print_metadata(&metadata);
 
-    prompt_continue("create this epoch config update proposal", tx_opts).await?;
-
     let mut client = HashiClient::new(config).await?;
+    refuse_bad_config_update(
+        key,
+        &value,
+        ConfigStore::Epoch,
+        client.epoch_config_value(key).as_ref(),
+        client.instant_config_value(key).is_some(),
+    )?;
+    print_acting_validator(&client)?;
+
+    if !prompt_continue("create this epoch config update proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
+
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateEpochConfig {
         key: key.to_string(),
         value,
@@ -755,9 +1321,32 @@ pub async fn create_add_config_proposal(
     ));
     print_metadata(&metadata);
 
-    prompt_continue("create this add config proposal", tx_opts).await?;
-
     let mut client = HashiClient::new(config).await?;
+    let target = if epoch {
+        ConfigStore::Epoch
+    } else {
+        ConfigStore::Instant
+    };
+    let (in_target, in_other) = match target {
+        ConfigStore::Epoch => (
+            client.epoch_config_value(key).is_some(),
+            client.instant_config_value(key).is_some(),
+        ),
+        ConfigStore::Instant => (
+            client.instant_config_value(key).is_some(),
+            client.epoch_config_value(key).is_some(),
+        ),
+    };
+    if let Some(warning) = refuse_bad_config_add(key, target, in_target, in_other)? {
+        print_warning(&warning);
+    }
+    print_acting_validator(&client)?;
+
+    if !prompt_continue("create this add config proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
+
     let tx = client.build_create_proposal_transaction(CreateProposalParams::AddConfig {
         epoch,
         key: key.to_string(),
@@ -825,7 +1414,10 @@ pub async fn create_update_mpc_config_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this MPC config update proposal", tx_opts).await?;
+    if !prompt_continue("create this MPC config update proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
         max_faulty_bps,
@@ -875,7 +1467,10 @@ pub async fn create_enable_version_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this enable version proposal", tx_opts).await?;
+    if !prompt_continue("create this enable version proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EnableVersion {
         version,
@@ -905,7 +1500,10 @@ pub async fn create_disable_version_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this disable version proposal", tx_opts).await?;
+    if !prompt_continue("create this disable version proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::DisableVersion {
         version,
@@ -932,7 +1530,10 @@ pub async fn create_abort_reconfig_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this abort reconfig proposal", tx_opts).await?;
+    if !prompt_continue("create this abort reconfig proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::AbortReconfig {
         epoch,
@@ -962,7 +1563,10 @@ pub async fn create_update_guardian_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue("create this update guardian proposal", tx_opts).await?;
+    if !prompt_continue("create this update guardian proposal", tx_opts).await? {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
         url: url.to_string(),
@@ -995,11 +1599,15 @@ pub async fn create_emergency_pause_proposal(
     let mut client = HashiClient::new(config).await?;
     print_acting_validator(&client)?;
 
-    prompt_continue(
+    if !prompt_continue(
         &format!("create this emergency {} proposal", action.to_lowercase()),
         tx_opts,
     )
-    .await?;
+    .await?
+    {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EmergencyPause {
         pause: !unpause,
@@ -1062,11 +1670,15 @@ pub async fn create_ignore_member_proposal(
 
     print_acting_validator(&client)?;
 
-    prompt_continue(
+    if !prompt_continue(
         &format!("create this {} member proposal", action.to_lowercase()),
         tx_opts,
     )
-    .await?;
+    .await?
+    {
+        crate::cli::print_warning("Aborted.");
+        return Ok(());
+    }
 
     let mut client = client;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::IgnoreMember {
@@ -1085,6 +1697,7 @@ pub async fn create_ignore_member_proposal(
 
 fn print_proposal_detailed(
     proposal: &Proposal,
+    status: &str,
     details: Option<&crate::cli::client::ProposalDetails>,
     committee: Option<&hashi_types::committee::Committee>,
 ) {
@@ -1099,6 +1712,7 @@ fn print_proposal_detailed(
         "Type:".bold(),
         display::format_proposal_type(&proposal.proposal_type).green()
     );
+    println!("  {} {}", "Status:".bold(), status);
     println!(
         "  {} {}",
         "Created:".bold(),
@@ -1113,41 +1727,19 @@ fn print_proposal_detailed(
         );
 
         // Vote tally + quorum progress.
-        let total_weight = committee.map(|c| c.total_weight()).unwrap_or(0);
-        let voted_weight: u64 = details
-            .votes
-            .iter()
-            .map(|voter| {
-                committee
-                    .and_then(|c| c.members().iter().find(|m| m.validator_address() == *voter))
-                    .map(|m| m.weight())
-                    .unwrap_or(0)
-            })
-            .sum();
-        let threshold_weight = total_weight
-            .saturating_mul(details.quorum_threshold_bps)
-            .div_ceil(10_000);
-        let quorum_met = voted_weight >= threshold_weight && total_weight > 0;
-
-        let status = if quorum_met {
-            "QUORUM REACHED".green().bold()
-        } else {
-            format!(
-                "{}/{} weight ({} more needed)",
-                voted_weight,
-                threshold_weight,
-                threshold_weight.saturating_sub(voted_weight)
-            )
-            .yellow()
+        let status = match committee {
+            Some(committee) => {
+                let progress =
+                    QuorumProgress::new(&details.votes, details.quorum_threshold_bps, committee);
+                if progress.met() {
+                    progress.describe().green().bold()
+                } else {
+                    progress.describe().yellow()
+                }
+            }
+            None => "no committee formed yet".dimmed(),
         };
-        println!(
-            "  {} {} voter(s) — {} of total weight {} — {}",
-            "Votes:".bold(),
-            details.votes.len().to_string().cyan(),
-            voted_weight.to_string().cyan(),
-            total_weight.to_string().dimmed(),
-            status
-        );
+        println!("  {} {}", "Votes:".bold(), status);
         println!(
             "  {} {} bps ({:.2}%)",
             "Threshold:".bold(),
@@ -1172,52 +1764,21 @@ fn print_proposal_detailed(
     println!("{}", "━".repeat(60).dimmed());
 }
 
-/// Pause for user acknowledgement before an actual execution. No-op when the
-/// user passed `-y/--yes`, or in dry-run / serialize-unsigned mode — those
-/// change no on-chain state, and serialize mode must keep stdout clean.
-pub(crate) async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
+/// Ask the operator to confirm before a real execution. Returns `true` to
+/// proceed. Always `true` with `-y/--yes`, or in dry-run and
+/// serialize-unsigned mode, which change no on-chain state. Requires an
+/// explicit `y`, and refuses when stdin is not a terminal (see
+/// [`crate::cli::confirm`]).
+pub(crate) async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<bool> {
     use crate::sui_tx_executor::TxMode;
-    use tokio::io::AsyncBufReadExt;
-    use tokio::io::BufReader;
 
     if tx_opts.skip_confirm || tx_opts.mode() != TxMode::Execute {
-        return Ok(());
+        return Ok(true);
     }
-
-    eprintln!(
-        "\n{}",
-        format!("Press enter to {action}, or Ctrl+C to cancel...").yellow()
-    );
-
-    let mut reader = BufReader::new(tokio::io::stdin());
-    let mut input = String::new();
-    reader.read_line(&mut input).await?;
-    Ok(())
+    eprintln!("\n{}", format!("About to {action}.").yellow());
+    crate::cli::confirm()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exclusive_digest_is_refused_without_acknowledgement() {
-        let err = check_exclusive_digest_acknowledged(Some("ab"), true, false).unwrap_err();
-        // Pin both remedies the message offers: the verified path and the
-        // explicit acknowledgement.
-        assert!(err.to_string().contains("--package-path"));
-        assert!(err.to_string().contains("--allow-unverified-exclusive"));
-    }
-
-    #[test]
-    fn exclusive_digest_is_allowed_with_acknowledgement() {
-        check_exclusive_digest_acknowledged(Some("ab"), true, true).unwrap();
-    }
-
-    #[test]
-    fn other_flag_combinations_are_unaffected() {
-        // A non-exclusive upgrade digest stays recoverable on-chain.
-        check_exclusive_digest_acknowledged(Some("ab"), false, false).unwrap();
-        // --package-path runs the pre-flight, so nothing needs acknowledging.
-        check_exclusive_digest_acknowledged(None, true, false).unwrap();
-    }
-}
+#[path = "proposal_tests.rs"]
+mod tests;

@@ -49,12 +49,12 @@ pub type CapturedPuts = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 #[cfg(test)]
 pub type MockKpSecretKeys = BTreeMap<String, String>;
 
-/// Build a one-certificate-per-KP roster while retaining the matching secret
-/// keys so tests can prove the returned armored shares are decryptable.
+/// Build a KP certificate roster while retaining the matching secret keys so
+/// tests can prove the returned armored shares are decryptable.
 #[cfg(test)]
-pub fn mock_kp_certs_roster_with_secrets(num_kps: usize) -> (KpCertsRoster, MockKpSecretKeys) {
+pub fn mock_kp_certs_roster_with_secrets(num_kps: usize) -> (KpCertRoster, MockKpSecretKeys) {
     let mut secret_keys = MockKpSecretKeys::new();
-    let cert_sets = (0..num_kps)
+    let certs = (0..num_kps)
         .map(|_| {
             let (public, secret) = hashi_types::pgp::test_utils::mock_pgp_keypair();
             let cert = PgpPublicCert::new(public).expect("mock public cert should parse");
@@ -63,55 +63,42 @@ pub fn mock_kp_certs_roster_with_secrets(num_kps: usize) -> (KpCertsRoster, Mock
                 secret_keys.insert(fingerprint, secret).is_none(),
                 "mock PGP fingerprints should be unique"
             );
-            KpCerts::new(vec![cert]).expect("one mock cert forms a valid KP cert set")
+            cert
         })
         .collect();
     (
-        KpCertsRoster::new(cert_sets).expect("mock cert sets form a valid roster"),
+        KpCertRoster::new(certs).expect("mock certs form a valid roster"),
         secret_keys,
     )
 }
 
 /// Decrypt every ciphertext in a KP-share roster and return one share per ID.
-/// If a share has multiple recipient certs, all ciphertexts must decrypt to the
-/// same scalar.
 #[cfg(test)]
 pub fn decrypt_kp_shares(
-    encrypted_shares: &KPEncryptedSharesRoster,
+    encrypted_shares: &KpEncryptedShareRoster,
     secret_keys: &MockKpSecretKeys,
 ) -> Vec<Share> {
     encrypted_shares
         .iter()
         .map(|encrypted_share| {
-            let mut share_value = None;
-            for (fingerprint, ciphertext) in &encrypted_share.ciphertexts_by_fingerprint {
-                let secret_key = secret_keys
-                    .get(fingerprint)
-                    .expect("every ciphertext should have a matching mock secret key");
-                let mut decryptor = decrypt_with_secret_key(
-                    std::io::Cursor::new(ciphertext.clone().into_bytes()),
-                    secret_key.as_bytes(),
-                )
-                .expect("mock KP should decrypt its armored share");
-                let mut plaintext = Vec::new();
-                decryptor
-                    .read_to_end(&mut plaintext)
-                    .expect("decrypted share should be readable");
-                let value = ScalarPrimitive::<K256Secp256k1>::from_slice(&plaintext)
-                    .map(k256::Scalar::from)
-                    .expect("decrypted share should be a valid scalar");
-                if let Some(expected) = share_value {
-                    assert_eq!(
-                        value, expected,
-                        "all recipients must receive the same share"
-                    );
-                } else {
-                    share_value = Some(value);
-                }
-            }
+            let secret_key = secret_keys
+                .get(&encrypted_share.recipient_fingerprint)
+                .expect("every ciphertext should have a matching mock secret key");
+            let mut decryptor = decrypt_with_secret_key(
+                std::io::Cursor::new(encrypted_share.armored_ciphertext.clone().into_bytes()),
+                secret_key.as_bytes(),
+            )
+            .expect("mock KP should decrypt its armored share");
+            let mut plaintext = Vec::new();
+            decryptor
+                .read_to_end(&mut plaintext)
+                .expect("decrypted share should be readable");
+            let value = ScalarPrimitive::<K256Secp256k1>::from_slice(&plaintext)
+                .map(k256::Scalar::from)
+                .expect("decrypted share should be a valid scalar");
             Share {
                 id: encrypted_share.id,
-                value: share_value.expect("each encrypted share should have a recipient"),
+                value,
             }
         })
         .collect()
@@ -261,14 +248,13 @@ fn dummy_secret_sharing_instance() -> SecretSharingInstance {
     SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap()
 }
 
-fn dummy_kp_encrypted_shares() -> KPEncryptedSharesRoster {
-    KPEncryptedSharesRoster::new(
+fn dummy_kp_encrypted_shares() -> KpEncryptedShareRoster {
+    KpEncryptedShareRoster::new(
         (1..=TEST_N)
-            .map(|i| KPEncryptedShares {
+            .map(|i| KpEncryptedShare {
                 id: NonZeroU16::new(i as u16).unwrap(),
-                ciphertexts_by_fingerprint: [(format!("DUMMY FINGERPRINT {i}"), "dummy".into())]
-                    .into_iter()
-                    .collect(),
+                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
+                armored_ciphertext: "dummy".into(),
             })
             .collect(),
     )
@@ -320,7 +306,7 @@ impl OperatorInitTestArgs {
         self
     }
 
-    pub fn with_kp_encrypted_shares(mut self, shares: KPEncryptedSharesRoster) -> Self {
+    pub fn with_kp_encrypted_shares(mut self, shares: KpEncryptedShareRoster) -> Self {
         self.ceremony_state.encrypted_shares = shares;
         self
     }
@@ -446,7 +432,12 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let config = InitConfig::from_parts_for_testing(limiter_config, master_pubkey, network);
+    let config = InitConfig::from_parts_for_testing(
+        limiter_config,
+        master_pubkey,
+        network,
+        hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID,
+    );
     let enclave =
         create_operator_initialized_enclave(OperatorInitTestArgs::default().with_config(config))
             .await;

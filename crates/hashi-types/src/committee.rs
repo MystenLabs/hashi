@@ -78,11 +78,12 @@ impl Bls12381PrivateKey {
 
     pub fn sign<T: IntentMessage>(
         &self,
+        hashi_id: Address,
         epoch: u64,
         address: Address,
         message: &T,
     ) -> MemberSignature {
-        let signing_message = signing_message(epoch, message);
+        let signing_message = signing_message(hashi_id, epoch, message);
         MemberSignature {
             epoch,
             address,
@@ -90,9 +91,15 @@ impl Bls12381PrivateKey {
         }
     }
 
-    pub fn proof_of_possession(&self, epoch: u64, address: Address) -> MemberSignature {
+    pub fn proof_of_possession(
+        &self,
+        hashi_id: Address,
+        epoch: u64,
+        address: Address,
+    ) -> MemberSignature {
         let public_key = self.public_key();
         self.sign(
+            hashi_id,
             epoch,
             address,
             &ProofOfPossessionMessage {
@@ -273,6 +280,7 @@ impl Committee {
     /// Verify a single signature provided by a [CommitteeMember].
     fn verify<T: IntentMessage>(
         &self,
+        hashi_id: Address,
         message: &T,
         signature: &MemberSignature,
     ) -> Result<(), SignatureError> {
@@ -282,7 +290,7 @@ impl Committee {
                 signature.epoch, self.epoch,
             )));
         }
-        let message_bytes = signing_message(signature.epoch, message);
+        let message_bytes = signing_message(hashi_id, signature.epoch, message);
         self.member(&signature.address)?
             .public_key
             .verify(&message_bytes, &signature.signature)
@@ -295,6 +303,7 @@ impl Committee {
     // weight, so a caller cannot forget the gate.
     pub fn verify_signature_any_weight<T: IntentMessage>(
         &self,
+        hashi_id: Address,
         signed_message: &SignedMessage<T>,
     ) -> Result<(), SignatureError> {
         // Validate that the bitmap matches this committee before indexing
@@ -308,8 +317,11 @@ impl Committee {
             .map(|index| self.members[index].public_key.clone())
             .collect::<Vec<_>>();
 
-        let message_bytes =
-            signing_message(signed_message.signature.epoch, &signed_message.message);
+        let message_bytes = signing_message(
+            hashi_id,
+            signed_message.signature.epoch,
+            &signed_message.message,
+        );
         signed_message
             .signature
             .signature
@@ -320,6 +332,7 @@ impl Committee {
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
     pub fn verify_signature_and_weight<T: IntentMessage>(
         &self,
+        hashi_id: Address,
         signed_message: &SignedMessage<T>,
         required_weight: u64,
     ) -> Result<(), SignatureError> {
@@ -330,11 +343,12 @@ impl Committee {
                 signed_weight, required_weight,
             )));
         }
-        self.verify_signature_any_weight(signed_message)
+        self.verify_signature_any_weight(hashi_id, signed_message)
     }
 
     pub fn verify_signature_and_reduced_weight<T: IntentMessage>(
         &self,
+        hashi_id: Address,
         signed_message: &SignedMessage<T>,
         nodes: &Nodes<EncryptionGroupElement>,
         required_weight: u32,
@@ -346,7 +360,7 @@ impl Committee {
                 signed_weight, required_weight,
             )));
         }
-        self.verify_signature_any_weight(signed_message)?;
+        self.verify_signature_any_weight(hashi_id, signed_message)?;
         Ok(signed_weight)
     }
 
@@ -550,6 +564,7 @@ impl<T: IntentMessage> SignedMessage<T> {
     }
 
     pub fn try_from_parts(
+        hashi_id: Address,
         epoch: u64,
         message: T,
         signature_bytes: &[u8],
@@ -569,7 +584,7 @@ impl<T: IntentMessage> SignedMessage<T> {
             signature: committee_signature,
             message,
         };
-        committee.verify_signature_and_weight(&signed_message, threshold)?;
+        committee.verify_signature_and_weight(hashi_id, &signed_message, threshold)?;
         Ok(signed_message)
     }
 }
@@ -649,6 +664,8 @@ impl<'a> ReducedWeight<'a> {
 #[derive(Debug)]
 pub struct BlsSignatureAggregator<'a, T, W = CommitteeWeight> {
     committee: &'a Committee,
+    /// The Hashi object id every added signature must be bound to.
+    hashi_id: Address,
     aggregate_signature: Option<BLS12381AggregateSignature>,
     bitmap: BitMap,
     message: T,
@@ -656,10 +673,11 @@ pub struct BlsSignatureAggregator<'a, T, W = CommitteeWeight> {
 }
 
 impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, CommitteeWeight> {
-    pub fn new(committee: &'a Committee, message: T) -> Self {
+    pub fn new(hashi_id: Address, committee: &'a Committee, message: T) -> Self {
         Self {
             bitmap: BitMap::new(),
             committee,
+            hashi_id,
             aggregate_signature: None,
             message,
             domain: CommitteeWeight { signed: 0 },
@@ -673,6 +691,7 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, CommitteeWeight
 
 impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, ReducedWeight<'a>> {
     pub fn new_reduced(
+        hashi_id: Address,
         committee: &'a Committee,
         message: T,
         nodes: &'a Nodes<EncryptionGroupElement>,
@@ -680,6 +699,7 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, ReducedWeight<'
         Ok(Self {
             bitmap: BitMap::new(),
             committee,
+            hashi_id,
             aggregate_signature: None,
             message,
             domain: ReducedWeight::new(committee, nodes)?,
@@ -699,7 +719,8 @@ impl<'a, T: IntentMessage + Clone, W: WeightDomain> BlsSignatureAggregator<'a, T
     ///  * if the signer is not a member of the committee,
     ///  * if the signature is not valid.
     pub fn add_signature(&mut self, signature: MemberSignature) -> Result<(), SignatureError> {
-        self.committee.verify(&self.message, &signature)?;
+        self.committee
+            .verify(self.hashi_id, &self.message, &signature)?;
 
         let index = self
             .committee
@@ -764,7 +785,7 @@ impl<'a, T: IntentMessage + Clone, W: WeightDomain> BlsSignatureAggregator<'a, T
 
                 // Double check that the aggregated sig still verifies
                 self.committee
-                    .verify_signature_any_weight(&signed_message)?;
+                    .verify_signature_any_weight(self.hashi_id, &signed_message)?;
 
                 Ok(signed_message)
             }
@@ -839,10 +860,13 @@ impl IntentMessage for ProofOfPossessionMessage {
     const INTENT: Intent = Intent::ProofOfPossession;
 }
 
-fn signing_message<T: IntentMessage>(epoch: u64, message: &T) -> Vec<u8> {
-    // Preimage: intent (u16 LE) || bcs(epoch) || bcs(message). Intent leads so
-    // the signed bytes are domain-tagged before anything else.
-    bcs::to_bytes(&(T::INTENT.as_u16(), epoch, message)).unwrap()
+fn signing_message<T: IntentMessage>(hashi_id: Address, epoch: u64, message: &T) -> Vec<u8> {
+    // Preimage: intent (u16 LE) || bcs(hashi_id) || bcs(epoch) || bcs(message).
+    // Intent leads so the signed bytes are domain-tagged before anything else;
+    // the Hashi object id right after binds the signature to one deployment,
+    // so a certificate minted for another Hashi instance (byte-identical
+    // committee, same epoch) can never verify here.
+    bcs::to_bytes(&(T::INTENT.as_u16(), hashi_id, epoch, message)).unwrap()
 }
 
 #[cfg(test)]
@@ -856,18 +880,62 @@ mod test {
     }
 
     /// Locks the signing preimage layout: intent (u16 LE) first, then the
-    /// bcs(epoch), then bcs(message). Mirrors the Move `verify_certificate`.
+    /// bcs(hashi object id), then bcs(epoch), then bcs(message). Mirrors the
+    /// Move `verify_certificate`.
     #[test]
-    fn preimage_is_intent_then_epoch_then_message() {
+    fn preimage_is_intent_then_hashi_id_then_epoch_then_message() {
+        let hashi_id = Address::new([0xAB; 32]);
         let epoch = 7u64;
         let msg: Vec<u8> = vec![1, 2, 3];
-        let bytes = signing_message(epoch, &msg);
+        let bytes = signing_message(hashi_id, epoch, &msg);
         let mut expected = bcs::to_bytes(&(Intent::Test as u16)).unwrap();
+        expected.extend(bcs::to_bytes(&hashi_id).unwrap());
         expected.extend(bcs::to_bytes(&epoch).unwrap());
         expected.extend(bcs::to_bytes(&msg).unwrap());
         assert_eq!(bytes, expected);
         // Intent leads and is two little-endian bytes.
         assert_eq!(&bytes[..2], &[0xFF, 0xFF]);
+        // The hashi object id follows as 32 raw bytes (Move `address` BCS),
+        // ahead of the epoch.
+        assert_eq!(&bytes[2..34], &[0xAB; 32]);
+    }
+
+    /// A certificate minted for one Hashi deployment must not verify against
+    /// another: the object id in the preimage separates deployments that are
+    /// otherwise byte-identical (same members, same epoch).
+    #[test]
+    fn certificate_bound_to_other_hashi_id_fails_verification() {
+        let epoch = 7u64;
+        let (committee, _, private_keys, addresses) = reduced_weight_fixture(epoch, [1, 1, 1, 1]);
+        let id_a = Address::new([0xA1; 32]);
+        let id_b = Address::new([0xB2; 32]);
+        let message = b"cross-instance".to_vec();
+
+        // Instance A mints a certificate; A accepts it.
+        let mut agg_a = BlsSignatureAggregator::new(id_a, &committee, message.clone());
+        for i in 0..3 {
+            agg_a
+                .add_signature(private_keys[i].sign(id_a, epoch, addresses[i], &message))
+                .unwrap();
+        }
+        let cert = agg_a.finish().unwrap();
+        committee.verify_signature_any_weight(id_a, &cert).unwrap();
+
+        // Instance B refuses the finished certificate at every verify entry.
+        assert!(committee.verify_signature_any_weight(id_b, &cert).is_err());
+        assert!(
+            committee
+                .verify_signature_and_weight(id_b, &cert, 1)
+                .is_err()
+        );
+
+        // ...and refuses the raw member signature at aggregation time.
+        let mut agg_b = BlsSignatureAggregator::new(id_b, &committee, message.clone());
+        assert!(
+            agg_b
+                .add_signature(private_keys[0].sign(id_a, epoch, addresses[0], &message))
+                .is_err()
+        );
     }
     use fastcrypto::groups::bls12381::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
@@ -875,6 +943,8 @@ mod test {
 
     const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
     const TEST_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
+    /// Deployment id used by tests that don't exercise cross-instance binding.
+    const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
     use test_strategy::proptest;
 
     impl proptest::arbitrary::Arbitrary for Bls12381PrivateKey {
@@ -940,38 +1010,39 @@ mod test {
             0,
         );
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, message.clone());
 
         // Aggregating with no sigs fails
         aggregator.finish().unwrap_err();
 
         // Adding a signature with the wrong index fails
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, epoch, addresses[1], &message))
             .unwrap_err();
 
         // Adding a signature with the wrong epoch fails
         aggregator
-            .add_signature(private_keys[0].sign(4, addresses[0], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, 4, addresses[0], &message))
             .unwrap_err();
 
         // This works
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, epoch, addresses[0], &message))
             .unwrap();
 
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 1);
 
         // Aggregating with a sig from the same committee member more than once fails
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, epoch, addresses[0], &message))
             .unwrap_err();
 
         aggregator
-            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[1].sign(TEST_HASHI_ID, epoch, addresses[1], &message))
             .unwrap();
         aggregator
-            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .add_signature(private_keys[2].sign(TEST_HASHI_ID, epoch, addresses[2], &message))
             .unwrap();
 
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 3);
@@ -980,25 +1051,25 @@ mod test {
         let signature = aggregator.finish().unwrap();
         aggregator
             .committee
-            .verify_signature_any_weight(&signature)
+            .verify_signature_any_weight(TEST_HASHI_ID, &signature)
             .unwrap();
 
         committee
-            .verify_signature_and_weight(&signature, 3)
+            .verify_signature_and_weight(TEST_HASHI_ID, &signature, 3)
             .unwrap();
         committee
-            .verify_signature_and_weight(&signature, 4)
+            .verify_signature_and_weight(TEST_HASHI_ID, &signature, 4)
             .unwrap_err();
 
         // We can add the last sig and still be successful
         aggregator
-            .add_signature(private_keys[3].sign(epoch, addresses[3], &message))
+            .add_signature(private_keys[3].sign(TEST_HASHI_ID, epoch, addresses[3], &message))
             .unwrap();
 
         let signature = aggregator.finish().unwrap();
         aggregator
             .committee
-            .verify_signature_any_weight(&signature)
+            .verify_signature_any_weight(TEST_HASHI_ID, &signature)
             .unwrap();
         assert_eq!(aggregator.finish().unwrap().weight(&committee).unwrap(), 4);
     }
@@ -1049,17 +1120,18 @@ mod test {
             0,
         );
 
-        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, message.clone());
 
         // Add signatures from validators 0, 1, and 2 (but not 3)
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, epoch, addresses[0], &message))
             .unwrap();
         aggregator
-            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[1].sign(TEST_HASHI_ID, epoch, addresses[1], &message))
             .unwrap();
         aggregator
-            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .add_signature(private_keys[2].sign(TEST_HASHI_ID, epoch, addresses[2], &message))
             .unwrap();
 
         let certificate = aggregator.finish().unwrap();
@@ -1105,30 +1177,33 @@ mod test {
         let (committee, nodes, private_keys, addresses) = reduced_weight_fixture(1, [3, 2, 1, 0]);
         let message = vec![42u8; 10];
 
-        let mut plain = BlsSignatureAggregator::new(&committee, message.clone());
+        let mut plain = BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, message.clone());
         plain
-            .add_signature(private_keys[0].sign(1, addresses[0], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, 1, addresses[0], &message))
             .unwrap();
         assert_eq!(plain.weight(), 2500);
 
         let mut agg =
-            BlsSignatureAggregator::new_reduced(&committee, message.clone(), &nodes).unwrap();
+            BlsSignatureAggregator::new_reduced(TEST_HASHI_ID, &committee, message.clone(), &nodes)
+                .unwrap();
         assert_eq!(agg.reduced_weight(), 0);
 
-        agg.add_signature(private_keys[2].sign(1, addresses[2], &message))
+        agg.add_signature(private_keys[2].sign(TEST_HASHI_ID, 1, addresses[2], &message))
             .unwrap();
         assert_eq!(agg.reduced_weight(), 1, "node 2 carries weight 1");
 
-        agg.add_signature(private_keys[0].sign(1, addresses[0], &message))
+        agg.add_signature(private_keys[0].sign(TEST_HASHI_ID, 1, addresses[0], &message))
             .unwrap();
         assert_eq!(agg.reduced_weight(), 4, "node 0 carries weight 3");
 
-        agg.add_signature(private_keys[3].sign(1, addresses[3], &message))
+        agg.add_signature(private_keys[3].sign(TEST_HASHI_ID, 1, addresses[3], &message))
             .unwrap();
         assert_eq!(agg.reduced_weight(), 4, "node 3 carries weight 0");
 
         let cert = agg.finish().unwrap();
-        committee.verify_signature_any_weight(&cert).unwrap();
+        committee
+            .verify_signature_any_weight(TEST_HASHI_ID, &cert)
+            .unwrap();
     }
 
     #[proptest]
@@ -1179,15 +1254,16 @@ mod test {
         );
 
         // Create a certificate via aggregator
-        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, message.clone());
         aggregator
-            .add_signature(private_keys[0].sign(epoch, addresses[0], &message))
+            .add_signature(private_keys[0].sign(TEST_HASHI_ID, epoch, addresses[0], &message))
             .unwrap();
         aggregator
-            .add_signature(private_keys[1].sign(epoch, addresses[1], &message))
+            .add_signature(private_keys[1].sign(TEST_HASHI_ID, epoch, addresses[1], &message))
             .unwrap();
         aggregator
-            .add_signature(private_keys[2].sign(epoch, addresses[2], &message))
+            .add_signature(private_keys[2].sign(TEST_HASHI_ID, epoch, addresses[2], &message))
             .unwrap();
 
         let original_cert = aggregator.finish().unwrap();
@@ -1198,6 +1274,7 @@ mod test {
 
         // Reconstruct from parts
         let reconstructed = SignedMessage::try_from_parts(
+            TEST_HASHI_ID,
             epoch,
             message.clone(),
             signature_bytes,
@@ -1243,8 +1320,9 @@ mod test {
             weight: 1,
         });
         let nodes = Nodes::new(oversized).unwrap();
-        let err = BlsSignatureAggregator::new_reduced(&committee, vec![7u8; 4], &nodes)
-            .expect_err("more nodes than committee members must be refused");
+        let err =
+            BlsSignatureAggregator::new_reduced(TEST_HASHI_ID, &committee, vec![7u8; 4], &nodes)
+                .expect_err("more nodes than committee members must be refused");
         assert!(
             err.to_string()
                 .contains("cover 5 nodes but the committee has 4"),
@@ -1256,8 +1334,13 @@ mod test {
     fn reduced_aggregator_rejects_nodes_from_another_committee() {
         let (committee, _, _, _) = reduced_weight_fixture(1, [3, 2, 1, 0]);
         let (_, foreign_nodes, _, _) = reduced_weight_fixture(1, [3, 2, 1, 0]);
-        let err = BlsSignatureAggregator::new_reduced(&committee, vec![42u8; 10], &foreign_nodes)
-            .expect_err("nodes from a different committee must be refused");
+        let err = BlsSignatureAggregator::new_reduced(
+            TEST_HASHI_ID,
+            &committee,
+            vec![42u8; 10],
+            &foreign_nodes,
+        )
+        .expect_err("nodes from a different committee must be refused");
         assert!(
             err.to_string().contains("different committee"),
             "unexpected error: {err}"
@@ -1299,10 +1382,11 @@ mod test {
         );
 
         let message = b"regression".to_vec();
-        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, &committee, message.clone());
         for i in 0..3 {
             aggregator
-                .add_signature(private_keys[i].sign(epoch, addresses[i], &message))
+                .add_signature(private_keys[i].sign(TEST_HASHI_ID, epoch, addresses[i], &message))
                 .unwrap();
         }
         let valid_cert = aggregator.finish().unwrap();
@@ -1315,8 +1399,16 @@ mod test {
             SignedMessage::new(epoch, message, valid_cert.signature_bytes(), &forged_bitmap)
                 .unwrap();
 
-        assert!(committee.verify_signature_any_weight(&forged).is_err());
-        assert!(committee.verify_signature_and_weight(&forged, 3).is_err());
+        assert!(
+            committee
+                .verify_signature_any_weight(TEST_HASHI_ID, &forged)
+                .is_err()
+        );
+        assert!(
+            committee
+                .verify_signature_and_weight(TEST_HASHI_ID, &forged, 3)
+                .is_err()
+        );
     }
 
     fn reduced_weight_fixture(
@@ -1371,10 +1463,15 @@ mod test {
         message: &Vec<u8>,
         signers: &[usize],
     ) -> SignedMessage<Vec<u8>> {
-        let mut aggregator = BlsSignatureAggregator::new(committee, message.clone());
+        let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, message.clone());
         for &i in signers {
             aggregator
-                .add_signature(private_keys[i].sign(committee.epoch(), addresses[i], message))
+                .add_signature(private_keys[i].sign(
+                    TEST_HASHI_ID,
+                    committee.epoch(),
+                    addresses[i],
+                    message,
+                ))
                 .unwrap();
         }
         aggregator.finish().unwrap()
@@ -1392,20 +1489,20 @@ mod test {
         let cert = sign(&[1]);
         assert_eq!(
             committee
-                .verify_signature_and_reduced_weight(&cert, &nodes, 2)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &cert, &nodes, 2)
                 .unwrap(),
             2
         );
         assert!(
             committee
-                .verify_signature_and_reduced_weight(&cert, &nodes, 3)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &cert, &nodes, 3)
                 .is_err()
         );
 
         let cert = sign(&[1, 3]);
         assert_eq!(
             committee
-                .verify_signature_and_reduced_weight(&cert, &nodes, 2)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &cert, &nodes, 2)
                 .unwrap(),
             2
         );
@@ -1413,7 +1510,7 @@ mod test {
         let cert = sign(&[0, 1, 2]);
         assert_eq!(
             committee
-                .verify_signature_and_reduced_weight(&cert, &nodes, 6)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &cert, &nodes, 6)
                 .unwrap(),
             6
         );
@@ -1440,7 +1537,7 @@ mod test {
         .unwrap();
         assert!(
             committee
-                .verify_signature_and_reduced_weight(&cert, &wrong_nodes, 1)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &cert, &wrong_nodes, 1)
                 .is_err()
         );
 
@@ -1456,7 +1553,12 @@ mod test {
         .unwrap();
         assert!(
             committee
-                .verify_signature_and_reduced_weight(&cert, &same_size_wrong_nodes, 1)
+                .verify_signature_and_reduced_weight(
+                    TEST_HASHI_ID,
+                    &cert,
+                    &same_size_wrong_nodes,
+                    1
+                )
                 .is_err(),
             "weights from a same-sized but different committee must be rejected"
         );
@@ -1472,7 +1574,7 @@ mod test {
         .unwrap();
         assert!(
             committee
-                .verify_signature_and_reduced_weight(&forged, &nodes, 1)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &forged, &nodes, 1)
                 .is_err()
         );
 
@@ -1485,7 +1587,7 @@ mod test {
         .unwrap();
         assert!(
             committee
-                .verify_signature_and_reduced_weight(&other_epoch, &nodes, 1)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &other_epoch, &nodes, 1)
                 .is_err()
         );
 
@@ -1506,7 +1608,7 @@ mod test {
         .unwrap();
         assert!(
             committee
-                .verify_signature_and_reduced_weight(&spliced, &nodes, 1)
+                .verify_signature_and_reduced_weight(TEST_HASHI_ID, &spliced, &nodes, 1)
                 .is_err(),
             "a signature over a different message must be rejected even at sufficient weight"
         );

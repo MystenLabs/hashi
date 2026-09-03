@@ -75,15 +75,23 @@ impl GuardianHarness {
     }
 
     /// Operator-init, provisioner-init, then activate the served enclave.
+    /// `hashi_object_id` pins the deployment whose certificates this enclave
+    /// verifies; it must be the live network's Hashi object id or every
+    /// node-signed guardian request will fail verification.
     pub async fn finalize(
         &self,
         committee: HashiCommittee,
         master_pubkey: HashiMasterG,
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
+        hashi_object_id: sui_sdk_types::Address,
     ) -> Result<()> {
-        let config =
-            InitConfig::from_parts_for_testing(limiter_config, master_pubkey, self.network);
+        let config = InitConfig::from_parts_for_testing(
+            limiter_config,
+            master_pubkey,
+            self.network,
+            hashi_object_id,
+        );
         self.enclave
             .install_operator_init_for_testing(OperatorInitTestArgs::default().with_config(config));
         hashi_guardian::test_utils::finalize_enclave(&self.enclave)

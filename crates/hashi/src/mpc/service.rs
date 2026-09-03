@@ -1829,7 +1829,12 @@ impl MpcService {
         let signing_key =
             self.inner
                 .find_signing_key_for_committee(&target_committee, my_address, epoch)?;
-        let my_sig = signing_key.sign(epoch, my_address, &message);
+        let my_sig = signing_key.sign(
+            self.inner.config.hashi_ids().hashi_object_id,
+            epoch,
+            my_address,
+            &message,
+        );
         self.inner
             .store_reconfig_signature(epoch, my_sig.signature().as_bytes().to_vec());
         let cert = loop {
@@ -1971,7 +1976,11 @@ impl MpcService {
             .expect("own signature must be stored before collecting");
         let my_sig =
             BLS12381Signature::from_bytes(&my_sig_bytes).expect("stored signature must be valid");
-        let mut aggregator = BlsSignatureAggregator::new(committee, message.clone());
+        let mut aggregator = BlsSignatureAggregator::new(
+            self.inner.config.hashi_ids().hashi_object_id,
+            committee,
+            message.clone(),
+        );
         aggregator
             .add_signature_from(my_address, my_sig)
             .map_err(|e| anyhow::anyhow!("failed to add own signature: {e}"))?;
