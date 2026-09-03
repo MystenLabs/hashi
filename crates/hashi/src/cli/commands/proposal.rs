@@ -130,6 +130,140 @@ pub fn proposal_status(location: &ProposalLocation, now_ms: u64) -> String {
     }
 }
 
+/// Vote tally against the quorum threshold, computed once and printed the
+/// same way everywhere (view, list --votes, after a vote, before execute).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuorumProgress {
+    pub voters: usize,
+    pub voted_weight: u64,
+    pub threshold_weight: u64,
+    pub total_weight: u64,
+}
+
+impl QuorumProgress {
+    pub fn new(
+        votes: &[Address],
+        quorum_threshold_bps: u64,
+        committee: &hashi_types::committee::Committee,
+    ) -> Self {
+        let total_weight = committee.total_weight();
+        let voted_weight = votes
+            .iter()
+            .map(|voter| {
+                committee
+                    .members()
+                    .iter()
+                    .find(|m| m.validator_address() == *voter)
+                    .map(|m| m.weight())
+                    .unwrap_or(0)
+            })
+            .sum();
+        Self {
+            voters: votes.len(),
+            voted_weight,
+            threshold_weight: total_weight
+                .saturating_mul(quorum_threshold_bps)
+                .div_ceil(10_000),
+            total_weight,
+        }
+    }
+
+    pub fn met(&self) -> bool {
+        self.total_weight > 0 && self.voted_weight >= self.threshold_weight
+    }
+
+    pub fn missing_weight(&self) -> u64 {
+        self.threshold_weight.saturating_sub(self.voted_weight)
+    }
+
+    /// `3 voter(s), 120/200 weight (80 more needed)` or
+    /// `3 voter(s), 200/200 weight, quorum reached`.
+    pub fn describe(&self) -> String {
+        if self.met() {
+            format!(
+                "{} voter(s), {}/{} weight, quorum reached",
+                self.voters, self.voted_weight, self.threshold_weight
+            )
+        } else {
+            format!(
+                "{} voter(s), {}/{} weight ({} more needed)",
+                self.voters,
+                self.voted_weight,
+                self.threshold_weight,
+                self.missing_weight()
+            )
+        }
+    }
+}
+
+/// Refuse a proposal past its seven-day window: the chain would abort with
+/// `EProposalExpired` after the prompt, and the only remaining action is
+/// deletion.
+pub fn refuse_if_expired(proposal: &Proposal, proposal_id: &str, now_ms: u64) -> Result<()> {
+    let expires_ms = proposal.timestamp_ms.saturating_add(PROPOSAL_MAX_AGE_MS);
+    anyhow::ensure!(
+        now_ms <= expires_ms,
+        "proposal {proposal_id} ({}) expired on {}; it can no longer be voted on or executed, \
+         only deleted",
+        display::format_proposal_type(&proposal.proposal_type),
+        display::format_timestamp(expires_ms)
+    );
+    Ok(())
+}
+
+/// Refuse a validator that is registered but not seated in the current
+/// committee: only seated members vote (`ENotCommitteeMember` on chain).
+/// `seated` is the current committee's member addresses; `None` before the
+/// first DKG, when there is no committee to check against.
+pub fn refuse_if_not_seated(validator: Address, seated: Option<(u64, &[Address])>) -> Result<()> {
+    if let Some((epoch, members)) = seated {
+        anyhow::ensure!(
+            members.contains(&validator),
+            "validator {} is registered but not seated in the current committee (epoch \
+             {epoch}); only seated members can vote",
+            validator.to_hex()
+        );
+    }
+    Ok(())
+}
+
+/// Refuse a second vote, or the removal of a vote that was never cast, before
+/// anything is signed (`EVoteAlreadyCounted` / `ENoVoteFound` on chain).
+pub fn refuse_vote_state(
+    validator: Address,
+    votes: &[Address],
+    proposal_id: &str,
+    action: ProposalAction,
+) -> Result<()> {
+    let has_voted = votes.contains(&validator);
+    match action {
+        ProposalAction::Vote => anyhow::ensure!(
+            !has_voted,
+            "validator {} has already voted on proposal {proposal_id}; nothing to submit. \
+             Use `hashi proposal remove-vote {proposal_id}` to withdraw the vote.",
+            validator.to_hex()
+        ),
+        ProposalAction::RemoveVote => anyhow::ensure!(
+            has_voted,
+            "validator {} has no vote on proposal {proposal_id} to remove",
+            validator.to_hex()
+        ),
+        ProposalAction::Execute => {}
+    }
+    Ok(())
+}
+
+fn seated_members(
+    committee: Option<&hashi_types::committee::Committee>,
+) -> Option<(u64, Vec<Address>)> {
+    committee.map(|c| {
+        (
+            c.epoch(),
+            c.members().iter().map(|m| m.validator_address()).collect(),
+        )
+    })
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -290,17 +424,19 @@ pub async fn list_proposals(
     config: &CliConfig,
     type_filter: Option<String>,
     detailed: bool,
+    executed: bool,
+    votes: bool,
+    json: bool,
 ) -> Result<()> {
     let client = HashiClient::new(config).await?;
 
     print_info("Fetching proposals...");
 
-    let proposals = client.fetch_proposals();
-
-    if proposals.is_empty() {
-        println!("\n{}", "No active proposals found.".dimmed());
-        return Ok(());
-    }
+    let (proposals, bag) = if executed {
+        (client.fetch_executed_proposals(), "executed")
+    } else {
+        (client.fetch_proposals(), "active")
+    };
 
     // Filter by type if specified
     let proposals: Vec<_> = if let Some(ref filter) = type_filter {
@@ -317,25 +453,76 @@ pub async fn list_proposals(
         proposals
     };
 
-    if proposals.is_empty() {
-        println!(
-            "\n{}",
-            format!(
-                "No proposals found matching type filter: {}",
-                type_filter.unwrap_or_default()
-            )
-            .dimmed()
-        );
+    // The optional per-row tally costs one live read per proposal.
+    let committee = client.fetch_current_committee();
+    let mut tallies: Vec<Option<QuorumProgress>> = Vec::with_capacity(proposals.len());
+    if votes {
+        for proposal in &proposals {
+            let tally = match (client.fetch_proposal_details(proposal.id).await, &committee) {
+                (Ok(details), Some(committee)) => Some(QuorumProgress::new(
+                    &details.votes,
+                    details.quorum_threshold_bps,
+                    committee,
+                )),
+                _ => None,
+            };
+            tallies.push(tally);
+        }
+    }
+
+    let now = now_ms();
+    let location = |p: &Proposal| {
+        if executed {
+            ProposalLocation::Executed(p.clone())
+        } else {
+            ProposalLocation::Active(p.clone())
+        }
+    };
+
+    if json {
+        let rows: Vec<serde_json::Value> = proposals
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let mut row = serde_json::json!({
+                    "id": p.id.to_hex(),
+                    "type": display::format_proposal_type(&p.proposal_type),
+                    "created_ms": p.timestamp_ms,
+                    "status": proposal_status(&location(p), now),
+                });
+                if let Some(Some(tally)) = tallies.get(i) {
+                    row["votes"] = serde_json::json!({
+                        "voters": tally.voters,
+                        "voted_weight": tally.voted_weight,
+                        "threshold_weight": tally.threshold_weight,
+                        "total_weight": tally.total_weight,
+                        "quorum_reached": tally.met(),
+                    });
+                }
+                row
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    println!("\n📋 Active Proposals:\n");
+    if proposals.is_empty() {
+        let what = match &type_filter {
+            Some(filter) => format!("No {bag} proposals found matching type filter: {filter}"),
+            None => format!("No {bag} proposals found."),
+        };
+        println!("\n{}", what.dimmed());
+        return Ok(());
+    }
+
+    println!(
+        "\n📋 {} Proposals:\n",
+        if executed { "Executed" } else { "Active" }
+    );
 
     if detailed {
-        // List mode skips the per-proposal vote/quorum fetch to avoid N extra
-        // network calls; use `proposal view <id>` for full vote progress.
         for proposal in &proposals {
-            let status = proposal_status(&ProposalLocation::Active(proposal.clone()), now_ms());
+            let status = proposal_status(&location(proposal), now);
             print_proposal_detailed(proposal, &status, None, None);
             println!();
         }
@@ -348,14 +535,26 @@ pub async fn list_proposals(
             proposal_type: String,
             #[tabled(rename = "Created")]
             timestamp: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "Votes")]
+            votes: String,
         }
 
         let rows: Vec<ProposalRow> = proposals
             .iter()
-            .map(|p| ProposalRow {
-                id: display::format_address(&p.id),
+            .enumerate()
+            .map(|(i, p)| ProposalRow {
+                // Full ids: this is what gets pasted into `vote` and `view`.
+                id: display::format_address_full(&p.id),
                 proposal_type: display::format_proposal_type(&p.proposal_type),
                 timestamp: display::format_timestamp(p.timestamp_ms),
+                status: proposal_status(&location(p), now),
+                votes: match tallies.get(i) {
+                    Some(Some(tally)) => tally.describe(),
+                    Some(None) => "unavailable".to_owned(),
+                    None => "(pass --votes)".to_owned(),
+                },
             })
             .collect();
 
@@ -364,7 +563,7 @@ pub async fn list_proposals(
     }
 
     println!(
-        "\n{} {} proposal(s) found",
+        "\n{} {} {bag} proposal(s) found",
         "ℹ".blue(),
         proposals.len().to_string().bold()
     );
@@ -425,15 +624,31 @@ pub async fn vote(
         ProposalAction::Vote,
         client.sui_rpc_url(),
     )?;
+    refuse_if_expired(&proposal, proposal_id, now_ms())?;
+
+    // Everything the chain would refuse after the prompt is refused here
+    // first, from one live read of the proposal.
+    let details = client.fetch_proposal_details(proposal_addr).await?;
+    let committee = client.fetch_current_committee();
+    if client.signer_address().is_some() {
+        let validator = client.resolve_validator_address()?;
+        let seated = seated_members(committee.as_ref());
+        refuse_if_not_seated(validator, seated.as_ref().map(|(e, m)| (*e, m.as_slice())))?;
+        refuse_vote_state(validator, &details.votes, proposal_id, ProposalAction::Vote)?;
+    }
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
     print_detail(&format!("\n{}", "Proposal Details:".bold()));
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
+    if let Some(committee) = &committee {
+        let progress = QuorumProgress::new(&details.votes, details.quorum_threshold_bps, committee);
+        print_detail(&format!("  Votes so far: {}", progress.describe()));
+    }
     print_acting_validator(&client)?;
 
     if !prompt_continue("vote on this proposal", tx_opts).await? {
-        crate::cli::print_warning("Aborted.");
+        print_warning("Aborted.");
         return Ok(());
     }
 
@@ -450,65 +665,49 @@ pub async fn vote(
 
     let vote_response = execute_or_simulate(&mut client, tx, tx_opts).await?;
 
-    if !execute {
-        return Ok(());
-    }
-
-    // `--execute` was requested. Only meaningful after a real execute (not a
-    // dry-run / missing-keypair).
+    // Nothing landed on chain (dry-run, serialize, or no keypair).
     if vote_response.is_none() {
         return Ok(());
     }
 
-    // Upgrade proposals require the dedicated upgrade flow — the generic
-    // `<module>::execute` path can't construct an UpgradeTicket.
-    if is_upgrade_proposal(&proposal.proposal_type) {
-        print_warning(
-            "--execute is not supported for Upgrade proposals; run \
-             `proposal execute-upgrade` once quorum is reached.",
-        );
-        return Ok(());
-    }
-
-    // Re-fetch live vote state to see whether the vote we just submitted
-    // pushed us over quorum. `HashiClient`'s cached scrape is from CLI start,
-    // so this has to be the live `list_dynamic_fields` call.
+    // Re-fetch live vote state: `HashiClient`'s cached scrape is from CLI
+    // start, so this has to be the live `list_dynamic_fields` call.
     let details = client
         .fetch_proposal_details(proposal_addr)
         .await
         .context("failed to re-fetch proposal state after voting")?;
-    let committee = client
-        .fetch_current_committee()
-        .ok_or_else(|| anyhow::anyhow!("no committee available to compute quorum"))?;
+    let Some(committee) = committee else {
+        print_info("Vote recorded; no committee is formed yet, so quorum cannot be computed.");
+        return Ok(());
+    };
+    let progress = QuorumProgress::new(&details.votes, details.quorum_threshold_bps, &committee);
+    print_info(&format!("Votes: {}", progress.describe()));
 
-    let total_weight = committee.total_weight();
-    let voted_weight: u64 = details
-        .votes
-        .iter()
-        .map(|voter| {
-            committee
-                .members()
-                .iter()
-                .find(|m| m.validator_address() == *voter)
-                .map(|m| m.weight())
-                .unwrap_or(0)
-        })
-        .sum();
-    let threshold_weight = total_weight
-        .saturating_mul(details.quorum_threshold_bps)
-        .div_ceil(10_000);
+    if !progress.met() {
+        if execute {
+            print_info("Quorum not reached yet; skipping --execute.");
+        }
+        return Ok(());
+    }
 
-    if voted_weight < threshold_weight {
+    // Upgrade proposals require the dedicated upgrade flow: the generic
+    // `<module>::execute` path can't construct an UpgradeTicket.
+    if is_upgrade_proposal(&proposal.proposal_type) {
         print_info(&format!(
-            "Quorum not reached yet ({voted_weight}/{threshold_weight} weight); \
-             skipping --execute."
+            "Quorum reached; run `hashi proposal execute-upgrade {proposal_id} \
+             --package-path <dir>` to execute it."
+        ));
+        return Ok(());
+    }
+    if !execute {
+        print_info(&format!(
+            "Quorum reached; run `hashi proposal execute {proposal_id}` to execute it \
+             (or pass --execute to vote next time)."
         ));
         return Ok(());
     }
 
-    print_info(&format!(
-        "Quorum reached ({voted_weight}/{threshold_weight} weight); executing..."
-    ));
+    print_info("Quorum reached; executing...");
     let execute_tx =
         client.build_execute_proposal_transaction(proposal_addr, &proposal.proposal_type)?;
     print_info(&format!(
@@ -535,6 +734,17 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
         ProposalAction::RemoveVote,
         client.sui_rpc_url(),
     )?;
+    refuse_if_expired(&proposal, proposal_id, now_ms())?;
+    if client.signer_address().is_some() {
+        let validator = client.resolve_validator_address()?;
+        let details = client.fetch_proposal_details(proposal_addr).await?;
+        refuse_vote_state(
+            validator,
+            &details.votes,
+            proposal_id,
+            ProposalAction::RemoveVote,
+        )?;
+    }
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
@@ -577,6 +787,7 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
         ProposalAction::Execute,
         client.sui_rpc_url(),
     )?;
+    refuse_if_expired(&proposal, proposal_id, now_ms())?;
 
     let proposal_type = &proposal.proposal_type;
     let proposal_type_str = display::format_proposal_type(proposal_type);
@@ -588,9 +799,28 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
         );
     }
 
+    // The chain aborts with EQuorumNotReached after the prompt; say so first,
+    // with the tally.
+    let details = client.fetch_proposal_details(proposal_addr).await?;
+    let committee = client
+        .fetch_current_committee()
+        .ok_or_else(|| anyhow::anyhow!("no committee is formed yet, so nothing can execute"))?;
+    let progress = QuorumProgress::new(&details.votes, details.quorum_threshold_bps, &committee);
+    anyhow::ensure!(
+        progress.met(),
+        "proposal {proposal_id} ({proposal_type_str}) has not reached quorum: {}. \
+         `hashi proposal view {proposal_id}` lists the voters.",
+        progress.describe()
+    );
+
     print_detail(&format!("\n{}", "Execute Proposal:".bold()));
     print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
     print_detail(&format!("  ID:   {}", proposal_id));
+    print_detail(&format!("  Votes: {}", progress.describe()));
+    // Execution is permissionless, so the sender is whoever pays gas.
+    if let Some(sender) = tx_opts.sender.or_else(|| client.signer_address()) {
+        print_detail(&format!("  Sender: {}", sender.to_hex().cyan()));
+    }
 
     if !prompt_continue("execute this proposal", tx_opts).await? {
         crate::cli::print_warning("Aborted.");
@@ -1366,41 +1596,19 @@ fn print_proposal_detailed(
         );
 
         // Vote tally + quorum progress.
-        let total_weight = committee.map(|c| c.total_weight()).unwrap_or(0);
-        let voted_weight: u64 = details
-            .votes
-            .iter()
-            .map(|voter| {
-                committee
-                    .and_then(|c| c.members().iter().find(|m| m.validator_address() == *voter))
-                    .map(|m| m.weight())
-                    .unwrap_or(0)
-            })
-            .sum();
-        let threshold_weight = total_weight
-            .saturating_mul(details.quorum_threshold_bps)
-            .div_ceil(10_000);
-        let quorum_met = voted_weight >= threshold_weight && total_weight > 0;
-
-        let status = if quorum_met {
-            "QUORUM REACHED".green().bold()
-        } else {
-            format!(
-                "{}/{} weight ({} more needed)",
-                voted_weight,
-                threshold_weight,
-                threshold_weight.saturating_sub(voted_weight)
-            )
-            .yellow()
+        let status = match committee {
+            Some(committee) => {
+                let progress =
+                    QuorumProgress::new(&details.votes, details.quorum_threshold_bps, committee);
+                if progress.met() {
+                    progress.describe().green().bold()
+                } else {
+                    progress.describe().yellow()
+                }
+            }
+            None => "no committee formed yet".dimmed(),
         };
-        println!(
-            "  {} {} voter(s) — {} of total weight {} — {}",
-            "Votes:".bold(),
-            details.votes.len().to_string().cyan(),
-            voted_weight.to_string().cyan(),
-            total_weight.to_string().dimmed(),
-            status
-        );
+        println!("  {} {}", "Votes:".bold(), status);
         println!(
             "  {} {} bps ({:.2}%)",
             "Threshold:".bold(),
