@@ -618,11 +618,15 @@ fun new_committee_from_voting_powers(
     )
 }
 
-/// True if the tx sender is authorized to act for this member — its validator
+/// True if the tx sender is authorized to act for this member: its validator
 /// key or its delegated operator key. The validator key always retains authority.
+///
+/// The zero address is never authorized. Sui system transactions run with `@0x0`
+/// as their sender, so an operator delegation that was "cleared" to `@0x0` must
+/// not hand them authority over the member.
 fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
     let sender = ctx.sender();
-    sender == self.validator_address || sender == self.operator_address
+    sender != @0x0 && (sender == self.validator_address || sender == self.operator_address)
 }
 
 /// Whether governance has flagged this member as ignored.
