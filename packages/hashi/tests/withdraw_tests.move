@@ -223,8 +223,8 @@ fun test_approve_then_cancel() {
 
 #[test]
 #[expected_failure(abort_code = hashi::withdraw::ECannotCancelProcessingWithdrawal)]
-/// Once a request has been committed to a WithdrawalTransaction it is in the
-/// Processing state and its BTC has been burned — cancellation must be rejected.
+/// Once a request has been committed to a WithdrawalTransaction its BTC has
+/// been burned — cancellation must be rejected.
 fun test_cancel_processing_request() {
     let epoch = 0u64;
     let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
@@ -244,7 +244,7 @@ fun test_cancel_processing_request() {
     let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
     hashi::withdraw::approve_request(&mut hashi, id1, cert, &clock);
 
-    // Commit the request into a WithdrawalTransaction — this moves it to Processing.
+    // Commit the request into a WithdrawalTransaction.
     let test_utxo = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());
     let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[id1],
@@ -308,7 +308,6 @@ fun setup_fully_signed_txn(
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
     queue.record_input_signatures(txn_id, vector[0], vector[x"DEADBEEF"]);
     queue.finalize_withdrawal_txn(txn_id, vector[x"AAAAAAAA"], clock);
-    queue.update_requests_signed(&vector[id]);
     (id, txn_id)
 }
 
@@ -334,13 +333,12 @@ fun test_confirm_withdrawal_defers_archival() {
     let (id, txn_id) = setup_fully_signed_txn(&mut hashi, &clock, ctx);
     confirm_via_entry(&mut hashi, txn_id, &clock);
 
-    // Confirm recorded in place: txn stays in the hot bag, request keeps its
-    // Signed status in `requests`; both moves are deferred to archival.
+    // Confirm recorded in place: txn stays in the hot bag, request stays in
+    // `requests`; both moves are deferred to archival.
     let queue = hashi.bitcoin().withdrawal_queue();
     assert!(queue.has_withdrawal_txn(txn_id));
     assert!(!queue.has_confirmed_txn(txn_id));
     assert!(queue.request_in_requests(id));
-    assert!(queue.request_status_any(id).is_signed());
 
     // The archival GC completes both moves.
     hashi::withdraw::archive_confirmed_withdrawals(&mut hashi, vector[txn_id]);
@@ -348,7 +346,6 @@ fun test_confirm_withdrawal_defers_archival() {
     assert!(!queue.has_withdrawal_txn(txn_id));
     assert!(queue.has_confirmed_txn(txn_id));
     assert!(queue.request_in_processed(id));
-    assert!(queue.request_status_any(id).is_confirmed());
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -404,7 +401,6 @@ fun test_archive_entry_batch_mixed() {
         let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
         queue.record_input_signatures(txn_id2, vector[0], vector[x"DEADBEEF"]);
         queue.finalize_withdrawal_txn(txn_id2, vector[x"AAAAAAAA"], &clock);
-        queue.update_requests_signed(&vector[id2]);
     };
     confirm_via_entry(&mut hashi, txn_id2, &clock);
 
@@ -429,7 +425,7 @@ fun test_cancel_pre_upgrade_processed_request() {
 
     // Simulate a request committed before the deferred-archival upgrade: it
     // sits in `processed`, so the cancellation gate must trip via the
-    // fallback bag check rather than the status-first path.
+    // fallback bag check rather than the in-place txn-link check.
     let id = setup_withdrawal_request(&mut hashi, &clock, 10_000, ctx);
     hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id, dummy_queue_cert(), &clock);
     let input = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());

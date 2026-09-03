@@ -595,47 +595,11 @@ pub struct WithdrawalRequestQueue {
     pub confirmed_txns: Bag,
 }
 
-/// Rust version of the Move hashi::withdrawal_queue::WithdrawalStatus enum.
-#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
-pub enum WithdrawalStatus {
-    Requested,
-    Approved,
-    Processing,
-    Signed,
-    Confirmed,
-}
-
-impl WithdrawalStatus {
-    /// Returns true if the status is `Approved`.
-    pub fn is_approved(&self) -> bool {
-        matches!(self, Self::Approved)
-    }
-
-    /// Returns true if the status is `Requested`.
-    pub fn is_requested(&self) -> bool {
-        matches!(self, Self::Requested)
-    }
-
-    /// Returns true while the request still awaits action in the queue
-    /// (`Requested` or `Approved`); false once committed into a withdrawal
-    /// txn. Mirrors Move's `WithdrawalStatus::is_active`.
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Requested | Self::Approved)
-    }
-
-    /// Lowercase status name, for metric labels and CLI rendering.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Requested => "requested",
-            Self::Approved => "approved",
-            Self::Processing => "processing",
-            Self::Signed => "signed",
-            Self::Confirmed => "confirmed",
-        }
-    }
-}
-
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalRequest type.
+///
+/// Lifecycle state is derived, not stored: `approval_cert` marks approval
+/// and `withdrawal_txn_id` marks commitment into a withdrawal txn, whose own
+/// signing and confirmation fields carry the rest of the lifecycle.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct WithdrawalRequest {
     pub id: Address,
@@ -643,17 +607,43 @@ pub struct WithdrawalRequest {
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
     pub created_timestamp_ms: u64,
-    pub status: WithdrawalStatus,
     /// Committee certificate recorded at approval time. `None` until
     /// `approve_request` has been called.
     pub approval_cert: Option<CommitteeSignature>,
     /// Clock timestamp at the moment of approval. `None` until
     /// `approve_request` has been called.
     pub approved_timestamp_ms: Option<u64>,
+    /// The withdrawal txn this request was committed into. `None` until
+    /// commitment; once set, the BTC is drained and the request can no
+    /// longer be approved or cancelled.
     pub withdrawal_txn_id: Option<Address>,
     pub sui_tx_digest: Digest,
     /// BTC balance in satoshis.
     pub btc: u64,
+}
+
+impl WithdrawalRequest {
+    /// The committee has recorded an approval cert. Stays true after
+    /// commitment; see `awaits_commitment` for the actionable set.
+    pub fn is_approved(&self) -> bool {
+        self.approval_cert.is_some()
+    }
+
+    /// Committed into a withdrawal txn: the BTC is drained, and the request
+    /// only lingers in the mirrored map until the archival GC sweeps it.
+    pub fn is_committed(&self) -> bool {
+        self.withdrawal_txn_id.is_some()
+    }
+
+    /// Not yet approved by the committee (and therefore not committed).
+    pub fn awaits_approval(&self) -> bool {
+        !self.is_approved()
+    }
+
+    /// Approved but not yet committed into a withdrawal txn.
+    pub fn awaits_commitment(&self) -> bool {
+        self.is_approved() && !self.is_committed()
+    }
 }
 
 /// Lightweight info extracted from a request at commit time for validation.

@@ -33,7 +33,6 @@ pub use hashi_types::move_types::Utxo;
 pub use hashi_types::move_types::UtxoId;
 pub use hashi_types::move_types::UtxoRecord;
 pub use hashi_types::move_types::WithdrawalRequest;
-pub use hashi_types::move_types::WithdrawalStatus;
 pub use hashi_types::move_types::WithdrawalTransaction;
 
 const NOT_SCRAPED: &str = "Bitcoin state was not scraped (ScrapeScope::GovernanceOnly)";

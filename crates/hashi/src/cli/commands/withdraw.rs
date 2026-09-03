@@ -19,7 +19,6 @@ use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::cli::types::display;
 use crate::onchain::types::WithdrawalRequest;
-use crate::onchain::types::WithdrawalStatus;
 use crate::onchain::types::WithdrawalTransaction;
 
 pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
@@ -257,9 +256,9 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     println!("{}", "━".repeat(60).dimmed());
 
     // Check the mirrored request map first. With deferred archival a request
-    // stays here for its whole live lifecycle — Requested/Approved, then
-    // Processing/Signed once committed into a withdrawal txn, then Confirmed
-    // until the archival GC moves it to the processed archive.
+    // stays here for its whole live lifecycle — awaiting approval, then
+    // commitment, then committed into a withdrawal txn until the archival GC
+    // moves it to the processed archive.
     if let Some(wr) = withdrawal_requests.iter().find(|w| w.id == req_addr) {
         println!(
             "  {} {}",
@@ -283,71 +282,49 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
             display::format_timestamp(wr.created_timestamp_ms)
         );
 
-        match wr.status {
-            WithdrawalStatus::Requested | WithdrawalStatus::Approved => {
+        // Committed into a withdrawal txn (BTC drained): render the txn's
+        // signing progress, looked up by the request's withdrawal_txn_id.
+        if let Some(txn_id) = wr.withdrawal_txn_id {
+            if let Some(pw) = withdrawal_txns.iter().find(|p| p.id == txn_id) {
+                print_txn_progress(config, pw);
+            } else {
                 println!();
-                let status_label = if wr.status.is_approved() {
-                    "Approved".green()
-                } else {
-                    "Requested".yellow()
-                };
+                print_info(&format!(
+                    "Request is committed to withdrawal transaction {} but that \
+                     transaction was not found in the pending queues.",
+                    display::format_address_full(&txn_id)
+                ));
+            }
+        } else {
+            println!();
+            let status_label = if wr.is_approved() {
+                "Approved".green()
+            } else {
+                "Requested".yellow()
+            };
 
-                let step = if wr.status.is_approved() { 2 } else { 1 };
-                println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
-                println!(
-                    "    {} Requested",
-                    if step >= 1 {
-                        "[done]".green()
-                    } else {
-                        "[    ]".dimmed()
-                    }
-                );
-                println!(
-                    "    {} Approved",
-                    if step >= 2 {
-                        "[done]".green()
-                    } else {
-                        "[    ]".dimmed()
-                    }
-                );
-                println!("    {} Committed", "[    ]".dimmed());
-                println!("    {} Signed", "[    ]".dimmed());
-                println!("    {} Broadcast", "[    ]".dimmed());
-                println!("    {} Confirmed", "[    ]".dimmed());
-            }
-            // Committed into a withdrawal txn (BTC drained): render the txn's
-            // signing progress, looked up by the request's withdrawal_txn_id.
-            WithdrawalStatus::Processing | WithdrawalStatus::Signed => {
-                let txn = wr
-                    .withdrawal_txn_id
-                    .and_then(|id| withdrawal_txns.iter().find(|p| p.id == id));
-                if let Some(pw) = txn {
-                    print_txn_progress(config, pw);
+            let step = if wr.is_approved() { 2 } else { 1 };
+            println!("  {} {} ({}/6)", "Progress:".bold(), status_label, step);
+            println!(
+                "    {} Requested",
+                if step >= 1 {
+                    "[done]".green()
                 } else {
-                    println!();
-                    print_info(&format!(
-                        "Request status is {} but its withdrawal transaction was not \
-                         found in the pending queues.",
-                        wr.status.as_str()
-                    ));
+                    "[    ]".dimmed()
                 }
-            }
-            // Terminal state: the withdrawal is complete; the request only
-            // lingers on-chain until the archival GC sweeps it.
-            WithdrawalStatus::Confirmed => {
-                println!();
-                println!(
-                    "  {} {} (6/6)",
-                    "Progress:".bold(),
-                    "Confirmed (archival pending)".green()
-                );
-                println!("    {} Requested", "[done]".green());
-                println!("    {} Approved", "[done]".green());
-                println!("    {} Committed", "[done]".green());
-                println!("    {} Signed", "[done]".green());
-                println!("    {} Broadcast", "[done]".green());
-                println!("    {} Confirmed", "[done]".green());
-            }
+            );
+            println!(
+                "    {} Approved",
+                if step >= 2 {
+                    "[done]".green()
+                } else {
+                    "[    ]".dimmed()
+                }
+            );
+            println!("    {} Committed", "[    ]".dimmed());
+            println!("    {} Signed", "[    ]".dimmed());
+            println!("    {} Broadcast", "[    ]".dimmed());
+            println!("    {} Confirmed", "[    ]".dimmed());
         }
     }
     // Check committed/signed withdrawal transactions
@@ -373,8 +350,8 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
 
 /// Render the committed-phase progress checklist (steps 3-6) and Bitcoin-side
 /// context for a withdrawal transaction. Shared by the request-map lookup
-/// (Processing/Signed requests point at their txn via `withdrawal_txn_id`)
-/// and the txn-map fallback lookup.
+/// (committed requests point at their txn via `withdrawal_txn_id`) and the
+/// txn-map fallback lookup.
 fn print_txn_progress(config: &CliConfig, pw: &WithdrawalTransaction) {
     let txid: bitcoin::Txid = pw.txid.into();
     let is_confirmed = pw.is_confirmed();
@@ -483,7 +460,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     serde_json::json!({
                         "request_id": wr.id.to_string(),
                         "amount_sats": wr.btc_amount,
-                        "status": wr.status.as_str(),
+                        "status": queued_status(wr),
                         "caller": wr.sender.to_string(),
                         "requested_ms": wr.created_timestamp_ms,
                     })
@@ -527,7 +504,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                             "  {:<20} {:<14} {:<10} {:<20} {}",
                             display::format_address_full(&wr.id),
                             wr.btc_amount,
-                            wr.status.as_str(),
+                            queued_status(wr),
                             display::format_address_full(&wr.sender),
                             display::format_timestamp(wr.created_timestamp_ms)
                         );
@@ -575,15 +552,25 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-/// Split the mirrored request map into the actionable queue
-/// (Requested/Approved) and the requests the v2 flow committed in place
-/// (Processing/Signed, plus the defensively handled Confirmed). The latter
-/// must not report as queued backlog: their BTC is already drained into a
-/// withdrawal txn, which the txn view counts.
+/// Split the mirrored request map into the actionable queue (awaiting
+/// approval or commitment) and the requests the v2 flow committed in place.
+/// The latter must not report as queued backlog: their BTC is already
+/// drained into a withdrawal txn, which the txn view counts.
 fn partition_queued(
     requests: &[WithdrawalRequest],
 ) -> (Vec<&WithdrawalRequest>, Vec<&WithdrawalRequest>) {
-    requests.iter().partition(|wr| wr.status.is_active())
+    requests.iter().partition(|wr| !wr.is_committed())
+}
+
+/// Lowercase state of a request in the actionable queue, for JSON rows and
+/// the table. Only meaningful for uncommitted requests (see
+/// `partition_queued`).
+fn queued_status(wr: &WithdrawalRequest) -> &'static str {
+    if wr.is_approved() {
+        "approved"
+    } else {
+        "requested"
+    }
 }
 
 /// The JSON row for one in-flight withdrawal transaction.
@@ -611,6 +598,7 @@ fn withdrawal_txn_row(pw: &WithdrawalTransaction) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use hashi_types::move_types::CommitteeSignature;
     use hashi_types::move_types::MpcSig;
     use hashi_types::move_types::SigningBatch;
 
@@ -675,19 +663,25 @@ mod tests {
         assert_eq!(row["status"], "confirmed");
     }
 
-    fn request_with_status(status: WithdrawalStatus) -> WithdrawalRequest {
+    /// A request at one of the three mirrored lifecycle points: requested,
+    /// approved (cert recorded), or committed (linked to a withdrawal txn,
+    /// BTC drained).
+    fn request(id: u8, approved: bool, committed: bool) -> WithdrawalRequest {
         WithdrawalRequest {
-            id: sui_sdk_types::Address::new([1; 32]),
+            id: sui_sdk_types::Address::new([id; 32]),
             sender: sui_sdk_types::Address::new([2; 32]),
             btc_amount: 1,
             bitcoin_address: vec![0; 20],
             created_timestamp_ms: 0,
-            status,
-            approval_cert: None,
-            approved_timestamp_ms: None,
-            withdrawal_txn_id: None,
+            approval_cert: approved.then(|| CommitteeSignature {
+                epoch: 0,
+                signature: Vec::new(),
+                signers_bitmap: Vec::new(),
+            }),
+            approved_timestamp_ms: approved.then_some(1),
+            withdrawal_txn_id: committed.then(|| sui_sdk_types::Address::new([9; 32])),
             sui_tx_digest: sui_sdk_types::Digest::new([0; 32]),
-            btc: 1,
+            btc: if committed { 0 } else { 1 },
         }
     }
 
@@ -696,28 +690,22 @@ mod tests {
     /// (they are already counted through their withdrawal txn).
     #[test]
     fn queued_view_excludes_committed_in_place_requests() {
-        let requests: Vec<_> = [
-            WithdrawalStatus::Requested,
-            WithdrawalStatus::Approved,
-            WithdrawalStatus::Processing,
-            WithdrawalStatus::Signed,
-            WithdrawalStatus::Confirmed,
-        ]
-        .into_iter()
-        .map(request_with_status)
-        .collect();
+        let requests = vec![
+            request(1, false, false),
+            request(2, true, false),
+            request(3, true, true),
+        ];
 
         let (queued, committed_in_place) = partition_queued(&requests);
-        let statuses = |group: &[&WithdrawalRequest]| {
-            group
-                .iter()
-                .map(|wr| wr.status.as_str())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(statuses(&queued), ["requested", "approved"]);
+        let ids = |group: &[&WithdrawalRequest]| group.iter().map(|wr| wr.id).collect::<Vec<_>>();
+        assert_eq!(ids(&queued), [requests[0].id, requests[1].id]);
+        assert_eq!(ids(&committed_in_place), [requests[2].id]);
         assert_eq!(
-            statuses(&committed_in_place),
-            ["processing", "signed", "confirmed"]
+            queued
+                .iter()
+                .map(|wr| queued_status(wr))
+                .collect::<Vec<_>>(),
+            ["requested", "approved"]
         );
     }
 }

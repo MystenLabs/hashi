@@ -141,22 +141,22 @@ const _: () = assert!(
 );
 
 /// Runtime-object cost model for `confirm_withdrawal`, with conservative
-/// upper-bound coefficients. `update_requests_confirmed` borrows each
-/// request in the `processed` ObjectBag (at most the `Field` wrapper plus
-/// the child object, 2 per request), and `mark_spent` borrows each input's
-/// `utxo_records` entry (1 per input; the record removal itself is deferred
-/// to `cleanup_spent_utxos`). `finalize_withdrawal` has the same
-/// per-request shape via `update_requests_signed` but no per-input loop, so
-/// confirm dominates it and is the only post-commit transaction modeled
-/// here.
+/// upper-bound coefficients. Confirm touches no request objects (the
+/// requests' move to the archive is deferred to the archival GC), and
+/// `mark_spent` borrows each input's `utxo_records` entry (1 per input; the
+/// record removal itself is deferred to `cleanup_spent_utxos`).
+/// `finalize_withdrawal` touches only the txn object, with no per-request
+/// or per-input loop, so confirm dominates it and is the only post-commit
+/// transaction modeled here.
 ///
 /// With these coefficients the commit model above binds at every request
 /// count that matters (3 objects per request versus 2), but confirm is
 /// checked alongside it so a future change to either cost cannot silently
 /// regress the other.
 const WITHDRAWAL_CONFIRM_FIXED_RUNTIME_OBJECTS: usize = 43;
-/// v2 confirm defers every request-status write to the archival GC, so its
-/// object cost no longer scales with the request count.
+/// v2 confirm defers the requests' archive move to the archival GC and
+/// writes nothing on the requests themselves, so its object cost does not
+/// scale with the request count.
 const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_REQUEST: usize = 0;
 const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 
@@ -164,7 +164,8 @@ const WITHDRAWAL_CONFIRM_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
 /// GC: ~3 objects per archived txn (hot-bag `Field` + child
 /// borrow, new cold-bag `Field`; the remove reuses the cache) and ~3 per
 /// request (the `requests` removal `Field` + child + the new `processed`
-/// `Field`; the pre-upgrade-leftover fallback path costs the same bound).
+/// `Field`; an already-archived or pre-upgrade-leftover request is skipped
+/// after the `requests` probe alone, under the same bound).
 /// Conservative upper bounds pending sui-replay measurement; the executor's
 /// greedy packer sizes each GC transaction from these.
 pub(crate) const WITHDRAWAL_ARCHIVE_FIXED_RUNTIME_OBJECTS: usize = 12;
@@ -173,9 +174,10 @@ pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 pub(crate) const WITHDRAWAL_ARCHIVE_RUNTIME_OBJECT_BUDGET: usize = WITHDRAWAL_RUNTIME_OBJECT_BUDGET;
 
 /// Cost of `finish_archive_withdrawal_txn`'s completeness walk: the walk
-/// probes only the `processed` bag, and its per-request ObjectBag borrow
-/// touches two runtime objects (the `Field` wrapper plus the child
-/// request), on top of the txn borrow.
+/// only probes the `processed` bag for each request (a `contains`, at most
+/// the `Field` wrapper) on top of the txn borrow. Kept at the earlier
+/// borrow-based bound of two objects per request (`Field` wrapper plus
+/// child) as a conservative margin pending sui-replay measurement.
 pub(crate) const WITHDRAWAL_ARCHIVE_FINISH_RUNTIME_OBJECTS_PER_REQUEST: usize = 2;
 
 // A txn whose requests exceed one GC transaction archives through the
@@ -440,7 +442,13 @@ impl Hashi {
                     approval.request_id
                 ))
             })?;
-        if request.status.is_approved() {
+        if request.is_committed() {
+            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+                "Withdrawal request {} is already committed to a withdrawal transaction",
+                approval.request_id
+            )));
+        }
+        if request.is_approved() {
             return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
                 "Withdrawal request {} is already approved",
                 approval.request_id
@@ -497,7 +505,8 @@ impl Hashi {
             &approval.outputs,
         )?;
 
-        // 1. Verify each request_id exists and is approved
+        // 1. Verify each request_id exists, is approved, and is not already
+        //    committed into another withdrawal txn.
         let requests: Vec<WithdrawalRequest> = approval
             .request_ids
             .iter()
@@ -507,7 +516,11 @@ impl Hashi {
                     .withdrawal_request(id)
                     .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
                 anyhow::ensure!(
-                    request.status.is_approved(),
+                    !request.is_committed(),
+                    "Withdrawal request {id} is already committed to a withdrawal transaction"
+                );
+                anyhow::ensure!(
+                    request.is_approved(),
                     "Withdrawal request {id} has not been approved"
                 );
                 Ok(request)

@@ -175,7 +175,7 @@ entry fun commit_withdrawal_tx(
         hashi.bitcoin_mut().utxo_pool_mut().lock(utxo.id(), withdrawal_txn_id);
     });
 
-    // Commit requests: drain BTC, set status + withdrawal_txn_id, move to processed.
+    // Commit requests in place: drain BTC and link each to this transaction.
     let btc_to_burn = hashi.bitcoin_mut().withdrawal_queue_mut().commit_requests(&withdrawal_txn);
 
     // Burn BTC balance
@@ -249,11 +249,12 @@ entry fun finalize_withdrawal(
         guardian_signatures,
     };
     hashi.verify(hashi::intent::withdrawal_signed(), approval, cert);
-    let WithdrawalSignedMessage { request_ids, guardian_signatures, .. } = approval;
+    let WithdrawalSignedMessage { guardian_signatures, .. } = approval;
 
-    let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
-    queue.finalize_withdrawal_txn(withdrawal_id, guardian_signatures, clock);
-    queue.update_requests_signed(&request_ids);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .finalize_withdrawal_txn(withdrawal_id, guardian_signatures, clock);
 }
 
 entry fun confirm_withdrawal(
@@ -283,10 +284,10 @@ entry fun confirm_withdrawal(
     );
 
     // Copy the input/change data out of a short borrow; the txn itself stays
-    // in the hot bag. Its move to `confirmed_txns` — and the requests' status
-    // flip and move to `processed` — are deferred to
-    // `archive_confirmed_withdrawals`, keeping this transaction's runtime
-    // object count independent of the request count.
+    // in the hot bag. Its move to `confirmed_txns` — and the requests' move
+    // to `processed` — are deferred to `archive_confirmed_withdrawals`,
+    // keeping this transaction's runtime object count independent of the
+    // request count.
     let (inputs, change_ids) = {
         let txn = hashi.bitcoin().withdrawal_queue().borrow_withdrawal_txn(withdrawal_id);
         (*txn.withdrawal_txn_inputs(), txn.change_utxo_ids())
@@ -315,8 +316,7 @@ entry fun confirm_withdrawal(
 
 /// Deferred archival for confirmed withdrawals: move each transaction from
 /// `withdrawal_txns` to `confirmed_txns` and its requests from `requests` to
-/// `processed` (setting status Confirmed). Idempotent per id, so callers may
-/// batch and retry freely.
+/// `processed`. Idempotent per id, so callers may batch and retry freely.
 ///
 /// Carries no committee cert: every write is derivable from already-certified
 /// state (`confirmed_timestamp_ms` is only ever set under a confirmation
@@ -447,10 +447,10 @@ public fun request_withdrawal(
 
 /// Cancel a pending withdrawal request and return the stored BTC to the requester.
 ///
-/// Cancellation is allowed while the request is in the `Requested` or `Approved`
-/// state (i.e. still in the active requests bag). Once the committee commits the
-/// request to a `WithdrawalTransaction` it moves to `Processing` in the processed
-/// bag and its BTC is burned — cancellation is no longer possible.
+/// Cancellation is allowed while the request awaits approval or commitment.
+/// Once the committee commits the request to a `WithdrawalTransaction` its BTC
+/// is burned and the request is linked to that transaction — cancellation is
+/// no longer possible.
 public fun cancel_withdrawal(
     hashi: &mut Hashi,
     request_id: address,

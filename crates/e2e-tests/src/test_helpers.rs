@@ -20,7 +20,6 @@ use hashi_types::move_types::DepositConfirmed;
 use hashi_types::move_types::ProtocolType;
 use hashi_types::move_types::StampedDealerSubmissionV1;
 use hashi_types::move_types::WithdrawalConfirmed;
-use hashi_types::move_types::WithdrawalStatus;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -408,8 +407,8 @@ pub async fn wait_for_spent_utxo_cleanup(networks: &TestNetworks, timeout: Durat
 /// Wait until every node's object mirror shows the deferred withdrawal
 /// archival completed: no withdrawal transaction with
 /// `confirmed_timestamp_ms` set is still sitting in the hot
-/// `withdrawal_txns` bag, and no request in a post-commit status
-/// (Processing/Signed/Confirmed) is lingering in the hot `requests` bag.
+/// `withdrawal_txns` bag, and no committed request (linked to a withdrawal
+/// txn) is lingering in the hot `requests` bag.
 ///
 /// Under the v2 package `confirm_withdrawal` leaves the transaction (and
 /// its requests) in the hot bags; the leader's deferred-archival GC
@@ -440,14 +439,7 @@ pub async fn wait_for_withdrawal_archival(
                     let terminal_requests = state
                         .withdrawal_requests()
                         .iter()
-                        .filter(|request| {
-                            matches!(
-                                request.status,
-                                WithdrawalStatus::Processing
-                                    | WithdrawalStatus::Signed
-                                    | WithdrawalStatus::Confirmed
-                            )
-                        })
+                        .filter(|request| request.is_committed())
                         .count();
                     (confirmed_txns > 0 || terminal_requests > 0).then_some((
                         index,
