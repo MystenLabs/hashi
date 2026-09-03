@@ -500,7 +500,9 @@ impl CommitteeSet {
 
     pub fn remove_validator(&mut self, validator: &Address) {
         if let Some(info) = self.members.remove(validator) {
-            self.resigned_at_removal.insert(*validator, info.resigned);
+            if info.resigned {
+                self.resigned_at_removal.insert(*validator, true);
+            }
             if let Some(tls_public_key) = &info.tls_public_key {
                 self.tls_public_key_to_address
                     .remove(tls_public_key.as_bytes());

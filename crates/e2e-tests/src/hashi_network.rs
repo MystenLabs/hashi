@@ -740,7 +740,7 @@ async fn register_onchain(
         executor = executor.with_onchain_state(onchain_state);
     }
     executor
-        .execute_register_or_update_validator(config, None, None, None)
+        .execute_register_or_update_validator(config, None, None, None, true)
         .await
         .map(|_| ())
 }

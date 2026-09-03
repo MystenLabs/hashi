@@ -1033,11 +1033,24 @@ impl MpcManager {
         // key shares and cannot generate valid rotation messages.
         let has_previous_shares = !previous.key_shares.shares.is_empty();
         if is_member_of_previous_committee && !has_previous_shares {
-            tracing::warn!(
-                "run_key_rotation: in the previous committee but holding no shares to reshare; \
-                 this node's previous-epoch weight will not reach the rotation"
-            );
-            metrics.mpc_rotation_previous_shares_missing_total.inc();
+            let owed_previous_shares = {
+                let mgr = mpc_manager.read().unwrap();
+                let address = mgr.address;
+                mgr.previous_share_ids_of(&address)
+                    .is_ok_and(|ids| !ids.is_empty())
+            };
+            if owed_previous_shares {
+                tracing::warn!(
+                    "run_key_rotation: in the previous committee but holding no shares to \
+                     reshare; this node's previous-epoch weight will not reach the rotation"
+                );
+                metrics.mpc_rotation_previous_shares_missing_total.inc();
+            } else {
+                tracing::info!(
+                    "run_key_rotation: in the previous committee with no reduced weight; \
+                     nothing to reshare"
+                );
+            }
         }
         let should_deal = is_member_of_previous_committee && has_previous_shares && {
             let certified = ordered_broadcast_channel.certified_dealers().await;
@@ -1880,7 +1893,7 @@ impl MpcManager {
         if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
             let rotation_cert = aggregator
                 .finish()
-                .expect("signatures should always be valid");
+                .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
             let cert = CertificateV1::Rotation(rotation_cert);
             publish_dealer_cert(
                 ordered_broadcast_channel,

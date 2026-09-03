@@ -1284,27 +1284,18 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Register and/or update validator metadata on-chain.
-    ///
-    /// Delegates to [`build_register_or_update_validator_tx`] to determine which
-    /// move calls are needed, then signs and executes the resulting transaction.
-    /// Returns `Ok(false)` if nothing needed to be updated.
     #[tracing::instrument(level = "info", skip_all)]
-    /// Returns the checkpoint the registration transaction landed in, or
-    /// `None` if the on-chain record was already up to date and no
-    /// transaction was needed. Callers that follow up with a mirror read
-    /// (the rejoin path) wait for the watermark to pass the returned
-    /// checkpoint first.
     pub async fn execute_register_or_update_validator(
         &mut self,
         config: &Config,
         operator_address: Option<Address>,
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
+        allow_first_registration: bool,
     ) -> anyhow::Result<Option<u64>> {
         let sender = self.signer.verifying_key().derive_address();
         let call_package = self.active_call_package_id();
-        let transaction = build_register_or_update_validator_tx(
+        let transaction = build_validator_tx(
             &mut self.client,
             &self.hashi_ids,
             call_package,
@@ -1313,6 +1304,7 @@ impl SuiTxExecutor {
             Some(sender),
             next_epoch_encryption_public_key,
             next_epoch_signing_key,
+            allow_first_registration,
         )
         .await?;
 
@@ -2487,15 +2479,6 @@ pub fn build_cancel_withdrawal(
     builder
 }
 
-/// Build a transaction to register and/or update validator metadata.
-///
-/// Fetches the validator's current onchain state via `client`. If the validator is not yet
-/// registered, includes a `validator::register` call and sets the sender to `validator_address`.
-/// If already registered, only includes update calls for metadata that differs from what is
-/// currently onchain. Returns `None` if no changes are needed.
-///
-/// When not registering, the sender is set to `sender` if provided (typically the operator
-/// address), otherwise falls back to `validator_address`.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_register_or_update_validator_tx(
     client: &mut Client,
@@ -2506,6 +2489,32 @@ pub async fn build_register_or_update_validator_tx(
     sender: Option<Address>,
     next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
     next_epoch_signing_key: Option<&Bls12381PrivateKey>,
+) -> anyhow::Result<Option<Transaction>> {
+    build_validator_tx(
+        client,
+        hashi_ids,
+        call_package,
+        config,
+        operator_address,
+        sender,
+        next_epoch_encryption_public_key,
+        next_epoch_signing_key,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_validator_tx(
+    client: &mut Client,
+    hashi_ids: &HashiIds,
+    call_package: Address,
+    config: &Config,
+    operator_address: Option<Address>,
+    sender: Option<Address>,
+    next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+    next_epoch_signing_key: Option<&Bls12381PrivateKey>,
+    allow_first_registration: bool,
 ) -> anyhow::Result<Option<Transaction>> {
     let validator_address = config.validator_address()?;
 
@@ -2526,20 +2535,22 @@ pub async fn build_register_or_update_validator_tx(
         hashi_object.object().contents().deserialize()?;
     let members_id = hashi_move.committees.members.id;
 
-    // Try to fetch existing member info. A missing dynamic field means the validator
-    // is not yet registered.
     let onchain_member = onchain::scrape_member_info(client.clone(), members_id, validator_address)
         .await
         .ok();
     let registering = onchain_member.is_none();
+    if registering && !allow_first_registration {
+        anyhow::bail!(
+            "validator {validator_address} has no readable on-chain registration, and a node \
+             only registers itself before genesis. Run `hashi register` if it is meant to join."
+        );
+    }
     if registering {
         tracing::info!(
             %validator_address,
             "Validator not found on-chain, will register"
         );
     } else {
-        // Debug, not info: this runs on every periodic metadata check, and
-        // most checks send nothing. Callers log the actual outcome.
         tracing::debug!(
             %validator_address,
             "Validator already registered; checking for stale metadata"
