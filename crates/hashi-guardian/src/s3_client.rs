@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::MAX_S3_WRITE_FAILURE_INTERVAL;
 use anyhow::Context;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::provider::SharedCredentialsProvider;
@@ -32,10 +31,9 @@ use serde::Serialize;
 use tracing::info;
 use tracing::warn;
 
-/// Maximum attempts the AWS SDK makes before returning one write failure.
+/// Maximum attempts the AWS SDK makes for reads and control-plane operations.
+/// Log PUTs override this because the Guardian log writer owns their retries.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
-/// Delay between application-level retries of an immutable S3 log write.
-const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 // TODO(testnet-wipe): Remove this escape hatch after the planned testnet wipe.
 /// Temporary testnet escape hatch for logs whose legacy seven-day locks expired.
 const SKIP_S3_OBJECT_LOCK_CHECK_ENV: &str = "HASHI_SKIP_S3_OBJECT_LOCK_CHECK";
@@ -169,51 +167,12 @@ impl GuardianS3Client {
     // S3 Write
     // ========================================================================
 
-    /// Attempt one immutable log write, relying on the AWS SDK retry policy.
-    pub async fn write_log_record(&self, log: LogRecord) -> GuardianResult<()> {
-        let key = log.object_key().to_string();
-        let object_lock_duration = self.object_lock_duration(&log);
-        self.write_at_key(&key, &log, object_lock_duration).await
-    }
-
-    /// Retry an immutable log write through the grace period, then abort.
-    /// State-changing RPCs call this from their root-owned task.
-    pub async fn write_log_record_or_abort(&self, log: LogRecord) -> GuardianResult<()> {
-        self.write_log_record_or_abort_inner(
-            log,
-            MAX_S3_WRITE_FAILURE_INTERVAL,
-            S3_WRITE_RETRY_INTERVAL,
-        )
-        .await
-    }
-
-    async fn write_log_record_or_abort_inner(
-        &self,
-        log: LogRecord,
-        max_failure_interval: Duration,
-        retry_interval: Duration,
-    ) -> GuardianResult<()> {
-        let object_lock_duration = self.object_lock_duration(&log);
+    /// Attempt one immutable log PUT. The Guardian log writer owns retries and
+    /// deadlines, so SDK retries are disabled for this operation.
+    pub(crate) async fn write_log_record_once(&self, log: &LogRecord) -> GuardianResult<()> {
         let key = log.object_key();
-        let write_until_success = async {
-            loop {
-                match self.write_at_key(key, &log, object_lock_duration).await {
-                    Ok(()) => return Ok(()),
-                    Err(error) => {
-                        warn!(%key, ?error, "S3 log write failed; retrying");
-                        tokio::time::sleep(retry_interval).await;
-                    }
-                }
-            }
-        };
-
-        match tokio::time::timeout(max_failure_interval, write_until_success).await {
-            Ok(result) => result,
-            Err(_) => panic!(
-                "S3 log {} was not written within {:?}",
-                key, max_failure_interval
-            ),
-        }
+        let object_lock_duration = self.object_lock_duration(log);
+        self.write_at_key_once(key, log, object_lock_duration).await
     }
 
     fn object_lock_duration(&self, log: &LogRecord) -> Duration {
@@ -223,7 +182,7 @@ impl GuardianS3Client {
     /// Write a value to S3 at an explicit key.
     ///
     /// This is intended for ordered log streams where the caller determines the key.
-    async fn write_at_key<T: Serialize>(
+    async fn write_at_key_once<T: Serialize>(
         &self,
         key: &str,
         value: &T,
@@ -252,6 +211,10 @@ impl GuardianS3Client {
             .object_lock_retain_until_date(DateTime::from(expiry_time))
             .if_none_match("*")
             .body(ByteStream::from(body.clone()))
+            .customize()
+            .config_override(
+                aws_sdk_s3::config::Builder::new().retry_config(RetryConfig::disabled()),
+            )
             .send()
             .await;
         if let Err(e) = result {
@@ -786,7 +749,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
         logger
-            .write_at_key(
+            .write_at_key_once(
                 "init/session/01-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
@@ -823,7 +786,7 @@ mod tests {
         );
         let logger = mk_logger_with_client(client);
         logger
-            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .write_at_key_once("key", &TestPayload { a: 1 }, Duration::from_mins(5))
             .await
             .unwrap();
 
@@ -855,7 +818,7 @@ mod tests {
         );
         let logger = mk_logger_with_client(client);
         logger
-            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .write_at_key_once("key", &TestPayload { a: 1 }, Duration::from_mins(5))
             .await
             .unwrap();
     }
@@ -884,74 +847,13 @@ mod tests {
         );
         let logger = mk_logger_with_client(client);
         logger
-            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .write_at_key_once("key", &TestPayload { a: 1 }, Duration::from_mins(5))
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn test_log_writer_retries_beyond_sdk_attempts() {
-        let put_flaky = mock!(Client::put_object)
-            .match_requests(|req| req.bucket() == Some("bucket"))
-            .sequence()
-            .http_status(500, None)
-            .times(5)
-            .output(|| PutObjectOutput::builder().build())
-            .build();
-        let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky], |b| b
-            .retry_config(RetryConfig::standard().with_max_attempts(1)));
-        let logger = mk_logger_with_client(client);
-        let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
-        let log = LogRecord::new(
-            "session".into(),
-            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
-            &signing_key,
-        );
-
-        // The generous deadline avoids CI timing sensitivity without slowing success;
-        // zero delay keeps the application-level retry sequence immediate.
-        logger
-            .write_log_record_or_abort_inner(log, Duration::from_secs(10), Duration::ZERO)
-            .await
-            .unwrap();
-        assert_eq!(put_flaky.num_calls(), 6);
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "was not written within")]
-    async fn test_log_writer_panics_after_failure_interval() {
-        let put_fail = mock!(Client::put_object)
-            .match_requests(|req| req.bucket() == Some("bucket"))
-            .sequence()
-            .http_status(500, None)
-            .times(100)
-            .build();
-        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_fail], |builder| {
-            builder.retry_config(RetryConfig::standard().with_max_attempts(1))
-        });
-        let logger = mk_logger_with_client(client);
-        let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
-        let log = LogRecord::new(
-            "session".into(),
-            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
-            &signing_key,
-        );
-
-        // The first PUT runs immediately, then retries every 5ms until the 50ms
-        // deadline panics (roughly 10 attempts; scheduling makes the count inexact).
-        logger
-            .write_log_record_or_abort_inner(
-                log,
-                Duration::from_millis(50),
-                Duration::from_millis(5),
-            )
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_write_retries_on_transient_failures() {
-        // Two transient failures followed by success.
+    async fn log_put_disables_sdk_retries() {
         let put_flaky = mock!(Client::put_object)
             .match_requests(|req| req.bucket() == Some("bucket"))
             .sequence()
@@ -960,21 +862,23 @@ mod tests {
             .output(|| PutObjectOutput::builder().build())
             .build();
 
-        // Override retry attempts on the test client so the operation has enough attempts
-        // to reach the success response.
+        // The client would retry three times, but log PUTs override that policy
+        // so the serialized writer is the only retry controller.
         let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky], |b| b
             .retry_config(RetryConfig::standard().with_max_attempts(3)));
         let logger = mk_logger_with_client(client);
         let object_lock_duration = Duration::from_mins(5);
-        logger
-            .write_at_key(
+        let error = logger
+            .write_at_key_once(
                 "init/session/01-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )
             .await
-            .unwrap();
-        assert_eq!(put_flaky.num_calls(), 3);
+            .expect_err("one PUT failure must be returned to the log writer");
+
+        assert!(matches!(error, S3Error(_)));
+        assert_eq!(put_flaky.num_calls(), 1);
     }
 
     #[test]

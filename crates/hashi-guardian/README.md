@@ -15,6 +15,54 @@ V2 for callers. In particular, V1 KP-share logs carry one fingerprint and
 ciphertext per share, while V2 carries a fingerprint-to-ciphertext map per
 share so one KP can rotate between multiple accepted certificates.
 
+## Heartbeat write fencing
+
+Every Guardian S3 log write is serialized. After the first successful
+withdraw-mode heartbeat, the writer allows another attempt only when its full
+timeout fits before the latest successful heartbeat plus the reader's quiet
+period minus the clock-skew budget. Successful non-heartbeat writes do not
+extend that deadline.
+
+The writer captures a monotonic timestamp immediately before constructing the
+signed heartbeat record and renews its local deadline only after S3 confirms
+the write. Readers independently apply the same quiet period to the heartbeat's
+signed wall-clock timestamp. The fencing argument makes these assumptions:
+
+- **Assumption 1: clock skew does not make the activating reader's quiet-period
+  boundary occur before the writer's fence.**
+  - **What it is:** The clocks need not be identical. The safety requirement is
+    that the reader must not declare the prior session quiet while the writer is
+    still allowed to make a write. The writer places its fence
+    `ACTIVATING_READER_CLOCK_SKEW_BUDGET` before the reader's quiet-period
+    boundary. Reader-ahead skew and any post-deadline S3 durability delay share
+    that margin; their combined duration must not exhaust it.
+  - **Where we make it:** `LogWriter::write` captures the monotonic renewal time
+    immediately before `LogRecord::new` captures the signed wall-clock time, and
+    `LatestHeartbeatTime` subtracts the skew budget from the writer's fence.
+    Heartbeat readers derive inactivity from the signed timestamp and the full
+    quiet period.
+- **Assumption 2: monotonic time advances across platform suspension.**
+  - **What it is:** A paused enclave cannot resume with its local write deadline
+    still artificially in the future.
+  - **Where we make it:** `LatestHeartbeatTime` and all writer deadlines use
+    `tokio::time::Instant`; the fencing proof requires this clock to advance
+    while the platform is suspended.
+- **Assumption 3: suspension does not resume execution within one future poll.**
+  - **What it is:** Execution does not pause between a deadline check and
+    network transmission, or between the final time check and result
+    propagation.
+  - **Where we make it:** `complete_before_attempt_deadline` checks the timer
+    before polling the S3 future and checks time again after that future
+    completes, but cannot inspect execution inside one poll.
+- **Assumption 4: S3 does not make a timed-out request durable arbitrarily
+  later.**
+  - **What it is:** Cancelling a request future cannot retract a PUT already
+    accepted by S3. If that PUT becomes durable after its local deadline, the
+    delay plus any reader-ahead clock skew remains within
+    `ACTIVATING_READER_CLOCK_SKEW_BUDGET`.
+  - **Where we make it:** `complete_before_attempt_deadline` drops the S3 future
+    when its timer wins.
+
 ## S3 log key format
 
 Canonical key layout:
