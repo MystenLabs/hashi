@@ -50,7 +50,6 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         })?;
     let new_fingerprint = new_cert.fingerprint().to_hex();
     let expected_certs_roster = certs_roster
-        .clone()
         .replace_cert(&signing_fingerprint, new_cert.clone())
         .context("replace the signing cert in the expected KP certificate roster")?;
 

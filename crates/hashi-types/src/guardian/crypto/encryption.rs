@@ -98,7 +98,7 @@ impl KpCertRoster {
     /// Replace one certificate while preserving the KP/share ordering and
     /// global fingerprint-uniqueness invariant.
     pub fn replace_cert(
-        self,
+        &self,
         current_fingerprint: &Fingerprint,
         new_cert: PgpPublicCert,
     ) -> GuardianResult<Self> {
@@ -110,7 +110,7 @@ impl KpCertRoster {
             )));
         }
 
-        let mut kp_certs = self.0;
+        let mut kp_certs = self.0.clone();
         let cert = kp_certs
             .iter_mut()
             .find(|cert| cert.fingerprint() == *current_fingerprint)
@@ -719,7 +719,6 @@ mod tests {
         assert_eq!(roster.cert_for_fingerprint(&old.fingerprint()), Some(&old));
 
         let rotated = roster
-            .clone()
             .replace_cert(&old.fingerprint(), replacement.clone())
             .unwrap();
         assert_eq!(
@@ -736,10 +735,7 @@ mod tests {
             "replacing share 1 must leave share 2 unchanged"
         );
 
-        let err = roster
-            .clone()
-            .replace_cert(&old.fingerprint(), other)
-            .unwrap_err();
+        let err = roster.replace_cert(&old.fingerprint(), other).unwrap_err();
         assert!(format!("{err}").contains("duplicate"), "{err}");
 
         let err = roster.replace_cert(&old.fingerprint(), old).unwrap_err();

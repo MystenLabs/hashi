@@ -54,8 +54,11 @@ impl Serialize for VersionedLogMessage {
     }
 }
 
-/// Schema-version-1 log messages. KP-share state uses the same scalar-recipient
-/// payload as V2 to preserve deployed signed JSON bytes.
+/// Schema-version-1 log messages.
+///
+/// V1 and V2 intentionally have the same message shape: the signed sibling
+/// `schema_version` distinguishes records, while separate types force readers
+/// to handle each deployed version explicitly.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),

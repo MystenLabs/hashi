@@ -73,21 +73,6 @@ async fn apply_cert_rotation(
     let latest_instance = latest_state.secret_sharing_instance;
     let encrypted_shares = latest_state.encrypted_shares;
     encrypted_shares.validate_share_assignment(&signer_fingerprint, share_id)?;
-    if new_recipient_fingerprint == signer_fingerprint {
-        return Err(InvalidInputs(format!(
-            "replacement KP fingerprint {new_recipient_fingerprint} must differ from the current \
-             fingerprint"
-        )));
-    }
-    if encrypted_shares
-        .find_by_fingerprint(&new_recipient_fingerprint)
-        .is_some()
-    {
-        return Err(InvalidInputs(format!(
-            "new KP fingerprint {new_recipient_fingerprint} is already present in the encrypted \
-             share roster"
-        )));
-    }
     let next_cert_seq = latest_state
         .cert_seq
         .checked_add(1)
