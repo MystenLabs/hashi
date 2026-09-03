@@ -155,6 +155,34 @@ pub async fn fetch_initial_shared_version(
     Ok(response.object().owner().version())
 }
 
+/// Which on-chain proposal bag holds a proposal. Executed proposals are not
+/// deleted: `proposal::execute` moves them from the active bag to the
+/// executed bag, where they stay for inspection, so a lookup that only asks
+/// "does it exist" cannot tell an open proposal from a finished one.
+#[derive(Clone, Debug)]
+pub enum ProposalLocation {
+    Active(Proposal),
+    Executed(Proposal),
+    /// In neither bag: the id is wrong, or the proposal expired and was
+    /// deleted.
+    Missing,
+}
+
+/// Locate `proposal_id` in the scraped active and executed bags.
+pub fn locate_proposal(
+    active: &[Proposal],
+    executed: &[Proposal],
+    proposal_id: &Address,
+) -> ProposalLocation {
+    if let Some(proposal) = active.iter().find(|p| p.id == *proposal_id) {
+        return ProposalLocation::Active(proposal.clone());
+    }
+    if let Some(proposal) = executed.iter().find(|p| p.id == *proposal_id) {
+        return ProposalLocation::Executed(proposal.clone());
+    }
+    ProposalLocation::Missing
+}
+
 impl HashiClient {
     /// Client for governance and config commands. Skips the Bitcoin
     /// collections, which none of them read.
@@ -302,6 +330,21 @@ impl HashiClient {
     /// Fetch a specific proposal by ID
     pub fn fetch_proposal(&self, proposal_id: &Address) -> Option<Proposal> {
         self.onchain_state.proposal(proposal_id)
+    }
+
+    /// Fetch all executed (archived) proposals
+    pub fn fetch_executed_proposals(&self) -> Vec<Proposal> {
+        self.onchain_state.executed_proposals()
+    }
+
+    /// Where `proposal_id` sits in the two on-chain proposal bags, as of the
+    /// scrape this client was built from.
+    pub fn locate_proposal(&self, proposal_id: &Address) -> ProposalLocation {
+        locate_proposal(
+            &self.fetch_proposals(),
+            &self.fetch_executed_proposals(),
+            proposal_id,
+        )
     }
 
     /// Fetch committee members for the current epoch
