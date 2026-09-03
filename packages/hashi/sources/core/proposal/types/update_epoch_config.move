@@ -7,9 +7,11 @@
 /// current epoch's committee, which keeps reading its own pinned copy.
 ///
 /// Every entry must refer to an existing key with a matching value type and
-/// pass `mpc_config::is_valid_value` (the MPC parameters live here), so
-/// governance can tune parameters but never introduce unknown keys or change
-/// an entry's type. The keys the package pins for the deployment's lifetime
+/// pass `mpc_config::is_valid_value` (the MPC parameters live here), and the
+/// store the proposal leaves behind must pass `mpc_config::is_consistent`, so
+/// governance can tune parameters but never introduce unknown keys, change
+/// an entry's type, or leave the MPC parameters in a state `start_reconfig`
+/// would have to repair. The keys the package pins for the deployment's lifetime
 /// are refused here as on `update_config`. New keys go through `add_config`.
 module hashi::update_epoch_config;
 
@@ -33,6 +35,10 @@ const ENoEntriesProvided: vector<u8> =
 
 #[error(code = 2)]
 const EProtectedConfigKey: vector<u8> = b"Config key cannot be changed through UpdateEpochConfig";
+
+#[error(code = 3)]
+const EInconsistentMpcConfig: vector<u8> =
+    b"mpc_weight_reduction_allowed_delta must stay below mpc_max_faulty_in_basis_points";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -81,4 +87,7 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
         );
         hashi.epoch_config_mut().upsert(*key.as_bytes(), value);
     });
+    // Judged on the resulting store so both coupled keys can move in one
+    // proposal regardless of entry order.
+    assert!(mpc_config::is_consistent(hashi.epoch_config()), EInconsistentMpcConfig);
 }

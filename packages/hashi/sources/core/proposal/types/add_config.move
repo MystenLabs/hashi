@@ -38,6 +38,10 @@ const EInvalidConfigEntry: vector<u8> = b"Proposed entry is not allowed in the e
 #[error(code = 2)]
 const ENoEntriesProvided: vector<u8> = b"AddConfig proposal must contain at least one entry";
 
+#[error(code = 4)]
+const EInconsistentMpcConfig: vector<u8> =
+    b"mpc_weight_reduction_allowed_delta must stay below mpc_max_faulty_in_basis_points";
+
 #[error(code = 3)]
 const EProtectedConfigKey: vector<u8> = b"Config key cannot be introduced through AddConfig";
 
@@ -89,4 +93,7 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
         assert!(!epoch || mpc_config::is_valid_value(&key, &value), EInvalidConfigEntry);
         store.upsert(*key.as_bytes(), value);
     });
+    if (epoch) {
+        assert!(mpc_config::is_consistent(hashi.epoch_config()), EInconsistentMpcConfig);
+    };
 }

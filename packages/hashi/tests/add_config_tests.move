@@ -55,7 +55,7 @@ fun test_add_instant_key_is_readable_immediately_and_never_pinned() {
 
     assert!(hashi.config().get(NEW_KEY).as_u64() == 64);
     assert!(!hashi.epoch_config().contains(NEW_KEY));
-    let pinned = mpc_config::pin(hashi.epoch_config_mut());
+    let pinned = *hashi.epoch_config();
     assert!(!pinned.contains(NEW_KEY));
 
     clock::destroy_for_testing(clock);
@@ -73,7 +73,7 @@ fun test_add_epoch_key_rides_the_wholesale_pin() {
     assert!(hashi.epoch_config().get(NEW_KEY).as_u64() == 64);
     assert!(!hashi.config().contains(NEW_KEY));
 
-    let pinned = mpc_config::pin(hashi.epoch_config_mut());
+    let pinned = *hashi.epoch_config();
     assert!(pinned.get(NEW_KEY).as_u64() == 64);
     // The MPC parameters are still in the snapshot alongside the new key.
     assert!(mpc_config::max_faulty_in_basis_points(&pinned) == 3333);

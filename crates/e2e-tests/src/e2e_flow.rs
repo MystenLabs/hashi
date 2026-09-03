@@ -2706,7 +2706,7 @@ mod tests {
         )
         .await?;
 
-        // Add one key to each store. The epoch key rides the wholesale pin
+        // Add one key to each store. The epoch key rides the verbatim copy
         // into the next committee; the instant key applies at once and never
         // reaches a committee.
         {

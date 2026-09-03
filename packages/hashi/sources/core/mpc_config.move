@@ -86,51 +86,6 @@ public(package) fun nonce_accumulation_window_ms(config: &Config): u64 {
         .destroy_or!(DEFAULT_NONCE_ACCUMULATION_WINDOW_MS)
 }
 
-public(package) fun seed_absent_defaults(config: &mut Config) {
-    seed_if_absent(
-        config,
-        KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
-        DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA,
-    );
-    seed_if_absent(config, KEY_MAX_FAULTY_IN_BASIS_POINTS, DEFAULT_MAX_FAULTY_IN_BASIS_POINTS);
-    seed_if_absent(config, KEY_NONCE_GENERATION_PROTOCOL, VANILLA_NONCE_GENERATION_PROTOCOL);
-    seed_if_absent(
-        config,
-        KEY_NONCE_ACCUMULATION_WINDOW_MS,
-        DEFAULT_NONCE_ACCUMULATION_WINDOW_MS,
-    );
-}
-
-fun reset_if_out_of_range(config: &mut Config, key: vector<u8>, lo: u64, hi: u64, default: u64) {
-    config.try_get(key).map!(|v| v.as_u64()).do!(|value| if (value < lo || value > hi) {
-        config.upsert(key, config_value::new_u64(default));
-    });
-}
-
-fun seed_if_absent(config: &mut Config, key: vector<u8>, default: u64) {
-    if (!config.contains(key)) {
-        config.upsert(key, config_value::new_u64(default));
-    };
-}
-
-fun repair_out_of_range(config: &mut Config) {
-    reset_if_out_of_range(
-        config,
-        KEY_MAX_FAULTY_IN_BASIS_POINTS,
-        1,
-        MAX_FAULTY_BPS,
-        DEFAULT_MAX_FAULTY_IN_BASIS_POINTS,
-    );
-    let max_delta = max_faulty_in_basis_points(config) - 1;
-    clamp_at_most(config, KEY_WEIGHT_REDUCTION_ALLOWED_DELTA, max_delta);
-}
-
-fun clamp_at_most(config: &mut Config, key: vector<u8>, hi: u64) {
-    config.try_get(key).map!(|v| v.as_u64()).do!(|value| if (value > hi) {
-        config.upsert(key, config_value::new_u64(hi));
-    });
-}
-
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(
         KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
@@ -150,15 +105,13 @@ public(package) fun init_defaults(config: &mut Config) {
     );
 }
 
-/// Normalize the MPC parameters in the epoch config (seed absent keys, repair
-/// out-of-range values in place) and return the whole store for pinning onto
-/// the committee being formed. Every epoch-scoped key, MPC or
-/// governance-added, is copied wholesale so nodes read one immutable snapshot
-/// per epoch.
-public(package) fun pin(epoch_config: &mut Config): Config {
-    seed_absent_defaults(epoch_config);
-    repair_out_of_range(epoch_config);
-    *epoch_config
+/// The one rule the per-entry range checks cannot see: the weight-reduction
+/// delta must stay below max-faulty. The proposals that write the epoch
+/// config check it on the store they leave behind, so a joint update of both
+/// keys is judged on its result rather than on entry order, and
+/// `start_reconfig` copies the store verbatim with nothing left to repair.
+public(package) fun is_consistent(config: &Config): bool {
+    weight_reduction_allowed_delta(config) < max_faulty_in_basis_points(config)
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~

@@ -261,6 +261,8 @@ fun test_reject_max_faulty_zero() {
     reject_single(mpc_max_faulty_key(), config_value::new_u64(0));
 }
 
+/// Max-faulty at its cap and the delta one below it: the largest pair the
+/// per-entry ranges and the cross-key rule both accept.
 #[test]
 fun test_accept_upper_boundary_values() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
@@ -269,11 +271,11 @@ fun test_accept_upper_boundary_values() {
 
     let mut entries = vec_map::empty();
     entries.insert(mpc_max_faulty_key(), config_value::new_u64(MAX_FAULTY_BPS));
-    entries.insert(mpc_allowed_delta_key(), config_value::new_u64(MAX_BPS));
+    entries.insert(mpc_allowed_delta_key(), config_value::new_u64(MAX_FAULTY_BPS - 1));
     propose_and_execute(&mut hashi, entries, &clock, ctx);
 
     assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == MAX_FAULTY_BPS);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == MAX_BPS);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == MAX_FAULTY_BPS - 1);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -314,61 +316,63 @@ fun test_reject_removed_threshold_key_even_when_present() {
     std::unit_test::destroy(hashi);
 }
 
+/// The per-entry range checks cannot see the cross-key rule (the delta must
+/// stay below max-faulty), so it is enforced on the store a proposal leaves
+/// behind: lowering max-faulty to the current delta is refused.
 #[test]
-fun test_out_of_range_max_faulty_is_repaired_in_place_at_reconfig() {
+#[expected_failure(abort_code = update_epoch_config::EInconsistentMpcConfig)]
+fun test_reject_max_faulty_at_or_below_delta() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == 800);
 
-    hashi.epoch_config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(5000));
-    let _ = mpc_config::pin(hashi.epoch_config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == MAX_FAULTY_BPS);
-    let pinned = mpc_config::pin(hashi.epoch_config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(&pinned) == MAX_FAULTY_BPS);
+    let mut entries = vec_map::empty();
+    entries.insert(b"mpc_max_faulty_in_basis_points".to_string(), config_value::new_u64(800));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
 
-    hashi.epoch_config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(0));
-    let _ = mpc_config::pin(hashi.epoch_config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == DEFAULT_MAX_FAULTY_BPS);
-
-    hashi.epoch_config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(2000));
-    let _ = mpc_config::pin(hashi.epoch_config_mut());
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == 2000);
-
+    clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
 
 #[test]
-fun test_delta_is_clamped_below_max_faulty_at_reconfig() {
+#[expected_failure(abort_code = update_epoch_config::EInconsistentMpcConfig)]
+fun test_reject_delta_at_or_above_max_faulty() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
-
+    let clock = clock::create_for_testing(ctx);
     assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == DEFAULT_MAX_FAULTY_BPS);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == 800);
-    let _ = mpc_config::pin(hashi.epoch_config_mut());
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == 800);
 
-    hashi.epoch_config_mut().upsert(b"mpc_max_faulty_in_basis_points", config_value::new_u64(500));
-    let _ = mpc_config::pin(hashi.epoch_config_mut());
+    let mut entries = vec_map::empty();
+    entries.insert(
+        b"mpc_weight_reduction_allowed_delta".to_string(),
+        config_value::new_u64(DEFAULT_MAX_FAULTY_BPS),
+    );
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+/// Both coupled keys may drop below the other's old value in one proposal:
+/// the rule is judged on the resulting store, not per entry, so the entry
+/// order (max-faulty first here, while the old delta still exceeds it) does
+/// not matter.
+#[test]
+fun test_joint_update_of_both_coupled_keys_is_judged_on_the_result() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let mut entries = vec_map::empty();
+    entries.insert(b"mpc_max_faulty_in_basis_points".to_string(), config_value::new_u64(500));
+    entries.insert(b"mpc_weight_reduction_allowed_delta".to_string(), config_value::new_u64(400));
+    propose_and_execute(&mut hashi, entries, &clock, ctx);
+
     assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == 500);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == 499);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == 400);
 
-    std::unit_test::destroy(hashi);
-}
-
-/// `pin` seeds every MPC key an older epoch config may lack, so a pinned
-/// config is always complete.
-#[test]
-fun test_pin_seeds_absent_mpc_keys() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
-
-    let mut bare = hashi::config::empty();
-    let pinned = mpc_config::pin(&mut bare);
-    assert!(mpc_config::max_faulty_in_basis_points(&pinned) == DEFAULT_MAX_FAULTY_BPS);
-    assert!(mpc_config::weight_reduction_allowed_delta(&pinned) == 800);
-    assert!(mpc_config::nonce_generation_protocol(&pinned) == 0);
-    assert!(mpc_config::nonce_accumulation_window_ms(&pinned) == 2000);
-    assert!(bare.contains(b"mpc_max_faulty_in_basis_points"));
-
+    clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
 

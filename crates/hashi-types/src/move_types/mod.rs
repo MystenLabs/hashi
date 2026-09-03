@@ -326,8 +326,9 @@ pub struct Committee {
     pub members: Vec<CommitteeMember>,
     /// Total voting weight of the committee.
     pub total_weight: u64,
-    /// The config pinned from the governed config at reconfig, BCS-mirroring the
-    /// Move `Committee.mpc: Config`. Carried verbatim end to end so the
+    /// The epoch config copied verbatim from the governed epoch config at
+    /// reconfig, BCS-mirroring the Move `Committee.epoch_config: Config`.
+    /// Carried verbatim end to end so the
     /// committee's signed BCS bytes match the on-chain committee exactly; never
     /// reconstructed from extracted fields.
     pub config: Config,
@@ -377,8 +378,8 @@ pub enum ConfigValue {
     Bytes(Vec<u8>),
 }
 
-/// MPC parameter keys, in the canonical order Move's `mpc_config::pin` writes
-/// them. Load-bearing for [`Config::from_mpc_params`].
+/// MPC parameter keys, in the order Move's `mpc_config::init_defaults` seeds
+/// them at genesis. Load-bearing for [`Config::from_mpc_params`].
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
@@ -457,7 +458,7 @@ impl Config {
     // ===== MPC parameters (mirror Move's `mpc_config` accessors) =====
 
     /// Build a config holding the MPC parameters, inserting the full key set in
-    /// the same fixed order as Move's `mpc_config::pin`. For synthetic
+    /// the same fixed order as Move's `mpc_config::init_defaults`. For synthetic
     /// committees only (tests, fallbacks); the scrape/wire paths carry the
     /// on-chain config verbatim via [`Config::from_entries`].
     pub fn from_mpc_params(
@@ -2146,7 +2147,8 @@ mod tests {
     /// Pins the exact BCS bytes of a committee's pinned config so a change to the
     /// canonical key order, the `ConfigValue` encoding, or the entry set is
     /// caught here rather than silently breaking handoff-cert verification.
-    /// The expected vector must equal what Move's `mpc_config::pin` produces.
+    /// The expected vector must equal the epoch config Move's
+    /// `mpc_config::init_defaults` seeds, which `start_reconfig` copies verbatim.
     #[test]
     fn committee_mpc_config_bcs_is_pinned() {
         let mpc = Config::from_mpc_params(800, 3333, 1, 700);

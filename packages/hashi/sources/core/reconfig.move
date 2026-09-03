@@ -65,14 +65,15 @@ entry fun start_reconfig(
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
     assert_genesis_launch_authorized(self);
-    // Pin the epoch config wholesale so it stays fixed for the new epoch even
-    // if governance changes it mid-epoch.
-    let config = hashi::mpc_config::pin(self.epoch_config_mut());
+    // Copy the epoch config verbatim onto the new committee so it stays fixed
+    // for the epoch even if governance changes the store mid-epoch. The
+    // proposals that write the store keep it valid; nothing is repaired here.
+    let epoch_config = *self.epoch_config();
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
             sui_system,
-            config,
+            epoch_config,
             ctx,
         );
     sui::event::emit(ReconfigStarted { epoch });

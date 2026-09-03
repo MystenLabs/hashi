@@ -46,10 +46,10 @@ public struct Committee has copy, drop, store {
     members: vector<CommitteeMember>,
     /// Total voting weight of the committee.
     total_weight: u64,
-    /// The epoch config pinned for this epoch (the MPC parameters plus any
-    /// epoch-scoped keys governance added), copied wholesale from the
-    /// governed epoch config at reconfig time.
-    config: Config,
+    /// The epoch config for this epoch (the MPC parameters plus any
+    /// epoch-scoped keys governance added), copied verbatim from the governed
+    /// epoch config when the committee is formed.
+    epoch_config: Config,
 }
 
 public struct CommitteeSignature has copy, drop, store {
@@ -84,7 +84,7 @@ public fun new_committee_signature(
 public(package) fun new_committee(
     epoch: u64,
     members: vector<CommitteeMember>,
-    config: Config,
+    epoch_config: Config,
 ): Committee {
     assert!(!members.is_empty());
 
@@ -100,7 +100,7 @@ public(package) fun new_committee(
         members,
         total_weight,
         epoch,
-        config,
+        epoch_config,
     }
 }
 
