@@ -197,6 +197,7 @@ public(package) fun verify_proposal(
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
 public(package) fun verify_certificate<T>(
     self: &Committee,
+    hashi_id: address,
     intent: u16,
     message: T,
     signature: CommitteeSignature,
@@ -250,10 +251,15 @@ public(package) fun verify_certificate<T>(
     // Verify the signature
     let pub_key_bytes = group_ops::bytes(&aggregate_key);
 
-    // Signing preimage: intent (u16 LE) || bcs(epoch) || bcs(message). The
-    // intent leads so the signed bytes are domain-tagged before anything else,
-    // separating message types signed under the same keys (see hashi::intent).
+    // Signing preimage: intent (u16 LE) || bcs(hashi_id) || bcs(epoch) ||
+    // bcs(message). The intent leads so the signed bytes are domain-tagged
+    // before anything else, separating message types signed under the same
+    // keys (see hashi::intent); the Hashi object id right after binds the
+    // certificate to this deployment, so a certificate minted for another
+    // Hashi instance (byte-identical committee, same epoch) can never verify
+    // here.
     let mut message_bytes = bcs::to_bytes(&intent);
+    message_bytes.append(bcs::to_bytes(&hashi_id));
     message_bytes.append(bcs::to_bytes(&signature.epoch));
     message_bytes.append(bcs::to_bytes(&message));
 

@@ -1866,6 +1866,10 @@ pub struct GuardianInfoData {
     /// Digest of the optional GenesisState pinned during operator_init.
     #[prost(bytes = "bytes", optional, tag = "13")]
     pub genesis_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The Hashi shared-object id (32 bytes) this guardian serves (set after
+    /// operator_init). Certificates verified by this enclave are bound to it.
+    #[prost(bytes = "bytes", optional, tag = "14")]
+    pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
     /// Signed enclave mode and its current lifecycle stage.
     #[prost(oneof = "guardian_info_data::Lifecycle", tags = "11, 12")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
@@ -2154,6 +2158,10 @@ pub struct InitConfig {
     /// Hashi deployment class selecting the S3 object-lock policy.
     #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
     pub retention_environment: i32,
+    /// The Hashi shared-object id (32 bytes) committee certificates verified by
+    /// this guardian must be bound to.
+    #[prost(bytes = "bytes", optional, tag = "7")]
+    pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {

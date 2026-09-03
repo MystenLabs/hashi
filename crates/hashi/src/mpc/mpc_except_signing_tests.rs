@@ -64,6 +64,7 @@ const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
 /// Use 1 for test_weight_divisor in unit tests (they already use small weights).
 const TEST_WEIGHT_DIVISOR: u16 = 1;
 const TEST_CHAIN_ID: &str = "testchain";
+const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
 const TEST_BATCH_SIZE_PER_WEIGHT: u16 = 50;
 
 fn unwrap_reconstruction_success(outcome: ReconstructionOutcome) -> MpcOutput {
@@ -306,6 +307,7 @@ impl TestSetup {
             Some(self.signing_keys[validator_index].clone()),
             store,
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
@@ -367,7 +369,7 @@ fn create_test_certificate(
         dealer_address,
         messages_hash,
     };
-    let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
+    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message);
     for signature in signatures {
         aggregator
             .add_signature(signature)
@@ -428,7 +430,7 @@ fn create_rotation_test_certificate(
         dealer_address,
         messages_hash,
     };
-    let mut aggregator = BlsSignatureAggregator::new(committee, rotation_message);
+    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, rotation_message);
     for signature in signatures {
         aggregator
             .add_signature(signature)
@@ -1057,6 +1059,7 @@ fn test_mpc_manager_new_from_committee_set() {
         Some(signing_key),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
@@ -1089,6 +1092,7 @@ fn test_mpc_manager_new_succeeds_for_non_member_without_identity() {
         None,
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1115,6 +1119,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         Some(setup.signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1133,6 +1138,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         None,
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1165,6 +1171,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         None,
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1185,6 +1192,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         Some(setup.signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1244,6 +1252,7 @@ fn test_role_predicates_separate_a_departing_node_from_a_never_member() {
             None,
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
@@ -1310,6 +1319,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         "test",
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
@@ -1342,6 +1352,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         Some(setup.signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1430,6 +1441,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1517,6 +1529,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -1623,6 +1636,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         Some(signing_keys[0].clone()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -2801,7 +2815,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
             .iter()
             .map(|i| {
                 let addr = setup.address(*i);
-                setup.signing_keys[*i].sign(epoch, addr, &dealer_0_dkg_message)
+                setup.signing_keys[*i].sign(TEST_HASHI_ID, epoch, addr, &dealer_0_dkg_message)
             })
             .collect(),
     )
@@ -2815,7 +2829,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
             .iter()
             .map(|i| {
                 let addr = setup.address(*i);
-                setup.signing_keys[*i].sign(epoch, addr, &dealer_1_dkg_message)
+                setup.signing_keys[*i].sign(TEST_HASHI_ID, epoch, addr, &dealer_1_dkg_message)
             })
             .collect(),
     )
@@ -2903,6 +2917,7 @@ async fn test_run_as_party_recovers_from_hash_mismatch() {
                 messages_hash,
             };
             setup.signing_keys[mgr.party_id().unwrap() as usize].sign(
+                TEST_HASHI_ID,
                 setup.epoch(),
                 mgr.address,
                 &dkg_message,
@@ -3384,14 +3399,15 @@ fn create_weight_based_test_certificate(
 
     let config = setup.dkg_config();
     let committee = setup.committee();
-    let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message.clone());
+    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message.clone());
 
     let dkg_required = config.threshold as u32 + config.max_faulty as u32;
     let mut weight_sum = 0u32;
 
     for i in 0..setup.num_validators() {
         let signer_addr = setup.address(i);
-        let signature = setup.signing_keys[i].sign(setup.epoch(), signer_addr, &dkg_message);
+        let signature =
+            setup.signing_keys[i].sign(TEST_HASHI_ID, setup.epoch(), signer_addr, &dkg_message);
         aggregator.add_signature(signature).unwrap();
         weight_sum += u32::from(
             config
@@ -3643,7 +3659,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
                 dealer_address: dealer1_addr,
                 messages_hash,
             };
-            setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+            setup.signing_keys[i].sign(TEST_HASHI_ID, epoch, addr, &dkg_message)
         })
         .collect();
 
@@ -3655,7 +3671,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
                 dealer_address: dealer2_addr,
                 messages_hash,
             };
-            setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+            setup.signing_keys[i].sign(TEST_HASHI_ID, epoch, addr, &dkg_message)
         })
         .collect();
 
@@ -3752,7 +3768,7 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
                     dealer_address: dealer_addr,
                     messages_hash,
                 };
-                setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+                setup.signing_keys[i].sign(TEST_HASHI_ID, epoch, addr, &dkg_message)
             })
             .collect()
     };
@@ -3875,7 +3891,7 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
             .iter()
             .map(|i| {
                 let addr = setup.address(*i);
-                setup.signing_keys[*i].sign(epoch, addr, &dealer0_dkg_message)
+                setup.signing_keys[*i].sign(TEST_HASHI_ID, epoch, addr, &dealer0_dkg_message)
             })
             .collect(),
     )
@@ -3888,7 +3904,7 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
             .iter()
             .map(|i| {
                 let addr = setup.address(*i);
-                setup.signing_keys[*i].sign(epoch, addr, &dealer1_dkg_message)
+                setup.signing_keys[*i].sign(TEST_HASHI_ID, epoch, addr, &dealer1_dkg_message)
             })
             .collect(),
     )
@@ -4835,7 +4851,7 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
         committee,
         dealer_addr,
         dealer_message,
-        vec![setup.signing_keys[1].sign(setup.epoch(), party_addr, &dkg_message)],
+        vec![setup.signing_keys[1].sign(TEST_HASHI_ID, setup.epoch(), party_addr, &dkg_message)],
     )
     .unwrap();
 
@@ -5119,7 +5135,8 @@ async fn test_retrieve_dealer_message_success() {
     };
 
     // Dealer signs its own message
-    let dealer_signature = setup.signing_keys[0].sign(setup.epoch(), dealer_address, &dkg_message);
+    let dealer_signature =
+        setup.signing_keys[0].sign(TEST_HASHI_ID, setup.epoch(), dealer_address, &dkg_message);
 
     // Create certificate with dealer's signature
     let committee = setup.committee();
@@ -5202,8 +5219,9 @@ async fn test_retrieve_dealer_message_retries_multiple_signers() {
     // Validator 1 signs first, then validator 0
     let validator_1_addr = setup.address(1);
     let validator_1_signature =
-        setup.signing_keys[1].sign(setup.epoch(), validator_1_addr, &dkg_message);
-    let dealer_signature = setup.signing_keys[0].sign(setup.epoch(), dealer_addr, &dkg_message);
+        setup.signing_keys[1].sign(TEST_HASHI_ID, setup.epoch(), validator_1_addr, &dkg_message);
+    let dealer_signature =
+        setup.signing_keys[0].sign(TEST_HASHI_ID, setup.epoch(), dealer_addr, &dkg_message);
 
     let committee = setup.committee();
     let cert = create_certificate_with_signers(
@@ -5268,8 +5286,10 @@ async fn test_retrieve_dealer_message_all_signers_fail() {
     // Create certificate with signers 2 and 3 (both will be offline in P2P)
     let signer_2_addr = setup.address(2);
     let signer_3_addr = setup.address(3);
-    let signer_2_signature = setup.signing_keys[2].sign(setup.epoch(), signer_2_addr, &dkg_message);
-    let signer_3_signature = setup.signing_keys[3].sign(setup.epoch(), signer_3_addr, &dkg_message);
+    let signer_2_signature =
+        setup.signing_keys[2].sign(TEST_HASHI_ID, setup.epoch(), signer_2_addr, &dkg_message);
+    let signer_3_signature =
+        setup.signing_keys[3].sign(TEST_HASHI_ID, setup.epoch(), signer_3_addr, &dkg_message);
 
     let committee = setup.committee();
     let cert = create_certificate_with_signers(
@@ -5348,9 +5368,14 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     };
 
     // Create valid certificate for dealer A with correct hash, signed by Byzantine signer and dealer A
-    let byzantine_signature =
-        setup.signing_keys[3].sign(setup.epoch(), byzantine_signer_addr, &dkg_message);
-    let dealer_a_signature = setup.signing_keys[0].sign(setup.epoch(), dealer_a_addr, &dkg_message);
+    let byzantine_signature = setup.signing_keys[3].sign(
+        TEST_HASHI_ID,
+        setup.epoch(),
+        byzantine_signer_addr,
+        &dkg_message,
+    );
+    let dealer_a_signature =
+        setup.signing_keys[0].sign(TEST_HASHI_ID, setup.epoch(), dealer_a_addr, &dkg_message);
 
     let committee = setup.committee();
     let cert = create_certificate_with_signers(
@@ -5398,7 +5423,7 @@ fn create_certificate_with_signers(
         messages_hash,
     };
 
-    let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
+    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message);
 
     for signature in signatures {
         aggregator
@@ -6049,7 +6074,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
         messages_hash,
     };
     let committee = setup.committee();
-    let mut aggregator = BlsSignatureAggregator::new(committee, dkg_message);
+    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, dkg_message);
     for (_, _, sig) in &signers {
         aggregator.add_signature(sig.clone()).unwrap();
     }
@@ -6482,7 +6507,7 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
                 dealer_address: dealer1_addr,
                 messages_hash,
             };
-            setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+            setup.signing_keys[i].sign(TEST_HASHI_ID, epoch, addr, &dkg_message)
         })
         .collect();
 
@@ -6494,7 +6519,7 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
                 dealer_address: dealer2_addr,
                 messages_hash,
             };
-            setup.signing_keys[i].sign(epoch, addr, &dkg_message)
+            setup.signing_keys[i].sign(TEST_HASHI_ID, epoch, addr, &dkg_message)
         })
         .collect();
 
@@ -6667,6 +6692,7 @@ impl RotationTestSetup {
             in_target.then(|| self.setup.signing_keys[index].clone()),
             store,
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
@@ -8249,6 +8275,7 @@ async fn test_prepare_previous_output_for_new_member() {
         Some(new_member_signing_key),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
@@ -10404,6 +10431,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         Some(rotation_setup.setup.signing_keys[shifted_member_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
@@ -10522,6 +10550,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
             .iter()
             .map(|&signer_idx| {
                 setup.signing_keys[signer_idx].sign(
+                    TEST_HASHI_ID,
                     epoch,
                     setup.address(signer_idx),
                     &DealerMessagesHash {
@@ -10586,6 +10615,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         Some(setup.signing_keys[target_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
@@ -10656,6 +10686,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
             .iter()
             .map(|&signer_idx| {
                 setup.signing_keys[signer_idx].sign(
+                    TEST_HASHI_ID,
                     epoch,
                     setup.address(signer_idx),
                     &DealerMessagesHash {
@@ -10720,6 +10751,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         Some(setup.signing_keys[target_index].clone()),
         Arc::new(build_store()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -10748,6 +10780,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         Some(setup.signing_keys[target_index].clone()),
         Arc::new(build_store()),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -10803,6 +10836,7 @@ fn test_recover_current_dkg() {
                 .iter()
                 .map(|&s| {
                     setup.signing_keys[s].sign(
+                        TEST_HASHI_ID,
                         epoch,
                         setup.address(s),
                         &DealerMessagesHash {
@@ -10853,6 +10887,7 @@ fn test_recover_current_dkg() {
             Some(setup.signing_keys[target_index].clone()),
             store,
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
@@ -10977,6 +11012,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
                 .iter()
                 .map(|&s| {
                     setup.signing_keys[s].sign(
+                        TEST_HASHI_ID,
                         epoch,
                         setup.address(s),
                         &DealerMessagesHash {
@@ -11024,6 +11060,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         Some(setup.signing_keys[target_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -11116,6 +11153,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             Some(rotation_setup.setup.signing_keys[dealer_idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
@@ -11149,6 +11187,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             Some(rotation_setup.setup.signing_keys[other_idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
@@ -11259,6 +11298,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         Some(rotation_setup.setup.signing_keys[shifted_member_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
@@ -11348,6 +11388,7 @@ fn test_recover_current_rotation() {
             Some(rotation_setup.setup.signing_keys[idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
@@ -11426,6 +11467,7 @@ fn test_recover_current_rotation() {
             Some(rotation_setup.setup.signing_keys[receiver_index].clone()),
             store,
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
@@ -11523,6 +11565,7 @@ fn test_recover_current_rotation() {
             .map(|i| {
                 let addr = rotation_setup.setup.address(i);
                 let signed = rotation_setup.setup.signing_keys[i].sign(
+                    TEST_HASHI_ID,
                     rotation_epoch,
                     addr,
                     &DealerMessagesHash {
@@ -11612,6 +11655,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             Some(rotation_setup.setup.signing_keys[idx].clone()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
+            TEST_HASHI_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
@@ -11692,6 +11736,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         Some(rotation_setup.setup.signing_keys[receiver_index].clone()),
         Arc::new(store),
         TEST_CHAIN_ID,
+        TEST_HASHI_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
@@ -12701,10 +12746,15 @@ fn valid_dealer_submission_signed_by(
     };
     let committee = setup.committee();
     let epoch = committee.epoch();
-    let mut aggregator = BlsSignatureAggregator::new(committee, target.clone());
+    let mut aggregator = BlsSignatureAggregator::new(TEST_HASHI_ID, committee, target.clone());
     for &i in signer_indices {
         aggregator
-            .add_signature(setup.signing_keys[i].sign(epoch, setup.address(i), &target))
+            .add_signature(setup.signing_keys[i].sign(
+                TEST_HASHI_ID,
+                epoch,
+                setup.address(i),
+                &target,
+            ))
             .unwrap();
     }
     let signed = aggregator.finish().unwrap();
@@ -13365,6 +13415,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
                 messages_hash,
             };
             setup.signing_keys[mgr.party_id().unwrap() as usize].sign(
+                TEST_HASHI_ID,
                 setup.epoch(),
                 mgr.address,
                 &dkg_message,
@@ -13393,6 +13444,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
                     messages_hash,
                 };
                 setup.signing_keys[mgr.party_id().unwrap() as usize].sign(
+                    TEST_HASHI_ID,
                     setup.epoch(),
                     mgr.address,
                     &dkg_message,
@@ -13815,7 +13867,8 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
         batch_index,
     };
     let member_sig = MemberSignature::new(receiver.mpc_config.epoch, receiver.address, sig);
-    let mut aggregator = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    let mut aggregator =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
     aggregator
         .add_signature(member_sig)
         .expect("Confirm signature must verify over AvssVoteMessagesHash{dealer, H(v), batch}");
@@ -13977,7 +14030,7 @@ fn avid_pessimistic_fixture(
         messages_hash: MessagesHash::from(common.hash().digest),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
     for s in sigs {
         agg.add_signature(s).unwrap();
     }
@@ -14077,7 +14130,7 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
         batch_index,
     };
     let member_sig = MemberSignature::new(voter.mpc_config.epoch, voter.address, vote);
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
     agg.add_signature(member_sig)
         .expect("Vote verifies over AvidVoteMessagesHash{dealer, H(AvidVote), batch}");
 
@@ -14204,11 +14257,12 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         messages_hash: hash_avid_vote(&avid_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
     for s in vote_sigs {
         agg.add_signature(s).unwrap();
     }
     let vote_cert = AvidCertificate::vote(
+        TEST_HASHI_ID,
         agg.finish().unwrap(),
         avid_vote,
         Arc::new(setup.committee().clone()),
@@ -14279,7 +14333,7 @@ fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
         receiver.address,
         response.signature.clone(),
     );
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
     agg.add_signature(member_sig)
         .expect("Confirm sig verifies over DealerMessagesHash{dealer, H(v)}");
     assert!(
@@ -14388,7 +14442,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
         receiver.address,
         response.signature.clone(),
     );
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
     agg.add_signature(member_sig)
         .expect("Vote verifies over AvidVoteMessagesHash{dealer, H(AvidVote), batch}");
     assert!(!echoes.is_empty());
@@ -14522,7 +14576,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         messages_hash: MessagesHash::from(fx.common.hash().digest),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm_target);
     for s in sigs {
         agg.add_signature(s).unwrap();
     }
@@ -15089,7 +15143,7 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
 
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature], take: usize| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs.iter().take(take) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -15161,7 +15215,7 @@ async fn test_run_as_avid_nonce_party_skips_zero_weight_dealer_without_local_ski
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -15180,7 +15234,14 @@ async fn test_run_as_avid_nonce_party_skips_zero_weight_dealer_without_local_ski
         batch_index,
     };
     let unresolvable_sigs: Vec<MemberSignature> = (0..6)
-        .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
+        .map(|i| {
+            setup.signing_keys[i].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(i),
+                &unresolvable_target,
+            )
+        })
         .collect();
 
     let mut party_manager = managers.remove(&setup.address(1)).unwrap();
@@ -15236,7 +15297,7 @@ async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -15255,7 +15316,14 @@ async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
         batch_index,
     };
     let unresolvable_sigs: Vec<MemberSignature> = (0..6)
-        .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
+        .map(|i| {
+            setup.signing_keys[i].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(i),
+                &unresolvable_target,
+            )
+        })
         .collect();
 
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
@@ -15294,7 +15362,7 @@ fn two_full_certs_fixture(
     let (second_sigs, second_target) =
         avid_confirm_signatures(setup, &mut managers, 2, batch_index, rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -15325,9 +15393,14 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() 
         messages_hash: MessagesHash::from([9u8; 32]),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), unresolvable_target.clone());
+    let mut agg = BlsSignatureAggregator::new(
+        TEST_HASHI_ID,
+        setup.committee(),
+        unresolvable_target.clone(),
+    );
     for i in 0..6 {
         agg.add_signature(setup.signing_keys[i].sign(
+            TEST_HASHI_ID,
             setup.epoch(),
             setup.address(i),
             &unresolvable_target,
@@ -15491,7 +15564,8 @@ fn cut_off_confirmer_fixture(setup: &TestSetup, batch_index: u32) -> CutOffConfi
         messages_hash: hash_avid_vote(&avid_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target.clone());
+    let mut agg =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target.clone());
     for s in vote_sigs {
         agg.add_signature(s).unwrap();
     }
@@ -15625,9 +15699,11 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_commo
         messages_hash: MessagesHash::from([9u8; 32]),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), other_target.clone());
+    let mut agg =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), other_target.clone());
     for i in 0..6 {
         agg.add_signature(setup.signing_keys[i].sign(
+            TEST_HASHI_ID,
             setup.epoch(),
             setup.address(i),
             &other_target,
@@ -15914,7 +15990,7 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -15933,7 +16009,14 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
         batch_index,
     };
     let unresolvable_sigs: Vec<MemberSignature> = (0..6)
-        .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &unresolvable_target))
+        .map(|i| {
+            setup.signing_keys[i].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(i),
+                &unresolvable_target,
+            )
+        })
         .collect();
 
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
@@ -15978,7 +16061,7 @@ async fn test_avid_below_floor_attribution_distinguishes_cause() {
     let (sigs, confirm_target) =
         avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
     let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature], ts: u64| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs.iter().take(6) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -16097,7 +16180,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
@@ -16169,9 +16252,15 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
                 dealer_address,
                 messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
             };
-            let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+            let mut aggregator =
+                BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
             for &s in signers {
-                let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+                let sig = setup.signing_keys[s].sign(
+                    TEST_HASHI_ID,
+                    setup.epoch(),
+                    setup.address(s),
+                    &message,
+                );
                 aggregator.add_signature(sig).unwrap();
             }
             (
@@ -16301,10 +16390,15 @@ async fn test_classification_survives_the_carrier_into_sizing() {
         messages_hash,
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm.clone());
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), confirm.clone());
     for i in 0..4usize {
-        agg.add_signature(setup.signing_keys[i].sign(epoch, setup.address(i), &confirm))
-            .unwrap();
+        agg.add_signature(setup.signing_keys[i].sign(
+            TEST_HASHI_ID,
+            epoch,
+            setup.address(i),
+            &confirm,
+        ))
+        .unwrap();
     }
     let transport = UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
         .as_dealer_messages_hash()
@@ -16389,10 +16483,15 @@ fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
         messages_hash,
         batch_index: 3,
     };
-    let mut agg = BlsSignatureAggregator::new(avid.committee(), confirm.clone());
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), confirm.clone());
     for s in 0..4usize {
-        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &confirm))
-            .unwrap();
+        agg.add_signature(avid.signing_keys[s].sign(
+            TEST_HASHI_ID,
+            avid.epoch(),
+            avid.address(s),
+            &confirm,
+        ))
+        .unwrap();
     }
     let signed = agg.finish().unwrap();
     let unclassified = UnclassifiedNonceCert::from_signature_parts(
@@ -16412,10 +16511,15 @@ fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
         messages_hash,
         batch_index: 3,
     };
-    let mut agg = BlsSignatureAggregator::new(avid.committee(), vote.clone());
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), vote.clone());
     for s in 0..4usize {
-        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &vote))
-            .unwrap();
+        agg.add_signature(avid.signing_keys[s].sign(
+            TEST_HASHI_ID,
+            avid.epoch(),
+            avid.address(s),
+            &vote,
+        ))
+        .unwrap();
     }
     let signed = agg.finish().unwrap();
     let unclassified = UnclassifiedNonceCert::from_signature_parts(
@@ -16436,9 +16540,14 @@ fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
         lone_weight < vote_quorum,
         "one signer must sit under the vote bar or this proves nothing"
     );
-    let mut agg = BlsSignatureAggregator::new(avid.committee(), vote.clone());
-    agg.add_signature(avid.signing_keys[0].sign(avid.epoch(), avid.address(0), &vote))
-        .unwrap();
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), vote.clone());
+    agg.add_signature(avid.signing_keys[0].sign(
+        TEST_HASHI_ID,
+        avid.epoch(),
+        avid.address(0),
+        &vote,
+    ))
+    .unwrap();
     let signed = agg.finish().unwrap();
     let unclassified = UnclassifiedNonceCert::from_signature_parts(
         dealer,
@@ -16463,10 +16572,15 @@ fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
         three_weight >= vote_quorum && three_weight < total,
         "three signers must clear the vote bar but not the confirm bar, or this proves nothing"
     );
-    let mut agg = BlsSignatureAggregator::new(avid.committee(), confirm.clone());
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), confirm.clone());
     for s in 0..3usize {
-        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &confirm))
-            .unwrap();
+        agg.add_signature(avid.signing_keys[s].sign(
+            TEST_HASHI_ID,
+            avid.epoch(),
+            avid.address(s),
+            &confirm,
+        ))
+        .unwrap();
     }
     let signed = agg.finish().unwrap();
     let unclassified = UnclassifiedNonceCert::from_signature_parts(
@@ -16489,10 +16603,15 @@ fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
         messages_hash,
     };
     let unclassified = {
-        let mut agg = BlsSignatureAggregator::new(avid.committee(), legacy.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), legacy.clone());
         for s in 0..4usize {
-            agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &legacy))
-                .unwrap();
+            agg.add_signature(avid.signing_keys[s].sign(
+                TEST_HASHI_ID,
+                avid.epoch(),
+                avid.address(s),
+                &legacy,
+            ))
+            .unwrap();
         }
         let signed = agg.finish().unwrap();
         UnclassifiedNonceCert::from_signature_parts(
@@ -16515,9 +16634,10 @@ fn test_verify_and_classify_recovers_the_kind_and_keeps_vanilla_working() {
         dealer_address: vanilla_dealer,
         messages_hash,
     };
-    let mut agg = BlsSignatureAggregator::new(vanilla.committee(), legacy.clone());
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, vanilla.committee(), legacy.clone());
     for s in 0..4usize {
         agg.add_signature(vanilla.signing_keys[s].sign(
+            TEST_HASHI_ID,
             vanilla.epoch(),
             vanilla.address(s),
             &legacy,
@@ -16550,10 +16670,15 @@ fn test_nonce_cert_does_not_verify_under_another_batch_index() {
         messages_hash,
         batch_index: 0,
     };
-    let mut agg = BlsSignatureAggregator::new(avid.committee(), target.clone());
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, avid.committee(), target.clone());
     for s in 0..4usize {
-        agg.add_signature(avid.signing_keys[s].sign(avid.epoch(), avid.address(s), &target))
-            .unwrap();
+        agg.add_signature(avid.signing_keys[s].sign(
+            TEST_HASHI_ID,
+            avid.epoch(),
+            avid.address(s),
+            &target,
+        ))
+        .unwrap();
     }
     let signed = agg.finish().unwrap();
     let under = |batch_index: u32| {
@@ -16588,9 +16713,15 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
                 dealer_address,
                 messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
             };
-            let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+            let mut aggregator =
+                BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
             for &s in signers {
-                let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+                let sig = setup.signing_keys[s].sign(
+                    TEST_HASHI_ID,
+                    setup.epoch(),
+                    setup.address(s),
+                    &message,
+                );
                 aggregator.add_signature(sig).unwrap();
             }
             (
@@ -16644,9 +16775,15 @@ fn test_avid_sizing_counts_past_the_floor() {
             dealer_address,
             messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
         };
-        let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
         for s in 0..4 {
-            let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+            let sig = setup.signing_keys[s].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(s),
+                &message,
+            );
             aggregator.add_signature(sig).unwrap();
         }
         (
@@ -16838,7 +16975,7 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
@@ -16918,11 +17055,12 @@ fn test_decoded_shares_match_optimistic_shares() {
         messages_hash: hash_avid_vote(&avid_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
     for s in vote_sigs {
         agg.add_signature(s).unwrap();
     }
     let vote_cert = AvidCertificate::vote(
+        TEST_HASHI_ID,
         agg.finish().unwrap(),
         avid_vote,
         Arc::new(setup.committee().clone()),
@@ -17028,7 +17166,7 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let (second_sigs, second_target) =
         avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
     let make_full_cert = |target: &AvssVoteMessagesHash, sigs: Vec<MemberSignature>| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
         for sig in sigs {
             agg.add_signature(sig).unwrap();
         }
@@ -17186,7 +17324,11 @@ fn test_avid_voter_state_survives_restart() {
         ));
     }
     let cert = |sigs: &[MemberSignature]| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+        let mut agg = BlsSignatureAggregator::new(
+            TEST_HASHI_ID,
+            setup.committee(),
+            flow.confirm_target.clone(),
+        );
         for sig in sigs {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -17240,11 +17382,12 @@ fn test_avid_voter_state_survives_restart() {
         messages_hash: hash_avid_vote(&held_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
     for sig in vote_sigs {
         agg.add_signature(sig).unwrap();
     }
     let vote_cert = AvidCertificate::vote(
+        TEST_HASHI_ID,
         agg.finish().unwrap(),
         held_vote.clone(),
         Arc::new(setup.committee().clone()),
@@ -17386,7 +17529,11 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         ));
         confirmers.push(mgr);
     }
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    let mut agg = BlsSignatureAggregator::new(
+        TEST_HASHI_ID,
+        setup.committee(),
+        flow.confirm_target.clone(),
+    );
     for sig in &sigs {
         agg.add_signature(sig.clone()).unwrap();
     }
@@ -17428,11 +17575,12 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         messages_hash: hash_avid_vote(&held_vote),
         batch_index,
     };
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), vote_target);
     for sig in vote_sigs {
         agg.add_signature(sig).unwrap();
     }
     let vote_cert = AvidCertificate::vote(
+        TEST_HASHI_ID,
         agg.finish().unwrap(),
         held_vote,
         Arc::new(setup.committee().clone()),
@@ -17513,9 +17661,15 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         messages_hash: hash_avid_vote(&blame_vote),
         batch_index,
     };
-    let mut thin = BlsSignatureAggregator::new(setup.committee(), blame_target.clone());
-    thin.add_signature(setup.signing_keys[0].sign(setup.epoch(), setup.address(0), &blame_target))
-        .unwrap();
+    let mut thin =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), blame_target.clone());
+    thin.add_signature(setup.signing_keys[0].sign(
+        TEST_HASHI_ID,
+        setup.epoch(),
+        setup.address(0),
+        &blame_target,
+    ))
+    .unwrap();
     let blame_request = ComplainRequest {
         dealer: dealer_addr,
         share_index: None,
@@ -17536,9 +17690,11 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         "a blame complaint carrying a sub-quorum vote cert must be refused: {result:?}"
     );
 
-    let mut full = BlsSignatureAggregator::new(setup.committee(), blame_target.clone());
+    let mut full =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), blame_target.clone());
     for i in 0..6usize {
         full.add_signature(setup.signing_keys[i].sign(
+            TEST_HASHI_ID,
             setup.epoch(),
             setup.address(i),
             &blame_target,
@@ -18404,6 +18560,7 @@ fn party_rejects_a_self_signed_cert() {
     let dealer_manager = setup.create_manager(0);
     let messages = Messages::Dkg(dealer_manager.create_dealer_message(&mut rng));
     let self_signature = setup.signing_keys[0].sign(
+        TEST_HASHI_ID,
         setup.epoch(),
         dealer,
         &DealerMessagesHash {
@@ -18475,7 +18632,9 @@ fn previous_epoch_certs_verify_against_previous_parameters() {
             &messages,
             dealer,
             (0..4)
-                .map(|i| setup.signing_keys[i].sign(prev_epoch, setup.address(i), &target))
+                .map(|i| {
+                    setup.signing_keys[i].sign(TEST_HASHI_ID, prev_epoch, setup.address(i), &target)
+                })
                 .collect(),
         )
         .unwrap(),
@@ -18494,7 +18653,7 @@ fn previous_epoch_certs_verify_against_previous_parameters() {
             &prev_committee,
             &messages,
             dealer,
-            vec![setup.signing_keys[0].sign(prev_epoch, setup.address(0), &target)],
+            vec![setup.signing_keys[0].sign(TEST_HASHI_ID, prev_epoch, setup.address(0), &target)],
         )
         .unwrap(),
     );
@@ -18522,7 +18681,7 @@ fn dealer_skip_weight_ignores_unverifiable_certs() {
             setup.committee(),
             &messages,
             dealer,
-            vec![setup.signing_keys[0].sign(setup.epoch(), dealer, &target)],
+            vec![setup.signing_keys[0].sign(TEST_HASHI_ID, setup.epoch(), dealer, &target)],
         )
         .unwrap(),
     );
@@ -18532,7 +18691,14 @@ fn dealer_skip_weight_ignores_unverifiable_certs() {
             &messages,
             dealer,
             (0..4)
-                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .map(|i| {
+                    setup.signing_keys[i].sign(
+                        TEST_HASHI_ID,
+                        setup.epoch(),
+                        setup.address(i),
+                        &target,
+                    )
+                })
                 .collect(),
         )
         .unwrap(),
@@ -18572,7 +18738,12 @@ async fn self_signed_certs_do_not_suppress_the_dealer_phase() {
             dealer_address: dealer,
             messages_hash: messages.compute_hash(),
         };
-        let own = setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
+        let own = setup.setup.signing_keys[dealer_idx].sign(
+            TEST_HASHI_ID,
+            setup.setup.epoch(),
+            dealer,
+            &target,
+        );
         let cert =
             create_test_certificate(setup.setup.committee(), messages, dealer, vec![own]).unwrap();
         self_signed.push((dealer, CertificateV1::Dkg(cert)));
@@ -18627,8 +18798,12 @@ async fn party_phase_rejects_a_sub_quorum_cert() {
                 dealer_address: dealer,
                 messages_hash: messages.compute_hash(),
             };
-            let own =
-                setup.setup.signing_keys[dealer_idx].sign(setup.setup.epoch(), dealer, &target);
+            let own = setup.setup.signing_keys[dealer_idx].sign(
+                TEST_HASHI_ID,
+                setup.setup.epoch(),
+                dealer,
+                &target,
+            );
             CertificateV1::Dkg(
                 create_test_certificate(setup.setup.committee(), messages, dealer, vec![own])
                     .unwrap(),
@@ -18704,7 +18879,7 @@ async fn recovery_drops_certs_the_live_path_would_reject() {
             setup.committee(),
             &messages,
             dealer,
-            vec![setup.signing_keys[0].sign(setup.epoch(), dealer, &target)],
+            vec![setup.signing_keys[0].sign(TEST_HASHI_ID, setup.epoch(), dealer, &target)],
         )
         .unwrap(),
     );
@@ -18714,7 +18889,14 @@ async fn recovery_drops_certs_the_live_path_would_reject() {
             &messages,
             dealer,
             (0..4)
-                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .map(|i| {
+                    setup.signing_keys[i].sign(
+                        TEST_HASHI_ID,
+                        setup.epoch(),
+                        setup.address(i),
+                        &target,
+                    )
+                })
                 .collect(),
         )
         .unwrap(),
@@ -19092,7 +19274,14 @@ fn departing_rotation_dealer_is_verified_not_rejected() {
             &messages,
             departed,
             (0..4)
-                .map(|i| setup.signing_keys[i].sign(setup.epoch(), setup.address(i), &target))
+                .map(|i| {
+                    setup.signing_keys[i].sign(
+                        TEST_HASHI_ID,
+                        setup.epoch(),
+                        setup.address(i),
+                        &target,
+                    )
+                })
                 .collect(),
         )
         .unwrap(),

@@ -176,7 +176,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         limiter_config,
         current_committee_epoch: enclave_current_committee_epoch,
         mpc_master_g,
+        hashi_object_id: enclave_hashi_object_id,
     } = &guardian_info;
+    anyhow::ensure!(
+        *enclave_hashi_object_id == Some(cfg.hashi.hashi_ids.hashi_object_id),
+        "Guardian hashi_object_id mismatch: enclave reports {:?}, expected {}",
+        enclave_hashi_object_id,
+        cfg.hashi.hashi_ids.hashi_object_id,
+    );
     anyhow::ensure!(
         *lifecycle == WithdrawStage::OperatorInitialized.into(),
         "Guardian lifecycle is {lifecycle:?}; expected withdraw/operator_initialized"
@@ -309,6 +316,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         guardian_s3.bucket_info.clone(),
         guardian_s3.retention_environment,
         cfg.bitcoin_network,
+        cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let config_hash = expected_config.digest();
     anyhow::ensure!(

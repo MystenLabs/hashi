@@ -74,6 +74,9 @@ pub struct EnclaveConfig {
     /// Operator-supplied limiter configuration.
     /// Note: This struct is duplicated in two places: `RateLimiter` stores a copy after activation.
     limiter_config: OnceLock<LimiterConfig>,
+    /// The Hashi shared-object id this guardian serves; bound into every
+    /// committee-certificate preimage verified here (set in operator_init).
+    hashi_object_id: OnceLock<hashi_types::sui_sdk_types::Address>,
 }
 
 /// Mutable state that changes during operation.
@@ -183,6 +186,7 @@ impl EnclaveConfig {
             hashi_btc_master_pubkey: OnceLock::new(),
             pcr_allowlist: OnceLock::new(),
             limiter_config: OnceLock::new(),
+            hashi_object_id: OnceLock::new(),
         }
     }
 
@@ -558,6 +562,7 @@ impl Enclave {
                     && self.config.limiter_config.get().is_some()
                     && self.temporary_init_state_is_available()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
+                    && self.config.hashi_object_id.get().is_some()
             }
         }
     }
@@ -640,6 +645,7 @@ impl Enclave {
             limiter_config: self.limiter_config().ok(),
             current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
             mpc_master_g: self.config.hashi_btc_master_pubkey.get().copied(),
+            hashi_object_id: self.config.hashi_object_id.get().copied(),
         }
     }
 
@@ -809,6 +815,7 @@ impl Enclave {
         hashi_btc_master_pubkey: HashiMasterG,
         pcr_allowlist: PcrAllowlist,
         limiter_config: LimiterConfig,
+        hashi_object_id: hashi_types::sui_sdk_types::Address,
     ) -> GuardianResult<()> {
         self.config
             .btc_network
@@ -825,6 +832,20 @@ impl Enclave {
         self.config
             .limiter_config
             .set(limiter_config)
-            .map_err(|_| InvalidInputs("Limiter config is already initialized".into()))
+            .map_err(|_| InvalidInputs("Limiter config is already initialized".into()))?;
+        self.config
+            .hashi_object_id
+            .set(hashi_object_id)
+            .map_err(|_| InvalidInputs("Hashi object id is already initialized".into()))
+    }
+
+    /// The Hashi shared-object id certificates verified by this guardian must
+    /// be bound to. Errors before operator_init has installed the config.
+    pub fn hashi_object_id(&self) -> GuardianResult<hashi_types::sui_sdk_types::Address> {
+        self.config
+            .hashi_object_id
+            .get()
+            .copied()
+            .ok_or_else(|| InvalidInputs("Hashi object id is not initialized".into()))
     }
 }

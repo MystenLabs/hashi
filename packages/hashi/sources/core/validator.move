@@ -63,9 +63,11 @@ entry fun update_next_epoch_public_key(
     ctx: &mut TxContext,
 ) {
     self.versioning().assert_version_enabled();
+    let hashi_id = self.id().uid_to_address();
     self
         .committee_set_mut()
         .set_next_epoch_public_key(
+            hashi_id,
             validator,
             next_epoch_public_key,
             proof_of_possession_signature,

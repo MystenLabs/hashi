@@ -582,6 +582,7 @@ mod tests {
                     from_epoch: 0,
                     new_committee: committee_1.clone(),
                     request_sign: request_sign.clone(),
+                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
                 })),
             ),
             (
@@ -591,12 +592,14 @@ mod tests {
                     new_committee: committee_1,
                     request_sign,
                     error: GuardianError::InvalidInputs("test failure".into()).to_string(),
+                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
                 })),
             ),
             (
                 "genesis",
                 LogMessage::Genesis(Box::new(GenesisLogMessage {
                     committee: committee_0,
+                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
                 })),
             ),
         ];
@@ -714,6 +717,7 @@ mod tests {
                 },
                 request_sign,
                 error: GuardianError::InvalidInputs("test failure".to_string()).to_string(),
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
             })),
             &signing_key,
         );
@@ -905,6 +909,7 @@ mod tests {
                     total_weight: 0,
                     config: crate::move_types::Config::default(),
                 },
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
             })),
             &signing_key,
             1_700_000_000_000,
@@ -1085,6 +1090,7 @@ mod tests {
                     total_weight: 0,
                     config: crate::move_types::Config::default(),
                 },
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
             })),
             &signing_key,
             1_700_000_000_000,

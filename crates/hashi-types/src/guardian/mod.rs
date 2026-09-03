@@ -121,6 +121,10 @@ pub struct GuardianInfo {
     /// Current committee epoch (set after operator_activate). Drives
     /// `UpdateCommittee` catch-up.
     pub current_committee_epoch: Option<u64>,
+    /// The Hashi shared-object id this guardian serves (set after
+    /// operator_init). Certificates verified by this enclave must be bound
+    /// to it; operators/KPs match it against their expected deployment.
+    pub hashi_object_id: Option<sui_sdk_types::Address>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
     #[serde(with = "crate::guardian::serde::option_mpc_master_g")]
@@ -166,6 +170,10 @@ pub struct InitConfig {
     retention_environment: S3RetentionEnvironment,
     /// BTC network.
     network: Network,
+    /// The Hashi shared-object id this guardian serves. Bound into every
+    /// committee-certificate preimage the enclave verifies, so certificates
+    /// minted for another Hashi deployment can never verify here.
+    hashi_object_id: sui_sdk_types::Address,
 }
 
 /// Optional first-deploy state pinned by the operator during OI and authorized
@@ -546,6 +554,7 @@ impl InitConfig {
         bucket_info: S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         network: Network,
+        hashi_object_id: sui_sdk_types::Address,
     ) -> GuardianResult<Self> {
         Ok(Self {
             limiter_config,
@@ -554,6 +563,7 @@ impl InitConfig {
             bucket_info,
             retention_environment,
             network,
+            hashi_object_id,
         })
     }
 
@@ -566,6 +576,7 @@ impl InitConfig {
         S3BucketInfo,
         S3RetentionEnvironment,
         Network,
+        sui_sdk_types::Address,
     ) {
         (
             self.limiter_config,
@@ -574,6 +585,7 @@ impl InitConfig {
             self.bucket_info,
             self.retention_environment,
             self.network,
+            self.hashi_object_id,
         )
     }
 
@@ -599,6 +611,12 @@ impl InitConfig {
 
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    /// The Hashi shared-object id certificates verified by this guardian
+    /// must be bound to.
+    pub fn hashi_object_id(&self) -> sui_sdk_types::Address {
+        self.hashi_object_id
     }
 
     /// The `config_hash`: the digest KPs authenticate in their signed PI
@@ -1002,6 +1020,7 @@ struct InitConfigRepr {
     pub bucket_info: S3BucketInfo,
     pub retention_environment: S3RetentionEnvironment,
     pub network: String,
+    pub hashi_object_id: sui_sdk_types::Address,
 }
 
 /// Serializable representation of ActivationState. Used for computing its digest.
@@ -1070,6 +1089,7 @@ impl From<&InitConfig> for InitConfigRepr {
             bucket_info,
             retention_environment,
             network,
+            hashi_object_id,
         ) = config.clone().into_parts();
         Self {
             limiter_config,
@@ -1078,6 +1098,7 @@ impl From<&InitConfig> for InitConfigRepr {
             bucket_info,
             retention_environment,
             network: network.to_string(),
+            hashi_object_id,
         }
     }
 }

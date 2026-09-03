@@ -35,7 +35,7 @@ pub async fn update_committee(
         return Ok(current_epoch);
     }
 
-    if let Err(e) = verify_hashi_cert(&current, &signed) {
+    if let Err(e) = verify_hashi_cert(enclave.hashi_object_id()?, &current, &signed) {
         log_failure(&enclave, current_epoch, &signed, &e).await?;
         return Err(e);
     }
@@ -91,6 +91,7 @@ async fn log_success(
         from_epoch,
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
+        hashi_object_id: enclave.hashi_object_id()?,
     };
     enclave.log_committee_update(msg).await
 }
@@ -106,6 +107,7 @@ async fn log_failure(
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
         error: err.to_string(),
+        hashi_object_id: enclave.hashi_object_id()?,
     };
     if let Err(log_err) = enclave.log_committee_update(msg).await {
         error!(
@@ -176,8 +178,9 @@ mod tests {
             new_committee: hashi_types::move_types::Committee::from(&new_committee),
         };
         let sk = mock_bls_sk();
-        let sig = sk.sign(signing_epoch, mock_signer_address(), &transition);
-        let mut agg = BlsSignatureAggregator::new(&outgoing, transition);
+        let hashi_id = hashi_types::guardian::test_utils::TEST_HASHI_OBJECT_ID;
+        let sig = sk.sign(hashi_id, signing_epoch, mock_signer_address(), &transition);
+        let mut agg = BlsSignatureAggregator::new(hashi_id, &outgoing, transition);
         agg.add_signature(sig).expect("member sig should verify");
         agg.finish().expect("threshold should be met")
     }

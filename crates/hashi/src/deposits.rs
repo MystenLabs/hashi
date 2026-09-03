@@ -340,7 +340,12 @@ impl Hashi {
         };
 
         let signature_bytes = private_key
-            .sign(epoch, validator_address, &message)
+            .sign(
+                self.config.hashi_ids().hashi_object_id,
+                epoch,
+                validator_address,
+                &message,
+            )
             .signature()
             .as_bytes()
             .to_vec()
