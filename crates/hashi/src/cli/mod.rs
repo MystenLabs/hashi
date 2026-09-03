@@ -121,7 +121,8 @@ pub struct CliGlobalOpts {
 
 #[derive(Subcommand)]
 pub enum ProposalCommands {
-    /// List all active proposals
+    /// List proposals (active by default; ids are printed in full so they can
+    /// be pasted into `vote` and `view`)
     List {
         /// Filter by proposal type (upgrade, update-deposit-fee, etc.)
         #[clap(long, short = 't')]
@@ -130,6 +131,18 @@ pub enum ProposalCommands {
         /// Show detailed information
         #[clap(long, short)]
         detailed: bool,
+
+        /// List the executed (archived) proposals instead of the active ones
+        #[clap(long)]
+        executed: bool,
+
+        /// Add a vote tally column (one live read per proposal)
+        #[clap(long)]
+        votes: bool,
+
+        /// Print the list as JSON instead of a table
+        #[clap(long)]
+        json: bool,
     },
 
     /// View details of a specific proposal
@@ -1038,8 +1051,17 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
 
     match command {
         CliCommand::Proposal { action } => match action {
-            ProposalCommands::List { r#type, detailed } => {
-                commands::proposal::list_proposals(&config, r#type, detailed).await?;
+            ProposalCommands::List {
+                r#type,
+                detailed,
+                executed,
+                votes,
+                json,
+            } => {
+                commands::proposal::list_proposals(
+                    &config, r#type, detailed, executed, votes, json,
+                )
+                .await?;
             }
             ProposalCommands::View { proposal_id } => {
                 commands::proposal::view_proposal(&config, &proposal_id).await?;

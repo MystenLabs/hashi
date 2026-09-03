@@ -161,6 +161,96 @@ fn status_reads_executed_for_the_executed_bag() {
     );
 }
 
+// ===== pre-flights the chain would otherwise refuse after the prompt =====
+
+const WEEK_MS: u64 = 1000 * 60 * 60 * 24 * 7;
+
+#[test]
+fn a_proposal_inside_its_window_is_not_expired() {
+    refuse_if_expired(&proposal(1, 1_000), &hex(1), 1_000 + WEEK_MS).unwrap();
+}
+
+#[test]
+fn an_expired_proposal_is_refused_with_its_expiry_date() {
+    let err = refuse_if_expired(&proposal(1, 1_000), &hex(1), 1_000 + WEEK_MS + 1)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&hex(1)), "{err}");
+    assert!(err.contains("expired on"), "{err}");
+    assert!(err.contains("only deleted"), "{err}");
+}
+
+#[test]
+fn a_seated_validator_passes_and_an_unseated_one_is_refused() {
+    let me = Address::new([7; 32]);
+    let seated = [Address::new([7; 32]), Address::new([8; 32])];
+    refuse_if_not_seated(me, Some((12, &seated))).unwrap();
+    let err = refuse_if_not_seated(Address::new([9; 32]), Some((12, &seated)))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not seated in the current committee (epoch 12)"),
+        "{err}"
+    );
+    // Before the first DKG there is no committee to check against.
+    refuse_if_not_seated(Address::new([9; 32]), None).unwrap();
+}
+
+#[test]
+fn a_second_vote_is_refused_and_points_at_remove_vote() {
+    let me = Address::new([7; 32]);
+    let err = refuse_vote_state(me, &[me], &hex(1), ProposalAction::Vote)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has already voted"), "{err}");
+    assert!(err.contains("remove-vote"), "{err}");
+    refuse_vote_state(me, &[], &hex(1), ProposalAction::Vote).unwrap();
+}
+
+#[test]
+fn removing_a_vote_that_was_never_cast_is_refused() {
+    let me = Address::new([7; 32]);
+    let err = refuse_vote_state(me, &[], &hex(1), ProposalAction::RemoveVote)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has no vote"), "{err}");
+    refuse_vote_state(me, &[me], &hex(1), ProposalAction::RemoveVote).unwrap();
+    // Execution is permissionless; the vote state is irrelevant.
+    refuse_vote_state(me, &[], &hex(1), ProposalAction::Execute).unwrap();
+}
+
+#[test]
+fn quorum_progress_rounds_the_threshold_up_and_describes_both_states() {
+    let short = QuorumProgress {
+        voters: 2,
+        voted_weight: 120,
+        threshold_weight: 200,
+        total_weight: 300,
+    };
+    assert!(!short.met());
+    assert_eq!(short.missing_weight(), 80);
+    assert_eq!(
+        short.describe(),
+        "2 voter(s), 120/200 weight (80 more needed)"
+    );
+    let met = QuorumProgress {
+        voters: 3,
+        voted_weight: 200,
+        threshold_weight: 200,
+        total_weight: 300,
+    };
+    assert!(met.met());
+    assert_eq!(met.describe(), "3 voter(s), 200/200 weight, quorum reached");
+    // An empty committee can never reach quorum, whatever the weights say.
+    let empty = QuorumProgress {
+        voters: 0,
+        voted_weight: 0,
+        threshold_weight: 0,
+        total_weight: 0,
+    };
+    assert!(!empty.met());
+}
+
 // ===== decoding Move aborts =====
 
 fn move_abort(module: &str, code: u64, clever: Option<(&str, &str)>) -> ExecutionError {
