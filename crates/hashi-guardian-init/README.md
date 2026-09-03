@@ -16,6 +16,9 @@ cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sa
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardian-init.sample.yaml --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 --new-kp-pgp-cert-path /path/to/kp3-new.asc
+cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guardian-init.sample.yaml --submission-path /path/to/kp3.rotation
+cargo run -p hashi-guardian-init -- operator rotate-kp-set submit --config guardian-init.sample.yaml --submission /path/to/kp1.rotation --submission /path/to/kp3.rotation
 ```
 
 On first deploy, add `--do-genesis` to the `operator provision` command and
@@ -75,12 +78,14 @@ entry. After verification it saves the full ceremony state, including every
 KP's encrypted shares and the public ceremony data, to the requested path, then
 signs and submits a confirmation to the live guardian. The guardian completes
 the ceremony only after all KP/share entries have confirmed.
-For rotations, the external orchestrator must keep the ceremony guardian
-running after `RotateKpSet` returns until its lifecycle reaches `Completed`.
 
 Both ceremony commands verify live guardian info and Nitro attestation against
 the configured current build. The KP additionally anchors the ceremony and
-share logs to their writing session's S3 `init/` attestation.
+share logs to their writing session's S3 `init/` attestation. Through the
+proxy, the KP's `guardian_endpoint` answers with the guardian KPs are
+provisioning (`GetProvisioningTargetInfo`): the standby during a KP-set
+rotation, else the active guardian. A bare guardian endpoint answers for
+itself.
 
 Each ciphertext in the selected roster entry is piped from memory to `gpg` over
 stdin. No temporary ciphertext or plaintext file is written locally; only the
@@ -222,6 +227,66 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-cert \
 
 After success, replace the path matching the target fingerprint with the new
 path in `kp_roster`. If `kp_pgp_cert_path` names the target cert, update it too.
+
+## operator rotate-kp-set
+
+Re-deals the ceremony key to a new KP set (`new_kp_roster`: new certs, `n`
+and `t`) on a fresh **ceremony-mode** guardian, without changing the key. The
+guardian that serves withdrawals is untouched; a replacement guardian is then
+provisioned by the new set (`operator provision` without `--do-genesis`,
+`key-provisioner provision` by the new KPs) and activated. Rotating the set
+changes who can provision future guardians; the old set's encrypted shares
+remain in earlier `kp-shares/` entries.
+
+`init` calls ceremony-mode `OperatorInit`, pins the session against its S3
+attestation, verifies the latest `ceremony/` + `kp-shares/` logs against the
+dealt `kp_roster`, and prints the session and the proposal for the current KPs
+to compare against their own. Each current KP then runs
+`key-provisioner rotate-kp-set` and sends the operator its submission file.
+
+`submit` decodes the files, checks what the enclave will check (signature,
+pinned session, each signer's share assignment, one submission per share,
+agreement with this config's `new_kp_roster` and PCR allowlist, the dealt
+set's threshold), calls `RotateKpSet` in one batch, verifies the guardian-
+signed response (`sharing_seq + 1`, every share encrypted to the new cert
+sets) and the `ceremony/` + `kp-shares/` logs it wrote, then waits for every
+new KP's `key-provisioner ceremony` confirmation. Re-running `submit` after
+the batch was accepted only verifies the logs and waits.
+
+```bash
+cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- operator rotate-kp-set submit --config guardian-init.sample.yaml --submission /path/to/kp1.rotation --submission /path/to/kp3.rotation
+```
+
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). These
+commands use `guardian_endpoint`, `guardian_s3`, `kp_roster` (the dealt set)
+and `new_kp_roster`.
+
+## key-provisioner rotate-kp-set
+
+One current KP's contribution to a KP-set rotation. It:
+
+1. Fetches and verifies the ceremony guardian's `GuardianInfo` through
+   `guardian_endpoint` (attestation, `operator_initialized`, git revision,
+   bucket), then requires the same session's S3 `init/` attestation.
+2. Reads the latest attested `ceremony/` + `kp-shares/` state, verifies it
+   against `kp_roster`, and decrypts the copy selected by `kp_pgp_cert_path`
+   (`gpg --decrypt` over a pipe; the plaintext stays in memory).
+3. HPKE-encrypts the share to the guardian and signs a request binding it to
+   the pinned session, the PCR allowlist, and `new_kp_roster`'s certs and
+   `n`/`t`. The signature is what authorizes the proposal.
+4. Writes the signed request to `--submission-path`: the wire message,
+   prost-encoded. It holds nothing secret and can be sent to the operator
+   over any channel.
+
+```bash
+cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guardian-init.sample.yaml --submission-path /path/to/kp3.rotation
+```
+
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
+command uses `kp_pgp_cert_path`, `guardian_endpoint`, `guardian_s3`,
+`kp_roster` and `new_kp_roster`. Every KP must render from the same config:
+the enclave rejects a batch whose submissions disagree on the proposal.
 
 ## operator activate
 
