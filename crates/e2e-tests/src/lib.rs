@@ -839,6 +839,7 @@ mod tests {
     use bitcoin::OutPoint;
     use bitcoin::TxIn;
     use bitcoin::TxOut;
+
     use bitcoin::Witness;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
@@ -852,6 +853,12 @@ mod tests {
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
     use fastcrypto_tbls::types::ShareIndex;
+
+    fn authenticated_client(node: &HashiNodeHandle) -> Result<hashi::grpc::Client> {
+        let key = node.config().tls_private_key()?;
+        let tls = hashi::tls::make_client_config_with_client_auth(&key, &key.verifying_key());
+        Ok(hashi::grpc::Client::new(node.endpoint_url(), tls)?)
+    }
 
     const DKG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     const ROTATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(480);
@@ -1120,6 +1127,7 @@ mod tests {
                 let mgr = mpc_mgr.read().unwrap();
                 mgr.committee.clone()
             };
+            let epoch = committee.epoch();
             let (refill_tx, _) = tokio::sync::watch::channel(0u32);
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
@@ -1133,7 +1141,12 @@ mod tests {
                 0,
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
-            );
+                hashi::mpc::IdentityInputs {
+                    epoch,
+                    batch_size_per_weight,
+                },
+            )
+            .0;
             node.hashi().store_signing_manager(signing_manager);
         }
         vk
@@ -1813,7 +1826,7 @@ mod tests {
 
         // Verify all nodes are reachable via RPC before restart cycles
         for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
-            let client = hashi::grpc::Client::new_no_auth(node.endpoint_url())?;
+            let client = authenticated_client(node)?;
             client
                 .get_service_info()
                 .await
@@ -1849,7 +1862,7 @@ mod tests {
 
             // Verify all nodes are reachable via RPC after restart
             for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
-                let client = hashi::grpc::Client::new_no_auth(node.endpoint_url())?;
+                let client = authenticated_client(node)?;
                 client.get_service_info().await.unwrap_or_else(|e| {
                     panic!(
                         "Node {i} RPC failed after restart iteration {}: {e}",

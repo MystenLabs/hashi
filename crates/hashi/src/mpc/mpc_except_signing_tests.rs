@@ -14,15 +14,36 @@ async fn run_nonce_generation_for_test(
 ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
     MpcManager::run_nonce_dealer_phase(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
         .await;
-    MpcManager::run_nonce_party_phase(
-        mpc_manager,
-        batch_index,
-        p2p_channel,
-        tob_channel,
-        None,
-        metrics,
-    )
-    .await
+    let protocol = mpc_manager
+        .read()
+        .unwrap()
+        .mpc_config
+        .nonce_generation_protocol;
+    match protocol {
+        NonceGenerationProtocol::Avid => {
+            let admitted = admitted_from_tob(tob_channel, mpc_manager, batch_index, None).await;
+            MpcManager::run_avid_nonce_party_phase(
+                mpc_manager,
+                batch_index,
+                p2p_channel,
+                &admitted,
+                None,
+                metrics,
+            )
+            .await
+        }
+        NonceGenerationProtocol::Vanilla => {
+            MpcManager::run_vanilla_nonce_party_phase(
+                mpc_manager,
+                batch_index,
+                p2p_channel,
+                tob_channel,
+                None,
+                metrics,
+            )
+            .await
+        }
+    }
     .map(|outcome| outcome.outputs)
 }
 
@@ -564,7 +585,6 @@ struct MockOrderedBroadcastChannel {
     /// If set, publish() will fail with this error message.
     fail_on_publish: Option<String>,
     publish_outcome: PublishOutcome,
-    before_receive: Option<Box<dyn FnMut(usize) + Send + Sync>>,
     receive_calls: usize,
 }
 
@@ -576,14 +596,8 @@ impl MockOrderedBroadcastChannel {
             override_certified_dealers: None,
             fail_on_publish: None,
             publish_outcome: PublishOutcome::Landed,
-            before_receive: None,
             receive_calls: 0,
         }
-    }
-
-    fn with_before_receive(mut self, hook: Box<dyn FnMut(usize) + Send + Sync>) -> Self {
-        self.before_receive = Some(hook);
-        self
     }
 
     fn with_publish_outcome(mut self, outcome: PublishOutcome) -> Self {
@@ -624,9 +638,6 @@ impl OrderedBroadcastChannel<CertificateV1> for MockOrderedBroadcastChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        if let Some(hook) = self.before_receive.as_mut() {
-            hook(self.receive_calls);
-        }
         self.receive_calls += 1;
         self.certificates
             .lock()
@@ -13023,7 +13034,7 @@ fn test_reconstruct_presignatures_skips_zero_weight_dealer() {
     let cert = |i: usize| valid_dealer_submission(&setup, i, 1_000);
     let certs = VerifiedNonceCerts::unclassified(vec![cert(3), cert(0), cert(1)]);
     let (certified, _) = mgr.window_certified_nonce_dealers(&certs);
-    assert!(certified.contains(&setup.address(3)));
+    assert!(!certified.contains(&setup.address(3)));
 
     let outcome = mgr.reconstruct_presignatures(batch_index, &certs).unwrap();
 
@@ -15126,13 +15137,10 @@ fn avid_confirm_signatures(
 }
 
 #[tokio::test]
-async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
+async fn test_avid_sizing_excludes_a_thin_confirm_cert_from_the_decided_set() {
     let mut rng = rand::thread_rng();
-    // W=16, t=6, f=4: the W-f floor (12) takes both dealers (6+6), and each
-    // dealer's weight (6) is under the t+f quorum (10), so certs need peers.
     let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
     let second_dealer_addr = setup.address(2);
     let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
@@ -15157,21 +15165,18 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         }
     };
     let thin_cert = make_cert(&confirm_target, &sigs, 3); // weight 6 + 1 + 6 = 13 < 16
-    let full_cert = make_cert(&confirm_target, &sigs, 6); // weight 16
     let second_full_cert = make_cert(&second_target, &second_sigs, 6);
 
-    // The party (node 1, holding its output) must ignore the thin Confirm cert and consume the
-    // full one — the fast path is only consume-safe at full weight.
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob =
-        MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert, second_full_cert]);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![thin_cert, second_full_cert]);
     let metrics = test_metrics();
+    let admitted_0 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_0,
         None,
         &metrics,
     )
@@ -15180,17 +15185,12 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 
     assert_eq!(
         admission.certified,
-        HashSet::from([dealer_addr, second_dealer_addr]),
-        "the floor takes both dealers, so neither alone can satisfy it"
+        HashSet::from([second_dealer_addr]),
+        "a thin confirm cert is never admitted, so its dealer is not in the decided set"
     );
     assert_eq!(
         admission.local_skips, 0,
         "a deterministic weight-gate rejection is not a node-local skip"
-    );
-    assert_eq!(
-        mock_tob.pending_messages(),
-        Some(0),
-        "the thin cert was ignored — the full cert had to be consumed for the quorum"
     );
     assert!(
         metrics
@@ -15203,7 +15203,7 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 }
 
 #[tokio::test]
-async fn test_run_as_avid_nonce_party_skips_zero_weight_dealer_without_local_skip() {
+async fn test_avid_sizing_excludes_a_zero_weight_dealer_before_the_party_phase() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
@@ -15266,11 +15266,12 @@ async fn test_run_as_avid_nonce_party_skips_zero_weight_dealer_without_local_ski
         make_cert(&confirm_target, &sigs),
         make_cert(&second_target, &second_sigs),
     ]);
+    let admitted_1 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_1,
         None,
         &test_metrics(),
     )
@@ -15334,11 +15335,12 @@ async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
         make_cert(&confirm_target, &sigs),
         make_cert(&second_target, &second_sigs),
     ]);
-    let outcome = MpcManager::run_nonce_party_phase(
+    let admitted_100 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
+    let outcome = MpcManager::run_avid_nonce_party_phase(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_100,
         None,
         &test_metrics(),
     )
@@ -15421,11 +15423,12 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() 
     let party = Arc::new(RwLock::new(party));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
-    let outcome = MpcManager::run_nonce_party_phase(
+    let admitted_101 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
+    let outcome = MpcManager::run_avid_nonce_party_phase(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_101,
         None,
         &test_metrics(),
     )
@@ -15482,11 +15485,12 @@ async fn test_avid_party_accepts_an_output_it_validated_against_the_cert_without
 
     let party_p2p = MockP2PChannel::new(voters, party_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs.clone());
+    let admitted_2 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
-        &mut mock_tob,
+        &admitted_2,
         None,
         &test_metrics(),
     )
@@ -15501,11 +15505,12 @@ async fn test_avid_party_accepts_an_output_it_validated_against_the_cert_without
 
     let no_peers = MockP2PChannel::new(HashMap::new(), party_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
+    let admitted_3 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &no_peers,
-        &mut mock_tob,
+        &admitted_3,
         None,
         &test_metrics(),
     )
@@ -15624,11 +15629,12 @@ async fn test_avid_party_accepts_a_cut_off_confirmers_cached_output_against_the_
     let party = Arc::new(RwLock::new(fx.party));
     let party_p2p = MockP2PChannel::new(fx.peers, setup.address(5));
     let mut mock_tob = MockOrderedBroadcastChannel::new(fx.certs);
+    let admitted_4 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
-        &mut mock_tob,
+        &admitted_4,
         None,
         &test_metrics(),
     )
@@ -15655,11 +15661,12 @@ async fn test_avid_party_rejects_a_cached_output_derived_from_a_different_common
     let party = Arc::new(RwLock::new(fx.party));
     let party_p2p = MockP2PChannel::new(fx.peers, setup.address(5));
     let mut mock_tob = MockOrderedBroadcastChannel::new(fx.certs);
+    let admitted_5 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
-        &mut mock_tob,
+        &admitted_5,
         None,
         &test_metrics(),
     )
@@ -15724,11 +15731,12 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_commo
     let party = Arc::new(RwLock::new(party));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
-    let outcome = MpcManager::run_nonce_party_phase(
+    let admitted_102 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
+    let outcome = MpcManager::run_avid_nonce_party_phase(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_102,
         None,
         &test_metrics(),
     )
@@ -15836,6 +15844,45 @@ fn test_optimistic_resend_keeps_the_validation_stamp_and_a_held_output_refuses_a
     );
 }
 
+#[test]
+fn test_handle_avid_nonce_message_rejects_a_zero_weight_sender() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let message = AvidNonceMessage {
+        batch_index,
+        kind: AvidNonceMessageKind::Optimistic(extract_optimistic(&fx.optimistic[1].1).clone()),
+    };
+
+    let mut receiver = setup.create_manager(1);
+    assert!(
+        receiver
+            .handle_avid_nonce_message(fx.dealer_addr, &message)
+            .is_ok()
+    );
+
+    let mut receiver = setup.create_manager(1);
+    let zero_weighted = receiver
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == 0 { 0 } else { n.weight },
+        })
+        .collect::<Vec<_>>();
+    receiver.mpc_config.nodes = Nodes::new(zero_weighted).unwrap();
+
+    let Err(MpcError::InvalidMessage { sender, reason }) =
+        receiver.handle_avid_nonce_message(fx.dealer_addr, &message)
+    else {
+        panic!("a zero-weight sender must be rejected");
+    };
+    assert_eq!(sender, fx.dealer_addr);
+    assert!(reason.contains("zero reduced weight"), "{reason}");
+}
+
 #[tokio::test]
 async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_decoded_output() {
     let mut rng = rand::thread_rng();
@@ -15873,11 +15920,12 @@ async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_deco
     let party = Arc::new(RwLock::new(party));
     let party_p2p = MockP2PChannel::new(voters, party_addr);
     let mut mock_tob = MockOrderedBroadcastChannel::new(certs);
+    let admitted_6 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
-        &mut mock_tob,
+        &admitted_6,
         None,
         &test_metrics(),
     )
@@ -15909,72 +15957,6 @@ async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_deco
         party.dealer_avid_nonce_outputs[&(batch_index, dealer_addr)].common_hash,
         decoded_common
     );
-}
-
-#[tokio::test]
-async fn test_avid_party_does_not_consume_an_output_whose_stamp_was_cleared_after_validation() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(4);
-    let party_addr = setup.address(5);
-    let (party, mut managers, full_certs) =
-        two_full_certs_fixture(&setup, batch_index, 5, &mut rng);
-
-    let dealer = Arc::new(RwLock::new(managers.remove(&dealer_addr).unwrap()));
-    let dealer_p2p = MockP2PChannel::new(managers, dealer_addr);
-    let mut dealer_tob = MockOrderedBroadcastChannel::new(vec![]);
-    MpcManager::run_as_avid_nonce_dealer(
-        &dealer,
-        batch_index,
-        &dealer_p2p,
-        &mut dealer_tob,
-        &test_metrics(),
-    )
-    .await
-    .unwrap();
-    let mut certs: Vec<CertificateV1> = dealer_tob
-        .certified_dealers()
-        .await
-        .into_iter()
-        .map(|(_, cert)| cert)
-        .collect();
-    certs.extend(full_certs);
-
-    let mut voters = std::mem::take(&mut *dealer_p2p.managers.lock().unwrap());
-    let Ok(dealer) = Arc::try_unwrap(dealer) else {
-        panic!("dealer Arc still shared");
-    };
-    voters.insert(dealer_addr, dealer.into_inner().unwrap());
-
-    let party = Arc::new(RwLock::new(party));
-    let overwriter = Arc::clone(&party);
-    let party_p2p = MockP2PChannel::new(voters, party_addr);
-    let mut mock_tob =
-        MockOrderedBroadcastChannel::new(certs).with_before_receive(Box::new(move |call| {
-            if call == 1 {
-                overwriter
-                    .write()
-                    .unwrap()
-                    .dealer_avid_nonce_outputs
-                    .get_mut(&(batch_index, dealer_addr))
-                    .unwrap()
-                    .cert_digest = None;
-            }
-        }));
-    let outcome = MpcManager::run_nonce_party_phase(
-        &party,
-        batch_index,
-        &party_p2p,
-        &mut mock_tob,
-        None,
-        &test_metrics(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(outcome.outputs.len(), 2);
-    assert_eq!(outcome.local_skips, 1);
 }
 
 #[tokio::test]
@@ -16027,11 +16009,12 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
         make_cert(&confirm_target, &sigs),
         make_cert(&second_target, &second_sigs),
     ]);
+    let admitted_7 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let admission = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_7,
         None,
         &test_metrics(),
     )
@@ -16050,111 +16033,68 @@ async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_s
     );
 }
 
-#[tokio::test]
-async fn test_avid_below_floor_attribution_distinguishes_cause() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+#[test]
+fn test_avid_below_floor_attribution_distinguishes_cause() {
     let batch_index = 0u32;
-    let mut managers: HashMap<Address, MpcManager> = (0..6)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let (sigs, confirm_target) =
-        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
-    let make_cert = |target: &AvssVoteMessagesHash, sigs: &[MemberSignature], ts: u64| {
-        let mut agg = BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), target.clone());
-        for sig in sigs.iter().take(6) {
-            agg.add_signature(sig.clone()).unwrap();
-        }
-        CertificateV1::NonceGeneration {
-            batch_index,
-            cert: UnclassifiedNonceCert::from_signed(&agg.finish().unwrap(), batch_index)
-                .as_dealer_messages_hash()
-                .unwrap(),
-            timestamp_ms: ts,
-        }
-    };
-
-    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
-    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut tob = crate::communication::PrefetchedTobChannel::new(vec![(
-        setup.address(0),
-        make_cert(&confirm_target, &sigs, 0),
-    )]);
     let metrics = test_metrics();
-    let dry = MpcManager::run_as_avid_nonce_party(
-        &party,
-        batch_index,
-        &mock_p2p,
-        &mut tob,
-        None,
-        &metrics,
-    )
-    .await;
 
-    assert!(
-        matches!(dry, Err(MpcError::NotEnoughParticipants { .. })),
-        "a dry stream below the floor must fail, got {:?}",
-        dry.map(|a| a.certified.len())
-    );
-    assert_eq!(
-        metrics.mpc_nonce_floor_unreached_total.get(),
-        1,
-        "an exhausted list is a floor-unreached batch"
-    );
-    assert_eq!(
-        metrics.mpc_nonce_window_closed_below_floor_total.get(),
-        0,
-        "nothing closed the window — the list simply ran out"
-    );
-    assert_eq!(
-        metrics.mpc_nonce_local_skip_batches_total.get(),
-        0,
-        "no dealer was skipped for a node-local reason"
-    );
-
-    let mut closed_managers: HashMap<Address, MpcManager> = (0..6)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let (closed_sigs, closed_target) =
-        avid_confirm_signatures(&setup, &mut closed_managers, 0, batch_index, &mut rng);
-    let closed_party = Arc::new(RwLock::new(
-        closed_managers.remove(&setup.address(1)).unwrap(),
+    let exhausted = AdmittedNonceDealers {
+        weight: 1,
+        required_weight: 10,
+        cutoff_ms: Some(1_000),
+        window_closed: false,
+        dealers: Vec::new(),
+    };
+    assert!(!exhausted.floor_reached());
+    assert!(matches!(
+        exhausted.below_floor_error(batch_index, &metrics),
+        MpcError::NotEnoughParticipants { .. }
     ));
-    let closed_p2p = MockP2PChannel::new(closed_managers, setup.address(1));
-    let mut closed_tob = crate::communication::PrefetchedTobChannel::new(vec![(
-        setup.address(0),
-        make_cert(&closed_target, &closed_sigs, 5_000),
-    )]);
-    let closed_metrics = test_metrics();
-    let closed = MpcManager::run_as_avid_nonce_party(
-        &closed_party,
-        batch_index,
-        &closed_p2p,
-        &mut closed_tob,
-        Some(1_000),
-        &closed_metrics,
-    )
-    .await;
-
-    assert!(
-        matches!(closed, Err(MpcError::NotEnoughParticipants { .. })),
-        "a window closed below the floor must fail, got {:?}",
-        closed.map(|a| a.certified.len())
-    );
     assert_eq!(
-        closed_metrics
-            .mpc_nonce_window_closed_below_floor_total
+        metrics
+            .mpc_nonce_decided_set_exhausted_below_floor_total
             .get(),
-        1,
-        "the window closed on a past-cutoff stamp"
+        1
     );
     assert_eq!(
-        closed_metrics.mpc_nonce_floor_unreached_total.get(),
-        0,
-        "the stream did not run out — attributing this to a floor shortage misdirects the \
-         on-call to the fleet"
+        metrics
+            .mpc_nonce_decided_set_window_closed_below_floor_total
+            .get(),
+        0
     );
-    assert_eq!(closed_metrics.mpc_nonce_local_skip_batches_total.get(), 0);
+
+    let closed = AdmittedNonceDealers {
+        weight: 1,
+        required_weight: 10,
+        cutoff_ms: Some(1_000),
+        window_closed: true,
+        dealers: Vec::new(),
+    };
+    assert!(matches!(
+        closed.below_floor_error(batch_index, &metrics),
+        MpcError::NotEnoughParticipants { .. }
+    ));
+    assert_eq!(
+        metrics
+            .mpc_nonce_decided_set_exhausted_below_floor_total
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .mpc_nonce_decided_set_window_closed_below_floor_total
+            .get(),
+        1
+    );
+
+    let met = AdmittedNonceDealers {
+        weight: 10,
+        required_weight: 10,
+        cutoff_ms: None,
+        window_closed: false,
+        dealers: Vec::new(),
+    };
+    assert!(met.floor_reached());
 }
 
 #[tokio::test]
@@ -16202,11 +16142,12 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let party = Arc::new(RwLock::new(restarted));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert, second_full_cert]);
+    let admitted_10 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &mock_p2p,
-        &mut mock_tob,
+        &admitted_10,
         None,
         &test_metrics(),
     )
@@ -16362,6 +16303,52 @@ fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
         weight_of(&[0]),
         "one dealer under two table keys must count once in the generic walk"
     );
+}
+
+async fn admitted_avid_dealers(
+    mgr: &Arc<RwLock<MpcManager>>,
+    batch_index: u32,
+    certs: Vec<CertificateV1>,
+    cutoff_ms: Option<u64>,
+) -> AdmittedNonceDealers {
+    let epoch = mgr.read().unwrap().mpc_config.epoch;
+    let keyed: Vec<(Address, CertificateV1)> = certs
+        .into_iter()
+        .map(|c| {
+            let CertificateV1::NonceGeneration { cert, .. } = &c else {
+                panic!("expected a nonce-generation certificate");
+            };
+            (cert.message().dealer_address, c)
+        })
+        .collect();
+    let verified = MpcManager::verified_nonce_certs(
+        mgr,
+        epoch,
+        keyed,
+        batch_index,
+        &mut HashMap::new(),
+        &test_metrics(),
+    )
+    .await;
+    mgr.read()
+        .unwrap()
+        .avid_admitted_nonce_dealers(&verified, cutoff_ms)
+        .expect("the decided set is well formed")
+}
+
+async fn admitted_from_tob(
+    tob: &mut impl OrderedBroadcastChannel<CertificateV1>,
+    mgr: &Arc<RwLock<MpcManager>>,
+    batch_index: u32,
+    cutoff_ms: Option<u64>,
+) -> AdmittedNonceDealers {
+    let certs = tob
+        .certified_dealers()
+        .await
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    admitted_avid_dealers(mgr, batch_index, certs, cutoff_ms).await
 }
 
 fn avid_certs_of_kind(
@@ -16754,12 +16741,121 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
 
     assert_eq!(mgr.nonce_collection_cutoff_ms(&certs), Some(1_800));
 
-    let admitted = mgr.avid_admitted_nonce_dealers(&certs, None);
+    let admitted = mgr.avid_admitted_nonce_dealers(&certs, None).unwrap();
     assert_eq!(admitted.cutoff_ms, Some(2_000));
     assert_eq!(admitted.weight, mgr.required_nonce_weight());
 
-    let settled = mgr.avid_admitted_nonce_dealers(&certs, Some(1_800));
+    let settled = mgr
+        .avid_admitted_nonce_dealers(&certs, Some(1_800))
+        .unwrap();
     assert_eq!(settled.cutoff_ms, Some(1_800));
+}
+
+#[tokio::test]
+async fn test_avid_party_counts_a_zero_weight_dealer_in_a_decided_set_as_a_skip() {
+    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let dealer_address = setup.address(1);
+    let message = DealerMessagesHash {
+        dealer_address,
+        messages_hash: MessagesHash::from([7u8; 32]),
+    };
+    let mut aggregator =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+    for s in 0..4 {
+        let sig =
+            setup.signing_keys[s].sign(TEST_HASHI_ID, setup.epoch(), setup.address(s), &message);
+        aggregator.add_signature(sig).unwrap();
+    }
+
+    let mut mgr = setup.create_manager(0);
+    let zeroed = mgr
+        .mpc_config
+        .nodes
+        .iter()
+        .map(|n| Node {
+            id: n.id,
+            pk: n.pk.clone(),
+            weight: if n.id == 1 { 0 } else { n.weight },
+        })
+        .collect::<Vec<_>>();
+    mgr.mpc_config.nodes = Nodes::new(zeroed).unwrap();
+
+    let admitted = AdmittedNonceDealers {
+        weight: 10,
+        required_weight: 7,
+        cutoff_ms: None,
+        window_closed: false,
+        dealers: vec![AdmittedNonceDealer {
+            dealer: dealer_address,
+            cert: CertificateV1::NonceGeneration {
+                batch_index: 0,
+                cert: aggregator.finish().unwrap(),
+                timestamp_ms: 0,
+            },
+            kind: CertKind::AvidVote,
+        }],
+    };
+    let party = Arc::new(RwLock::new(mgr));
+    let p2p = MockP2PChannel::new(HashMap::new(), setup.address(0));
+    let admission =
+        MpcManager::run_as_avid_nonce_party(&party, 0, &p2p, &admitted, None, &test_metrics())
+            .await
+            .unwrap();
+    assert!(admission.certified.is_empty());
+    assert_eq!(admission.local_skips, 1);
+    assert_eq!(p2p.retrieve_calls(), 0);
+}
+
+#[test]
+fn test_avid_sizing_reports_whether_the_window_closed() {
+    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.nonce_accumulation_window_ms = 0;
+    let all: Vec<usize> = (0..4).collect();
+    let make_cert = |dealer_idx: usize, timestamp_ms: u64| -> (Address, CertificateV1) {
+        let dealer_address = setup.address(dealer_idx);
+        let message = DealerMessagesHash {
+            dealer_address,
+            messages_hash: MessagesHash::from([dealer_idx as u8 + 1; 32]),
+        };
+        let mut aggregator =
+            BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), message.clone());
+        for &s in &all {
+            let sig = setup.signing_keys[s].sign(
+                TEST_HASHI_ID,
+                setup.epoch(),
+                setup.address(s),
+                &message,
+            );
+            aggregator.add_signature(sig).unwrap();
+        }
+        (
+            dealer_address,
+            CertificateV1::NonceGeneration {
+                batch_index: 0,
+                cert: aggregator.finish().unwrap(),
+                timestamp_ms,
+            },
+        )
+    };
+    let certs = avid_vote_certs(vec![make_cert(0, 1_000), make_cert(1, 5_000)]);
+
+    let closed = mgr
+        .avid_admitted_nonce_dealers(&certs, Some(2_000))
+        .unwrap();
+    assert!(closed.window_closed);
+    assert_eq!(closed.dealers.len(), 1);
+
+    let exhausted = mgr
+        .avid_admitted_nonce_dealers(&certs, Some(9_000))
+        .unwrap();
+    assert!(!exhausted.window_closed);
+    assert_eq!(exhausted.dealers.len(), 2);
+
+    let thin = avid_vote_certs(vec![make_cert(3, 1_000)]);
+    let thin = mgr.avid_admitted_nonce_dealers(&thin, Some(9_000)).unwrap();
+    assert!(!thin.window_closed);
+    assert!(!thin.floor_reached());
 }
 
 #[test]
@@ -16846,9 +16942,7 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
     .unwrap();
     assert_eq!(mock_tob.pending_messages(), Some(1), "Vote cert published");
 
-    // The laggard pulls v / the vote / echoes from the voters and decodes its share. The mock
-    // TOB then runs dry before the required dealer weight, which surfaces as an error — the
-    // decoded share is what this test is about.
+    // The laggard pulls the vote and echoes from the voters and decodes its share.
     let mut voters = std::mem::take(&mut *dealer_p2p.managers.lock().unwrap());
     let Ok(dealer) = Arc::try_unwrap(dealer) else {
         panic!("dealer Arc still shared");
@@ -16857,16 +16951,18 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
     let laggard = Arc::new(RwLock::new(setup.create_manager(5)));
     let laggard_p2p = MockP2PChannel::new(voters, setup.address(5));
     let metrics = test_metrics();
+    let admitted_11 = admitted_from_tob(&mut mock_tob, &laggard, batch_index, None).await;
     let result = MpcManager::run_as_avid_nonce_party(
         &laggard,
         batch_index,
         &laggard_p2p,
-        &mut mock_tob,
+        &admitted_11,
         None,
         &metrics,
     )
     .await;
-    assert!(result.is_err(), "mock TOB runs dry: {result:?}");
+    let admission = result.expect("the decided set is consumed without a channel");
+    assert!(admission.certified.contains(&dealer_addr));
     let mgr = laggard.read().unwrap();
     assert!(
         mgr.dealer_avid_nonce_outputs
@@ -16941,11 +17037,12 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
         );
     }
     let party_p2p = MockP2PChannel::new(voters, setup.address(1));
+    let admitted_12 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
-        &mut mock_tob,
+        &admitted_12,
         None,
         &test_metrics(),
     )
@@ -17261,16 +17358,18 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
     let party = Arc::new(RwLock::new(victim_mgr));
     let party_p2p = MockP2PChannel::new(nodes, victim);
     let metrics = test_metrics();
+    let admitted_13 = admitted_from_tob(&mut mock_tob, &party, batch_index, None).await;
     let result = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
-        &mut mock_tob,
+        &admitted_13,
         None,
         &metrics,
     )
     .await;
-    assert!(result.is_err(), "mock TOB runs dry: {result:?}");
+    let admission = result.expect("the decided set is consumed without a channel");
+    assert!(admission.certified.contains(&dealer_addr));
     let mgr = party.read().unwrap();
     assert!(
         mgr.dealer_avid_nonce_outputs

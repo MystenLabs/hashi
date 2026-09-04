@@ -6,6 +6,7 @@ use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
 use crate::communication::PublishOutcome;
+use crate::communication::sui_tob::tob_wait_superseded;
 use crate::communication::with_timeout_and_retry;
 use crate::communication::with_timeout_and_retry_budget;
 use crate::constants::is_production_sui_chain;
@@ -13,6 +14,9 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::mpc::types::AdmittedCertRef;
+use crate::mpc::types::AdmittedNonceDealer;
+use crate::mpc::types::AdmittedNonceDealers;
 use crate::mpc::types::AvidCertificate;
 use crate::mpc::types::AvidConfirmCertificate;
 use crate::mpc::types::AvidDealerFlowData;
@@ -22,6 +26,7 @@ use crate::mpc::types::AvidNonceRetrievalMessage;
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::AvidVoteMessagesHash;
 use crate::mpc::types::AvssVoteMessagesHash;
+use crate::mpc::types::CertKind;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
 pub use crate::mpc::types::ComplaintResponse;
@@ -71,6 +76,7 @@ use crate::mpc::types::UnclassifiedNonceCert;
 use crate::mpc::types::VerifiedAvidVoteCert;
 use crate::mpc::types::VerifiedCertificateV1;
 use crate::mpc::types::hash_avid_vote;
+use crate::onchain::OnchainState;
 use crate::onchain::types::CommitteeSet;
 use crate::storage::PublicMessagesStore;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
@@ -163,12 +169,6 @@ pub struct TaggedAvidOutput {
     pub cert_digest: Option<MessagesHash>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CertKind {
-    AvssVote,
-    AvidVote,
-}
-
 #[allow(clippy::large_enum_variant)]
 enum WindowedNonceReceive {
     Cert {
@@ -241,9 +241,34 @@ pub struct MpcManager {
     test_corrupt_shares_for: Option<Address>,
 }
 
-pub(crate) struct AdmittedNonceDealers {
-    pub(crate) weight: u32,
-    pub(crate) cutoff_ms: Option<u64>,
+impl AdmittedNonceDealers {
+    pub(crate) fn below_floor_error(&self, batch_index: u32, metrics: &Metrics) -> MpcError {
+        if self.window_closed {
+            metrics
+                .mpc_nonce_decided_set_window_closed_below_floor_total
+                .inc();
+            tracing::warn!(
+                "nonce batch {batch_index} closed on the window cutoff under the floor: \
+                 admitted {} of {} required",
+                self.weight,
+                self.required_weight,
+            );
+        } else {
+            metrics
+                .mpc_nonce_decided_set_exhausted_below_floor_total
+                .inc();
+            tracing::warn!(
+                "nonce batch {batch_index} ran out of certs under the floor: admitted {} \
+                 of {} required",
+                self.weight,
+                self.required_weight,
+            );
+        }
+        MpcError::NotEnoughParticipants {
+            expected: self.required_weight as usize,
+            got: self.weight as usize,
+        }
+    }
 }
 
 pub(crate) struct VerifiedNonceCerts<T> {
@@ -1218,7 +1243,7 @@ impl MpcManager {
         }
     }
 
-    pub async fn run_nonce_party_phase(
+    pub async fn run_vanilla_nonce_party_phase(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
@@ -1226,61 +1251,84 @@ impl MpcManager {
         cutoff_ms: Option<u64>,
         metrics: &Metrics,
     ) -> MpcResult<NoncePartyOutcome> {
-        let protocol = {
-            let mgr = mpc_manager.read().unwrap();
-            mgr.mpc_config.nonce_generation_protocol
-        };
-        let admission = match protocol {
-            NonceGenerationProtocol::Vanilla => {
-                Self::run_as_nonce_party(
-                    mpc_manager,
-                    batch_index,
-                    p2p_channel,
-                    tob_channel,
-                    cutoff_ms,
-                    metrics,
-                )
-                .await?
-            }
-            NonceGenerationProtocol::Avid => {
-                Self::run_as_avid_nonce_party(
-                    mpc_manager,
-                    batch_index,
-                    p2p_channel,
-                    tob_channel,
-                    cutoff_ms,
-                    metrics,
-                )
-                .await?
-            }
-        };
+        let admission = Self::run_as_nonce_party(
+            mpc_manager,
+            batch_index,
+            p2p_channel,
+            tob_channel,
+            cutoff_ms,
+            metrics,
+        )
+        .await?;
         let mut mgr = mpc_manager.write().unwrap();
-        // Keep only the outputs selected by the party phase. The RPC handler may have inserted
-        // additional outputs concurrently — discard them so all nodes use the same deterministic
-        // set.
-        let (pre_filter, dealers, outputs) = match protocol {
-            NonceGenerationProtocol::Vanilla => consume_certified_nonce_outputs(
-                &mut mgr.dealer_nonce_outputs,
-                batch_index,
-                &admission.certified,
-                |_| true,
-                |output| output.clone(),
-            ),
-            NonceGenerationProtocol::Avid => {
-                let indices = mgr
-                    .mpc_config
-                    .nodes
-                    .share_ids_of(mgr.party_id()?)
-                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-                consume_certified_nonce_outputs(
-                    &mut mgr.dealer_avid_nonce_outputs,
-                    batch_index,
-                    &admission.certified,
-                    |tagged| tagged.cert_digest.is_some(),
-                    |tagged| tagged.output.clone().into_legacy(&indices),
-                )
-            }
-        };
+        let (pre_filter, dealers, outputs) = consume_certified_nonce_outputs(
+            &mut mgr.dealer_nonce_outputs,
+            batch_index,
+            &admission.certified,
+            |_| true,
+            |output| output.clone(),
+        );
+        Self::finish_nonce_party_phase(
+            &mgr,
+            batch_index,
+            cutoff_ms,
+            admission,
+            pre_filter,
+            dealers,
+            outputs,
+        )
+    }
+
+    pub(crate) async fn run_avid_nonce_party_phase(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        p2p_channel: &impl P2PChannel,
+        admitted: &AdmittedNonceDealers,
+        supersede: Option<(OnchainState, u64)>,
+        metrics: &Metrics,
+    ) -> MpcResult<NoncePartyOutcome> {
+        let admission = Self::run_as_avid_nonce_party(
+            mpc_manager,
+            batch_index,
+            p2p_channel,
+            admitted,
+            supersede,
+            metrics,
+        )
+        .await?;
+        let mut mgr = mpc_manager.write().unwrap();
+        let indices = mgr
+            .mpc_config
+            .nodes
+            .share_ids_of(mgr.party_id()?)
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let (pre_filter, dealers, outputs) = consume_certified_nonce_outputs(
+            &mut mgr.dealer_avid_nonce_outputs,
+            batch_index,
+            &admission.certified,
+            |tagged| tagged.cert_digest.is_some(),
+            |tagged| tagged.output.clone().into_legacy(&indices),
+        );
+        Self::finish_nonce_party_phase(
+            &mgr,
+            batch_index,
+            admitted.cutoff_ms,
+            admission,
+            pre_filter,
+            dealers,
+            outputs,
+        )
+    }
+
+    fn finish_nonce_party_phase(
+        mgr: &Self,
+        batch_index: u32,
+        cutoff_ms: Option<u64>,
+        admission: NoncePartyAdmission,
+        pre_filter: usize,
+        dealers: Vec<Address>,
+        outputs: Vec<batch_avss::ReceiverOutput>,
+    ) -> MpcResult<NoncePartyOutcome> {
         let expected = admission
             .certified
             .iter()
@@ -1291,7 +1339,7 @@ impl MpcManager {
         let unmaterialised = expected.saturating_sub(dealers.len()) as u32;
         let local_skips = admission.local_skips.saturating_add(unmaterialised);
         tracing::info!(
-            "run_nonce_party_phase: epoch={}, batch_index={batch_index}, \
+            "nonce party phase: epoch={}, batch_index={batch_index}, \
              cutoff_ms={cutoff_ms:?}, {pre_filter} outputs before filter, {} after, \
              local_skips={local_skips} ({unmaterialised} certified without an output). \
              dealers={dealers:?}",
@@ -1360,7 +1408,12 @@ impl MpcManager {
         &self,
         certs: &VerifiedNonceCerts<T>,
     ) -> (HashSet<Address>, NonceCollectionWindow) {
-        self.certified_nonce_dealers_in_window(certs, self.nonce_collection_window(), |_, _| true)
+        let (admitted, window) = self.certified_nonce_dealers_in_window(
+            certs,
+            self.nonce_collection_window(),
+            |_, _| true,
+        );
+        (admitted.into_iter().map(|a| a.dealer).collect(), window)
     }
 
     fn certified_nonce_dealers_in_window<T: NonceCertTimestamp>(
@@ -1368,9 +1421,10 @@ impl MpcManager {
         certs: &VerifiedNonceCerts<T>,
         mut window: NonceCollectionWindow,
         admit: impl Fn(&T, Option<CertKind>) -> bool,
-    ) -> (HashSet<Address>, NonceCollectionWindow) {
+    ) -> (Vec<AdmittedCertRef>, NonceCollectionWindow) {
+        let mut admitted: Vec<AdmittedCertRef> = Vec::new();
         let mut certified = HashSet::new();
-        for (table_dealer, cert) in certs.as_slice() {
+        for (index, (table_dealer, cert)) in certs.as_slice().iter().enumerate() {
             let dealer = match cert.signed_dealer(self.mpc_config.epoch) {
                 Some(signed) => {
                     if signed != *table_dealer {
@@ -1397,30 +1451,79 @@ impl MpcManager {
             if let Some(party_id) = self.committee.index_of(&dealer)
                 && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
             {
+                if w == 0 {
+                    continue;
+                }
                 window.record(admission, w as u32);
                 certified.insert(dealer);
+                admitted.push(AdmittedCertRef {
+                    dealer,
+                    index,
+                    kind: certs.kind_of(table_dealer),
+                });
             }
         }
-        (certified, window)
+        (admitted, window)
     }
 
-    pub(crate) fn avid_admitted_nonce_dealers(
+    pub(crate) fn avid_admitted_nonce_weight(
         &self,
         certs: &VerifiedNonceCerts<CertificateV1>,
         settled_cutoff_ms: Option<u64>,
-    ) -> AdmittedNonceDealers {
+    ) -> u32 {
+        self.avid_admitted_walk(certs, settled_cutoff_ms).1.weight()
+    }
+
+    fn avid_admitted_walk(
+        &self,
+        certs: &VerifiedNonceCerts<CertificateV1>,
+        settled_cutoff_ms: Option<u64>,
+    ) -> (Vec<AdmittedCertRef>, NonceCollectionWindow) {
         let window = match settled_cutoff_ms {
             Some(cutoff_ms) => {
                 NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), Some(cutoff_ms))
             }
             None => self.nonce_collection_window(),
         };
-        let (_, window) =
-            self.certified_nonce_dealers_in_window(certs, window, self.avid_admission());
-        AdmittedNonceDealers {
+        self.certified_nonce_dealers_in_window(certs, window, self.avid_admission())
+    }
+
+    pub(crate) fn avid_admitted_nonce_dealers(
+        &self,
+        certs: &VerifiedNonceCerts<CertificateV1>,
+        settled_cutoff_ms: Option<u64>,
+    ) -> MpcResult<AdmittedNonceDealers> {
+        let (admitted, window) = self.avid_admitted_walk(certs, settled_cutoff_ms);
+        let slice = certs.as_slice();
+        let dealers = admitted
+            .into_iter()
+            .map(|a| {
+                let (_, cert) = slice.get(a.index).ok_or_else(|| {
+                    MpcError::InvalidCertificate(format!(
+                        "admitted dealer {:?} indexes outside the cert list",
+                        a.dealer
+                    ))
+                })?;
+                let kind = a.kind.ok_or_else(|| {
+                    MpcError::InvalidCertificate(format!(
+                        "admitted dealer {:?} carries no signing domain",
+                        a.dealer
+                    ))
+                })?;
+                Ok(AdmittedNonceDealer {
+                    dealer: a.dealer,
+                    cert: cert.clone(),
+                    kind,
+                })
+            })
+            .collect::<MpcResult<Vec<_>>>()?;
+        Ok(AdmittedNonceDealers {
             weight: window.weight(),
+            required_weight: window.required_weight(),
             cutoff_ms: window.cutoff_ms(),
-        }
+            window_closed: window.closed(),
+            dealers,
+        })
     }
 
     #[cfg(test)]
@@ -1429,12 +1532,15 @@ impl MpcManager {
         certs: &VerifiedNonceCerts<CertificateV1>,
         cutoff_ms: Option<u64>,
     ) -> (HashSet<Address>, u32) {
-        let (certified, window) = self.certified_nonce_dealers_in_window(
+        let (admitted, window) = self.certified_nonce_dealers_in_window(
             certs,
             NonceCollectionWindow::with_cutoff(self.required_nonce_weight(), cutoff_ms),
             self.avid_admission(),
         );
-        (certified, window.weight())
+        (
+            admitted.into_iter().map(|a| a.dealer).collect(),
+            window.weight(),
+        )
     }
 
     fn avid_admission(&self) -> impl Fn(&CertificateV1, Option<CertKind>) -> bool + '_ {
@@ -1518,6 +1624,10 @@ impl MpcManager {
                 }
             };
             let mgr = Arc::clone(mpc_manager);
+            let _verify_timer = metrics
+                .mpc_cert_verify_duration_seconds
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                .start_timer();
             let verification = spawn_blocking(move || {
                 let mgr = mgr.read().unwrap();
                 let unclassified =
@@ -3269,6 +3379,12 @@ impl MpcManager {
         message: &AvidNonceMessage,
     ) -> MpcResult<BLS12381Signature> {
         let batch_index = message.batch_index;
+        if Self::dealer_deals_nothing(&self.committee, &self.mpc_config.nodes, &sender) {
+            return Err(MpcError::InvalidMessage {
+                sender,
+                reason: "sender has zero reduced weight in this committee".into(),
+            });
+        }
         match &message.kind {
             AvidNonceMessageKind::Optimistic(msg) => {
                 if let Some(state) = self.get_avid_round_state(batch_index, &sender)?
@@ -3651,6 +3767,16 @@ impl MpcManager {
             .ok()
             .and_then(|id| nodes.weight_of(id).ok())
             .is_some_and(|weight| weight == 0)
+    }
+
+    pub(crate) fn ensure_manager_epoch(&self, epoch: u64) -> MpcResult<()> {
+        if self.mpc_config.epoch != epoch {
+            return Err(MpcError::InvalidConfig(format!(
+                "MPC manager is for epoch {} but presigning is running for epoch {epoch}",
+                self.mpc_config.epoch,
+            )));
+        }
+        Ok(())
     }
 
     fn this_node_deals_nothing(&self) -> bool {
@@ -4255,98 +4381,37 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
-        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        cutoff_ms: Option<u64>,
+        admitted: &AdmittedNonceDealers,
+        supersede: Option<(OnchainState, u64)>,
         metrics: &Metrics,
     ) -> MpcResult<NoncePartyAdmission> {
-        let mut window = {
-            let mgr = mpc_manager.read().unwrap();
-            NonceCollectionWindow::with_cutoff(mgr.required_nonce_weight(), cutoff_ms)
-        };
         let mut certified_dealers = HashSet::new();
         let mut local_skips = 0u32;
-        loop {
-            if window.closed() {
-                break;
-            }
-            let _timer = metrics
-                .mpc_tob_poll_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                .start_timer();
-            let received = Self::receive_nonce_cert_in_window(tob_channel, &mut window).await?;
-            drop(_timer);
-            let (nonce_cert, admission) = match received {
-                WindowedNonceReceive::Cert {
-                    nonce_cert,
-                    admission,
-                } => (nonce_cert, admission),
-                WindowedNonceReceive::Skip => continue,
-                WindowedNonceReceive::Closed => break,
+        for entry in &admitted.dealers {
+            Self::bail_if_avid_phase_superseded(&supersede)?;
+            let dealer = entry.dealer;
+            let kind = entry.kind;
+            let deals_nothing = {
+                let mgr = mpc_manager.read().unwrap();
+                Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, &dealer)
             };
-            let dealer = nonce_cert.message().dealer_address;
-            if certified_dealers.contains(&dealer) {
+            if deals_nothing {
+                tracing::warn!(
+                    "Decided AVID dealer {:?} has zero reduced weight under this manager; the \
+                     decided set did not come from its sizing walk",
+                    dealer
+                );
+                local_skips += 1;
                 continue;
             }
-            {
-                let mgr = mpc_manager.read().unwrap();
-                if nonce_cert.epoch() != mgr.mpc_config.epoch {
-                    tracing::warn!(
-                        "Dropping AVID nonce cert from {:?}: epoch {} is not the current epoch {}",
-                        dealer,
-                        nonce_cert.epoch(),
-                        mgr.mpc_config.epoch,
-                    );
-                    continue;
-                }
-            }
-            let unclassified =
-                UnclassifiedNonceCert::from_dealer_certificate(&nonce_cert, batch_index);
-            let kind = {
-                let _timer = metrics
-                    .mpc_cert_verify_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                    .start_timer();
-                let mgr = Arc::clone(mpc_manager);
-                let cert = nonce_cert.clone();
-                let result = spawn_blocking(move || {
-                    let mgr = mgr.read().unwrap();
-                    mgr.verify_and_classify_nonce_cert(&unclassified)
-                        .map_err(|e| {
-                            let reason = mgr.rejection_reason(
-                                &cert,
-                                mgr.nonce_cert_required_weight(&unclassified),
-                            );
-                            (e, reason)
-                        })
-                })
-                .await;
-                drop(_timer);
-                match result {
-                    Ok((Some(kind), _)) => kind,
-                    Ok((None, _)) => {
-                        tracing::warn!(
-                            "Nonce cert from {:?} classified as vanilla inside the AVID \
-                             party loop; dropping",
-                            dealer
-                        );
-                        continue;
-                    }
-                    Err((e, reason)) => {
-                        tracing::warn!("Rejected AVID nonce cert from {:?}: {}", dealer, e);
-                        metrics
-                            .mpc_certs_rejected_total
-                            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, reason])
-                            .inc();
-                        continue;
-                    }
-                }
+            let CertificateV1::NonceGeneration {
+                cert: nonce_cert, ..
+            } = &entry.cert
+            else {
+                tracing::warn!("Decided AVID dealer {:?} carries a non-nonce cert", dealer);
+                local_skips += 1;
+                continue;
             };
-            {
-                let mgr = mpc_manager.read().unwrap();
-                if Self::dealer_deals_nothing(&mgr.committee, &mgr.mpc_config.nodes, &dealer) {
-                    continue;
-                }
-            }
             let digest = nonce_cert.message().messages_hash;
             let validated_common = {
                 let mgr = mpc_manager.read().unwrap();
@@ -4371,16 +4436,12 @@ impl MpcManager {
                         material if kind == CertKind::AvssVote => {
                             let own_confirm_in_cert = {
                                 let mgr = mpc_manager.read().unwrap();
-                                !Self::dealer_deals_nothing(
-                                    &mgr.committee,
-                                    &mgr.mpc_config.nodes,
-                                    &mgr.address,
-                                )
+                                !mgr.this_node_deals_nothing()
                             };
                             let cause = match (&material, own_confirm_in_cert) {
                                 (_, false) => "this node's confirm was not needed for that cert",
                                 (LocalMaterial::Absent, true) => {
-                                    "this node's confirm was part of that cert, so its round \
+                                    "this node's confirm was part of that cert, yet its round \
                                      state is missing"
                                 }
                                 (LocalMaterial::Mismatches, true) => {
@@ -4417,7 +4478,7 @@ impl MpcManager {
                                 mpc_manager,
                                 dealer,
                                 batch_index,
-                                &nonce_cert,
+                                nonce_cert,
                                 p2p_channel,
                                 metrics,
                             )
@@ -4448,7 +4509,7 @@ impl MpcManager {
                     }
                 }
             };
-            let dealer_weight = {
+            {
                 let mut mgr = mpc_manager.write().unwrap();
                 if let Err(e) = mgr.ensure_avid_nonce_output(dealer, batch_index, &expected_common)
                 {
@@ -4472,24 +4533,7 @@ impl MpcManager {
                     continue;
                 };
                 cached.cert_digest = Some(digest);
-                match Self::certified_dealer_party_id(&mgr.committee, &dealer).and_then(|id| {
-                    mgr.mpc_config.nodes.weight_of(id).map_err(|_| {
-                        MpcError::InvalidCertificate(format!(
-                            "No reduced weight for certified dealer {dealer:?}"
-                        ))
-                    })
-                }) {
-                    Ok(weight) => weight,
-                    Err(e) => {
-                        tracing::warn!("Skipping certified dealer: {e}");
-                        metrics
-                            .mpc_certs_rejected_total
-                            .with_label_values(&[MPC_LABEL_NONCE_GENERATION, "dealer"])
-                            .inc();
-                        continue;
-                    }
-                }
-            };
+            }
             tracing::info!(
                 "AVID nonce round consumed: dealer {:?}, batch_index={batch_index}, kind {:?}",
                 dealer,
@@ -4502,21 +4546,36 @@ impl MpcManager {
                     CertKind::AvidVote => "vote",
                 }])
                 .inc();
-            window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
         }
-        if !window.floor_reached() {
-            return Err(Self::below_floor_error(
-                &window,
-                local_skips,
-                batch_index,
-                metrics,
-            ));
-        }
+        Self::bail_if_avid_phase_superseded(&supersede)?;
         Ok(NoncePartyAdmission {
             certified: certified_dealers,
             local_skips,
         })
+    }
+
+    fn bail_if_avid_phase_superseded(supersede: &Option<(OnchainState, u64)>) -> MpcResult<()> {
+        let Some((onchain_state, epoch)) = supersede else {
+            return Ok(());
+        };
+        let (onchain_epoch, pending) = {
+            let state = onchain_state.state();
+            let committees = &state.hashi().committees;
+            (committees.epoch(), committees.pending_epoch_change())
+        };
+        if tob_wait_superseded(
+            hashi_types::move_types::ProtocolType::NonceGeneration,
+            *epoch,
+            onchain_epoch,
+            pending,
+        ) {
+            return Err(MpcError::ProtocolFailed(format!(
+                "AVID nonce party phase for epoch {epoch} superseded (onchain epoch \
+                 {onchain_epoch}, pending epoch change {pending:?})"
+            )));
+        }
+        Ok(())
     }
 
     async fn publish_nonce_generation_cert<T: crate::mpc::types::NonceCertPayload>(

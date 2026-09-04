@@ -1844,12 +1844,16 @@ mod test {
         let server_version = ServerVersion::new("unknown", "unknown");
         let mut config = Config::new_for_testing();
         config.db = Some(tmpdir.path().into());
+        let decode_limit = 64 * 1024;
+        config.grpc_max_decoding_message_size = Some(decode_limit);
         let tls_public_key = config.tls_public_key().unwrap();
+        let tls_private_key = config.tls_private_key().unwrap();
 
         let registry = prometheus::Registry::new();
         let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
 
-        let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
+        let (local_addr, _http_service) =
+            crate::grpc::HttpService::new(hashi.clone()).start().await;
 
         let address = format!("https://{}", local_addr);
         dbg!(&address);
@@ -1858,19 +1862,85 @@ mod test {
         let client_auth_server = Client::new(&address, client_tls_config).unwrap();
         let client_no_auth = Client::new_no_auth(&address).unwrap();
 
-        let resp = client_auth_server
+        let status = client_auth_server
             .get_service_info()
             .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
+            .expect_err("no gRPC method is served when no validator resolves");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
 
-        let resp = client_no_auth
+        let status = client_no_auth
             .get_service_info()
             .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
+            .expect_err("no gRPC method is served when no validator resolves");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+
+        let oversized = hashi_types::proto::SendMessagesRequest {
+            epoch: Some(0),
+            messages: Some(
+                hashi_types::proto::send_messages_request::Messages::DkgMessage(
+                    sui_rpc::proto::sui::rpc::v2::Bcs::serialize(&vec![0u8; decode_limit * 4])
+                        .unwrap(),
+                ),
+            ),
+        };
+        let status = client_no_auth
+            .mpc_service_client()
+            .send_messages(oversized)
+            .await
+            .expect_err("a caller that resolves to no validator must be refused");
+        assert_eq!(
+            status.code(),
+            tonic::Code::PermissionDenied,
+            "refusal must precede decoding; OutOfRange here would mean the body was read first: {status:?}"
+        );
+
+        let probe = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        for (path, expected) in [
+            ("/health", reqwest::StatusCode::OK),
+            ("/ready", reqwest::StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let resp = probe
+                .get(format!("{address}{path}"))
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("{path} must be reachable without a cert: {e}"));
+            assert_eq!(resp.status(), expected, "{path} must stay anonymous");
+        }
+
+        let client_with_cert = Client::new(
+            &address,
+            crate::tls::make_client_config_with_client_auth(&tls_private_key, &tls_public_key),
+        )
+        .unwrap();
+        let status = client_with_cert
+            .get_service_info()
+            .await
+            .expect_err("a certificate that resolves to no member must be refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+
+        let status =
+            tonic_health::pb::health_client::HealthClient::new(client_no_auth.boxed_channel())
+                .check(tonic_health::pb::HealthCheckRequest::default())
+                .await
+                .expect_err("health must not be served when no validator resolves");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status:?}");
+
+        let refusals = |reason: &str| {
+            hashi
+                .metrics
+                .unknown_caller_refused_total
+                .with_label_values(&[reason])
+                .get()
+        };
+        assert_eq!(refusals("no_client_cert"), 4, "certless callers");
+        assert_eq!(
+            refusals("state_unavailable"),
+            1,
+            "a cert is resolved before the registry is consulted, and this node has no on-chain state"
+        );
 
         //         loop {
         //             let resp = client

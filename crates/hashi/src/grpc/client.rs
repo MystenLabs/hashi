@@ -129,7 +129,7 @@ impl Client {
     /// back to `tonic::body::Body` before/after the channel sees it. The
     /// inner `tonic_rustls::Error` is mapped to `tonic::Status` so
     /// tonic's generated clients receive the error type they expect.
-    fn boxed_channel(&self) -> BoxedChannel {
+    pub(crate) fn boxed_channel(&self) -> BoxedChannel {
         let channel = self.channel.clone();
         match &self.metrics {
             Some(metrics) => {

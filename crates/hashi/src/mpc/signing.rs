@@ -152,6 +152,7 @@ struct SigningPoolState {
 struct PrefetchedBatch {
     batch_index: u32,
     pool: Vec<Option<(Vec<S>, G)>>,
+    identity: PresigBatchIdentity,
 }
 
 pub struct SigningManager {
@@ -203,13 +204,80 @@ impl PeerCooldowns {
     }
 }
 
-fn presig_pool_fingerprint<'a>(nonces: impl Iterator<Item = &'a G>) -> String {
+#[derive(Debug, Clone)]
+pub struct PresigBatchIdentity {
+    pub epoch: u64,
+    pub batch_index: u32,
+    pub fingerprint: [u8; 32],
+    pub size: u32,
+    pub batch_size_per_weight: u16,
+}
+
+impl PresigBatchIdentity {
+    pub fn short(&self) -> String {
+        hex::encode(&self.fingerprint[..8])
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IdentityInputs {
+    pub epoch: u64,
+    pub batch_size_per_weight: u16,
+}
+
+#[cfg(test)]
+impl PresigBatchIdentity {
+    fn for_test() -> Self {
+        Self {
+            epoch: 0,
+            batch_index: 0,
+            fingerprint: [0u8; 32],
+            size: 0,
+            batch_size_per_weight: 1,
+        }
+    }
+}
+
+#[cfg(test)]
+impl IdentityInputs {
+    fn for_test() -> Self {
+        Self {
+            epoch: 0,
+            batch_size_per_weight: 1,
+        }
+    }
+}
+
+impl IdentityInputs {
+    fn identity_for<'a>(
+        &self,
+        batch_index: u32,
+        nonces: impl ExactSizeIterator<Item = &'a G>,
+    ) -> PresigBatchIdentity {
+        let size = nonces.len() as u32;
+        PresigBatchIdentity {
+            epoch: self.epoch,
+            batch_index,
+            fingerprint: presig_batch_fingerprint(self.epoch, nonces),
+            size,
+            batch_size_per_weight: self.batch_size_per_weight,
+        }
+    }
+}
+
+fn presig_batch_fingerprint<'a>(
+    epoch: u64,
+    nonces: impl ExactSizeIterator<Item = &'a G>,
+) -> [u8; 32] {
     use fastcrypto::hash::HashFunction;
     let mut hasher = fastcrypto::hash::Blake2b256::default();
+    hasher.update(b"hashi/presig-batch-identity/v1");
+    hasher.update(epoch.to_le_bytes());
+    hasher.update((nonces.len() as u32).to_le_bytes());
     for nonce in nonces {
         hasher.update(bcs::to_bytes(nonce).expect("serialization should always succeed"));
     }
-    hex::encode(&hasher.finalize().digest[..8])
+    hasher.finalize().digest
 }
 
 impl SigningManager {
@@ -226,20 +294,24 @@ impl SigningManager {
         batch_start_index: u64,
         refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
-    ) -> Self {
-        let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
+        identity_inputs: IdentityInputs,
+    ) -> (Self, PresigBatchIdentity) {
+        let generated: Vec<(Vec<S>, G)> = presignatures.collect();
+        let identity = identity_inputs.identity_for(batch_index, generated.iter().map(|(_, n)| n));
+        let pool: Vec<Option<(Vec<S>, G)>> = generated.into_iter().map(Some).collect();
         tracing::info!(
-            "Presig batch installed: address={address}, batch_index={batch_index}, \
+            "Presig batch installed: address={address}, epoch={}, batch_index={batch_index}, \
              start_index={batch_start_index}, size={}, fingerprint={}",
+            identity.epoch,
             pool.len(),
-            presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
+            identity.short(),
         );
         let batch = PresigBatch {
             pool,
             start_index: batch_start_index,
             batch_index,
         };
-        Self {
+        let manager = Self {
             config: Arc::new(SigningEpochConfig {
                 address,
                 committee,
@@ -257,7 +329,8 @@ impl SigningManager {
             }),
             refill_tx,
             peer_cooldowns: PeerCooldowns::new(),
-        }
+        };
+        (manager, identity)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -273,11 +346,17 @@ impl SigningManager {
         pending: &HashSet<u64>,
         refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
-    ) -> anyhow::Result<Self> {
+        identity_inputs: IdentityInputs,
+    ) -> anyhow::Result<(Self, Vec<(u32, PresigBatchIdentity)>)> {
         let mut batches = Vec::with_capacity(retained.len());
+        let mut identities = Vec::with_capacity(retained.len());
         let mut covered_pending = 0usize;
         for (presignatures, batch_index, start_index) in retained {
-            let pool: Vec<Option<(Vec<S>, G)>> = presignatures
+            let generated: Vec<(Vec<S>, G)> = presignatures.collect();
+            let identity =
+                identity_inputs.identity_for(batch_index, generated.iter().map(|(_, n)| n));
+            let pool: Vec<Option<(Vec<S>, G)>> = generated
+                .into_iter()
                 .enumerate()
                 .map(|(i, presig)| {
                     let global = start_index + i as u64;
@@ -293,12 +372,15 @@ impl SigningManager {
                 })
                 .collect();
             tracing::info!(
-                "Recovered presig batch installed: address={address}, batch_index={batch_index}, \
-                 start_index={start_index}, size={}, enabled={}, fingerprint={}",
+                "Recovered presig batch installed: address={address}, epoch={}, \
+                 batch_index={batch_index}, start_index={start_index}, size={}, \
+                 enabled={}, fingerprint={}",
+                identity.epoch,
                 pool.len(),
                 pool.iter().filter(|s| s.is_some()).count(),
-                presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
+                identity.short(),
             );
+            identities.push((batch_index, identity));
             batches.push(PresigBatch {
                 pool,
                 start_index,
@@ -310,35 +392,40 @@ impl SigningManager {
             "recovered signing manager covers {covered_pending} of {} pending presig indices",
             pending.len(),
         );
-        Ok(Self {
-            config: Arc::new(SigningEpochConfig {
-                address,
-                committee,
-                threshold,
-                key_shares,
-                verifying_key,
-                owned_counts: owned_counts_by_member(&share_owners),
-                share_owners,
-                refill_divisor,
-            }),
-            state: RwLock::new(SigningPoolState {
-                batches,
-                partial_signing_outputs: HashMap::new(),
-                next_batch: None,
-            }),
-            refill_tx,
-            peer_cooldowns: PeerCooldowns::new(),
-        })
+        Ok((
+            Self {
+                config: Arc::new(SigningEpochConfig {
+                    address,
+                    committee,
+                    threshold,
+                    key_shares,
+                    verifying_key,
+                    owned_counts: owned_counts_by_member(&share_owners),
+                    share_owners,
+                    refill_divisor,
+                }),
+                state: RwLock::new(SigningPoolState {
+                    batches,
+                    partial_signing_outputs: HashMap::new(),
+                    next_batch: None,
+                }),
+                refill_tx,
+                peer_cooldowns: PeerCooldowns::new(),
+            },
+            identities,
+        ))
     }
 
-    /// Stage a refill result for installation once signing advances past the
-    /// current batches. `batch_index` must be the index the presignatures
-    /// were generated for; a result that is not strictly newer than the
-    /// latest installed batch is discarded, since installing it under a
-    /// later index would re-serve already-consumed nonces.
-    pub fn set_next_batch(&self, batch_index: u32, presignatures: Presignatures) {
-        let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
-        let fingerprint = presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce));
+    pub fn set_next_batch(
+        &self,
+        batch_index: u32,
+        presignatures: Presignatures,
+        identity_inputs: IdentityInputs,
+    ) -> Option<PresigBatchIdentity> {
+        let generated: Vec<(Vec<S>, G)> = presignatures.collect();
+        let identity = identity_inputs.identity_for(batch_index, generated.iter().map(|(_, n)| n));
+        let fingerprint = identity.short();
+        let pool: Vec<Option<(Vec<S>, G)>> = generated.into_iter().map(Some).collect();
         let mut state = self.state.write().unwrap();
         if let Some(latest) = state.batches.last()
             && batch_index <= latest.batch_index
@@ -349,7 +436,7 @@ impl SigningManager {
                 latest.batch_index,
                 pool.len(),
             );
-            return;
+            return None;
         }
         if let Some(existing) = &state.next_batch {
             tracing::warn!(
@@ -358,12 +445,18 @@ impl SigningManager {
             );
         }
         tracing::info!(
-            "Presig batch prefetched: address={}, batch_index={batch_index}, size={}, \
-             fingerprint={fingerprint}",
+            "Presig batch prefetched: address={}, epoch={}, batch_index={batch_index}, \
+             size={}, fingerprint={fingerprint}",
             self.config.address,
+            identity.epoch,
             pool.len(),
         );
-        state.next_batch = Some(PrefetchedBatch { batch_index, pool });
+        state.next_batch = Some(PrefetchedBatch {
+            batch_index,
+            pool,
+            identity: identity.clone(),
+        });
+        Some(identity)
     }
 
     pub fn has_next_batch(&self) -> bool {
@@ -749,12 +842,6 @@ impl SigningManager {
                 {
                     &mut state.batches[b]
                 } else {
-                    // Index not found in any current batch; try to swap in
-                    // the prefetched next batch. Only a prefetch generated
-                    // for exactly the next index may be installed: its
-                    // position in the global index space is derived from the
-                    // local install order, so relabeling any other result
-                    // would silently bind the wrong nonces to these indices.
                     if let Some(latest) = state.batches.last() {
                         let next_start = latest.end_index();
                         let next_batch_index = latest.batch_index + 1;
@@ -762,13 +849,13 @@ impl SigningManager {
                             Some(next) if next.batch_index == next_batch_index => {
                                 let next = state.next_batch.take().expect("checked above");
                                 tracing::info!(
-                                    "Presig batch installed: address={}, batch_index={next_batch_index}, \
-                                     start_index={next_start}, size={}, fingerprint={}",
+                                    "Presig batch installed: address={}, epoch={}, \
+                                     batch_index={next_batch_index}, start_index={next_start}, \
+                                     size={}, fingerprint={}",
                                     config.address,
+                                    next.identity.epoch,
                                     next.pool.len(),
-                                    presig_pool_fingerprint(
-                                        next.pool.iter().flatten().map(|(_, nonce)| nonce)
-                                    ),
+                                    next.identity.short(),
                                 );
                                 state.batches.push(PresigBatch {
                                     pool: next.pool,
@@ -783,14 +870,8 @@ impl SigningManager {
                                     next.batch_index,
                                 );
                                 if next.batch_index < next_batch_index {
-                                    // Stale: can only re-serve consumed
-                                    // nonces. Drop it so the refill request
-                                    // below fetches the right batch.
                                     state.next_batch = None;
                                 } else {
-                                    // A future batch: keep it, but the gap
-                                    // means the expected batch was never
-                                    // staged, so request it explicitly.
                                     let _ = self.refill_tx.send(next_batch_index);
                                 }
                             }
@@ -1923,7 +2004,9 @@ mod tests {
                         0, // batch_start_index
                         crate::constants::PRESIG_REFILL_DIVISOR,
                         refill_tx.clone(),
-                    );
+                        IdentityInputs::for_test(),
+                    )
+                    .0;
                     Arc::new(mgr)
                 })
                 .collect();
@@ -1938,11 +2021,6 @@ mod tests {
             }
         }
 
-        /// Have peers generate + store partial sigs so their RPC handlers work.
-        /// `global_presig_index` is the global index used to locate the presig
-        /// in the batch list. If `skip` is Some(i), that manager is skipped
-        /// (use for the caller who will generate its own sigs inside `sign()`).
-        /// Returns (public_nonce, Vec of per-party partial sigs).
         fn prepare_all(
             &self,
             message: &[u8],
@@ -2072,7 +2150,7 @@ mod tests {
         fn set_next_batch_on_all(&self) {
             for (mgr, presignatures) in self.managers.iter().zip(self.build_presignatures()) {
                 let next_index = mgr.batch_index() + 1;
-                mgr.set_next_batch(next_index, presignatures);
+                mgr.set_next_batch(next_index, presignatures, IdentityInputs::for_test());
             }
         }
 
@@ -2276,8 +2354,51 @@ mod tests {
             &pending,
             crate::constants::PRESIG_REFILL_DIVISOR,
             Arc::new(refill_tx),
+            IdentityInputs::for_test(),
         )
         .unwrap();
+        let (mgr, identities) = (mgr.0, mgr.1);
+
+        let (fresh_refill_tx, _fresh_rx) = watch::channel(0u32);
+        let (_, unmasked) = SigningManager::new_recovered(
+            test_address(0),
+            committee.clone(),
+            t,
+            avss::SharesForNode {
+                shares: vec![sk_shares[0].clone()],
+            },
+            vk,
+            test_share_owners(4),
+            vec![(new_batch(), 0, 0), (new_batch(), 1, size0)],
+            0,
+            &HashSet::new(),
+            crate::constants::PRESIG_REFILL_DIVISOR,
+            Arc::new(fresh_refill_tx),
+            IdentityInputs::for_test(),
+        )
+        .unwrap();
+        assert_eq!(
+            identities.len(),
+            2,
+            "both retained batches must yield an identity"
+        );
+        assert_eq!(
+            unmasked.len(),
+            2,
+            "both retained batches must yield an identity"
+        );
+        for ((_, consumed_run), (_, fresh_run)) in identities.iter().zip(unmasked.iter()) {
+            assert_eq!(
+                consumed_run.fingerprint, fresh_run.fingerprint,
+                "identity must cover the generated sequence, so masking consumed slots \
+                 must not change it; a digest taken after the mask would differ on \
+                 every restart that had spent part of the batch"
+            );
+            assert_eq!(
+                consumed_run.size, fresh_run.size,
+                "recorded size must be the generated length, not the enabled count"
+            );
+        }
 
         {
             let state = mgr.state.read().unwrap();
@@ -2318,6 +2439,7 @@ mod tests {
             &pending, // pending {3} lives in the dropped batch 0
             crate::constants::PRESIG_REFILL_DIVISOR,
             Arc::new(refill_tx2),
+            IdentityInputs::for_test(),
         );
         assert!(
             err.is_err(),
@@ -4071,31 +4193,25 @@ mod tests {
         // Batch 0 is already installed, so a refill result for batch 0 is
         // stale and must be dropped.
         let presigs = setup.build_presignatures().swap_remove(0);
-        setup.managers[0].set_next_batch(0, presigs);
+        setup.managers[0].set_next_batch(0, presigs, IdentityInputs::for_test());
         assert!(!setup.managers[0].has_next_batch());
 
         // A result for the actual next batch is accepted.
         let presigs = setup.build_presignatures().swap_remove(0);
-        setup.managers[0].set_next_batch(1, presigs);
+        setup.managers[0].set_next_batch(1, presigs, IdentityInputs::for_test());
         assert!(setup.managers[0].has_next_batch());
     }
 
-    /// A prefetched batch tagged with an older index than the expected next
-    /// batch must not be installed under the next batch's index range
-    /// (regression test for the testnet incident where a duplicated
-    /// batch-19 refill result was relabeled as batch 20, binding stale
-    /// nonces to fresh global presig indices).
     #[tokio::test]
     async fn test_stale_prefetch_is_not_relabeled_as_next_batch() {
         let mut setup = SigningTestSetup::new(4);
         let batch_size = setup.managers[0].initial_presig_count() as u64;
         setup.refill_rx.borrow_and_update();
 
-        // Force a stale prefetch (tagged with the already-installed batch 0)
-        // past the `set_next_batch` guard, straight into the state.
         setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
             batch_index: 0,
             pool: vec![],
+            identity: PresigBatchIdentity::for_test(),
         });
 
         let p2p = setup.mock_p2p_for(0);
@@ -4120,8 +4236,6 @@ mod tests {
         assert_eq!(*setup.refill_rx.borrow(), 1);
     }
 
-    /// A prefetched batch tagged with a future index is kept (it will be
-    /// needed later) but not installed in place of the expected next batch.
     #[tokio::test]
     async fn test_future_prefetch_is_kept_but_not_installed() {
         let mut setup = SigningTestSetup::new(4);
@@ -4131,6 +4245,7 @@ mod tests {
         setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
             batch_index: 2,
             pool: vec![],
+            identity: PresigBatchIdentity::for_test(),
         });
 
         let p2p = setup.mock_p2p_for(0);
@@ -4153,10 +4268,6 @@ mod tests {
         assert_eq!(*setup.refill_rx.borrow(), 1);
     }
 
-    /// `available_presig_end_index` only counts a prefetch that is
-    /// contiguous with the installed range; a future-tagged one would
-    /// report capacity across a coverage gap and suppress the leader's
-    /// proactive refill.
     #[test]
     fn test_available_end_index_ignores_non_contiguous_prefetch() {
         let setup = SigningTestSetup::new(4);
@@ -4166,12 +4277,14 @@ mod tests {
         setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
             batch_index: 2,
             pool: vec![None; 5],
+            identity: PresigBatchIdentity::for_test(),
         });
         assert_eq!(setup.managers[0].available_presig_end_index(), batch_size);
 
         setup.managers[0].state.write().unwrap().next_batch = Some(PrefetchedBatch {
             batch_index: 1,
             pool: vec![None; 5],
+            identity: PresigBatchIdentity::for_test(),
         });
         assert_eq!(
             setup.managers[0].available_presig_end_index(),

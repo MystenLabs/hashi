@@ -25,8 +25,10 @@ On first deploy, add `--do-genesis` to the `operator provision` command and
 every `key-provisioner provision` command. Omit it for replacement deployments.
 
 Each KP generates one PGP key on a YubiKey and exports its public certificate
-to the operator; the key ceremony and provisioning flow is then driven through
-these commands. All production commands read the same unified config file; see
+to the operator; see the
+[key provisioner key-creation guide](../../design/docs/key-provisioner-key-creation.mdx).
+The key ceremony and provisioning flow is then driven through these commands.
+All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
 For a fully-local end-to-end run of this flow (local sui node + a dockerized

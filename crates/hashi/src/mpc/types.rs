@@ -236,6 +236,38 @@ impl NonceCollectionWindow {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CertKind {
+    AvssVote,
+    AvidVote,
+}
+
+pub(crate) struct AdmittedNonceDealers {
+    pub(crate) weight: u32,
+    pub(crate) required_weight: u32,
+    pub(crate) cutoff_ms: Option<u64>,
+    pub(crate) window_closed: bool,
+    pub(crate) dealers: Vec<AdmittedNonceDealer>,
+}
+
+impl AdmittedNonceDealers {
+    pub(crate) fn floor_reached(&self) -> bool {
+        self.weight >= self.required_weight
+    }
+}
+
+pub(crate) struct AdmittedNonceDealer {
+    pub(crate) dealer: Address,
+    pub(crate) cert: CertificateV1,
+    pub(crate) kind: CertKind,
+}
+
+pub(crate) struct AdmittedCertRef {
+    pub(crate) dealer: Address,
+    pub(crate) index: usize,
+    pub(crate) kind: Option<CertKind>,
+}
+
 // Unique identifier for a session of MPC protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionId([u8; 64]);
