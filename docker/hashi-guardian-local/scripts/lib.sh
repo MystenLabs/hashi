@@ -18,12 +18,25 @@ PUBKEY_FILE="${WORK}/guardian-btc-pubkey.hex"
 NUM_SHARES="${NUM_SHARES:-3}"
 THRESHOLD="${THRESHOLD:-2}"
 
-# Generate NUM_SHARES test KP OpenPGP keypairs in one shared GNUPGHOME (a test
-# rig — real KPs each hold their own yubikey). `operator ceremony` encrypts each
-# share to the matching public cert; `key-provisioner provision` decrypts via
-# `gpg --decrypt`, which auto-selects the right secret key from this same home.
+kp_bundles_exist() {
+  [ -d "${CERTS_DIR}" ] || return 1
+  local i
+  for i in $(seq 1 "${NUM_SHARES}"); do
+    [ -f "${CERTS_DIR}/kp${i}.asc" ] \
+      && [ -f "${CERTS_DIR}/kp${i}-device-attestation.pem" ] \
+      && [ -f "${CERTS_DIR}/kp${i}-sig-attestation.pem" ] \
+      && [ -f "${CERTS_DIR}/kp${i}-dec-attestation.pem" ] \
+      || return 1
+  done
+}
+
+# Generate NUM_SHARES test KP OpenPGP keypairs and mock attestation evidence in
+# one shared GNUPGHOME (a test rig — real KPs each hold their own YubiKey).
+# `operator ceremony` encrypts each share to the matching public cert;
+# `key-provisioner provision` decrypts via `gpg --decrypt`, which auto-selects
+# the right secret key from this same home.
 gen_kp_keys() {
-  if [ -d "${CERTS_DIR}" ] && [ "$(ls -1 "${CERTS_DIR}"/kp*.asc 2>/dev/null | wc -l)" -eq "${NUM_SHARES}" ]; then
+  if kp_bundles_exist; then
     echo "KP keys already generated (${NUM_SHARES})."
     return 0
   fi
@@ -38,8 +51,11 @@ gen_kp_keys() {
     # Export the newest key's armored public cert.
     fpr="$(gpg --list-keys --with-colons "kp${i}@localhost" | awk -F: '/^fpr:/{print $10; exit}')"
     gpg --armor --export "${fpr}" > "${CERTS_DIR}/kp${i}.asc"
+    printf 'mock device attestation for local development\n' > "${CERTS_DIR}/kp${i}-device-attestation.pem"
+    printf 'mock signature attestation for local development\n' > "${CERTS_DIR}/kp${i}-sig-attestation.pem"
+    printf 'mock decryption attestation for local development\n' > "${CERTS_DIR}/kp${i}-dec-attestation.pem"
   done
-  echo "Wrote ${NUM_SHARES} KP certs to ${CERTS_DIR}."
+  echo "Wrote ${NUM_SHARES} KP certificate bundles to ${CERTS_DIR}."
 }
 
 # Render guardian-init.local.yaml from the template + the running localnet.
@@ -53,12 +69,16 @@ render_config() {
   : "${PACKAGE_ID:?PACKAGE_ID must be set (from hashi-localnet state.json)}"
   : "${HASHI_OBJECT_ID:?HASHI_OBJECT_ID must be set (from hashi-localnet state.json)}"
 
-  # Build the YAML list of KP cert paths (2-space indent under kp_pgp_cert_paths).
+  # Build ordered KP bundle entries. The local key generator creates explicit
+  # mock evidence for the non-enclave-dev guardian.
   # `i` must be local — callers (e.g. provision.sh's KP loop) use `i` too, and
   # bash's dynamic scoping would otherwise let this loop clobber theirs.
-  local kp_cert_paths_yaml="" i
+  local kp_cert_bundles_yaml="" i
   for i in $(seq 1 "${NUM_SHARES}"); do
-    kp_cert_paths_yaml="${kp_cert_paths_yaml}    - ${CERTS_DIR}/kp${i}.asc"$'\n'
+    kp_cert_bundles_yaml="${kp_cert_bundles_yaml}    - cert_path: ${CERTS_DIR}/kp${i}.asc"$'\n'
+    kp_cert_bundles_yaml="${kp_cert_bundles_yaml}      device_attestation_cert_path: ${CERTS_DIR}/kp${i}-device-attestation.pem"$'\n'
+    kp_cert_bundles_yaml="${kp_cert_bundles_yaml}      sig_attestation_path: ${CERTS_DIR}/kp${i}-sig-attestation.pem"$'\n'
+    kp_cert_bundles_yaml="${kp_cert_bundles_yaml}      dec_attestation_path: ${CERTS_DIR}/kp${i}-dec-attestation.pem"$'\n'
   done
 
   GUARDIAN_ENDPOINT="${guardian_endpoint}" \
@@ -73,7 +93,7 @@ render_config() {
   HASHI_OBJECT_ID="${HASHI_OBJECT_ID}" \
   NUM_SHARES="${NUM_SHARES}" \
   THRESHOLD="${THRESHOLD}" \
-  KP_CERT_PATHS_YAML="${kp_cert_paths_yaml%$'\n'}" \
+  KP_CERT_BUNDLES_YAML="${kp_cert_bundles_yaml%$'\n'}" \
   GUARDIAN_GIT_REVISION="${GUARDIAN_GIT_REVISION:-local}" \
     envsubst < /scripts/guardian-init.local.yaml.tmpl > "${CONFIG}"
   echo "Rendered ${CONFIG} (guardian_endpoint=${guardian_endpoint})."

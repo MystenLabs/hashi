@@ -52,9 +52,12 @@ targets that cert (parsed without decrypting) → cross-checks the guardian's
 `ceremony/` audit log and `kp-shares/` recovery log.
 It then waits for every KP to confirm successful share recovery.
 
-`kp_roster.kp_pgp_cert_paths` is an ordered list with one certificate path per
-KP/share id. Each share has one encrypted ciphertext addressed to that
-certificate's fingerprint.
+`kp_roster.kp_pgp_cert_bundles` is an ordered list with one entry per
+KP/share id.
+Every entry supplies `cert_path`, `device_attestation_cert_path`,
+`sig_attestation_path`, and `dec_attestation_path`. The operator ceremony sends
+the certificate and all three attestation files to the guardian; each encrypted
+share is addressed to the corresponding certificate's fingerprint.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
@@ -201,28 +204,33 @@ recovered through `rotate-cert`; the KPs must authorize a quorum-based
 It:
 
 1. Loads the old signing cert from `kp_pgp_cert_path`, requires it to be present
-   in `kp_roster`, and loads a replacement cert whose fingerprint does not
-   collide with the roster.
+   in `kp_roster`, and loads a replacement certificate bundle whose fingerprint
+   does not collide with the roster.
 2. Fetches and verifies the active guardian's `GuardianInfo` through
    `relay_endpoint`, then requires its BTC public key to match the latest
    attested `ceremony/` log and uses that log's sharing instance.
 3. Reads and verifies the latest `kp-shares/{sharing_seq}/` state against the
    current roster, decrypts the old cert's ciphertext, and verifies the share
    commitment.
-4. HPKE-encrypts the same share to the guardian, signs the request with the old
-   cert, binds the observed `cert_seq` to reject stale updates, and calls
-   `ProvisionerRotateCert` through the relay.
+4. HPKE-encrypts the same share to the guardian and signs the request with the
+   old cert, binding the session, `cert_seq`, encrypted share, and replacement
+   certificate bundle. The guardian verifies the attestations before replacing
+   the encrypted-share recipient.
 5. Verifies the guardian-signed response and the next `kp-shares/` snapshot,
    including that only this share's recipient and ciphertext changed.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner rotate-cert \
   --config guardian-init.sample.yaml \
-  --new-kp-pgp-cert-path /path/to/kp3-new.asc
+  --new-kp-pgp-cert-path /path/to/kp3-new.asc \
+  --new-kp-device-attestation-cert-path /path/to/kp3-new-device-attestation.pem \
+  --new-kp-sig-attestation-path /path/to/kp3-new-sig-attestation.pem \
+  --new-kp-dec-attestation-path /path/to/kp3-new-dec-attestation.pem
 ```
 
-After success, replace this KP's certificate path in `kp_roster` with the new
-path and update `kp_pgp_cert_path` to match.
+After success, replace this KP's four paths in
+`kp_roster.kp_pgp_cert_bundles` and update `kp_pgp_cert_path` to the new
+certificate.
 
 ## operator activate
 

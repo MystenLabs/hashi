@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing::info;
 
 /// Set up a new BTC key. Flow:
-///     1. KPs send their OpenPGP certificates to the operator
+///     1. KPs send their OpenPGP certificates and attestations to the operator
 ///     2. Operator calls setup_new_key
 ///     3. KPs fetch commitments from `ceremony/` and ciphertexts from `kp-shares/`
 pub async fn setup_new_key(
@@ -24,16 +24,16 @@ pub async fn setup_new_key(
     let params = request.params();
     let n = params.num_shares();
     let t = params.threshold();
-    let key_provisioner_certs_roster = request.kp_certs_roster();
+    let kp_bundles = request.kp_pgp_cert_bundles();
     info!(
-        share_count = key_provisioner_certs_roster.num_kps(),
-        "Received key provisioner OpenPGP certificate roster."
+        share_count = kp_bundles.len(),
+        "Received key provisioner OpenPGP certificate bundles."
     );
-    for (index, cert) in key_provisioner_certs_roster.iter().enumerate() {
+    for (index, bundle) in kp_bundles.iter().enumerate() {
         info!(
             share_id = index + 1,
-            recipient_fingerprint = %cert.fingerprint().to_hex(),
-            "Received KP certificate."
+            recipient_fingerprint = %bundle.cert().fingerprint().to_hex(),
+            "Received KP certificate bundle."
         );
     }
 
@@ -46,8 +46,12 @@ pub async fn setup_new_key(
         let fp = format!("{:x}", fingerprint(&sk));
         let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
         info!("Splitting secret into {n} shares (threshold: {t}).");
-        let (encrypted, commitments) =
-            split_and_encrypt_for_kps(&sk, key_provisioner_certs_roster, params, &mut rng);
+        let (encrypted, commitments) = split_and_encrypt_for_kps(
+            &sk,
+            kp_bundles.iter().map(KpPgpCertBundle::cert),
+            params,
+            &mut rng,
+        );
         (encrypted, commitments, fp, btc_master_pubkey)
     };
     info!(
@@ -91,7 +95,7 @@ mod tests {
     use super::*;
     use crate::mock_logger_capturing;
     use crate::test_utils::decrypt_kp_shares;
-    use crate::test_utils::mock_kp_certs_roster_with_secrets;
+    use crate::test_utils::mock_kp_pgp_cert_bundles_with_secrets;
     use hashi_types::guardian::crypto::combine_shares;
     use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
@@ -101,9 +105,9 @@ mod tests {
     const TEST_T: usize = 3;
 
     fn mock_setup_new_key_request() -> (SetupNewKeyRequest, crate::test_utils::MockKpSecretKeys) {
-        let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
+        let (bundles, secret_keys) = mock_kp_pgp_cert_bundles_with_secrets(TEST_N);
         (
-            SetupNewKeyRequest::new(roster, TEST_N, TEST_T).unwrap(),
+            SetupNewKeyRequest::new(bundles, TEST_N, TEST_T).unwrap(),
             secret_keys,
         )
     }

@@ -36,8 +36,8 @@ hashi:
 kp_roster:
   num_shares: ${NUM_SHARES}
   threshold: ${THRESHOLD}
-  kp_pgp_cert_paths:
-${KP_CERT_PATHS_YAML}
+  kp_pgp_cert_bundles:
+${KP_CERT_BUNDLES_YAML}
   # Dev fidelity: the guardian runs `--features non-enclave-dev` (mock
   # attestation), so PCR0 is not verified — a dummy build entry satisfies the
   # config shape. The git_revision check still runs, so it must match the

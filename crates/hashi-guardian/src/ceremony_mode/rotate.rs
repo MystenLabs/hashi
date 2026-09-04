@@ -209,7 +209,7 @@ async fn finalize_rotation(
     // future stays Send.
     let (encrypted_shares, share_commitments) = {
         let mut rng = rand::thread_rng();
-        split_and_encrypt_for_kps(&k256_sk, &new_certs_roster, &new_params, &mut rng)
+        split_and_encrypt_for_kps(&k256_sk, new_certs_roster.iter(), &new_params, &mut rng)
     };
     info!(
         share_count = encrypted_shares.share_count(),

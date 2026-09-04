@@ -38,6 +38,10 @@ use std::process::Stdio;
 use std::sync::LazyLock;
 use tracing::info;
 
+mod yubikey_attestation;
+
+pub use yubikey_attestation::verify_yubikey_attestations;
+
 static POLICY: LazyLock<StandardPolicy> = LazyLock::new(StandardPolicy::new);
 
 #[derive(Debug, Clone)]
@@ -60,6 +64,10 @@ impl PgpPublicCert {
 
     pub fn armored(&self) -> &str {
         &self.armored
+    }
+
+    pub(crate) fn into_armored(self) -> String {
+        self.armored
     }
 
     pub fn fingerprint(&self) -> Fingerprint {

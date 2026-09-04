@@ -22,6 +22,7 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSignedResponse;
+use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -72,24 +73,24 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    SetupNewKeyRequest::new).
     cfg.kp_roster.validate()?;
 
-    // 2. Load + validate each KP's PGP cert.
+    // 2. Load + validate each KP's PGP certificate and attestation evidence.
     info!(
         phase = "roster load",
-        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP certificate roster",
+        share_count = cfg.kp_roster.num_shares,
+        "loading KP certificate bundles",
     );
-    let certs_roster = cfg.kp_roster.load_certs_roster()?;
+    let bundles = cfg.kp_roster.load_pgp_cert_bundles()?;
+    let certs_roster =
+        KpCertRoster::new(bundles.iter().map(|bundle| bundle.cert().clone()).collect())
+            .context("invalid KP certificate roster")?;
     info!(
         phase = "roster load",
-        share_count = certs_roster.num_kps(),
-        "KP certificate roster loaded"
+        share_count = bundles.len(),
+        "KP certificate bundles loaded"
     );
-    let setup_req = SetupNewKeyRequest::new(
-        certs_roster.clone(),
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )
-    .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
+    let setup_req =
+        SetupNewKeyRequest::new(bundles, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)
+            .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
 
     // 3. Connect to the ceremony-mode guardian.
     info!(

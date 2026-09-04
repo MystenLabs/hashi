@@ -4,8 +4,6 @@
 //! `key-provisioner rotate-cert` replaces this KP's configured signing
 //! certificate while preserving every other KP's encrypted share.
 
-use std::path::PathBuf;
-
 use anyhow::Context;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::GuardianReader;
@@ -22,22 +20,29 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
+use crate::kp_roster::KpPgpCertBundlePaths;
 use crate::kp_roster::decrypt_kp_share;
 use crate::kp_roster::load_kp_cert;
+use crate::kp_roster::load_pgp_cert_bundle;
 
-pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<()> {
+pub async fn run(
+    cfg: Config,
+    new_kp_pgp_cert_bundle_paths: KpPgpCertBundlePaths,
+) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
     let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
 
     let signing_cert = load_kp_cert(cfg.require_kp_pgp_cert_path("key-provisioner rotate-cert")?)?;
-    let new_cert = load_kp_cert(&new_kp_pgp_cert_path).with_context(|| {
-        format!(
-            "load replacement KP cert at {}",
-            new_kp_pgp_cert_path.display()
-        )
-    })?;
+    let new_kp_pgp_cert_bundle =
+        load_pgp_cert_bundle(&new_kp_pgp_cert_bundle_paths).with_context(|| {
+            format!(
+                "load replacement KP certificate bundle at {}",
+                new_kp_pgp_cert_bundle_paths.cert_path.display()
+            )
+        })?;
+    let new_cert = new_kp_pgp_cert_bundle.cert();
     let signing_fingerprint = signing_cert.fingerprint();
     let signing_fingerprint_hex = signing_fingerprint.to_hex();
     certs_roster
@@ -45,7 +50,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         .with_context(|| {
             format!(
                 "signing KP cert fingerprint {signing_fingerprint} is not among the configured \
-                 kp_roster.kp_pgp_cert_paths"
+                 kp_roster.kp_pgp_cert_bundles entries"
             )
         })?;
     let new_fingerprint = new_cert.fingerprint().to_hex();
@@ -128,7 +133,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     let request = ProvisionerRotateCertRequest::new(
         session_id.clone(),
         old_cert_seq,
-        new_cert,
+        new_kp_pgp_cert_bundle,
         &decrypted,
         &guardian_pub_key,
         &mut thread_rng(),

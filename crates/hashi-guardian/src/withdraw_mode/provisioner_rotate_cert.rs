@@ -21,6 +21,19 @@ use hashi_types::guardian::ProvisionerRotateCertResponse;
 use hashi_types::guardian::SessionBoundRequest;
 use tracing::info;
 
+#[cfg(not(feature = "non-enclave-dev"))]
+fn verify_replacement_attestation(request: &ProvisionerRotateCertRequest) -> GuardianResult<()> {
+    request
+        .new_kp_pgp_cert_bundle()
+        .verify_attestation()
+        .map_err(|error| {
+            InvalidInputs(format!(
+                "invalid replacement YubiKey OpenPGP attestation (fingerprint {}): {error:#}",
+                request.new_kp_pgp_cert_bundle().cert().fingerprint(),
+            ))
+        })
+}
+
 pub async fn provisioner_rotate_cert(
     enclave: Arc<Enclave>,
     signed_request: KpSigned<ProvisionerRotateCertRequest>,
@@ -37,6 +50,9 @@ pub async fn provisioner_rotate_cert(
     let live_session_id = enclave.s3_session_id();
     request.validate_session(&live_session_id)?;
 
+    #[cfg(not(feature = "non-enclave-dev"))]
+    verify_replacement_attestation(&request)?;
+
     let mut reader = enclave.new_guardian_reader()?;
     let latest_state = reader.read_latest_ceremony_state().await?;
     apply_cert_rotation(&enclave, signer_fingerprint, request, latest_state).await
@@ -48,8 +64,9 @@ async fn apply_cert_rotation(
     request: ProvisionerRotateCertRequest,
     latest_state: CeremonyState,
 ) -> GuardianResult<GuardianSignedResponse<ProvisionerRotateCertResponse>> {
-    let (_, expected_cert_seq, new_kp_pgp_cert, encrypted_share) = request.into_parts();
+    let (_, expected_cert_seq, new_kp_pgp_cert_bundle, encrypted_share) = request.into_parts();
     let share_id = encrypted_share.id;
+    let new_kp_pgp_cert = new_kp_pgp_cert_bundle.cert();
     let new_recipient_fingerprint = new_kp_pgp_cert.fingerprint().to_hex();
 
     let enclave_btc_pubkey = enclave.config.enclave_btc_pubkey()?;
@@ -83,7 +100,7 @@ async fn apply_cert_rotation(
     let share = decrypt_share(&encrypted_share, enclave.encryption_secret_key(), None)?;
     latest_instance.commitments().verify_share(&share)?;
 
-    let replacement_ciphertext = encrypt_share_for_provisioner(&share, &new_kp_pgp_cert);
+    let replacement_ciphertext = encrypt_share_for_provisioner(&share, new_kp_pgp_cert);
     let (encrypted_shares, changed_entry) = encrypted_shares.replace_recipient(
         &signer_fingerprint,
         new_recipient_fingerprint.clone(),
@@ -119,6 +136,7 @@ mod tests {
     use hashi_types::bitcoin::create_btc_keypair_for_test;
     use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
     use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
+    use hashi_types::guardian::test_utils::mock_kp_pgp_cert_bundle;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
@@ -150,7 +168,7 @@ mod tests {
         let request = ProvisionerRotateCertRequest::new(
             enclave.s3_session_id(),
             INITIAL_CERT_SEQ,
-            new_cert,
+            mock_kp_pgp_cert_bundle(new_cert),
             share,
             enclave.encryption_public_key(),
             &mut rand::thread_rng(),
@@ -171,8 +189,12 @@ mod tests {
         let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&secret);
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let (cert_roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
-        let (encrypted_shares, commitments) =
-            split_and_encrypt_for_kps(&secret, &cert_roster, &params, &mut rand::thread_rng());
+        let (encrypted_shares, commitments) = split_and_encrypt_for_kps(
+            &secret,
+            cert_roster.iter(),
+            &params,
+            &mut rand::thread_rng(),
+        );
         let shares = decrypt_kp_shares(&encrypted_shares, &secret_keys);
         let instance = SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
         let ceremony_state = CeremonyState {
@@ -301,6 +323,31 @@ mod tests {
         assert_eq!(
             enclave.config.enclave_btc_pubkey().unwrap(),
             btc_master_pubkey
+        );
+    }
+
+    #[cfg(not(feature = "non-enclave-dev"))]
+    #[test]
+    fn rejects_invalid_replacement_attestation() {
+        let request = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
+            "mock-session".into(),
+            0,
+            mock_pgp_cert(),
+            GuardianEncryptedShare {
+                id: NonZeroU16::new(1).unwrap(),
+                ciphertext: Ciphertext {
+                    encapsulated_key: vec![],
+                    aes_ciphertext: vec![],
+                },
+            },
+        );
+
+        let error = verify_replacement_attestation(&request)
+            .expect_err("software-generated replacement evidence must be rejected");
+        assert!(matches!(error, InvalidInputs(_)), "{error}");
+        assert!(
+            error.to_string().contains("invalid replacement YubiKey"),
+            "{error}"
         );
     }
 

@@ -108,7 +108,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
 
     info!(
         phase = "roster load",
-        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        share_count = cfg.kp_roster.num_shares,
         "loading + validating full KP certificate roster",
     );
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
@@ -124,7 +124,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     anyhow::ensure!(
         certs_roster.cert_for_fingerprint(&kp_fingerprint).is_some(),
         "this KP's cert (fingerprint {kp_fingerprint}) is not among the configured \
-         kp_roster.kp_pgp_cert_paths"
+         kp_roster.kp_pgp_cert_bundles entries"
     );
     info!(
         phase = "setup",
