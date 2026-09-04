@@ -2196,7 +2196,7 @@ impl MpcManager {
                     .get(&dealer)
                     .ok_or_else(|| {
                         MpcError::ProtocolFailed(format!(
-                            "No rotation messages for dealer {:?} during complaint recovery",
+                            "No rotation messages for dealer {:?}",
                             dealer
                         ))
                     })?
@@ -2230,21 +2230,12 @@ impl MpcManager {
                 }
             }
             drop(_timer);
-            // Only add indices that have outputs (avoids adding indices for
-            // dealers with empty rotation messages, e.g. a node that rejoined
-            // with no shares from the new-member fallback).
-            {
-                let mgr = mpc_manager.read().unwrap();
-                for idx in dealer_share_indices {
-                    if !certified_share_indices.iter().any(|(_, i)| *i == idx)
-                        && mgr
-                            .dealer_outputs
-                            .contains_key(&DealerOutputsKey::Rotation(dealer, idx))
-                    {
-                        certified_share_indices.push((dealer, idx));
-                    }
-                }
-            }
+            let selected = select_rotation_indices(
+                &dealer_share_indices,
+                &rotation_msgs,
+                &certified_share_indices,
+            );
+            certified_share_indices.extend(selected.into_iter().map(|idx| (dealer, idx)));
             certified_dealers.insert(dealer);
             tracing::info!(
                 "run_key_rotation_as_party: processed dealer {dealer}, \
@@ -7386,6 +7377,17 @@ async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
         }
         round_size = round_size.saturating_mul(HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR);
     }
+}
+
+fn select_rotation_indices(
+    owned: &[ShareIndex],
+    msgs: &RotationMessages,
+    already: &[(Address, ShareIndex)],
+) -> Vec<ShareIndex> {
+    msgs.keys()
+        .copied()
+        .filter(|idx| owned.contains(idx) && !already.iter().any(|(_, i)| i == idx))
+        .collect()
 }
 
 fn required_previous_commitment(
