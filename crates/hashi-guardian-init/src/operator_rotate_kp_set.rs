@@ -2,14 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `operator rotate-kp-set`: re-deal the ceremony key to a new KP set on a
-//! fresh ceremony-mode guardian.
-//!
-//! `init` operator-initializes the guardian and pins its session; the current
-//! KPs then each sign a submission for it (`key-provisioner rotate-kp-set`).
-//! `submit` batches threshold-many submissions into one `RotateKpSet`, checks
-//! the returned shares and the `ceremony/` + `kp-shares/` logs the guardian
-//! wrote, and waits for every new KP to confirm (`key-provisioner ceremony`),
-//! exactly as `operator ceremony` does after `SetupNewKey`.
+//! fresh ceremony-mode guardian. `init` operator-initializes it and pins the
+//! session the current KPs sign for; `submit` batches their submissions into
+//! one `RotateKpSet`, verifies what was dealt and waits for every new KP.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -216,8 +211,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// What every submission must be signed over: the pinned session and the
-/// proposal from this config.
+/// The pinned session and this config's proposal; every submission must match.
 struct Proposal<'a> {
     session_id: &'a SessionID,
     pcr_allowlist: &'a PcrAllowlist,
@@ -225,9 +219,8 @@ struct Proposal<'a> {
     new_params: SecretSharingParams,
 }
 
-/// The checks the enclave repeats, run first so a bad file is named:
-/// signature, session, the signer's share assignment in the dealt set, one
-/// submission per share, agreement with the proposal, and the old threshold.
+/// The enclave's checks, run first so a bad file is named: signature, session,
+/// share assignment, one submission per share, proposal, old threshold.
 fn validate_batch(
     submissions: Vec<(String, KpSigned<ProvisionerRotateKpSetRequest>)>,
     old: &CeremonyState,

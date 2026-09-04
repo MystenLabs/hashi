@@ -51,10 +51,9 @@ pub struct CeremonyGuardian {
 }
 
 impl CeremonyGuardian {
-    /// Connect to `guardian_endpoint`, run `OperatorInit` (ceremony mode: S3
-    /// config only) unless it already ran, and pin the session: the live
-    /// attestation and the S3 `init/` attestation must carry the same signing
-    /// key. Every later response is verified under that key.
+    /// Connect, run `OperatorInit` (ceremony mode: S3 config only) unless it
+    /// already ran, and pin the session: the live and the S3 `init/`
+    /// attestations must carry the same signing key.
     pub async fn init(cfg: &Config, guardian_s3: &ResolvedS3Config) -> Result<Self> {
         let allowlist = cfg.kp_roster.pcr_allowlist();
         info!(
@@ -158,9 +157,8 @@ impl CeremonyGuardian {
         Ok(status)
     }
 
-    /// Require the latest `ceremony/` + `kp-shares/` logs, written by the
-    /// current build, to equal the state the guardian returned. KPs read the
-    /// same logs during `key-provisioner ceremony`.
+    /// Require the latest `ceremony/` + `kp-shares/` logs, from the current
+    /// build, to equal the state the guardian returned.
     pub async fn verify_published(
         &mut self,
         live: &CeremonyState,

@@ -1,10 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A current KP's signed KP-set rotation submission, carried to the operator
-//! as a file: the wire message, prost-encoded, so the operator decodes it with
-//! the conversion the enclave applies. It holds nothing secret: the old share
-//! is encrypted to one enclave session and everything else is public.
+//! A current KP's signed rotation submission, carried to the operator as a
+//! file: the prost-encoded wire message, decoded with the conversion the
+//! enclave applies. It holds nothing secret.
 
 use std::path::Path;
 

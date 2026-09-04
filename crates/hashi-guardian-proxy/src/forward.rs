@@ -33,8 +33,7 @@ use crate::widlog::LogStore;
 pub struct Forwarding<L> {
     client: GuardianServiceClient<Channel>,
     /// The guardian KPs are provisioning, same as the relay's: the standby
-    /// when one is configured (a KP-set rotation's ceremony enclave), else
-    /// the active guardian.
+    /// when one is configured, else the active guardian.
     ceremony_client: GuardianServiceClient<Channel>,
     /// Shared with the relay: one gate admits every KP-signed RPC, and a cert
     /// rotation drops the cached roster for both.

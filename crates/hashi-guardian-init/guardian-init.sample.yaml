@@ -13,9 +13,8 @@
 
 # gRPC endpoint of the guardian. `operator ceremony` and `operator rotate-kp-set`
 # expect ceremony mode; `operator provision` and `operator activate` expect
-# withdraw mode. KP ceremony commands reach the ceremony guardian here too:
-# through the proxy it is the guardian KPs are provisioning (the standby during
-# a KP-set rotation).
+# withdraw mode. KP ceremony commands use it too; through the proxy it answers
+# with the guardian KPs are provisioning.
 guardian_endpoint: "http://localhost:3000"
 
 # Relay endpoint the KP's share is submitted to. `key-provisioner provision`
@@ -78,9 +77,8 @@ kp_roster:
   #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
 
 # The KP set a rotate-kp-set proposes (rotate-kp-set commands only). kp_roster
-# stays the dealt set; its allowlist must list every build that wrote the logs
-# the ceremony guardian reads (the earlier ceremony build, any withdraw build
-# that rotated a cert).
+# stays the dealt set, and its allowlist must list every build that wrote the
+# logs the ceremony guardian reads.
 # new_kp_roster:
 #   num_shares: 3
 #   threshold: 2

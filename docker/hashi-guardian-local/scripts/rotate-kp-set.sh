@@ -3,14 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # KP-set rotation against a FRESH ceremony-mode guardian (chain-free):
-#   1. mint the new KP set (kp<N+1>.. — a rotation may change n and t),
-#   2. `operator rotate-kp-set init` -> OperatorInit + session pin,
-#   3. threshold-many current KPs run `key-provisioner rotate-kp-set`: each
-#      decrypts its share, re-encrypts it to the guardian and signs the
-#      proposal into a submission file,
-#   4. `operator rotate-kp-set submit` -> RotateKpSet: the guardian
-#      reconstructs the key, re-splits it to the new set, writes
-#      ceremony/{seq+1} + kp-shares/, and waits for every new KP,
+#   1. mint the new KP set (kp<N+1>..; n and t may change),
+#   2. `operator rotate-kp-set init`,
+#   3. threshold-many current KPs sign submissions (`key-provisioner rotate-kp-set`),
+#   4. `operator rotate-kp-set submit` -> RotateKpSet, then waits for the new KPs,
 #   5. every new KP runs `key-provisioner ceremony`,
 #   6. the new set becomes the dealt roster; `make reprovision` next.
 set -euo pipefail

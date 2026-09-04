@@ -43,11 +43,9 @@ pub async fn verified_provisioning_target_info(
     verify_info_response(info_pb, current_build)
 }
 
-/// The ceremony guardian a KP confirms to or signs a rotation for. Through the
-/// proxy, the relay surface answers for the guardian KPs are provisioning (the
-/// standby during a KP-set rotation, where the node-facing `GetGuardianInfo`
-/// answers for the active one); a bare guardian has no relay surface and
-/// answers for itself.
+/// The ceremony guardian a KP confirms to or signs a rotation for: through
+/// the proxy, the relay's provisioning target (the standby during a KP-set
+/// rotation); a bare guardian answers for itself.
 pub async fn verified_ceremony_guardian_info(
     endpoint: &str,
     current_build: &BuildPcrs,

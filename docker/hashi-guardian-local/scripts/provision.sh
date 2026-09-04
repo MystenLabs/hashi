@@ -41,9 +41,8 @@ echo "== operator provision ${genesis_flag} =="
 # shellcheck disable=SC2086
 hashi-guardian-init operator provision --config "${CONFIG}" ${genesis_flag}
 
-# A KP refuses a guardian session it cannot see heartbeating in S3, and the
-# first heartbeat lands on the guardian's own cadence, not at operator
-# provision; here nothing else separates the two. Retry that one refusal.
+# The guardian's first heartbeat lands on its own cadence, and a KP refuses a
+# session it cannot see heartbeating in S3; retry that one refusal.
 kp_provision() {
   local attempt out
   for attempt in 1 2 3 4 5 6; do

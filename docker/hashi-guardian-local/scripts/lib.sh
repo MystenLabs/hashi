@@ -43,9 +43,8 @@ kp_cert_paths() { # FIRST LAST -> "path path ..."
 }
 
 # Mint test KP PGP keypairs kpFIRST..kpLAST in one shared GNUPGHOME (a test
-# rig — real KPs each hold their own yubikey). `operator ceremony` encrypts
-# each share to the matching public cert; the KP commands decrypt and sign via
-# gpg, which selects the right secret key from this same home.
+# rig; real KPs each hold their own yubikey). gpg picks the right secret key
+# from this home when a KP command decrypts or signs.
 gen_kp_keys() { # FIRST LAST
   mkdir -p "${GNUPGHOME}" "${CERTS_DIR}"
   chmod 700 "${GNUPGHOME}"

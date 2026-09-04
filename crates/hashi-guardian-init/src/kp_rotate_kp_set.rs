@@ -2,14 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `key-provisioner rotate-kp-set`: one current KP's half of a KP-set rotation.
-//!
-//! The KP verifies the fresh ceremony guardian the operator initialized,
-//! decrypts its share of the dealt (current) set through its yubikey, and
-//! signs a submission that binds that share, re-encrypted to the guardian's
-//! session key, to the proposed new roster and sharing params. The submission
-//! is written to a file for the operator, who batches threshold-many of them
-//! into one `RotateKpSet`. The enclave re-verifies every signature and binding;
-//! the file carries nothing secret.
+//! Verifies the fresh ceremony guardian, decrypts this KP's share and signs a
+//! submission binding it (re-encrypted to the guardian) to the proposed roster
+//! and params. The file holds nothing secret; the operator batches them.
 
 use std::path::Path;
 
@@ -72,9 +67,8 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         );
     }
 
-    // 1. The ceremony guardian this submission is for: attested as the current
-    //    build, operator-initialized on the expected bucket, and its session
-    //    attestation in S3.
+    // 1. The ceremony guardian: attested current build, operator-initialized
+    //    on the expected bucket, session attestation in S3.
     let target =
         verified_ceremony_guardian_info(&cfg.guardian_endpoint, allowlist.current_build()).await?;
     ensure!(
