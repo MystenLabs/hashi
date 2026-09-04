@@ -489,7 +489,11 @@ mod tests {
 
         verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap();
 
-        request.new_kp_pgp_cert.push('0');
+        request
+            .new_kp_pgp_cert_bundle
+            .as_mut()
+            .unwrap()
+            .sig_attestation_pem = Some(b"tampered".to_vec().into());
         let err = verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }

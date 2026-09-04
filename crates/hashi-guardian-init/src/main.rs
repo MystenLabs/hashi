@@ -78,6 +78,15 @@ enum KeyProvisionerCommand {
         /// Path to the replacement armored OpenPGP public cert.
         #[arg(long)]
         new_kp_pgp_cert_path: PathBuf,
+        /// Path to the replacement YubiKey device attestation certificate.
+        #[arg(long)]
+        new_kp_device_attestation_cert_path: PathBuf,
+        /// Path to the replacement signature-key attestation statement.
+        #[arg(long)]
+        new_kp_sig_attestation_path: PathBuf,
+        /// Path to the replacement decryption-key attestation statement.
+        #[arg(long)]
+        new_kp_dec_attestation_path: PathBuf,
     },
     /// Verify, save, and confirm this KP's encrypted ceremony share.
     Ceremony {
@@ -146,9 +155,21 @@ async fn main() -> anyhow::Result<()> {
             KeyProvisionerCommand::RotateCert {
                 config,
                 new_kp_pgp_cert_path,
+                new_kp_device_attestation_cert_path,
+                new_kp_sig_attestation_path,
+                new_kp_dec_attestation_path,
             } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                kp_rotate_cert::run(cfg, new_kp_pgp_cert_path).await?;
+                kp_rotate_cert::run(
+                    cfg,
+                    kp_roster::KpPgpCertBundlePaths {
+                        cert_path: new_kp_pgp_cert_path,
+                        device_attestation_cert_path: new_kp_device_attestation_cert_path,
+                        sig_attestation_path: new_kp_sig_attestation_path,
+                        dec_attestation_path: new_kp_dec_attestation_path,
+                    },
+                )
+                .await?;
             }
         },
         Command::Tools { command } => match command {
@@ -161,7 +182,6 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn key_provisioner_ceremony_requires_encrypted_shares_path() {
@@ -204,20 +224,36 @@ mod tests {
     }
 
     #[test]
-    fn key_provisioner_rotate_cert_help_exposes_only_the_singular_cert_path() {
-        let mut command = Cli::command();
-        let rotate_cert = command
-            .find_subcommand_mut("key-provisioner")
-            .expect("key-provisioner subcommand")
-            .find_subcommand_mut("rotate-cert")
-            .expect("rotate-cert subcommand");
-        let mut rendered = Vec::new();
-        rotate_cert
-            .write_long_help(&mut rendered)
-            .expect("render rotate-cert help");
-        let help = String::from_utf8(rendered).expect("Clap help is UTF-8");
-
-        assert!(help.contains("--new-kp-pgp-cert-path"), "{help}");
-        assert!(!help.contains("--target-kp-pgp-fingerprint"), "{help}");
+    fn key_provisioner_rotate_cert_requires_replacement_bundle() {
+        assert!(
+            Cli::try_parse_from([
+                "hashi-guardian-init",
+                "key-provisioner",
+                "rotate-cert",
+                "--config",
+                "config.yaml",
+                "--new-kp-pgp-cert-path",
+                "kp-new.asc",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "hashi-guardian-init",
+                "key-provisioner",
+                "rotate-cert",
+                "--config",
+                "config.yaml",
+                "--new-kp-pgp-cert-path",
+                "kp-new.asc",
+                "--new-kp-device-attestation-cert-path",
+                "kp-new-device.pem",
+                "--new-kp-sig-attestation-path",
+                "kp-new-sig.pem",
+                "--new-kp-dec-attestation-path",
+                "kp-new-dec.pem",
+            ])
+            .is_ok()
+        );
     }
 }

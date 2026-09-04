@@ -2196,9 +2196,9 @@ pub struct ProvisionerInitResponse {}
 /// sharing instance, commitments, share ids, or threshold.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignedProvisionerRotateCertRequest {
-    /// Armored replacement cert.
-    #[prost(string, tag = "1")]
-    pub new_kp_pgp_cert: ::prost::alloc::string::String,
+    /// Replacement OpenPGP certificate and YubiKey attestation evidence.
+    #[prost(message, optional, tag = "7")]
+    pub new_kp_pgp_cert_bundle: ::core::option::Option<KpPgpCertBundle>,
     /// The same plaintext share, HPKE-encrypted to the guardian.
     #[prost(message, optional, tag = "2")]
     pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,

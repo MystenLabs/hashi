@@ -42,11 +42,11 @@ use zeroize::Zeroizing;
 /// evidence.
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct KpPgpCertBundlePaths {
-    cert_path: PathBuf,
-    device_attestation_cert_path: PathBuf,
-    sig_attestation_path: PathBuf,
-    dec_attestation_path: PathBuf,
+pub(crate) struct KpPgpCertBundlePaths {
+    pub(crate) cert_path: PathBuf,
+    pub(crate) device_attestation_cert_path: PathBuf,
+    pub(crate) sig_attestation_path: PathBuf,
+    pub(crate) dec_attestation_path: PathBuf,
 }
 
 /// Common KP-roster config: the sharing params, the full KP cert roster, and the
@@ -119,7 +119,7 @@ fn load_cert(path: &Path) -> Result<PgpPublicCert> {
     Ok(cert)
 }
 
-fn load_pgp_cert_bundle(paths: &KpPgpCertBundlePaths) -> Result<KpPgpCertBundle> {
+pub(crate) fn load_pgp_cert_bundle(paths: &KpPgpCertBundlePaths) -> Result<KpPgpCertBundle> {
     let cert = load_cert(&paths.cert_path)?;
     let device_attestation_cert_pem = read_attestation(
         &paths.device_attestation_cert_path,

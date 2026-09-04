@@ -140,17 +140,19 @@ pub fn mock_kp_certs_roster(n: usize) -> KpCertRoster {
     KpCertRoster::new(mock_pgp_certs(n)).unwrap()
 }
 
+pub fn mock_kp_pgp_cert_bundle(cert: PgpPublicCert) -> KpPgpCertBundle {
+    KpPgpCertBundle::new(
+        cert,
+        b"device attestation".to_vec(),
+        b"SIG attestation".to_vec(),
+        b"DEC attestation".to_vec(),
+    )
+}
+
 pub fn mock_kp_pgp_cert_bundles(n: usize) -> Vec<KpPgpCertBundle> {
     mock_pgp_certs(n)
         .into_iter()
-        .map(|cert| {
-            KpPgpCertBundle::new(
-                cert,
-                b"device attestation".to_vec(),
-                b"SIG attestation".to_vec(),
-                b"DEC attestation".to_vec(),
-            )
-        })
+        .map(mock_kp_pgp_cert_bundle)
         .collect()
 }
 fn dummy_commitments() -> ShareCommitments {
@@ -319,7 +321,7 @@ impl ProvisionerRotateCertRequest {
         Self::from_encrypted_share(
             expected_session_id,
             expected_cert_seq,
-            new_kp_pgp_cert,
+            mock_kp_pgp_cert_bundle(new_kp_pgp_cert),
             encrypted_share,
         )
     }

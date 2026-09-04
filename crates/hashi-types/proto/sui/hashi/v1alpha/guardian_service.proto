@@ -427,8 +427,10 @@ message ProvisionerInitResponse {}
 // Replace the signing KP's sole certificate. This does not change the BTC key,
 // sharing instance, commitments, share ids, or threshold.
 message SignedProvisionerRotateCertRequest {
-  // Armored replacement cert.
-  string new_kp_pgp_cert = 1;
+  reserved 1;
+
+  // Replacement OpenPGP certificate and YubiKey attestation evidence.
+  KpPgpCertBundle new_kp_pgp_cert_bundle = 7;
 
   // The same plaintext share, HPKE-encrypted to the guardian.
   GuardianEncryptedShare encrypted_share = 2;

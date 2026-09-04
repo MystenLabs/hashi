@@ -125,6 +125,36 @@ fn kp_cert_roster_from_armored(certs: Vec<String>) -> GuardianResult<KpCertRoste
     )
 }
 
+fn kp_pgp_cert_bundle_from_pb(bundle: pb::KpPgpCertBundle) -> GuardianResult<KpPgpCertBundle> {
+    let cert = PgpPublicCert::new(bundle.pgp_cert.ok_or_else(|| missing("pgp_cert"))?)
+        .map_err(|e| InvalidInputs(e.to_string()))?;
+    Ok(KpPgpCertBundle::new(
+        cert,
+        bundle
+            .device_attestation_cert_pem
+            .ok_or_else(|| missing("device_attestation_cert_pem"))?
+            .to_vec(),
+        bundle
+            .sig_attestation_pem
+            .ok_or_else(|| missing("sig_attestation_pem"))?
+            .to_vec(),
+        bundle
+            .dec_attestation_pem
+            .ok_or_else(|| missing("dec_attestation_pem"))?
+            .to_vec(),
+    ))
+}
+
+fn kp_pgp_cert_bundle_to_pb(bundle: KpPgpCertBundle) -> pb::KpPgpCertBundle {
+    let (cert, device, sig, dec) = bundle.into_parts();
+    pb::KpPgpCertBundle {
+        pgp_cert: Some(cert.into_armored()),
+        device_attestation_cert_pem: Some(device.into()),
+        sig_attestation_pem: Some(sig.into()),
+        dec_attestation_pem: Some(dec.into()),
+    }
+}
+
 impl TryFrom<pb::GuardianEncryptedShare> for GuardianEncryptedShare {
     type Error = GuardianError;
 
@@ -143,25 +173,7 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
         let bundles = req
             .kp_pgp_cert_bundles
             .into_iter()
-            .map(|bundle| {
-                let cert = PgpPublicCert::new(bundle.pgp_cert.ok_or_else(|| missing("pgp_cert"))?)
-                    .map_err(|e| InvalidInputs(e.to_string()))?;
-                Ok(KpPgpCertBundle::new(
-                    cert,
-                    bundle
-                        .device_attestation_cert_pem
-                        .ok_or_else(|| missing("device_attestation_cert_pem"))?
-                        .to_vec(),
-                    bundle
-                        .sig_attestation_pem
-                        .ok_or_else(|| missing("sig_attestation_pem"))?
-                        .to_vec(),
-                    bundle
-                        .dec_attestation_pem
-                        .ok_or_else(|| missing("dec_attestation_pem"))?
-                        .to_vec(),
-                ))
-            })
+            .map(kp_pgp_cert_bundle_from_pb)
             .collect::<GuardianResult<Vec<_>>>()?;
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
@@ -406,9 +418,6 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
     type Error = GuardianError;
 
     fn try_from(req: pb::SignedProvisionerRotateCertRequest) -> Result<Self, Self::Error> {
-        if req.new_kp_pgp_cert.is_empty() {
-            return Err(missing("new_kp_pgp_cert"));
-        }
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
@@ -419,8 +428,10 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
             return Err(missing("kp_signature"));
         }
 
-        let new_kp_pgp_cert = PgpPublicCert::new(req.new_kp_pgp_cert)
-            .map_err(|e| InvalidInputs(format!("invalid new_kp_pgp_cert: {e}")))?;
+        let new_kp_pgp_cert_bundle = kp_pgp_cert_bundle_from_pb(
+            req.new_kp_pgp_cert_bundle
+                .ok_or_else(|| missing("new_kp_pgp_cert_bundle"))?,
+        )?;
         let encrypted_share = GuardianEncryptedShare::try_from(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
@@ -431,7 +442,7 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
             req.expected_session_id.into(),
             req.expected_cert_seq
                 .ok_or_else(|| missing("expected_cert_seq"))?,
-            new_kp_pgp_cert,
+            new_kp_pgp_cert_bundle,
             encrypted_share,
         );
         Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
@@ -779,18 +790,7 @@ pub fn provisioner_rotate_cert_response_signed_to_pb(
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     let (bundles, params) = s.into_parts();
     pb::SetupNewKeyRequest {
-        kp_pgp_cert_bundles: bundles
-            .into_iter()
-            .map(|bundle| {
-                let (cert, device, sig, dec) = bundle.into_parts();
-                pb::KpPgpCertBundle {
-                    pgp_cert: Some(cert.into_armored()),
-                    device_attestation_cert_pem: Some(device.into()),
-                    sig_attestation_pem: Some(sig.into()),
-                    dec_attestation_pem: Some(dec.into()),
-                }
-            })
-            .collect(),
+        kp_pgp_cert_bundles: bundles.into_iter().map(kp_pgp_cert_bundle_to_pb).collect(),
         num_shares: Some(params.num_shares() as u32),
         threshold: Some(params.threshold() as u32),
     }
@@ -898,10 +898,10 @@ pub fn ceremony_confirmation_response_to_pb(
 impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotateCertRequest {
     fn from(r: KpSigned<ProvisionerRotateCertRequest>) -> Self {
         let (request, signer_cert, signature) = r.into_parts();
-        let (expected_session_id, expected_cert_seq, new_kp_pgp_cert, encrypted_share) =
+        let (expected_session_id, expected_cert_seq, new_kp_pgp_cert_bundle, encrypted_share) =
             request.into_parts();
         Self {
-            new_kp_pgp_cert: new_kp_pgp_cert.armored().to_string(),
+            new_kp_pgp_cert_bundle: Some(kp_pgp_cert_bundle_to_pb(new_kp_pgp_cert_bundle)),
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.into(),
             signer_cert: signer_cert.armored().to_string(),
@@ -2129,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_provisioner_rotate_cert_request_round_trip_and_binds_scalar_fields() {
+    fn signed_provisioner_rotate_cert_request_round_trip_and_binds_bundle() {
         use crate::pgp::test_utils::mock_pgp_keypair;
         use crate::pgp::test_utils::sign_detached_in_process;
 
@@ -2137,6 +2137,8 @@ mod tests {
         let signer_cert = PgpPublicCert::new(signer_armored).unwrap();
         let (new_cert_armored, _) = mock_pgp_keypair();
         let new_cert = PgpPublicCert::new(new_cert_armored).unwrap();
+        let new_bundle = super::super::test_utils::mock_kp_pgp_cert_bundle(new_cert);
+        let expected_bundle = new_bundle.clone();
         let encrypted_share = GuardianEncryptedShare {
             id: ShareID::new(1).unwrap(),
             ciphertext: Ciphertext {
@@ -2147,17 +2149,23 @@ mod tests {
         let request = ProvisionerRotateCertRequest::from_encrypted_share(
             "session-a".into(),
             7,
-            new_cert,
+            new_bundle,
             encrypted_share.clone(),
         );
         let signature = sign_detached_in_process(&signer_secret, &KpSigned::signed_bytes(&request));
         let signed = KpSigned::from_parts(request, signer_cert, signature);
 
         let pb = pb::SignedProvisionerRotateCertRequest::from(signed);
+        let mut missing_bundle = pb.clone();
+        missing_bundle.new_kp_pgp_cert_bundle = None;
+        let err = KpSigned::<ProvisionerRotateCertRequest>::try_from(missing_bundle).unwrap_err();
+        assert!(err.to_string().contains("new_kp_pgp_cert_bundle"), "{err}");
+
         let round_trip = KpSigned::<ProvisionerRotateCertRequest>::try_from(pb.clone()).unwrap();
         let data = round_trip.verify_signature().unwrap();
         assert_eq!(data.expected_cert_seq(), 7);
         assert_eq!(data.encrypted_share(), &encrypted_share);
+        assert_eq!(data.new_kp_pgp_cert_bundle(), &expected_bundle);
 
         let assert_signature_invalid = |tampered| {
             assert!(
@@ -2170,8 +2178,20 @@ mod tests {
 
         let (other_cert_armored, _) = mock_pgp_keypair();
         let mut tampered_cert = pb.clone();
-        tampered_cert.new_kp_pgp_cert = other_cert_armored;
+        tampered_cert
+            .new_kp_pgp_cert_bundle
+            .as_mut()
+            .unwrap()
+            .pgp_cert = Some(other_cert_armored);
         assert_signature_invalid(tampered_cert);
+
+        let mut tampered_attestation = pb.clone();
+        tampered_attestation
+            .new_kp_pgp_cert_bundle
+            .as_mut()
+            .unwrap()
+            .dec_attestation_pem = Some(b"tampered".to_vec().into());
+        assert_signature_invalid(tampered_attestation);
 
         let mut tampered_seq = pb.clone();
         tampered_seq.expected_cert_seq = Some(8);

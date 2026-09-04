@@ -264,7 +264,7 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
 pub struct ProvisionerRotateCertRequest {
     expected_session_id: SessionID,
     expected_cert_seq: u64,
-    new_kp_pgp_cert: PgpPublicCert,
+    new_kp_pgp_cert_bundle: KpPgpCertBundle,
     encrypted_share: GuardianEncryptedShare,
 }
 
@@ -287,7 +287,7 @@ pub struct CeremonyOperatorInitRequest {
 }
 
 /// One key provisioner's OpenPGP certificate and its YubiKey attestation evidence.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct KpPgpCertBundle {
     cert: PgpPublicCert,
     device_attestation_cert_pem: Vec<u8>,
@@ -410,8 +410,9 @@ impl KpPgpCertBundle {
         &self.cert
     }
 
-    #[cfg(not(feature = "non-enclave-dev"))]
-    fn verify_attestation(&self) -> anyhow::Result<()> {
+    /// Verify that the certificate's signing and decryption keys were generated
+    /// on the YubiKey identified by the device attestation certificate.
+    pub fn verify_attestation(&self) -> anyhow::Result<()> {
         crate::pgp::verify_yubikey_attestations(
             &self.cert,
             &self.device_attestation_cert_pem,
@@ -879,7 +880,7 @@ impl ProvisionerRotateCertRequest {
     pub fn new<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        new_kp_pgp_cert: PgpPublicCert,
+        new_kp_pgp_cert_bundle: KpPgpCertBundle,
         share: &Share,
         enclave_pub_key: &EncPubKey,
         rng: &mut R,
@@ -888,7 +889,7 @@ impl ProvisionerRotateCertRequest {
         Self {
             expected_session_id,
             expected_cert_seq,
-            new_kp_pgp_cert,
+            new_kp_pgp_cert_bundle,
             encrypted_share,
         }
     }
@@ -896,13 +897,13 @@ impl ProvisionerRotateCertRequest {
     pub(crate) fn from_encrypted_share(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        new_kp_pgp_cert: PgpPublicCert,
+        new_kp_pgp_cert_bundle: KpPgpCertBundle,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self {
             expected_session_id,
             expected_cert_seq,
-            new_kp_pgp_cert,
+            new_kp_pgp_cert_bundle,
             encrypted_share,
         }
     }
@@ -911,12 +912,8 @@ impl ProvisionerRotateCertRequest {
         self.encrypted_share.id
     }
 
-    pub fn new_kp_pgp_cert(&self) -> &PgpPublicCert {
-        &self.new_kp_pgp_cert
-    }
-
-    pub fn new_recipient_fingerprint(&self) -> KPFingerprint {
-        self.new_kp_pgp_cert.fingerprint().to_hex()
+    pub fn new_kp_pgp_cert_bundle(&self) -> &KpPgpCertBundle {
+        &self.new_kp_pgp_cert_bundle
     }
 
     pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
@@ -931,11 +928,11 @@ impl ProvisionerRotateCertRequest {
         self.expected_cert_seq
     }
 
-    pub fn into_parts(self) -> (SessionID, u64, PgpPublicCert, GuardianEncryptedShare) {
+    pub fn into_parts(self) -> (SessionID, u64, KpPgpCertBundle, GuardianEncryptedShare) {
         (
             self.expected_session_id,
             self.expected_cert_seq,
-            self.new_kp_pgp_cert,
+            self.new_kp_pgp_cert_bundle,
             self.encrypted_share,
         )
     }
