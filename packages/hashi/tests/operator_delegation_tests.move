@@ -56,6 +56,54 @@ fun test_member_authorized() {
     std::unit_test::destroy(hashi);
 }
 
+#[test]
+/// The zero address is never authorized, even when a validator "clears" its
+/// operator delegation by pointing it at `@0x0`. Sui system transactions run as
+/// `@0x0`, so this delegation must not grant them the member's authority.
+fun test_zero_sender_never_authorized() {
+    let ctx = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+
+    let voters = vector[VALIDATOR1, VALIDATOR2, VALIDATOR3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    // Undelegated member: the zero sender is a stranger.
+    let cz = &test_utils::new_tx_context(@0x0, 0);
+    assert!(!hashi.committee_set().member_authorized(VALIDATOR1, cz));
+
+    // VALIDATOR1 "clears" its delegation by pointing it at the zero address.
+    let cd = &test_utils::new_tx_context(VALIDATOR1, 0);
+    hashi.committee_set_mut().set_operator_address(VALIDATOR1, @0x0, cd);
+
+    // The zero sender still is not authorized, while the validator key still is.
+    let cz2 = &test_utils::new_tx_context(@0x0, 0);
+    assert!(!hashi.committee_set().member_authorized(VALIDATOR1, cz2));
+    let cv = &test_utils::new_tx_context(VALIDATOR1, 0);
+    assert!(hashi.committee_set().member_authorized(VALIDATOR1, cv));
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure]
+/// A delegation cleared to `@0x0` does not let a zero-address sender re-point
+/// the operator address.
+fun test_set_operator_address_rejects_zero_sender() {
+    let ctx = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+
+    let voters = vector[VALIDATOR1, VALIDATOR2, VALIDATOR3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    let cd = &test_utils::new_tx_context(VALIDATOR1, 0);
+    hashi.committee_set_mut().set_operator_address(VALIDATOR1, @0x0, cd);
+
+    // The zero sender matches the cleared operator slot but is never authorized -> aborts.
+    let cz = &test_utils::new_tx_context(@0x0, 0);
+    hashi.committee_set_mut().set_operator_address(VALIDATOR1, @0xBEEF, cz);
+
+    // Won't reach here.
+    std::unit_test::destroy(hashi);
+}
+
 // ======== Operator Acting On Behalf Of Validator ========
 
 #[test]
