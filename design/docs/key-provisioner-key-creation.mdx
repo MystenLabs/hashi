@@ -32,16 +32,17 @@ questions:
   - What does a key provisioner give the guardian operator?
 answer: >-
   A guardian key provisioner uses oct to generate OpenPGP signing, decryption,
-  and authentication keys directly on one YubiKey, then tests the public
-  certificate with GnuPG. The key provisioner gives only the exported armored
-  public certificate to the guardian operator; the private keys remain on the
-  YubiKey.
+  and authentication keys directly on one YubiKey, then uses ykman to require
+  a physical touch for every signing and decryption operation and tests the
+  public certificate with GnuPG. The key provisioner gives only the exported
+  armored public certificate to the guardian operator; the private keys remain
+  on the YubiKey.
 ---
 
 Each guardian key provisioner (KP) needs one YubiKey-backed OpenPGP certificate
 that can encrypt and sign. During the guardian ceremony, Hashi encrypts the KP's
-guardian share to that certificate. Later, the KP uses the YubiKey to decrypt
-the share and sign provisioning requests.
+guardian share to that certificate. Later, the KP touches the YubiKey to decrypt
+the share and touches it again to sign provisioning requests.
 
 Generate dedicated keys for guardian provisioning. Do not reuse a personal key
 or a node-backup key. The private keys remain on the YubiKey; only the armored
@@ -62,6 +63,8 @@ configured so a command cannot select the wrong device.
      card administration and key generation.
    - [`gpg`](https://gnupg.org/), for testing decryption and signing through the
      YubiKey.
+   - [`ykman`](https://docs.yubico.com/software/yubikey/tools/ykman/), for
+     requiring physical touch before the YubiKey decrypts or signs.
 
 3. Insert the YubiKey and list the available OpenPGP cards:
 
@@ -100,31 +103,60 @@ cannot be recovered afterward.
 
 ```sh
 oct admin --card 0006:26883270 generate \
-  --userid "Guardian KP 1 <guardian-kp1@example.com>" \
+  --userid "Guardian KP" \
   --output guardian-kp1.asc \
   curve25519
 ```
 
-Use the KP's real identity and a unique output filename. `oct` prompts for the
+Use the KP's real name or assigned guardian identifier as the user ID and use a
+unique output filename. An email address is not required. `oct` prompts for the
 user and administrator PINs. The resulting `.asc` file contains public material
 only; the private signing, decryption, and authentication keys remain on the
 YubiKey.
 
-7. Inspect the exported certificate and record its fingerprint:
+7. Require a physical touch every time the signing or decryption key is used:
 
 ```sh
-gpg --show-keys --fingerprint guardian-kp1.asc
+ykman openpgp keys set-touch sig on
+ykman openpgp keys set-touch enc on
 ```
 
-The fingerprint, card identifier, physical label, and filename should identify
-the same device in the KP's inventory.
+Enter the administrator PIN when prompted. Touch policy is configured
+separately for each OpenPGP key slot; `sig` controls signing and `enc` controls
+decryption. Do not use the `cached` policy, because it permits more operations
+for 15 seconds after one touch.
+
+Confirm both policies:
+
+```sh
+ykman openpgp keys info sig
+ykman openpgp keys info enc
+```
+
+Both commands must report a touch policy of `On`.
+
+8. Extract the complete primary-key fingerprint into a Bash variable and record
+   its value:
+
+```bash
+FINGERPRINT="$(
+  gpg --show-keys --with-colons guardian-kp1.asc |
+    awk -F: '$1 == "fpr" { print $10; exit }'
+)"
+printf 'Guardian key fingerprint: %s\n' "$FINGERPRINT"
+```
+
+The first `fpr` record is the certificate's primary-key fingerprint. Keep using
+the same Bash session for the remaining steps. The fingerprint, card identifier,
+physical label, and filename should identify the same device in the KP's
+inventory.
 
 ## Test the YubiKey
 
 Test both operations Hashi requires before sending the public certificate to the
 operator.
 
-8. Import the public certificate into the KP's local GnuPG keyring and connect
+9. Import the public certificate into the KP's local GnuPG keyring and connect
    GnuPG to the card:
 
 ```sh
@@ -132,34 +164,35 @@ gpg --import guardian-kp1.asc
 gpg --card-status
 ```
 
-9. Encrypt and decrypt a test file:
+10. Encrypt and decrypt a test file using the fingerprint extracted in step 8:
 
-```sh
+```bash
 printf 'guardian key test\n' > guardian-kp-test.txt
 gpg --encrypt --armor \
   --trust-model always \
-  --recipient "guardian-kp1@example.com" \
+  --recipient "$FINGERPRINT" \
   --output guardian-kp-test.txt.asc \
   guardian-kp-test.txt
 gpg --decrypt guardian-kp-test.txt.asc
 ```
 
-GnuPG prompts for the user PIN and may require a touch. Confirm that the
-decrypted output is `guardian key test`.
+GnuPG prompts for the user PIN. Touch the YubiKey when its indicator flashes;
+decryption must not complete before that touch. Confirm that the decrypted
+output is `guardian key test`.
 
-10. Create and verify a detached signature, replacing
-    `REPLACE_WITH_FINGERPRINT` with the fingerprint shown in step 7:
+11. Create and verify a detached signature using the same fingerprint:
 
-```sh
+```bash
 gpg --armor --detach-sign \
-  --local-user REPLACE_WITH_FINGERPRINT \
+  --local-user "$FINGERPRINT" \
   --output guardian-kp-test.sig.asc \
   guardian-kp-test.txt
 gpg --verify guardian-kp-test.sig.asc guardian-kp-test.txt
 ```
 
-Confirm that GnuPG reports a valid signature from the expected fingerprint,
-then delete the test plaintext, ciphertext, and signature.
+Touch the YubiKey when its indicator flashes; signing must not complete before
+that touch. Confirm that GnuPG reports a valid signature from the expected
+fingerprint, then delete the test plaintext, ciphertext, and signature.
 
 ## Provide the public certificate to the operator
 
