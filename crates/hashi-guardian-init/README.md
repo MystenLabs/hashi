@@ -78,9 +78,9 @@ KP's share and verifies its commitment. After verification it saves the full
 ceremony state, including every KP's encrypted share and the public ceremony
 data, to the requested path, then
 signs and submits a confirmation to the live guardian. The guardian completes
-the ceremony only after all KP/share entries have confirmed.
-For rotations, the external orchestrator must keep the ceremony guardian
-running after `RotateKpSet` returns until its lifecycle reaches `Completed`.
+the ceremony only after all KP/share entries have confirmed. For rotations,
+the ceremony guardian must keep running after `RotateKpSet` returns until
+every new KP has confirmed; `operator rotate-kp-set submit` waits for that.
 
 Both ceremony commands verify live guardian info and Nitro attestation against
 the configured current build. The KP additionally anchors the ceremony and
@@ -254,7 +254,11 @@ set's threshold), calls `RotateKpSet` in one batch, verifies the guardian-
 signed response (`sharing_seq + 1`, every share encrypted to the new certs)
 and the `ceremony/` + `kp-shares/` logs it wrote, then waits for every new
 KP's `key-provisioner ceremony` confirmation. Re-running `submit` after the
-batch was accepted only verifies the logs and waits.
+batch was accepted only verifies the logs and waits. An accepted batch is
+committed in S3 (`ceremony/{seq+1}` + `kp-shares/{seq+1}/`) whether or not the
+confirmations complete: if the ceremony guardian dies first, the new set can
+still provision, and each new KP first decrypts its share during
+`key-provisioner provision` instead.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml
@@ -290,6 +294,37 @@ Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `kp_pgp_cert_path`, `guardian_endpoint`, `guardian_s3`,
 `kp_roster` and `new_kp_roster`. Every KP must render from the same config:
 the enclave rejects a batch whose submissions disagree on the proposal.
+
+## recovering a lost KP key
+
+A KP whose sole YubiKey is lost or unusable cannot `rotate-cert` (that needs
+the old key). Any `t` of the remaining KPs replace the whole set instead:
+
+1. Leave the serving guardian alone: it holds the key in memory and keeps
+   signing. Nothing below touches it until the switchover.
+2. Agree on the new set: `n`, `t` and one cert per KP (a fresh YubiKey for the
+   affected KP, or a different person). It goes in `new_kp_roster`;
+   `kp_roster` stays the dealt set. The operator and every KP use one config.
+3. Operator: bring up a fresh ceremony-mode guardian on the standby slot,
+   against the same bucket, then `operator rotate-kp-set init`.
+4. Any `t` current KPs: `key-provisioner rotate-kp-set`, each sending the
+   operator its submission file. The lost key takes no part.
+5. Operator: `operator rotate-kp-set submit` with the files. It waits for the
+   new KPs.
+6. Every new KP: `key-provisioner ceremony`, with `kp_roster` set to the new
+   set.
+7. Flip the standby slot to a withdraw-mode guardian: `operator provision`
+   (no `--do-genesis`), `key-provisioner provision` by the new KPs,
+   `operator activate`, switch over, retire the old guardian.
+
+The rotation does not revoke the old shares: `kp-shares/{old seq}/` stays
+readable by the old certs, so `t` old keys could still reconstruct the key
+offline. If that many old keys may be compromised, run a new key ceremony and
+migrate on-chain instead.
+
+[`docker/hashi-guardian-local`](../../docker/hashi-guardian-local)'s
+`make rotate-kp-set` then `make reprovision` run this sequence end to end
+with softkeys: `t` of the dealt set sign, the new set is entirely new keys.
 
 ## operator activate
 

@@ -72,20 +72,15 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         );
     }
 
-    // 1. The ceremony guardian this submission is for: attested, operator-
-    //    initialized on the expected bucket, and its session attestation in S3.
+    // 1. The ceremony guardian this submission is for: attested as the current
+    //    build, operator-initialized on the expected bucket, and its session
+    //    attestation in S3.
     let target =
         verified_ceremony_guardian_info(&cfg.guardian_endpoint, allowlist.current_build()).await?;
     ensure!(
         target.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
         "guardian lifecycle is {:?}; expected ceremony/operator_initialized (run `operator rotate-kp-set init`)",
         target.info.lifecycle
-    );
-    ensure!(
-        target.info.untrusted_git_revision == allowlist.current_build().git_revision(),
-        "guardian git revision mismatch: expected {}, got {}",
-        allowlist.current_build().git_revision(),
-        target.info.untrusted_git_revision
     );
     ensure!(
         target.info.bucket_info.as_ref() == Some(&guardian_s3.bucket_info),
@@ -125,6 +120,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let decrypted = decrypt_kp_share(&state, &kp_cert)?;
 
     // 3. Bind the re-encrypted share to the proposal and sign.
+    let share_id = decrypted.id;
     let request = ProvisionerRotateKpSetRequest::build_from_share(
         session_id.clone(),
         allowlist,
@@ -134,7 +130,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         new_params,
         &mut thread_rng(),
     )?;
-    let share_id = decrypted.id;
+    drop(decrypted);
     let signed = KpSigned::sign(request, kp_cert.clone(), None)
         .context("sign the rotation submission with the KP key")?;
     signed

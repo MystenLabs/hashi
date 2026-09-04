@@ -6,6 +6,7 @@
 //! the log cross-check and the wait for every KP's confirmation.
 
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -187,12 +188,16 @@ impl CeremonyGuardian {
     }
 
     /// Block until every dealt KP has confirmed and the guardian reports
-    /// `Completed`.
+    /// `Completed`; a line a minute shows the wait is alive.
     pub async fn wait_for_confirmations(&mut self) -> Result<()> {
+        const POLL: Duration = Duration::from_secs(5);
+        const POLLS_PER_PROGRESS_LINE: u32 = 12;
         info!(
             phase = "KP confirmations",
             "ceremony state published; waiting for every key provisioner to run key-provisioner ceremony",
         );
+        let started = Instant::now();
+        let mut polls = 0u32;
         loop {
             let status = match self.live_info().await {
                 Ok(status) => status,
@@ -202,7 +207,7 @@ impl CeremonyGuardian {
                         error = %format!("{error:#}"),
                         "transient guardian status failure; retrying",
                     );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(POLL).await;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -212,7 +217,15 @@ impl CeremonyGuardian {
                 lifecycle
                     if lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() =>
                 {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    polls += 1;
+                    if polls.is_multiple_of(POLLS_PER_PROGRESS_LINE) {
+                        info!(
+                            phase = "KP confirmations",
+                            elapsed_secs = started.elapsed().as_secs(),
+                            "still waiting for every key provisioner's confirmation",
+                        );
+                    }
+                    tokio::time::sleep(POLL).await;
                 }
                 lifecycle => anyhow::bail!(
                     "ceremony guardian entered unexpected lifecycle {lifecycle:?} while waiting for KP confirmations"
