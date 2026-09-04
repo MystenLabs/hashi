@@ -46,9 +46,9 @@ x509-parser.workspace = true
 tempfile.workspace = true
 
 [features]
-# Stub out enclave attestation verification so off-enclave consumers (e2e, dev)
-# accept the mock document the guardian emits outside a Nitro enclave. Do not
-# enable for prod builds. Mirrors hashi-guardian's `non-enclave-dev`.
+# Skip hardware-backed Nitro and YubiKey attestation verification for local and
+# end-to-end development flows. Do not enable for production builds. Mirrors
+# hashi-guardian's `non-enclave-dev`.
 non-enclave-dev = []
 
 [dev-dependencies]

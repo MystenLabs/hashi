@@ -166,7 +166,20 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(bundles, num_shares, threshold)
+        let request = SetupNewKeyRequest::new(bundles, num_shares, threshold)?;
+        // Local development uses software-generated OpenPGP keys with mock evidence.
+        #[cfg(not(feature = "non-enclave-dev"))]
+        for (index, bundle) in request.kp_pgp_cert_bundles().iter().enumerate() {
+            bundle.verify_attestation().map_err(|error| {
+                InvalidInputs(format!(
+                    "invalid YubiKey OpenPGP attestation for KP bundle {} \
+                     (fingerprint {}): {error:#}",
+                    index + 1,
+                    bundle.cert().fingerprint(),
+                ))
+            })?;
+        }
+        Ok(request)
     }
 }
 
@@ -1895,11 +1908,48 @@ mod tests {
     }
 
     #[test]
-    fn setup_new_key_request_round_trip() {
+    fn setup_new_key_request_encodes_complete_bundles() {
+        let wire = setup_new_key_request_to_pb(SetupNewKeyRequest::mock_for_testing());
+
+        assert_eq!(wire.kp_pgp_cert_bundles.len(), 5);
+        for bundle in wire.kp_pgp_cert_bundles {
+            assert!(bundle.pgp_cert.is_some());
+            assert!(bundle.device_attestation_cert_pem.is_some());
+            assert!(bundle.sig_attestation_pem.is_some());
+            assert!(bundle.dec_attestation_pem.is_some());
+        }
+    }
+
+    #[cfg(feature = "non-enclave-dev")]
+    #[test]
+    fn setup_new_key_request_round_trips_in_non_enclave_dev() {
         let req = SetupNewKeyRequest::mock_for_testing();
-        let pb = setup_new_key_request_to_pb(req.clone());
-        let back = SetupNewKeyRequest::try_from(pb).unwrap();
-        assert_eq!(req, back);
+        let wire = setup_new_key_request_to_pb(req.clone());
+        let decoded = SetupNewKeyRequest::try_from(wire).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[cfg(not(feature = "non-enclave-dev"))]
+    #[test]
+    fn setup_new_key_request_rejects_invalid_attestation_evidence() {
+        let wire = setup_new_key_request_to_pb(SetupNewKeyRequest::mock_for_testing());
+        let first_fingerprint = wire.kp_pgp_cert_bundles[0]
+            .pgp_cert
+            .as_ref()
+            .map(|cert| PgpPublicCert::new(cert.clone()).unwrap().fingerprint())
+            .unwrap();
+
+        let err = SetupNewKeyRequest::try_from(wire).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("KP bundle 1"), "{message}");
+        assert!(
+            message.contains(&first_fingerprint.to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("device attestation PEM does not start"),
+            "{message}"
+        );
     }
 
     #[test]

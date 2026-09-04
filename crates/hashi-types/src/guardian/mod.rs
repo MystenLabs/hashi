@@ -410,6 +410,16 @@ impl KpPgpCertBundle {
         &self.cert
     }
 
+    #[cfg(not(feature = "non-enclave-dev"))]
+    fn verify_attestation(&self) -> anyhow::Result<()> {
+        crate::pgp::verify_yubikey_attestations(
+            &self.cert,
+            &self.device_attestation_cert_pem,
+            &self.sig_attestation_pem,
+            &self.dec_attestation_pem,
+        )
+    }
+
     pub(crate) fn into_parts(self) -> (PgpPublicCert, Vec<u8>, Vec<u8>, Vec<u8>) {
         (
             self.cert,
