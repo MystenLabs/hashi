@@ -5,8 +5,8 @@
 //!
 //! `operator ceremony` drives a fresh ceremony-mode guardian through genesis BTC key setup:
 //! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
-//! share's recipient matches its expected KP cert and its ciphertext targets
-//! that cert (without decrypting) -> cross-check the
+//! share's recipient roster matches its expected KP cert set and every
+//! ciphertext targets its keyed cert (without decrypting) -> cross-check the
 //! guardian's `ceremony/` audit log and `kp-shares/` recovery log -> wait for
 //! every KP to confirm successful recovery.
 //!
@@ -18,32 +18,16 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
-use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSignedResponse;
-use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
-use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
-use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use std::time::Duration;
-use tonic::Code;
 use tracing::info;
-use tracing::warn;
 
+use crate::ceremony::CeremonyGuardian;
 use crate::config::Config;
-use crate::guardian_info::verified_live_guardian_info;
-
-fn is_transient_rpc_error(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<tonic::Status>().is_some_and(|status| {
-        matches!(
-            status.code(),
-            Code::Cancelled | Code::DeadlineExceeded | Code::Unavailable
-        )
-    })
-}
 
 /// Run the one-time production guardian key ceremony.
 ///
@@ -91,83 +75,24 @@ pub async fn run(cfg: Config) -> Result<()> {
     )
     .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
 
-    // 3. Connect to the ceremony-mode guardian.
-    info!(
-        phase = "connect",
-        endpoint = %cfg.guardian_endpoint,
-        "connecting to ceremony-mode guardian",
-    );
-    let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
-        .await
-        .with_context(|| format!("connect to guardian at {}", cfg.guardian_endpoint))?;
-    info!(phase = "connect", endpoint = %cfg.guardian_endpoint, "connected to guardian");
-
-    // 4. operator_init (ceremony mode: S3 config only, no InitConfig).
-    info!(
-        phase = "operator_init",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
-        "calling OperatorInit (ceremony mode: S3 config only)",
-    );
-    let oi_req =
-        operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(guardian_s3.clone()))
-            .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
-    client
-        .operator_init(oi_req)
-        .await
-        .context("OperatorInit RPC failed")?;
-    info!(
-        phase = "operator_init",
-        "operator_init complete; guardian S3 logger installed"
-    );
-
-    // 5. get_guardian_info -> verify attestation/PCRs and signed info -> pin the
-    //    session id. This binds `signing_pub_key` (and thus the session) before
-    //    we trust the SetupNewKey response we'll verify against it below.
-    info!(phase = "guardian info", "calling GetGuardianInfo");
-    let allowlist = cfg.kp_roster.pcr_allowlist();
-    let verified = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
+    // 3. operator_init + pin the session. This binds `signing_pub_key` (and
+    //    thus the session) before we trust the SetupNewKey response we'll
+    //    verify against it below.
+    let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
     ensure!(
-        verified.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        guardian.lifecycle == CeremonyStage::OperatorInitialized.into(),
         "guardian is not an operator-initialized ceremony enclave"
     );
-    let signing_pub_key = verified.signing_pub_key;
-    let session_id = verified.session_id;
-    info!(
-        phase = "guardian info",
-        session_id = %session_id,
-        signing_pubkey = hex::encode(signing_pub_key.as_bytes()),
-        "guardian info attestation and signature verified; session pinned",
-    );
 
-    info!(
-        phase = "attestation pin",
-        session_id = %session_id,
-        "connecting to guardian log bucket + verifying attestation against current build",
-    );
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
-        .await
-        .context("connect to guardian log bucket")?;
-    let verified_session = reader.get_current_session_info(&session_id).await?;
-    let attested_signing_pub_key = verified_session.signing_pubkey();
-    ensure!(
-        attested_signing_pub_key == &signing_pub_key,
-        "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
-    );
-    info!(
-        phase = "attestation pin",
-        session_id = %session_id,
-        "guardian S3 attestation matches gRPC signing key",
-    );
-
-    // 6. setup_new_key.
+    // 4. setup_new_key.
     info!(
         phase = "setup_new_key",
         n = cfg.kp_roster.num_shares,
         t = cfg.kp_roster.threshold,
         "calling SetupNewKey",
     );
-    let signed_resp_pb = client
+    let signed_resp_pb = guardian
+        .client
         .setup_new_key(setup_new_key_request_to_pb(setup_req))
         .await
         .context("SetupNewKey RPC failed")?
@@ -175,10 +100,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     let signed_resp = GuardianSignedResponse::<SetupNewKeyResponse>::try_from(signed_resp_pb)
         .map_err(|e| anyhow!("decode SignedSetupNewKeyResponse: {e:?}"))?;
 
-    // 7. Verify the response under the pinned session's signing key,
+    // 5. Verify the response under the pinned session's signing key,
     //    and sanity-check the shape; keep the verified BTC master pubkey.
     let response = signed_resp
-        .verify_into_data(&signing_pub_key)
+        .verify_into_data(&guardian.signing_pub_key)
         .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e}"))?
         .response;
     info!(
@@ -197,7 +122,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         "verified SetupNewKeyResponse signature + shape",
     );
 
-    // 8. Inspect each share's recipient and ciphertext WITHOUT decrypting.
+    // 6. Inspect each share's recipient roster and every ciphertext
+    //    WITHOUT decrypting.
     info!(
         phase = "roster verify",
         share_count = live.encrypted_shares.share_count(),
@@ -206,67 +132,17 @@ pub async fn run(cfg: Config) -> Result<()> {
     live.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(
         phase = "roster verify",
-        "all returned PGP-encrypted share ciphertexts verified against expected KP certificates",
+        "all returned PGP-encrypted shares verified against expected KP certificates",
     );
 
-    // 9. Cross-check the latest guardian ceremony/ and kp-shares/ logs.
-    //    KPs will fetch the same KP share state during key-provisioner ceremony.
-    info!(
-        phase = "log cross-check",
-        "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
-    );
-    let logged = reader
-        .read_latest_ceremony_state_from_current_build()
+    // 7. Cross-check the latest guardian ceremony/ and kp-shares/ logs, then
+    //    wait for every KP's confirmation.
+    guardian
+        .verify_published(&live, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)
         .await?;
-    logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    anyhow::ensure!(
-        logged == live,
-        "ceremony/ and kp-shares/ logs differ from the SetupNewKeyResponse"
-    );
-    info!(
-        phase = "log cross-check",
-        "ceremony/ and kp-shares/ logs match the SetupNewKeyResponse",
-    );
+    guardian.wait_for_confirmations().await?;
 
-    info!(
-        phase = "KP confirmations",
-        "ceremony state published; waiting for every key provisioner to run key-provisioner ceremony",
-    );
-    loop {
-        let status = match verified_live_guardian_info(&mut client, allowlist.current_build()).await
-        {
-            Ok(status) => status,
-            Err(error) if is_transient_rpc_error(&error) => {
-                warn!(
-                    phase = "KP confirmations",
-                    error = %format!("{error:#}"),
-                    "transient guardian status failure; retrying",
-                );
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        ensure!(
-            status.session_id == session_id && status.signing_pub_key == signing_pub_key,
-            "ceremony guardian session changed while waiting for KP confirmations"
-        );
-        match status.info.lifecycle {
-            lifecycle if lifecycle == CeremonyStage::Completed.into() => break,
-            lifecycle if lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() => {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-            lifecycle => anyhow::bail!(
-                "ceremony guardian entered unexpected lifecycle {lifecycle:?} while waiting for KP confirmations"
-            ),
-        }
-    }
-    info!(
-        phase = "KP confirmations",
-        "every key provisioner confirmed successful ceremony recovery",
-    );
-
-    // 10. Summary.
+    // 8. Summary.
     info!(
         phase = "summary",
         sharing_seq = live.secret_sharing_instance.sharing_seq(),

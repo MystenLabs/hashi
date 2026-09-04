@@ -7,9 +7,14 @@
 #   cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml --encrypted-shares-path /secure/path/kp-shares.json
 #   cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 #   cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardian-init.sample.yaml --new-kp-pgp-cert-path /path/to/kp3-new.asc
+#   cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guardian-init.sample.yaml --submission-path /path/to/kp3.rotation
+#   cargo run -p hashi-guardian-init -- operator rotate-kp-set submit --config guardian-init.sample.yaml --submission /path/to/kp1.rotation --submission /path/to/kp3.rotation
 
-# gRPC endpoint of the guardian. `operator ceremony` expects ceremony mode;
-# `operator provision` and `operator activate` expect withdraw mode.
+# gRPC endpoint of the guardian. `operator ceremony` and `operator rotate-kp-set`
+# expect ceremony mode; `operator provision` and `operator activate` expect
+# withdraw mode. KP ceremony commands use it too; through the proxy it answers
+# with the guardian KPs are provisioning.
 guardian_endpoint: "http://localhost:3000"
 
 # Relay endpoint the KP's share is submitted to. `key-provisioner provision`
@@ -70,6 +75,17 @@ kp_roster:
   # prev_builds:
   #   - git_revision: "1111111111111111111111111111111111111111"
   #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+
+# The KP set a rotate-kp-set proposes (rotate-kp-set commands only). kp_roster
+# stays the dealt set, and its allowlist must list every build that wrote the
+# logs the ceremony guardian reads.
+# new_kp_roster:
+#   num_shares: 3
+#   threshold: 2
+#   kp_pgp_cert_paths:
+#     - /path/to/kp6.asc
+#     - /path/to/kp7.asc
+#     - /path/to/kp8.asc
 
 # Limiter parameters the withdraw-mode guardian will be initialized with.
 limiter_config:

@@ -13,6 +13,7 @@ hashi-guardian = { path = "../hashi-guardian" }
 hex.workspace = true
 hpke.workspace = true
 k256.workspace = true
+prost.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,3 +31,4 @@ non-enclave-dev = ["hashi-types/non-enclave-dev", "hashi-guardian/non-enclave-de
 
 [dev-dependencies]
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
+tempfile.workspace = true
