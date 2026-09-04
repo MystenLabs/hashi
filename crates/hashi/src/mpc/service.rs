@@ -119,6 +119,12 @@ pub struct MpcService {
     replacement_keys_target_epoch: Mutex<Option<u64>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Backup {
+    Write,
+    Skip,
+}
+
 impl MpcService {
     pub fn new(hashi: Arc<Hashi>, backup_handle: crate::backup::BackupHandle) -> (Self, MpcHandle) {
         let (key_ready_tx, key_ready_rx) = watch::channel(None);
@@ -251,7 +257,12 @@ impl MpcService {
         }
     }
 
-    async fn post_reconfig_housekeeping(&self, target_epoch: u64, epoch_change_confirmed: bool) {
+    async fn post_reconfig_housekeeping(
+        &self,
+        target_epoch: u64,
+        epoch_change_confirmed: bool,
+        backup: Backup,
+    ) {
         let current_epoch = self.inner.onchain_state().epoch();
         if epoch_change_confirmed || current_epoch >= target_epoch {
             let pruning_references = {
@@ -272,7 +283,9 @@ impl MpcService {
             );
         }
         self.run_major_compaction(target_epoch).await;
-        self.backup_handle.backup_after_epoch_change(target_epoch);
+        if backup == Backup::Write {
+            self.backup_handle.backup_after_epoch_change(target_epoch);
+        }
     }
 
     async fn sleep_if_still_pending(&self, epoch: u64) {
@@ -1576,9 +1589,15 @@ impl MpcService {
                         metrics.task_heartbeat("mpc_service");
                         self.sleep_if_still_pending(target_epoch).await;
                     }
-                    if !matches!(outcome, ReconfigOutcome::NoRole) {
-                        self.post_reconfig_housekeeping(target_epoch, false).await;
-                    }
+                    let backup = match outcome {
+                        ReconfigOutcome::NoRole => Backup::Skip,
+                        ReconfigOutcome::Output(_)
+                        | ReconfigOutcome::Dealt
+                        | ReconfigOutcome::NotNeeded
+                        | ReconfigOutcome::NoShares => Backup::Write,
+                    };
+                    self.post_reconfig_housekeeping(target_epoch, false, backup)
+                        .await;
                     return;
                 }
                 Err(e) => {
@@ -1639,7 +1658,7 @@ impl MpcService {
             );
         }
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
-        self.post_reconfig_housekeeping(target_epoch, end_reconfig_confirmed)
+        self.post_reconfig_housekeeping(target_epoch, end_reconfig_confirmed, Backup::Write)
             .await;
         if !self.reconfig_target_live(target_epoch) {
             info!(
