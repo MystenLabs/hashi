@@ -52,9 +52,12 @@ targets that cert (parsed without decrypting) → cross-checks the guardian's
 `ceremony/` audit log and `kp-shares/` recovery log.
 It then waits for every KP to confirm successful share recovery.
 
-`kp_roster.kp_pgp_cert_paths` is an ordered list with one certificate path per
-KP/share id. Each share has one encrypted ciphertext addressed to that
-certificate's fingerprint.
+`kp_roster.kp_pgp_cert_bundles` is an ordered list with one entry per
+KP/share id.
+Every entry supplies `cert_path`, `device_attestation_cert_path`,
+`sig_attestation_path`, and `dec_attestation_path`. The operator ceremony sends
+the certificate and all three attestation files to the guardian; each encrypted
+share is addressed to the corresponding certificate's fingerprint.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
@@ -221,8 +224,8 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-cert \
   --new-kp-pgp-cert-path /path/to/kp3-new.asc
 ```
 
-After success, replace this KP's certificate path in `kp_roster` with the new
-path and update `kp_pgp_cert_path` to match.
+After success, replace this KP's four paths in `kp_roster.kp_pgp_cert_bundles` and
+update `kp_pgp_cert_path` to the new certificate.
 
 ## operator activate
 

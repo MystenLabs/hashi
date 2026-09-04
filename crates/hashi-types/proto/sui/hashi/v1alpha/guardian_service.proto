@@ -157,11 +157,25 @@ message S3BucketInfo {
 //      SetupNewKey
 // =======================
 
+message KpPgpCertBundle {
+  // Armored OpenPGP public certificate.
+  optional string pgp_cert = 1;
+
+  // Factory device attestation certificate in PEM format.
+  optional bytes device_attestation_cert_pem = 2;
+
+  // Attestation statement for the OpenPGP signature key in PEM format.
+  optional bytes sig_attestation_pem = 3;
+
+  // Attestation statement for the OpenPGP decryption key in PEM format.
+  optional bytes dec_attestation_pem = 4;
+}
+
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // Ordered OpenPGP certificates for key provisioners. Each string is the sole
-  // armored certificate for one KP/share, and length must equal `num_shares`.
-  repeated string key_provisioner_pgp_certs = 1;
+  // Ordered certificate and attestation bundles for key provisioners. Each
+  // bundle represents one KP/share, and length must equal `num_shares`.
+  repeated KpPgpCertBundle kp_pgp_cert_bundles = 1;
 
   // Total number of shares to split the new BTC key into.
   optional uint32 num_shares = 2;

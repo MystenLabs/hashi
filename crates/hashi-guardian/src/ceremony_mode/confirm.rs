@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::ceremony_mode::setup::setup_new_key;
     use crate::mock_logger_capturing;
-    use crate::test_utils::mock_kp_certs_roster_with_secrets;
+    use crate::test_utils::mock_kp_pgp_cert_bundles_with_secrets;
     use crate::test_utils::MockKpSecretKeys;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
@@ -80,12 +80,15 @@ mod tests {
     }
 
     async fn setup_context() -> TestContext {
-        let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
+        let (bundles, secret_keys) = mock_kp_pgp_cert_bundles_with_secrets(TEST_N);
+        let roster =
+            KpCertRoster::new(bundles.iter().map(|bundle| bundle.cert().clone()).collect())
+                .unwrap();
         let (logger, _) = mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_ceremony(logger);
         let response = setup_new_key(
             enclave.clone(),
-            SetupNewKeyRequest::new(roster.clone(), TEST_N, TEST_T).unwrap(),
+            SetupNewKeyRequest::new(bundles, TEST_N, TEST_T).unwrap(),
         )
         .await
         .unwrap()

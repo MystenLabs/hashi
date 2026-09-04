@@ -51,7 +51,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     info!(
         phase = "roster load",
-        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        share_count = cfg.kp_roster.num_shares,
         "loading + validating full KP certificate roster",
     );
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
@@ -69,7 +69,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         .with_context(|| {
             format!(
                 "this KP's cert (fingerprint {}) is not among the configured \
-                 kp_roster.kp_pgp_cert_paths",
+                 kp_roster.kp_pgp_cert_bundles entries",
                 kp_cert.fingerprint()
             )
         })?;

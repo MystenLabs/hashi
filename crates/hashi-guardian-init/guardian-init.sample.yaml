@@ -48,17 +48,34 @@ hashi:
   hashi_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 kp_roster:
-  # Secret-sharing parameters. `num_shares` MUST equal `kp_pgp_cert_paths.len()`.
+  # Secret-sharing parameters. `num_shares` MUST equal
+  # `kp_pgp_cert_bundles.len()`.
   num_shares: 5
   threshold: 3
 
-  # Ordered paths to the armored OpenPGP public cert for each KP/share id.
-  kp_pgp_cert_paths:
-    - /path/to/kp1.asc
-    - /path/to/kp2.asc
-    - /path/to/kp3.asc
-    - /path/to/kp4.asc
-    - /path/to/kp5.asc
+  # Ordered OpenPGP certificate and YubiKey attestation bundles. Each entry is
+  # one KP/share id; all four paths are required.
+  kp_pgp_cert_bundles:
+    - cert_path: /path/to/kp1.asc
+      device_attestation_cert_path: /path/to/kp1-device-attestation.pem
+      sig_attestation_path: /path/to/kp1-sig-attestation.pem
+      dec_attestation_path: /path/to/kp1-dec-attestation.pem
+    - cert_path: /path/to/kp2.asc
+      device_attestation_cert_path: /path/to/kp2-device-attestation.pem
+      sig_attestation_path: /path/to/kp2-sig-attestation.pem
+      dec_attestation_path: /path/to/kp2-dec-attestation.pem
+    - cert_path: /path/to/kp3.asc
+      device_attestation_cert_path: /path/to/kp3-device-attestation.pem
+      sig_attestation_path: /path/to/kp3-sig-attestation.pem
+      dec_attestation_path: /path/to/kp3-dec-attestation.pem
+    - cert_path: /path/to/kp4.asc
+      device_attestation_cert_path: /path/to/kp4-device-attestation.pem
+      sig_attestation_path: /path/to/kp4-sig-attestation.pem
+      dec_attestation_path: /path/to/kp4-dec-attestation.pem
+    - cert_path: /path/to/kp5.asc
+      device_attestation_cert_path: /path/to/kp5-device-attestation.pem
+      sig_attestation_path: /path/to/kp5-sig-attestation.pem
+      dec_attestation_path: /path/to/kp5-dec-attestation.pem
 
   # Expected enclave build: git revision + PCR0 (hex).
   current_build:

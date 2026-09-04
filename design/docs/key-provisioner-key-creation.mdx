@@ -199,22 +199,32 @@ fingerprint, then delete the test plaintext, ciphertext, and signature.
 Send only the `.asc` public certificate and its fingerprint to the guardian
 operator. Do not send either PIN or any local GnuPG private-key material.
 
-The operator assigns each KP one ordered roster entry containing exactly one
-certificate path:
+The operator assigns each KP one ordered roster entry containing the public
+certificate and all three attestation files:
 
 ```yaml
 kp_roster:
   num_shares: 3
   threshold: 2
-  kp_pgp_cert_paths:
-    - /secure/kp1.asc
-    - /secure/kp2.asc
-    - /secure/kp3.asc
+  kp_pgp_cert_bundles:
+    - cert_path: /secure/kp1.asc
+      device_attestation_cert_path: /secure/kp1-device-attestation.pem
+      sig_attestation_path: /secure/kp1-sig-attestation.pem
+      dec_attestation_path: /secure/kp1-dec-attestation.pem
+    - cert_path: /secure/kp2.asc
+      device_attestation_cert_path: /secure/kp2-device-attestation.pem
+      sig_attestation_path: /secure/kp2-sig-attestation.pem
+      dec_attestation_path: /secure/kp2-dec-attestation.pem
+    - cert_path: /secure/kp3.asc
+      device_attestation_cert_path: /secure/kp3-device-attestation.pem
+      sig_attestation_path: /secure/kp3-sig-attestation.pem
+      dec_attestation_path: /secure/kp3-dec-attestation.pem
 ```
 
-Each entry represents one KP, one guardian share, and one YubiKey-backed
-OpenPGP certificate. The KP's local `kp_pgp_cert_path` points to the same
-certificate for ceremony and provisioning commands.
+Each ordered entry represents one KP, one guardian share, one YubiKey-backed
+OpenPGP certificate, and that YubiKey's device, signature-key, and
+decryption-key attestations. The KP's local `kp_pgp_cert_path` points to the
+same certificate for ceremony and provisioning commands.
 
 Store the YubiKey separately from the public certificate and guardian
 configuration. Losing the YubiKey prevents that KP from decrypting and

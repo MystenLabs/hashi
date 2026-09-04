@@ -66,6 +66,10 @@ impl PgpPublicCert {
         &self.armored
     }
 
+    pub(crate) fn into_armored(self) -> String {
+        self.armored
+    }
+
     pub fn fingerprint(&self) -> Fingerprint {
         self.cert.fingerprint()
     }

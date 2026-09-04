@@ -45,7 +45,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         .with_context(|| {
             format!(
                 "signing KP cert fingerprint {signing_fingerprint} is not among the configured \
-                 kp_roster.kp_pgp_cert_paths"
+                 kp_roster.kp_pgp_cert_bundles entries"
             )
         })?;
     let new_fingerprint = new_cert.fingerprint().to_hex();

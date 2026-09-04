@@ -34,6 +34,7 @@ use super::InitConfig;
 use super::KpCertRoster;
 use super::KpEncryptedShare;
 use super::KpEncryptedShareRoster;
+use super::KpPgpCertBundle;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::LimiterState;
@@ -139,12 +140,33 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let certs = kp_cert_roster_from_armored(req.key_provisioner_pgp_certs)?;
-
+        let bundles = req
+            .kp_pgp_cert_bundles
+            .into_iter()
+            .map(|bundle| {
+                let cert = PgpPublicCert::new(bundle.pgp_cert.ok_or_else(|| missing("pgp_cert"))?)
+                    .map_err(|e| InvalidInputs(e.to_string()))?;
+                Ok(KpPgpCertBundle::new(
+                    cert,
+                    bundle
+                        .device_attestation_cert_pem
+                        .ok_or_else(|| missing("device_attestation_cert_pem"))?
+                        .to_vec(),
+                    bundle
+                        .sig_attestation_pem
+                        .ok_or_else(|| missing("sig_attestation_pem"))?
+                        .to_vec(),
+                    bundle
+                        .dec_attestation_pem
+                        .ok_or_else(|| missing("dec_attestation_pem"))?
+                        .to_vec(),
+                ))
+            })
+            .collect::<GuardianResult<Vec<_>>>()?;
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(certs, num_shares, threshold)
+        SetupNewKeyRequest::new(bundles, num_shares, threshold)
     }
 }
 
@@ -742,14 +764,22 @@ pub fn provisioner_rotate_cert_response_signed_to_pb(
 }
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
+    let (bundles, params) = s.into_parts();
     pb::SetupNewKeyRequest {
-        key_provisioner_pgp_certs: s
-            .kp_certs_roster()
-            .iter()
-            .map(|cert| cert.armored().to_string())
+        kp_pgp_cert_bundles: bundles
+            .into_iter()
+            .map(|bundle| {
+                let (cert, device, sig, dec) = bundle.into_parts();
+                pb::KpPgpCertBundle {
+                    pgp_cert: Some(cert.into_armored()),
+                    device_attestation_cert_pem: Some(device.into()),
+                    sig_attestation_pem: Some(sig.into()),
+                    dec_attestation_pem: Some(dec.into()),
+                }
+            })
             .collect(),
-        num_shares: Some(s.num_shares() as u32),
-        threshold: Some(s.threshold() as u32),
+        num_shares: Some(params.num_shares() as u32),
+        threshold: Some(params.threshold() as u32),
     }
 }
 
@@ -1870,6 +1900,48 @@ mod tests {
         let pb = setup_new_key_request_to_pb(req.clone());
         let back = SetupNewKeyRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn setup_new_key_request_requires_complete_bundles() {
+        let req = SetupNewKeyRequest::mock_for_testing();
+
+        for field in [
+            "pgp_cert",
+            "device_attestation_cert_pem",
+            "sig_attestation_pem",
+            "dec_attestation_pem",
+        ] {
+            let mut wire = setup_new_key_request_to_pb(req.clone());
+            let bundle = &mut wire.kp_pgp_cert_bundles[0];
+            match field {
+                "pgp_cert" => bundle.pgp_cert = None,
+                "device_attestation_cert_pem" => bundle.device_attestation_cert_pem = None,
+                "sig_attestation_pem" => bundle.sig_attestation_pem = None,
+                "dec_attestation_pem" => bundle.dec_attestation_pem = None,
+                _ => unreachable!(),
+            }
+            let err = SetupNewKeyRequest::try_from(wire).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[test]
+    fn setup_new_key_request_requires_one_bundle_per_share() {
+        let mut wire = setup_new_key_request_to_pb(SetupNewKeyRequest::mock_for_testing());
+        wire.num_shares = Some(wire.kp_pgp_cert_bundles.len() as u32 + 1);
+
+        let err = SetupNewKeyRequest::try_from(wire).unwrap_err();
+        assert!(err.to_string().contains("bundle entries"), "{err}");
+    }
+
+    #[test]
+    fn setup_new_key_request_rejects_duplicate_certificates() {
+        let mut wire = setup_new_key_request_to_pb(SetupNewKeyRequest::mock_for_testing());
+        wire.kp_pgp_cert_bundles[1] = wire.kp_pgp_cert_bundles[0].clone();
+
+        let err = SetupNewKeyRequest::try_from(wire).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
     #[test]

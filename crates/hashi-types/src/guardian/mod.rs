@@ -62,6 +62,7 @@ pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
+use std::collections::HashSet;
 
 // ---------------------------------
 //    Common requests and responses
@@ -285,12 +286,21 @@ pub struct CeremonyOperatorInitRequest {
     pub s3_config: ResolvedS3Config,
 }
 
+/// One key provisioner's OpenPGP certificate and its YubiKey attestation evidence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KpPgpCertBundle {
+    cert: PgpPublicCert,
+    device_attestation_cert_pem: Vec<u8>,
+    sig_attestation_pem: Vec<u8>,
+    dec_attestation_pem: Vec<u8>,
+}
+
 /// TODO: Replace the operator-authored setup request with a batch of new-KP-signed
 /// approvals binding the session, roster, sharing params, and S3 policy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    /// One ordered KP certificate per secret share.
-    key_provisioner_certs_roster: KpCertRoster,
+    /// One ordered KP certificate and attestation bundle per secret share.
+    key_provisioner_pgp_cert_bundles: Vec<KpPgpCertBundle>,
     /// The secret-sharing params (n, t).
     params: SecretSharingParams,
 }
@@ -381,28 +391,70 @@ impl OperatorInitRequest {
     }
 }
 
+impl KpPgpCertBundle {
+    pub fn new(
+        cert: PgpPublicCert,
+        device_attestation_cert_pem: Vec<u8>,
+        sig_attestation_pem: Vec<u8>,
+        dec_attestation_pem: Vec<u8>,
+    ) -> Self {
+        Self {
+            cert,
+            device_attestation_cert_pem,
+            sig_attestation_pem,
+            dec_attestation_pem,
+        }
+    }
+
+    pub fn cert(&self) -> &PgpPublicCert {
+        &self.cert
+    }
+
+    pub(crate) fn into_parts(self) -> (PgpPublicCert, Vec<u8>, Vec<u8>, Vec<u8>) {
+        (
+            self.cert,
+            self.device_attestation_cert_pem,
+            self.sig_attestation_pem,
+            self.dec_attestation_pem,
+        )
+    }
+}
+
 impl SetupNewKeyRequest {
     pub fn new(
-        kp_certs_roster: KpCertRoster,
+        kp_pgp_cert_bundles: Vec<KpPgpCertBundle>,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
         let params = SecretSharingParams::new(num_shares, threshold)?;
-        if kp_certs_roster.num_kps() != params.num_shares() {
+        if kp_pgp_cert_bundles.len() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} KP OpenPGP cert roster entries, got {}",
+                "expected {} KP OpenPGP cert bundle entries, got {}",
                 params.num_shares(),
-                kp_certs_roster.num_kps()
+                kp_pgp_cert_bundles.len()
             )));
         }
+        let mut seen = HashSet::with_capacity(kp_pgp_cert_bundles.len());
+        for bundle in &kp_pgp_cert_bundles {
+            let fingerprint = bundle.cert().fingerprint();
+            if !seen.insert(fingerprint.clone()) {
+                return Err(InvalidInputs(format!(
+                    "duplicate OpenPGP certificate fingerprint {fingerprint}"
+                )));
+            }
+        }
         Ok(Self {
-            key_provisioner_certs_roster: kp_certs_roster,
+            key_provisioner_pgp_cert_bundles: kp_pgp_cert_bundles,
             params,
         })
     }
 
-    pub fn kp_certs_roster(&self) -> &KpCertRoster {
-        &self.key_provisioner_certs_roster
+    pub fn kp_pgp_cert_bundles(&self) -> &[KpPgpCertBundle] {
+        &self.key_provisioner_pgp_cert_bundles
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<KpPgpCertBundle>, SecretSharingParams) {
+        (self.key_provisioner_pgp_cert_bundles, self.params)
     }
 
     pub fn params(&self) -> &SecretSharingParams {

@@ -1906,15 +1906,28 @@ pub struct S3BucketInfo {
     #[prost(string, optional, tag = "2")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Untrusted wire DTO. Converted to a validated domain request in the server.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KpPgpCertBundle {
+    /// Armored OpenPGP public certificate.
+    #[prost(string, optional, tag = "1")]
+    pub pgp_cert: ::core::option::Option<::prost::alloc::string::String>,
+    /// Factory device attestation certificate in PEM format.
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub device_attestation_cert_pem: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Attestation statement for the OpenPGP signature key in PEM format.
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub sig_attestation_pem: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Attestation statement for the OpenPGP decryption key in PEM format.
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub dec_attestation_pem: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Untrusted wire DTO. Converted to a validated domain request in the server.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupNewKeyRequest {
-    /// Ordered OpenPGP certificates for key provisioners. Each string is the sole
-    /// armored certificate for one KP/share, and length must equal `num_shares`.
-    #[prost(string, repeated, tag = "1")]
-    pub key_provisioner_pgp_certs: ::prost::alloc::vec::Vec<
-        ::prost::alloc::string::String,
-    >,
+    /// Ordered certificate and attestation bundles for key provisioners. Each
+    /// bundle represents one KP/share, and length must equal `num_shares`.
+    #[prost(message, repeated, tag = "1")]
+    pub kp_pgp_cert_bundles: ::prost::alloc::vec::Vec<KpPgpCertBundle>,
     /// Total number of shares to split the new BTC key into.
     #[prost(uint32, optional, tag = "2")]
     pub num_shares: ::core::option::Option<u32>,

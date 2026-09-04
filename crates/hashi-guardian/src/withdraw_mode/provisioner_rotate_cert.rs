@@ -171,8 +171,12 @@ mod tests {
         let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&secret);
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let (cert_roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
-        let (encrypted_shares, commitments) =
-            split_and_encrypt_for_kps(&secret, &cert_roster, &params, &mut rand::thread_rng());
+        let (encrypted_shares, commitments) = split_and_encrypt_for_kps(
+            &secret,
+            cert_roster.iter(),
+            &params,
+            &mut rand::thread_rng(),
+        );
         let shares = decrypt_kp_shares(&encrypted_shares, &secret_keys);
         let instance = SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
         let ceremony_state = CeremonyState {

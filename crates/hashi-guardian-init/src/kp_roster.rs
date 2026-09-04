@@ -23,6 +23,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::KpCertRoster;
+use hashi_types::guardian::KpPgpCertBundle;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
@@ -37,19 +38,29 @@ use tracing::info;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
+/// Paths to one key provisioner's OpenPGP certificate and YubiKey attestation
+/// evidence.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct KpPgpCertBundlePaths {
+    cert_path: PathBuf,
+    device_attestation_cert_path: PathBuf,
+    sig_attestation_path: PathBuf,
+    dec_attestation_path: PathBuf,
+}
+
 /// Common KP-roster config: the sharing params, the full KP cert roster, and the
 /// PCR allowlist. Shared by every command that needs to discover and verify a
 /// ceremony against an expected KP set.
 #[derive(Deserialize)]
 pub struct KpRosterConfig {
-    /// Total number of shares/KPs. Must equal `kp_pgp_cert_paths.len()`.
+    /// Total number of shares/KPs. Must equal `kp_pgp_cert_bundles.len()`.
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
-    /// Ordered paths to each KP's armored OpenPGP public certificate. The path
-    /// at index `i` is assigned share id `i + 1`; read-only commands match
-    /// shares by fingerprint.
-    pub kp_pgp_cert_paths: Vec<PathBuf>,
+    /// Ordered paths to each KP's OpenPGP certificate and attestation evidence.
+    /// The entry at index `i` is assigned share id `i + 1`.
+    kp_pgp_cert_bundles: Vec<KpPgpCertBundlePaths>,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
 }
@@ -59,10 +70,10 @@ impl KpRosterConfig {
         SecretSharingParams::new(self.num_shares, self.threshold)
             .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
 
-        let cert_path_count = self.kp_pgp_cert_paths.len();
+        let bundle_count = self.kp_pgp_cert_bundles.len();
         anyhow::ensure!(
-            self.num_shares == cert_path_count,
-            "num_shares ({}) must equal the number of KP cert paths ({cert_path_count})",
+            self.num_shares == bundle_count,
+            "num_shares ({}) must equal the number of KP cert bundles ({bundle_count})",
             self.num_shares
         );
         Ok(())
@@ -70,15 +81,27 @@ impl KpRosterConfig {
 
     pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
         let certs = self
-            .kp_pgp_cert_paths
+            .kp_pgp_cert_bundles
             .iter()
             .enumerate()
-            .map(|(idx, cert_path)| {
-                load_cert(cert_path)
+            .map(|(idx, paths)| {
+                load_cert(&paths.cert_path)
                     .with_context(|| format!("invalid KP cert at roster position {}", idx + 1))
             })
             .collect::<Result<Vec<_>>>()?;
         KpCertRoster::new(certs).context("invalid KP certificate roster")
+    }
+
+    pub fn load_pgp_cert_bundles(&self) -> Result<Vec<KpPgpCertBundle>> {
+        self.kp_pgp_cert_bundles
+            .iter()
+            .enumerate()
+            .map(|(idx, paths)| {
+                load_pgp_cert_bundle(paths).with_context(|| {
+                    format!("invalid KP cert bundle at roster position {}", idx + 1)
+                })
+            })
+            .collect()
     }
 
     /// The PCR allowlist decoded from `current_build` + `prev_builds`.
@@ -87,13 +110,35 @@ impl KpRosterConfig {
     }
 }
 
-fn load_cert(path: &PathBuf) -> Result<PgpPublicCert> {
+fn load_cert(path: &Path) -> Result<PgpPublicCert> {
     let armored = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read PGP cert at {}", path.display()))?;
     let cert = PgpPublicCert::new(armored)
         .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
     info!(fingerprint = %cert, path = %path.display(), "loaded PGP cert");
     Ok(cert)
+}
+
+fn load_pgp_cert_bundle(paths: &KpPgpCertBundlePaths) -> Result<KpPgpCertBundle> {
+    let cert = load_cert(&paths.cert_path)?;
+    let device_attestation_cert_pem = read_attestation(
+        &paths.device_attestation_cert_path,
+        "device attestation certificate",
+    )?;
+    let sig_attestation_pem =
+        read_attestation(&paths.sig_attestation_path, "signature-key attestation")?;
+    let dec_attestation_pem =
+        read_attestation(&paths.dec_attestation_path, "decryption-key attestation")?;
+    Ok(KpPgpCertBundle::new(
+        cert,
+        device_attestation_cert_pem,
+        sig_attestation_pem,
+        dec_attestation_pem,
+    ))
+}
+
+fn read_attestation(path: &Path, kind: &str) -> Result<Vec<u8>> {
+    std::fs::read(path).with_context(|| format!("failed to read {kind} at {}", path.display()))
 }
 
 /// Find, decrypt, and commitment-check the share addressed to `kp_cert`.
@@ -273,12 +318,12 @@ mod tests {
         (CeremonyState::from(response), shares)
     }
 
-    fn roster_yaml(paths: &str) -> String {
+    fn roster_yaml(entries: &str) -> String {
         format!(
             "num_shares: 2\n\
              threshold: 2\n\
-             kp_pgp_cert_paths:\n\
-             {paths}\
+             kp_pgp_cert_bundles:\n\
+             {entries}\
              current_build:\n\
              \x20 git_revision: \"0000000000000000000000000000000000000000\"\n\
              \x20 pcr0: \"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"\n\
@@ -287,27 +332,54 @@ mod tests {
     }
 
     #[test]
-    fn flat_kp_cert_paths_deserialize_in_order() {
-        let cfg: KpRosterConfig =
-            serde_yaml::from_str(&roster_yaml("  - /path/kp1.asc\n  - /path/kp2.asc\n")).unwrap();
+    fn kp_cert_bundle_paths_deserialize_in_order() {
+        let cfg: KpRosterConfig = serde_yaml::from_str(&roster_yaml(
+            "  - cert_path: /path/kp1.asc\n\
+             \x20   device_attestation_cert_path: /path/kp1-device.pem\n\
+             \x20   sig_attestation_path: /path/kp1-sig.pem\n\
+             \x20   dec_attestation_path: /path/kp1-dec.pem\n\
+             \x20 - cert_path: /path/kp2.asc\n\
+             \x20   device_attestation_cert_path: /path/kp2-device.pem\n\
+             \x20   sig_attestation_path: /path/kp2-sig.pem\n\
+             \x20   dec_attestation_path: /path/kp2-dec.pem\n",
+        ))
+        .unwrap();
 
+        assert_eq!(cfg.kp_pgp_cert_bundles.len(), 2);
         assert_eq!(
-            cfg.kp_pgp_cert_paths,
-            vec![
-                PathBuf::from("/path/kp1.asc"),
-                PathBuf::from("/path/kp2.asc")
-            ]
+            cfg.kp_pgp_cert_bundles[0],
+            KpPgpCertBundlePaths {
+                cert_path: PathBuf::from("/path/kp1.asc"),
+                device_attestation_cert_path: PathBuf::from("/path/kp1-device.pem"),
+                sig_attestation_path: PathBuf::from("/path/kp1-sig.pem"),
+                dec_attestation_path: PathBuf::from("/path/kp1-dec.pem"),
+            }
+        );
+        assert_eq!(
+            cfg.kp_pgp_cert_bundles[1].cert_path,
+            PathBuf::from("/path/kp2.asc")
         );
         cfg.validate().unwrap();
     }
 
     #[test]
-    fn nested_kp_cert_paths_are_rejected() {
-        let parsed = serde_yaml::from_str::<KpRosterConfig>(&roster_yaml(
-            "  - [/path/kp1-a.asc, /path/kp1-b.asc]\n  - /path/kp2.asc\n",
-        ));
+    fn old_flat_kp_cert_paths_are_rejected() {
+        let yaml = "num_shares: 2\n\
+                    threshold: 2\n\
+                    kp_pgp_cert_paths:\n\
+                    \x20 - /path/kp1.asc\n\
+                    \x20 - /path/kp2.asc\n\
+                    current_build:\n\
+                    \x20 git_revision: \"0000000000000000000000000000000000000000\"\n\
+                    \x20 pcr0: \"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"\n\
+                    prev_builds: []\n";
 
-        assert!(parsed.is_err(), "nested certificate paths must be rejected");
+        let parsed = serde_yaml::from_str::<KpRosterConfig>(yaml);
+
+        assert!(
+            parsed.is_err(),
+            "the old flat certificate-path field must be rejected"
+        );
     }
 
     #[test]

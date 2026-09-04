@@ -72,6 +72,27 @@ pub fn mock_kp_certs_roster_with_secrets(num_kps: usize) -> (KpCertRoster, MockK
     )
 }
 
+/// Build setup bundles while retaining the matching mock OpenPGP secret keys.
+#[cfg(test)]
+pub fn mock_kp_pgp_cert_bundles_with_secrets(
+    num_kps: usize,
+) -> (Vec<KpPgpCertBundle>, MockKpSecretKeys) {
+    let (certs, secret_keys) = mock_kp_certs_roster_with_secrets(num_kps);
+    let bundles = certs
+        .into_vec()
+        .into_iter()
+        .map(|cert| {
+            KpPgpCertBundle::new(
+                cert,
+                b"device attestation".to_vec(),
+                b"SIG attestation".to_vec(),
+                b"DEC attestation".to_vec(),
+            )
+        })
+        .collect();
+    (bundles, secret_keys)
+}
+
 /// Decrypt every ciphertext in a KP-share roster and return one share per ID.
 #[cfg(test)]
 pub fn decrypt_kp_shares(

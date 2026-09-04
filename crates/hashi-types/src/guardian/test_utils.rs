@@ -18,6 +18,7 @@ use super::InitConfig;
 use super::KpCertRoster;
 use super::KpEncryptedShare;
 use super::KpEncryptedShareRoster;
+use super::KpPgpCertBundle;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
@@ -131,7 +132,7 @@ impl GetGuardianInfoResponse {
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_kp_pgp_cert_bundles(TEST_N), TEST_N, TEST_T).unwrap()
     }
 }
 
@@ -139,6 +140,19 @@ pub fn mock_kp_certs_roster(n: usize) -> KpCertRoster {
     KpCertRoster::new(mock_pgp_certs(n)).unwrap()
 }
 
+pub fn mock_kp_pgp_cert_bundles(n: usize) -> Vec<KpPgpCertBundle> {
+    mock_pgp_certs(n)
+        .into_iter()
+        .map(|cert| {
+            KpPgpCertBundle::new(
+                cert,
+                b"device attestation".to_vec(),
+                b"SIG attestation".to_vec(),
+                b"DEC attestation".to_vec(),
+            )
+        })
+        .collect()
+}
 fn dummy_commitments() -> ShareCommitments {
     let commitments = (0..TEST_N)
         .map(|i| ShareCommitment {

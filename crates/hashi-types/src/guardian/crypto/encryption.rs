@@ -62,7 +62,6 @@ impl KpCertRoster {
                 )));
             }
         }
-
         Ok(Self(kp_certs))
     }
 
@@ -70,7 +69,7 @@ impl KpCertRoster {
         self.0.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &PgpPublicCert> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &PgpPublicCert> {
         self.0.iter()
     }
 
@@ -346,23 +345,26 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
             .expect("neither plaintext nor aad are long"),
     }
 }
-
 /// Split `sk` into `params.num_shares()` shares with reconstruction threshold
 /// `params.threshold()`, encrypt each share to its matching KP certificate, and
-/// compute one commitment per share. The roster assigns its certificate at
+/// compute one commitment per share. The iterator assigns its certificate at
 /// position `i` to share ID `i + 1`.
 ///
 /// # Panics
 ///
-/// Panics if `kp_certs_roster.num_kps() != params.num_shares()`.
-pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
+/// Panics if `kp_certs.len() != params.num_shares()`.
+pub fn split_and_encrypt_for_kps<'a, R, I>(
     sk: &k256::SecretKey,
-    kp_certs_roster: &KpCertRoster,
+    kp_certs: I,
     params: &SecretSharingParams,
     rng: &mut R,
-) -> (KpEncryptedShareRoster, ShareCommitments) {
+) -> (KpEncryptedShareRoster, ShareCommitments)
+where
+    R: CryptoRng + RngCore,
+    I: ExactSizeIterator<Item = &'a PgpPublicCert>,
+{
     assert_eq!(
-        kp_certs_roster.num_kps(),
+        kp_certs.len(),
         params.num_shares(),
         "request validation ensures one KP certificate per share",
     );
@@ -370,7 +372,7 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     let n = params.num_shares();
     let mut encrypted_shares = Vec::with_capacity(n);
     let mut commitments = Vec::with_capacity(n);
-    for (share, cert) in shares.iter().zip(kp_certs_roster.iter()) {
+    for (share, cert) in shares.iter().zip(kp_certs) {
         encrypted_shares.push(KpEncryptedShare {
             id: share.id,
             recipient_fingerprint: cert.fingerprint().to_hex(),
@@ -751,7 +753,7 @@ mod tests {
         let params = SecretSharingParams::new(5, 3).unwrap();
 
         let (encrypted_shares, commitments) =
-            split_and_encrypt_for_kps(&secret_key, &roster, &params, &mut rand::thread_rng());
+            split_and_encrypt_for_kps(&secret_key, roster.iter(), &params, &mut rand::thread_rng());
         assert_eq!(commitments.len(), 5);
 
         assert_eq!(
