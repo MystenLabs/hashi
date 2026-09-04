@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_INTERVAL"],"fn":["parse_external_labels","parse_url","start"],"struct":["RemoteWriteConfig"]};

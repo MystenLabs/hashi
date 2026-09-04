@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OutputUTXOWire"],"fn":["construct_tx","sign_btc_tx"],"struct":["ExternalOutputUTXOWire","InputUTXO","InternalOutputUTXO","TxUTXOs","TxUTXOsWire"]};

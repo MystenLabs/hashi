@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["confirm_ceremony","operator_activate","operator_init","provisioner_init","provisioner_rotate_cert","rotate_kp_set","setup_new_key","standard_withdrawal","update_committee","update_committee_chain"]};

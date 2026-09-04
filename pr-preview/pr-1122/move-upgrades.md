@@ -1,0 +1,142 @@
+# Move Package Upgrades
+
+*[Documentation index](/hashi/design/llms.txt) · [Full index](/hashi/design/llms-full.txt)*
+
+> How Hashi classifies Move upgrades as exclusive or non-exclusive, rolls out validator binaries, and retires old package versions safely.
+
+Hashi package versions are separate callable Sui packages, but they operate on
+the same shared `Hashi` object. Publishing a new package therefore does not make
+an old package harmless. If an old entry function interprets shared state using
+an obsolete invariant, it can overwrite or destroy work performed by the new
+version.
+
+The withdrawal v2 work exposed a concrete example. A request committed by v2
+could remain in a location that v1 treated as cancellable. While v1 remained
+enabled, its cancellation path could destroy that committed request, stranding
+burned hBTC and locked UTXOs. This is why package publication and version
+retirement sometimes need to be one atomic governance action.
+
+## Required classification
+
+Every upgrade proposal must be labeled **exclusive** or **non-exclusive** in
+its design and rollout plan. Reviewers should treat a missing classification as
+an incomplete upgrade.
+
+Use an **exclusive upgrade** when any of the following is true:
+
+- The new version changes the meaning, location, or lifecycle of shared state.
+- An old entry function could undo, overwrite, replay, or misclassify a new
+  version's write.
+- Safety depends on all callers using the new validation or authorization rule.
+- Cross-version behavior has not been tested directly.
+
+Exclusive should be the default when there is doubt. It atomically replaces the
+enabled-version set with the newly committed version, so no transaction can
+observe the new version enabled while an older version is still callable.
+
+Use a **non-exclusive upgrade** only when retaining an older version is an
+intentional compatibility feature. The review must explain why old and new
+entry functions are safe against the same shared state and include direct
+cross-version tests for state both versions can mutate. A desire to let old
+validator binaries keep working is not, by itself, enough: binary rollout is an
+operational concern and must not weaken an onchain safety invariant.
+
+The `upgrade::Upgrade` proposal records this decision in its `exclusive`
+field. Execution returns the Sui `UpgradeTicket` together with a non-droppable
+authorization carrying the approved setting. Finalization consumes both in the
+same programmable transaction, binding the committee vote to the version policy
+that is applied when the package is committed. The CLI requires
+`--exclusive true` or `--exclusive false`; omission is rejected so the
+classification cannot be an accidental default.
+
+## Validator rollout contract
+
+An exclusive upgrade deliberately makes old binaries unable to perform normal
+writes once the upgrade checkpoint is observed. An old binary does not contain
+the code or ABI routing for the newest package, and the previous package is no
+longer enabled. Updated Hashi nodes detect that they support no enabled package
+version and halt autonomous mutations instead of falling back unsafely.
+
+Use this sequence for every upgrade:
+
+1. Build the exact Move package and record its digest in the proposal. Create
+   exclusive proposals with `--package-path`, which verifies the package's
+   `PACKAGE_VERSION` constant against the chain before proposing; the CLI
+   refuses `--digest` for an exclusive upgrade unless
+   `--allow-unverified-exclusive` explicitly acknowledges that the constant
+   was not machine-checked.
+2. Release a node binary that understands both the currently active package and
+   the proposed package.
+3. Restart validators one at a time. Each validator verifies healthy operation
+   on the current package before casting its vote.
+4. Confirm that upgraded validators represent at least two thirds of committee
+   **weight**, not merely two thirds of node count.
+5. Reach proposal quorum, then separately execute and publish the upgrade with
+   `hashi proposal execute-upgrade <proposal-id> --package-path <dir>`, built
+   from the same commit and `sui` binary as the proposal's digest. Votes never
+   auto-publish a package.
+6. Verify the package-upgrade checkpoint, enabled-version set, active routing,
+   and validator health before resuming ordinary rollout work.
+
+This ordering means the network retains quorum-capable updated software before
+an exclusive publication causes old binaries to stop writing.
+
+## Current testnet v1 to v2 plan
+
+The deployed testnet v1 package only has the legacy `upgrade` proposal. That
+proposal always leaves previous versions enabled, so it cannot make the first
+v1-to-v2 transition atomic. Testnet carries no real funds, and we accept a small
+race window for this one migration. Run the migration under the emergency
+pause, which closes the withdrawal-replay surface described below; the
+withdrawal queue does not need to drain first.
+
+1. Create and fully vote the pause, v2 upgrade, and `DisableVersion(1)`
+   proposals while v1 is active. Proposal creation permits targeting the
+   current version; only execution rejects disabling it.
+2. Execute the pause once the remaining proposals are near quorum. Governance
+   entries are not pause-gated, so the remaining steps execute while paused.
+3. Verify the bridge is still paused, then execute, publish, and finalize v2
+   through the legacy v1 upgrade path (`hashi proposal execute-upgrade`).
+4. Wait for that transaction to succeed and obtain the newly published v2
+   package ID.
+5. Immediately execute the already-approved disable-v1 proposal through the v2
+   package. Pre-build this transaction so only the package ID needs filling.
+6. Verify that v1 calls fail with `EVersionDisabled` and that validators route
+   ordinary work through v2.
+7. Create, vote, and execute the unpause.
+
+Proposal execution checks only quorum, not the caller, so any quorum-complete
+proposal is executable by any account. The strict ordering therefore votes the
+unpause only after `DisableVersion(1)` is verified: a pre-voted unpause would
+let an adversary unpause and commit through v2 in one transaction inside the
+window. The Testnet migration relaxes this and pre-votes the unpause
+alongside the other proposals, accepting the theoretical window: nothing of
+value is at stake, the window is seconds wide, and the proposing operators
+have executed every proposal to date. Any future migration that carries real
+value must use the strict ordering; on Mainnet the question should not arise
+at all, because exclusive upgrades replace the enabled set atomically and
+leave no window to protect.
+
+The upgrade and disable are necessarily two transactions. Do not submit them
+concurrently: the network does not guarantee shared-object ordering, and
+disable-v1 must execute through v2 after publication.
+
+The pause is what makes the window between them safe for withdrawals.
+Commitment and approval certificates bind no package version, so while both
+versions are enabled a live certificate can be replayed through v2's
+`commit_withdrawal_tx`. That commits the request in place, where v1's
+pause-exempt `cancel_withdrawal` (which checks only the `processed` bag) can
+destroy it, burning the user's hBTC while releasing no BTC and wedging the
+referencing withdrawal transaction forever. Every corrupting interleaving
+requires such a v2 commit to land while v1 is still enabled.
+`commit_withdrawal_tx` and `approve_request` honor the pause in both
+packages, so holding the pause across the window means no transaction can
+create that state, and the pause-exempt v1 cancel has nothing corruptible to
+act on. In-flight withdrawals ride
+through the flip without draining: committed batches sign, confirm, and
+archive from their v1 locations, and approved or requested entries commit
+v2-style afterward.
+
+The pre-mainnet tree ships this way already: the legacy module is deleted,
+the atomic proposal type is named `upgrade`, and it is the only upgrade path.
+Mainnet begins with it from genesis.
