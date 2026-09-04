@@ -14,7 +14,9 @@
 //! observes traffic and writes into those metrics.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use axum::http;
@@ -278,18 +280,7 @@ impl callback::ResponseHandler for ResponseHandler {
     fn on_response(&mut self, response: &response::Parts) {
         const GRPC_STATUS: http::HeaderName = http::HeaderName::from_static("grpc-status");
 
-        let status = if response
-            .headers
-            .get(&http::header::CONTENT_TYPE)
-            .is_some_and(|content_type| {
-                content_type
-                    .as_bytes()
-                    // check if the content-type starts_with 'application/grpc' in order to
-                    // consider this as a gRPC request. A prefix comparison is done instead of a
-                    // full equality check in order to account for the various types of
-                    // content-types that are considered as gRPC traffic.
-                    .starts_with(tonic::metadata::GRPC_CONTENT_TYPE.as_bytes())
-            }) {
+        let status = if super::is_grpc_content_type(&response.headers) {
             let code = response
                 .headers
                 .get(&GRPC_STATUS)
@@ -362,22 +353,44 @@ fn extract_path(request: &request::Parts, role: Role) -> Cow<'static, str> {
     }
 }
 
+fn known_grpc_paths() -> &'static HashSet<Box<str>> {
+    static PATHS: OnceLock<HashSet<Box<str>>> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        use prost::Message as _;
+
+        let mut paths = HashSet::new();
+        for encoded in [
+            hashi_types::proto::FILE_DESCRIPTOR_SET,
+            tonic_health::pb::FILE_DESCRIPTOR_SET,
+            tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET,
+            tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET,
+        ] {
+            let Ok(set) = prost_types::FileDescriptorSet::decode(encoded) else {
+                continue;
+            };
+            for file in set.file {
+                let package = file.package();
+                for service in &file.service {
+                    for method in &service.method {
+                        paths.insert(
+                            format!("/{package}.{}/{}", service.name(), method.name())
+                                .into_boxed_str(),
+                        );
+                    }
+                }
+            }
+        }
+        paths
+    })
+}
+
 fn extract_server_path(request: &request::Parts) -> Cow<'static, str> {
     if let Some(matched_path) = request.extensions.get::<axum::extract::MatchedPath>() {
-        if request
-            .headers
-            .get(&http::header::CONTENT_TYPE)
-            .is_some_and(|header| {
-                header
-                    .as_bytes()
-                    // check if the content-type starts_with 'application/grpc' in order to
-                    // consider this as a gRPC request. A prefix comparison is done instead of a
-                    // full equality check in order to account for the various types of
-                    // content-types that are considered as gRPC traffic.
-                    .starts_with(tonic::metadata::GRPC_CONTENT_TYPE.as_bytes())
-            })
-        {
-            Cow::Owned(request.uri.path().to_owned())
+        if super::is_grpc_content_type(&request.headers) {
+            match known_grpc_paths().get(request.uri.path()) {
+                Some(path) => Cow::Borrowed(path),
+                None => Cow::Owned(matched_path.as_str().to_owned()),
+            }
         } else {
             Cow::Owned(matched_path.as_str().to_owned())
         }
@@ -420,5 +433,28 @@ fn code_as_str(code: tonic::Code) -> &'static str {
         tonic::Code::Unavailable => "unavailable",
         tonic::Code::DataLoss => "data-loss",
         tonic::Code::Unauthenticated => "unauthenticated",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_grpc_paths;
+
+    #[test]
+    fn known_paths_cover_every_served_grpc_service() {
+        let paths = known_grpc_paths();
+
+        for served in [
+            "/sui.hashi.v1alpha.MpcService/SendMessages",
+            "/sui.hashi.v1alpha.BridgeService/GetServiceInfo",
+            "/grpc.health.v1.Health/Check",
+            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+            "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+        ] {
+            assert!(paths.contains(served), "{served} missing from {paths:?}");
+        }
+
+        assert!(!paths.contains("/sui.hashi.v1alpha.MpcService/NoSuchMethod"));
+        assert!(!paths.contains("/"));
     }
 }

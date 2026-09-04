@@ -115,8 +115,10 @@ impl HttpService {
             );
 
         let layers = ServiceBuilder::new()
-            // Add middleware for mapping a request to a known validator
-            .map_request(lookup_validator_middleware(self.inner.clone()))
+            .layer(axum::middleware::from_fn_with_state(
+                self.inner.clone(),
+                require_known_validator,
+            ))
             .layer(sui_http::middleware::callback::CallbackLayer::new(
                 metrics_layer::RpcMetricsMakeCallbackHandler::server(self.inner.metrics.clone()),
             ));
@@ -186,11 +188,16 @@ impl HttpService {
 }
 
 async fn health() -> impl axum::response::IntoResponse {
-    (axum::http::StatusCode::OK, "up")
+    (http::StatusCode::OK, "up")
 }
 
 async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
-    let onchain_state = hashi.onchain_state();
+    let Some(onchain_state) = hashi.onchain_state_opt() else {
+        return (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "on-chain state not yet initialized",
+        );
+    };
     // If the chain has moved past what this binary supports, report not-ready so
     // operators/orchestration surface it — the node has halted autonomous work
     // (see leader gate) and needs a binary upgrade. Details are in the
@@ -200,7 +207,7 @@ async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
         Some(crate::onchain::HaltReason::BinaryUnsupported { .. })
     ) {
         return (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            http::StatusCode::SERVICE_UNAVAILABLE,
             "binary does not support the enabled on-chain package version(s) — upgrade required",
         );
     }
@@ -209,19 +216,18 @@ async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
     // up the rest of the StatefulSet to register keys and run the initial DKG.
     let awaiting_genesis = epoch == 0 && onchain_state.current_committee().is_none();
     if awaiting_genesis {
-        (axum::http::StatusCode::OK, "ready (awaiting genesis)")
+        (http::StatusCode::OK, "ready (awaiting genesis)")
     } else if hashi.signing_manager_for(epoch).is_some() {
-        (axum::http::StatusCode::OK, "ready")
+        (http::StatusCode::OK, "ready")
     } else {
         (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            http::StatusCode::SERVICE_UNAVAILABLE,
             "SigningManager not yet initialized",
         )
     }
 }
 
 trait RouterExt {
-    /// Add a new grpc service.
     fn add_grpc_service<S>(self, svc: S) -> Self
     where
         S: tower::Service<
@@ -237,7 +243,6 @@ trait RouterExt {
 }
 
 impl RouterExt for axum::Router {
-    /// Add a new grpc service.
     fn add_grpc_service<S>(self, svc: S) -> Self
     where
         S: tower::Service<
@@ -255,29 +260,83 @@ impl RouterExt for axum::Router {
     }
 }
 
-// Given a TLS client cert, pull out the ed25519 public key and map it to a validator
-fn lookup_validator_middleware<B>(
-    hashi: Arc<Hashi>,
-) -> impl Fn(axum::http::Request<B>) -> axum::http::Request<B> + Clone {
-    move |mut request| {
-        if let Some(validator_address) = lookup_validator_address(&hashi, &request) {
+const ANONYMOUS_PATHS: &[&str] = &["/health", "/ready"];
+
+async fn require_known_validator(
+    axum::extract::State(hashi): axum::extract::State<Arc<Hashi>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match lookup_validator_address(&hashi, &request) {
+        Ok(validator_address) => {
             request.extensions_mut().insert(validator_address);
         }
-        request
+        Err(_) if ANONYMOUS_PATHS.contains(&request.uri().path()) => {}
+        Err(reason) => {
+            hashi
+                .metrics
+                .unknown_caller_refused_total
+                .with_label_values(&[reason.as_str()])
+                .inc();
+            return refuse(&request);
+        }
     }
+    next.run(request).await
+}
+
+enum RefusalReason {
+    NoClientCert,
+    StateUnavailable,
+    NotRegistered,
+}
+
+impl RefusalReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoClientCert => "no_client_cert",
+            Self::StateUnavailable => "state_unavailable",
+            Self::NotRegistered => "not_registered",
+        }
+    }
+}
+
+fn refuse<B>(request: &http::Request<B>) -> axum::response::Response {
+    if is_grpc_content_type(request.headers()) {
+        tonic::Status::permission_denied("unknown validator").into_http()
+    } else {
+        axum::response::IntoResponse::into_response((
+            http::StatusCode::FORBIDDEN,
+            "unknown validator",
+        ))
+    }
+}
+
+pub(super) fn is_grpc_content_type(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(&http::header::CONTENT_TYPE)
+        .is_some_and(|header| {
+            header
+                .as_bytes()
+                .starts_with(tonic::metadata::GRPC_CONTENT_TYPE.as_bytes())
+        })
 }
 
 fn lookup_validator_address<B>(
     hashi: &Hashi,
-    request: &axum::http::Request<B>,
-) -> Option<sui_sdk_types::Address> {
-    let peer_certs = request.extensions().get::<sui_http::PeerCertificates>()?;
-    let cert = peer_certs.peer_certs().first()?;
-    let tls_public_key = crate::tls::public_key_from_certificate(cert).ok()?;
+    request: &http::Request<B>,
+) -> Result<sui_sdk_types::Address, RefusalReason> {
+    let tls_public_key = request
+        .extensions()
+        .get::<sui_http::PeerCertificates>()
+        .and_then(|peer_certs| peer_certs.peer_certs().first())
+        .and_then(|cert| crate::tls::public_key_from_certificate(cert).ok())
+        .ok_or(RefusalReason::NoClientCert)?;
     hashi
-        .onchain_state_opt()?
+        .onchain_state_opt()
+        .ok_or(RefusalReason::StateUnavailable)?
         .state()
         .hashi()
         .committees
         .lookup_address_by_tls_public_key(&tls_public_key)
+        .ok_or(RefusalReason::NotRegistered)
 }
