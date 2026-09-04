@@ -264,25 +264,32 @@ impl MpcService {
         backup: Backup,
     ) {
         let current_epoch = self.inner.onchain_state().epoch();
-        if epoch_change_confirmed || current_epoch >= target_epoch {
+        let tombstoned = if epoch_change_confirmed || current_epoch >= target_epoch {
             let pruning_references = {
                 let state = self.inner.onchain_state().state();
                 build_pruning_references(&state.hashi().committees, target_epoch)
             };
-            if let Err(e) = self
+            match self
                 .inner
                 .db
                 .prune_messages_below(target_epoch, &pruning_references)
             {
-                error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+                Ok(deleted) => deleted > 0,
+                Err(e) => {
+                    error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+                    true
+                }
             }
         } else {
             info!(
                 "handle_reconfig: still on epoch {current_epoch}; skipping the prune for \
                  epoch {target_epoch}"
             );
+            false
+        };
+        if tombstoned {
+            self.run_major_compaction(target_epoch).await;
         }
-        self.run_major_compaction(target_epoch).await;
         if backup == Backup::Write {
             self.backup_handle.backup_after_epoch_change(target_epoch);
         }
