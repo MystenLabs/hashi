@@ -86,27 +86,20 @@ The main components are:
 
 ## Ceremony mode flow
 
-Before the ceremony, each KP runs the provisioning script with a required user
-ID used only to name output files, not as an OpenPGP identity. The ID has no
-default; it must start with an ASCII letter or digit, followed only by ASCII
-letters, digits, dots, underscores, or hyphens. For ID `jdoe`, the script retains
-five public files in the selected output directory (default `.`):
-`jdoe-kp-pubkey.asc`, `jdoe-kp-fingerprint.txt`,
-`jdoe-kp-pubkey.attestation-device.pem`,
-`jdoe-kp-pubkey.attestation-sig.pem`, and
-`jdoe-kp-pubkey.attestation-dec.pem`. The KP provides all five files:
-the armored OpenPGP public certificate, its primary-key fingerprint text file,
-and the three PEM sidecars containing the factory ATT device signer certificate
-and SIG/DEC attestation statements (not AUT). The operator retains the bundle
-for later verification of on-device key generation and manufacturer provenance.
-See the [KP provisioning guide](https://github.com/MystenLabs/hashi/blob/main/key-provisioner/provision.md#setting-up-your-yubikey)
-for firmware 5.7+ and original factory ATT requirements, script exports, and handoff.
+Before the ceremony, each KP provides its public OpenPGP certificate, fingerprint
+text file, and three matching PEM sidecars. See the
+[KP provisioning guide](https://github.com/MystenLabs/hashi/blob/main/key-provisioner/provision.md#setting-up-your-yubikey)
+for device requirements, output filenames, and attestation policy.
 
-This collection is an off-enclave operational step: current configuration still
-contains only `.asc` paths, and neither the guardian nor the initialization CLI
-currently verifies or transmits the PEM sidecars. It does not change the one
-certificate and one ciphertext per KP/share invariant. The attestation in the
-flow below is the guardian's Nitro attestation, not YubiKey attestation.
+Configuration still contains only `.asc` paths. All matching sidecars must be
+colocated on every certificate-loading host, including for signers and replacement
+certificates. The CLI verifies and sends bundles; the guardian independently
+rejects missing or invalid proofs on every certificate-bearing RPC.
+Signature verification, encryption, and recipient checks pin the actual attested
+keys, not merely a primary-key fingerprint. This preserves one certificate and
+one ciphertext per KP/share.
+YubiKey provenance checks are separate from the guardian's Nitro attestation
+in its S3 init log.
 
 ```mermaid
 sequenceDiagram
@@ -119,13 +112,14 @@ sequenceDiagram
 
     Operator->>Guardian: OperatorInit(S3 config)
     Guardian->>S3: log(init attestation + GuardianInfo)
-    Operator->>Guardian: SetupNewKey(ordered KP PGP certs, n, t)
+    Operator->>Guardian: SetupNewKey(ordered KP attested bundles, n, t)
+    Guardian->>Guardian: Verify all YubiKey proofs and bind SIG/DEC keys
     Guardian->>S3: log(ceremony/NewKey + kp-shares state)
     Guardian-->>Operator: encrypted KP share state + guardian BTC pubkey
 
     KPs->>S3: Read init, ceremony, and kp-shares logs
-    S3-->>KPs: One PGP-encrypted share addressed to this KP cert fingerprint
-    KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
+    S3-->>KPs: One PGP-encrypted share targeting this KP's attested DEC key
+    KPs->>KPs: Decrypt share and verify Nitro attestation, recipients, commitment
 ```
 
 ## Withdraw-mode provisioning flow

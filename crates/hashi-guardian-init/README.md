@@ -21,18 +21,16 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardia
 On first deploy, add `--do-genesis` to the `operator provision` command and
 every `key-provisioner provision` command. Omit it for replacement deployments.
 
-Each KP runs the provisioning script with a required user ID used only to name
-output files, not as an OpenPGP identity. The ID has no default; it must start
-with an ASCII letter or digit, followed only by ASCII letters, digits, dots,
-underscores, or hyphens. For user ID `jdoe`, the script retains five public files
-in the selected output directory (default `.`):
-`jdoe-kp-pubkey.asc`, `jdoe-kp-fingerprint.txt`,
-`jdoe-kp-pubkey.attestation-device.pem`,
-`jdoe-kp-pubkey.attestation-sig.pem`, and
-`jdoe-kp-pubkey.attestation-dec.pem`. The PEM sidecars contain the factory
-device signer certificate and two statements, for SIG and DEC (not AUT).
-See the [key provisioner setup and artifact handoff guide](../../key-provisioner/provision.md)
-for firmware 5.7+ and factory ATT prerequisites, script exports, and handoff.
+Provision each KP's YubiKey and collect its public certificate, fingerprint text
+file, and three PEM sidecars using the
+[provisioning and artifact handoff guide](../../key-provisioner/provision.md).
+
+Config fields contain only `.asc` paths. Keep matching sidecars beside each
+certificate on every certificate-loading host, including for signers and
+replacements. The CLI verifies and sends bundles; the guardian independently
+rejects missing or invalid proofs. These YubiKey provenance checks are separate
+from the guardian Nitro attestation checks below.
+
 The key ceremony and provisioning flow is then driven through these commands.
 All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
@@ -63,14 +61,8 @@ It then waits for every KP to confirm successful share recovery.
 
 `kp_roster.kp_pgp_cert_paths` lists one certificate per KP, in any order.
 New ceremonies assign share IDs by fingerprint order; existing assignments
-come from signed `kp-shares/` state.
-
-Before the ceremony, collect and retain each KP's three matching PEM sidecars
-with its `.asc` certificate and fingerprint text file for later attestation verification.
-Only the `.asc` paths go in `kp_roster.kp_pgp_cert_paths` and
-`kp_pgp_cert_path`; no attestation config fields or RPC payloads are involved.
-Neither the guardian nor this CLI currently verifies these YubiKey
-attestations. The guardian/Nitro attestation checks described below are separate.
+come from signed `kp-shares/` state. Each ciphertext targets its recipient's
+attested DEC key, with the primary-key fingerprint identifying the KP.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
@@ -212,11 +204,13 @@ request and decrypts the current share. If that sole key is lost, it cannot be
 recovered through `rotate-cert`; the KPs must authorize a quorum-based
 `RotateKpSet` ceremony instead.
 
-Obtain and retain the replacement certificate's matching three PEM sidecars
-and primary-key fingerprint text file using the
+Obtain the replacement certificate's matching three PEM sidecars and
+primary-key fingerprint text file using the
 [provisioning guide](../../key-provisioner/provision.md#provide-the-public-artifacts-to-the-operator),
-just as for initial setup. The rotation command still takes only the new `.asc`
-path and does not verify or transmit the sidecars.
+just as for initial setup. `--new-kp-pgp-cert-path` takes only the new `.asc`
+path, with matching sidecars beside it. Keep the old signer's bundle available
+too. The command verifies both bundles and signs the replacement bundle into
+the rotation request; the guardian rechecks both.
 
 It:
 

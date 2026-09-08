@@ -59,6 +59,42 @@ fn pem(der: &[u8]) -> Vec<u8> {
 /// certificates, attestations, keys, or trust roots.
 pub fn mock_attested_kp_keypair() -> (AttestedKpCert, String) {
     let (public, secret) = crate::pgp::test_utils::mock_pgp_keypair();
+    (attest_generated_cert(public), secret)
+}
+
+/// Keep the expired software key in the same certificate as the attested keys.
+#[cfg(test)]
+pub(in crate::guardian::crypto) fn mock_attested_kp_keypair_with_expired_signer()
+-> (AttestedKpCert, Cert, std::time::SystemTime) {
+    use sequoia_openpgp::cert::CertBuilder;
+    use sequoia_openpgp::serialize::Serialize;
+    use sequoia_openpgp::types::KeyFlags;
+    use std::time::Duration;
+    use std::time::SystemTime;
+
+    let creation_time = SystemTime::now() - Duration::from_secs(7 * 24 * 60 * 60);
+    let signature_time = creation_time + Duration::from_secs(60);
+    let (pgp_cert, _) = CertBuilder::new()
+        .set_profile(sequoia_openpgp::Profile::RFC4880)
+        .unwrap()
+        .set_creation_time(creation_time)
+        .set_primary_key_flags(KeyFlags::empty().set_certification())
+        .add_subkey(
+            KeyFlags::empty().set_signing(),
+            Duration::from_secs(24 * 60 * 60),
+            None,
+        )
+        .add_signing_subkey()
+        .add_transport_encryption_subkey()
+        .generate()
+        .unwrap();
+    let mut public = Vec::new();
+    pgp_cert.armored().export(&mut public).unwrap();
+    let attested = attest_generated_cert(String::from_utf8(public).unwrap());
+    (attested, pgp_cert, signature_time)
+}
+
+fn attest_generated_cert(public: String) -> AttestedKpCert {
     let pgp_cert = Cert::from_bytes(public.as_bytes()).unwrap();
     let cert = PgpPublicCert::new(public).unwrap();
 
@@ -132,16 +168,13 @@ pub fn mock_attested_kp_keypair() -> (AttestedKpCert, String) {
         &[issuer.der().as_ref()],
     )
     .expect("generated KP fixture must pass all attestation checks");
-    (
-        AttestedKpCert {
-            cert,
-            device_pem: pem(device.der()),
-            sig_pem: pem(&statements[0]),
-            dec_pem: pem(&statements[1]),
-            keys,
-        },
-        secret,
-    )
+    AttestedKpCert {
+        cert,
+        device_pem: pem(device.der()),
+        sig_pem: pem(&statements[0]),
+        dec_pem: pem(&statements[1]),
+        keys,
+    }
 }
 
 /// Generate distinct KP bundles checked under a test-only authority.
