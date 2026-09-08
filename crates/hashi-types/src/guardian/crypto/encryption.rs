@@ -24,6 +24,60 @@ use tracing::info;
 /// the canonical [`crate::pgp::Fingerprint`].
 pub type KPFingerprint = String;
 
+/// A key-provisioner's PGP certificate and its verified YubiKey attestations.
+///
+/// Construction checks the certificate and all three PEM artifacts with
+/// [`crate::pgp::verify_yubikey_attestations`]. This records a successful check
+/// at construction, not ongoing freshness or a time-validity policy: the
+/// verifier does not enforce X.509 dates, revocation, touch, or freshness, or
+/// establish current possession of either private key.
+///
+/// The fields are immutable and this type deliberately does not implement
+/// `Deserialize`; callers must pass through [`Self::new`] to validate a bundle.
+#[derive(Debug, Clone)]
+pub struct AttestedKpCert {
+    cert: PgpPublicCert,
+    device_pem: Vec<u8>,
+    sig_pem: Vec<u8>,
+    dec_pem: Vec<u8>,
+}
+
+impl AttestedKpCert {
+    /// Validate the attestation bundle using the pinned production trust policy.
+    pub fn new(
+        cert: PgpPublicCert,
+        device_pem: Vec<u8>,
+        sig_pem: Vec<u8>,
+        dec_pem: Vec<u8>,
+    ) -> GuardianResult<Self> {
+        crate::pgp::verify_yubikey_attestations(&cert, &device_pem, &sig_pem, &dec_pem).map_err(
+            |err| InvalidInputs(format!("invalid KP certificate attestations: {err:#}")),
+        )?;
+        Ok(Self {
+            cert,
+            device_pem,
+            sig_pem,
+            dec_pem,
+        })
+    }
+
+    pub fn cert(&self) -> &PgpPublicCert {
+        &self.cert
+    }
+
+    pub fn device_pem(&self) -> &[u8] {
+        &self.device_pem
+    }
+
+    pub fn sig_pem(&self) -> &[u8] {
+        &self.sig_pem
+    }
+
+    pub fn dec_pem(&self) -> &[u8] {
+        &self.dec_pem
+    }
+}
+
 /// The ordered KP certificate roster for a sharing instance.
 ///
 /// The certificate at position `i` is assigned share id `i + 1`. This type
@@ -484,6 +538,13 @@ mod tests {
     fn cert_and_secret() -> (PgpPublicCert, String) {
         let (public, secret) = mock_pgp_keypair();
         (PgpPublicCert::new(public).unwrap(), secret)
+    }
+
+    #[test]
+    fn attested_kp_cert_rejects_malformed_proof() {
+        let proof = b"not a PEM certificate".to_vec();
+        let result = AttestedKpCert::new(cert(), proof.clone(), proof.clone(), proof);
+        assert!(matches!(result, Err(InvalidInputs(_))));
     }
 
     #[test]
