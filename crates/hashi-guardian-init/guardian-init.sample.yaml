@@ -54,6 +54,10 @@ kp_roster:
 
   # One armored OpenPGP public cert per KP; path order is irrelevant.
   # New ceremonies assign IDs by fingerprint order; signed state retains existing IDs.
+  # Retain all five public files from the selected output directory: the .asc,
+  # fingerprint .txt, and matching .attestation-device.pem, .attestation-sig.pem,
+  # and .attestation-dec.pem sidecars. Configure only .asc paths; guardian/CLI
+  # verification is not integrated. See ../../key-provisioner/provision.md.
   kp_pgp_cert_paths:
     - /path/to/kp1.asc
     - /path/to/kp2.asc

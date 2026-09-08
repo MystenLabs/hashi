@@ -86,6 +86,28 @@ The main components are:
 
 ## Ceremony mode flow
 
+Before the ceremony, each KP runs the provisioning script with a required user
+ID used only to name output files, not as an OpenPGP identity. The ID has no
+default; it must start with an ASCII letter or digit, followed only by ASCII
+letters, digits, dots, underscores, or hyphens. For ID `jdoe`, the script retains
+five public files in the selected output directory (default `.`):
+`jdoe-kp-pubkey.asc`, `jdoe-kp-fingerprint.txt`,
+`jdoe-kp-pubkey.attestation-device.pem`,
+`jdoe-kp-pubkey.attestation-sig.pem`, and
+`jdoe-kp-pubkey.attestation-dec.pem`. The KP provides all five files:
+the armored OpenPGP public certificate, its primary-key fingerprint text file,
+and the three PEM sidecars containing the factory ATT device signer certificate
+and SIG/DEC attestation statements (not AUT). The operator retains the bundle
+for later verification of on-device key generation and manufacturer provenance.
+See the [KP provisioning guide](https://github.com/MystenLabs/hashi/blob/main/key-provisioner/provision.md#setting-up-your-yubikey)
+for firmware 5.7+ and original factory ATT requirements, script exports, and handoff.
+
+This collection is an off-enclave operational step: current configuration still
+contains only `.asc` paths, and neither the guardian nor the initialization CLI
+currently verifies or transmits the PEM sidecars. It does not change the one
+certificate and one ciphertext per KP/share invariant. The attestation in the
+flow below is the guardian's Nitro attestation, not YubiKey attestation.
+
 ```mermaid
 sequenceDiagram
     autonumber
