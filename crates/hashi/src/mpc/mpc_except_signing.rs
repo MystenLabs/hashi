@@ -2745,6 +2745,10 @@ impl MpcManager {
         }
     }
 
+    // TODO(fix): `dealer` is never checked against the committee (but any registered member can call it).
+    // Fix: (1) `certified_dealer_party_id(&self.committee, &dealer)?` here, and
+    // (2) make `reconstruct_dkg_output_locally` skip an out-of-committee dealer
+    // exactly like the live path so the two never diverge.
     fn try_sign_dkg_message(
         &mut self,
         dealer: Address,
@@ -3984,6 +3988,7 @@ impl MpcManager {
         }
     }
 
+    // TODO[defence in depth]: pass expected epoch and check against it
     pub fn verify_certificate(&self, cert: CertificateV1) -> MpcResult<VerifiedCertificateV1> {
         match &cert {
             CertificateV1::Dkg(dealer_cert) | CertificateV1::Rotation(dealer_cert) => {
@@ -5017,6 +5022,7 @@ impl MpcManager {
                 Err(e) => return Err(MpcError::StorageError(e.to_string())),
             },
         };
+        // TODO[nit]: next should never fail (should be .expect)
         let signature = self.try_sign_dkg_message(self.address, &messages)?;
         Ok(self.build_dealer_flow_data(messages, Some(signature)))
     }
@@ -6382,6 +6388,9 @@ impl MpcManager {
         Ok((previous, is_member_of_previous_committee))
     }
 
+    // TODO(defence in depth): Compare `public_output.public_key` against the
+    // on-chain `mpc_public_key` (available in `OnchainState`) and refuse on
+    // mismatch.
     async fn fetch_and_build_public_output(
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,

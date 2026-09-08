@@ -244,6 +244,14 @@ fun submit_stamped_cert_internal(
 
 fun assert_can_submit(hashi: &Hashi, epoch: u64, dealer: address, ctx: &TxContext) {
     hashi.versioning().assert_version_enabled();
+    // TODO(fix): `member_authorized` only checks that `dealer` is a registered
+    // member acting through its validator/operator key, not that it belongs to
+    // the committee of `epoch`. A registered non-member can therefore occupy a
+    // dealer slot in the DKG/rotation/nonce bucket of the current or pending
+    // epoch. Nodes drop such certs (the dealer has no party id), so this is not
+    // a safety issue, but the on-chain gate should also require
+    // `hashi.committee_set().get_committee(epoch).has_member(&dealer)` (the
+    // committee for a current or pending epoch always exists).
     assert!(hashi.committee_set().member_authorized(dealer, ctx));
     let pending = hashi.committee_set().pending_epoch_change();
     assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));

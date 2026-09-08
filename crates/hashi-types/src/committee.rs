@@ -48,6 +48,18 @@ pub type EncryptionPrivateKey = fastcrypto_tbls::ecies_v1::PrivateKey<Encryption
 pub type EncryptionPublicKey = fastcrypto_tbls::ecies_v1::PublicKey<EncryptionGroupElement>;
 
 /// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
+// TODO[fix]: why do we need implicit clone and Serialize (instead of moving?).
+//
+// Debug here is harmless: the wrapped `min_pk::BLS12381PrivateKey` is `SilentDebug`, so this
+// derive prints `Bls12381PrivateKey(<elided secret for BLS12381PrivateKey>)`. 
+// However other Debug impls should be fixed:
+// - `EncryptionPrivateKey` (alias of `fastcrypto_tbls::ecies_v1::PrivateKey<RistrettoPoint>`)
+//   derives Debug and prints the raw `RistrettoScalar` bytes; wrap it in a newtype with a
+//   redacting Debug like this one.
+// - `hashi::config::Config` derives Debug and prints inline `tls_private_key` /
+//   `operator_private_key` values; give it a manual Debug that elides those fields.
+//
+// Also, let's use zeroize.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
 

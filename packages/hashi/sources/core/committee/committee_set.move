@@ -361,6 +361,8 @@ public(package) fun clear_resignation(
     self.member_mut(validator_address).resigned = false;
 }
 
+// TODO(fix): if called after abort_reconfig, it may reuse the same epoch as the aborted one (while the rest of the system assumes, e.g., there is one invocation of key rotation per epoch in several places)
+// is that the expected behavior?
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
