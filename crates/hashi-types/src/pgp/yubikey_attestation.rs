@@ -15,10 +15,10 @@
 //! fingerprint metadata is deliberately ignored: the device administrator can
 //! overwrite it. See <https://developers.yubico.com/PGP/Attestation.html>.
 //!
-//! Statements must use RFC 8410 Ed25519/X25519 SPKI encoding (raw 32-byte keys,
-//! absent parameters). Older firmware's nonstandard Curve25519 encoding is not
-//! supported; Yubico reports correcting it in 5.7:
-//! <https://github.com/Yubico/yubikey-manager/issues/402>.
+//! Statements support NIST P-256 uncompressed SEC1 points with named-curve SPKI
+//! parameters, or RFC 8410 Ed25519/X25519 raw 32-byte keys with absent parameters.
+//! The complete public key must match; legacy, lossy Curve25519 encodings are
+//! rejected.
 
 use super::AttestedPgpKeys;
 use super::Fingerprint;
@@ -41,6 +41,8 @@ const DEC_COMMON_NAME: &str = "YubiKey OPGP Attestation DEC";
 const YUBICO_KEY_SOURCE_OID: Oid<'static> = oid!(1.3.6.1.4.1.41482.5.2);
 const ED25519_OID: Oid<'static> = oid!(1.3.101.112);
 const X25519_OID: Oid<'static> = oid!(1.3.101.110);
+const EC_PUBLIC_KEY_OID: Oid<'static> = oid!(1.2.840.10045.2.1);
+const NIST_P256_OID: Oid<'static> = oid!(1.2.840.10045.3.1.7);
 static TRUSTED_ISSUERS: LazyLock<[Vec<u8>; 4]> = LazyLock::new(|| {
     let mut input = include_bytes!("yubikey_attestation/yubico-openpgp-issuers.pem").as_slice();
     let issuers = std::array::from_fn(|_| {
@@ -64,8 +66,8 @@ static TRUSTED_ISSUERS: LazyLock<[Vec<u8>; 4]> = LazyLock::new(|| {
 /// Each input must contain exactly one PEM `CERTIFICATE` block, with no other
 /// non-whitespace data and exactly one DER certificate inside. The device must
 /// be signed directly by a pinned Yubico OpenPGP issuer, and both statements by
-/// that device. Only legacy OpenPGP Ed25519 signing and Cv25519 encryption keys
-/// are supported, with RFC 8410 statement SPKIs (not older firmware encodings).
+/// that device. Supported OpenPGP keys are NIST P-256 ECDSA/ECDH and legacy
+/// Ed25519/Cv25519, with standard statement SPKIs as described above.
 /// This does not enforce X.509 dates, revocation, touch, or freshness, and does
 /// not establish current possession of either private key.
 pub fn verify_yubikey_attestations(
@@ -104,14 +106,14 @@ pub(crate) fn verify_yubikey_attestations_with_issuers(
     verify_device_issuer(&device, trusted_issuers)?;
     verify_statement(&sig, &device, SIG_COMMON_NAME)?;
     verify_statement(&dec, &device, DEC_COMMON_NAME)?;
-    let (signing, signing_bytes) = signing_key(&cert.cert)?;
-    let (encryption, encryption_bytes) = encryption_key(&cert.cert)?;
+    let (signing, signing_curve, signing_bytes) = signing_key(&cert.cert)?;
+    let (encryption, encryption_curve, encryption_bytes) = encryption_key(&cert.cert)?;
     anyhow::ensure!(
-        statement_key(&sig, &ED25519_OID)? == signing_bytes,
+        statement_key(&sig, &signing_curve)? == signing_bytes,
         "SIG attestation key does not match the OpenPGP signing key"
     );
     anyhow::ensure!(
-        statement_key(&dec, &X25519_OID)? == encryption_bytes,
+        statement_key(&dec, &encryption_curve)? == encryption_bytes,
         "DEC attestation key does not match the OpenPGP encryption key"
     );
     Ok(AttestedPgpKeys {
@@ -213,24 +215,38 @@ fn verify_statement(
     Ok(())
 }
 
-fn statement_key<'a>(
-    statement: &'a X509Certificate<'_>,
-    expected_algorithm: &Oid<'_>,
-) -> Result<&'a [u8]> {
+fn statement_key<'a>(statement: &'a X509Certificate<'_>, curve: &Curve) -> Result<&'a [u8]> {
     let spki = statement.public_key();
+    let (algorithm, valid_parameters, key_len) = match curve {
+        Curve::Ed25519 => (&ED25519_OID, spki.algorithm.parameters.is_none(), 32),
+        Curve::Cv25519 => (&X25519_OID, spki.algorithm.parameters.is_none(), 32),
+        Curve::NistP256 => (
+            &EC_PUBLIC_KEY_OID,
+            spki.algorithm
+                .parameters
+                .as_ref()
+                .is_some_and(|parameters| {
+                    parameters.as_oid().is_ok_and(|oid| oid == NIST_P256_OID)
+                }),
+            65,
+        ),
+        _ => anyhow::bail!("attestation public key uses an unsupported curve"),
+    };
     anyhow::ensure!(
-        spki.algorithm.algorithm == *expected_algorithm && spki.algorithm.parameters.is_none(),
+        spki.algorithm.algorithm == *algorithm && valid_parameters,
         "attestation public key has an unsupported algorithm or parameters"
     );
     let key = &spki.subject_public_key;
     anyhow::ensure!(
-        key.unused_bits == 0 && key.data.len() == 32,
+        key.unused_bits == 0
+            && key.data.len() == key_len
+            && (*curve != Curve::NistP256 || key.data.first() == Some(&0x04)),
         "attestation public key has an unsupported encoding"
     );
     Ok(key.data.as_ref())
 }
 
-fn signing_key(cert: &openpgp::Cert) -> Result<(Fingerprint, &[u8])> {
+fn signing_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
     let mut candidates = cert
         .keys()
         .with_policy(&*POLICY, None)
@@ -251,13 +267,21 @@ fn signing_key(cert: &openpgp::Cert) -> Result<(Fingerprint, &[u8])> {
             q,
         } => q
             .decode_point(&Curve::Ed25519)
-            .map(|(key, _)| (candidate.key().fingerprint(), key))
+            .map(|(key, _)| (candidate.key().fingerprint(), Curve::Ed25519, key))
             .context("OpenPGP signing key has invalid Ed25519 encoding"),
-        _ => anyhow::bail!("OpenPGP signing key does not use legacy Ed25519"),
+        mpi::PublicKey::ECDSA {
+            curve: Curve::NistP256,
+            q,
+        } => {
+            q.decode_point(&Curve::NistP256)
+                .context("OpenPGP signing key has invalid NIST P-256 encoding")?;
+            Ok((candidate.key().fingerprint(), Curve::NistP256, q.value()))
+        }
+        _ => anyhow::bail!("OpenPGP signing key does not use Ed25519 or NIST P-256 ECDSA"),
     }
 }
 
-fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, &[u8])> {
+fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, Curve, &[u8])> {
     let mut candidates = cert
         .keys()
         .with_policy(&*POLICY, None)
@@ -279,9 +303,18 @@ fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, &[u8])> {
             ..
         } => q
             .decode_point(&Curve::Cv25519)
-            .map(|(key, _)| (candidate.key().fingerprint(), key))
+            .map(|(key, _)| (candidate.key().fingerprint(), Curve::Cv25519, key))
             .context("OpenPGP encryption key has invalid Cv25519 encoding"),
-        _ => anyhow::bail!("OpenPGP encryption key does not use legacy Cv25519"),
+        mpi::PublicKey::ECDH {
+            curve: Curve::NistP256,
+            q,
+            ..
+        } => {
+            q.decode_point(&Curve::NistP256)
+                .context("OpenPGP encryption key has invalid NIST P-256 encoding")?;
+            Ok((candidate.key().fingerprint(), Curve::NistP256, q.value()))
+        }
+        _ => anyhow::bail!("OpenPGP encryption key does not use Cv25519 or NIST P-256 ECDH"),
     }
 }
 
