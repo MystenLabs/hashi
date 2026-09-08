@@ -361,6 +361,16 @@ impl Hashi {
             output = %output_path.display(),
             "Automatic backup completed after epoch change",
         );
+        if let Err(error) = crate::backup::cleanup_old_backups(
+            self.config.backup_dir(),
+            &output_path,
+            jiff::Timestamp::now(),
+        ) {
+            tracing::warn!(
+                epoch,
+                "Automatic backup succeeded, but cleanup of expired backups failed: {error:#}",
+            );
+        }
         Ok(Some(output_path))
     }
 
@@ -1603,7 +1613,16 @@ mod test {
         config.save(&config_path).unwrap();
 
         let server_version = ServerVersion::new("unknown", "unknown");
-        let hashi = Hashi::new(server_version, Some(config_path), config).unwrap();
+        let hashi = Hashi::new_with_registry(
+            server_version,
+            Some(config_path.clone()),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let expired = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&expired, b"old archive").unwrap();
 
         let output = hashi
             .backup_after_epoch_change(7)
@@ -1612,6 +1631,12 @@ mod test {
 
         assert!(output.is_file());
         assert_eq!(output.parent(), Some(backup_dir.as_path()));
+        assert!(!expired.exists());
+
+        std::fs::write(&expired, b"old archive").unwrap();
+        std::fs::remove_file(config_path).unwrap();
+        assert!(hashi.backup_after_epoch_change(8).is_err());
+        assert_eq!(std::fs::read(expired).unwrap(), b"old archive");
     }
 
     #[test]

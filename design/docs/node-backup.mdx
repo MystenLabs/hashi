@@ -258,6 +258,11 @@ backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 You can also configure the location where Hashi saves backups with the field
 `backup-dir`.
 
+After each successful automatic backup, Hashi deletes local backup archives older
+than 14 days, based on their filenames. The new backup and unrelated files are
+preserved. Failed or manual backups do not trigger cleanup, so expired archives
+remain until the next successful automatic backup.
+
 ## Cloud backup
 
 In the future, we will likely add support for automatically uploading backups

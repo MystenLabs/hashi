@@ -41,6 +41,9 @@ pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
 
+const BACKUP_FILE_NAME_FORMAT: &str = "hashi-backup-%Y%m%dT%H%M%SZ.tar.asc";
+const BACKUP_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(14 * 24);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupArchiveFormat {
     Encrypted,
@@ -364,11 +367,41 @@ pub fn encrypted_backup_file_name() -> PathBuf {
     // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
     // lexicographically, and contains no characters that need escaping on any
     // common filesystem.
-    let timestamp = jiff::Timestamp::now()
+    jiff::Timestamp::now()
         .to_zoned(jiff::tz::TimeZone::UTC)
-        .strftime("%Y%m%dT%H%M%SZ")
-        .to_string();
-    PathBuf::from(format!("{BACKUP_FILE_NAME_PREFIX}-{timestamp}.tar.asc"))
+        .strftime(BACKUP_FILE_NAME_FORMAT)
+        .to_string()
+        .into()
+}
+
+/// Remove expired local archives, preserving the backup that just completed.
+pub(crate) fn cleanup_old_backups(
+    output_dir: &Path,
+    current_backup: &Path,
+    now: jiff::Timestamp,
+) -> Result<()> {
+    let cutoff = now.checked_sub(BACKUP_RETENTION)?;
+    for entry in fs::read_dir(output_dir)
+        .with_context(|| format!("Failed to read backup directory {}", output_dir.display()))?
+    {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Ok(created_at) =
+            jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_FORMAT, file_name.as_encoded_bytes())
+                .and_then(|datetime| datetime.to_zoned(jiff::tz::TimeZone::UTC))
+        else {
+            continue;
+        };
+        if created_at.timestamp() >= cutoff || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path != current_backup {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove expired backup {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -1057,6 +1090,40 @@ mod tests {
             archive.finish().unwrap();
         }
         tar_bytes
+    }
+
+    #[test]
+    fn cleanup_old_backups_preserves_boundary_and_unrelated_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let expired = dir.join("hashi-backup-20260825T115959Z.tar.asc");
+        fs::write(&expired, b"expired despite fresh mtime").unwrap();
+        let current = dir.join("hashi-backup-20260801T000000Z.tar.asc");
+        let preserved = [
+            "hashi-backup-20260825T120000Z.tar.asc",
+            "hashi-backup-20260801T000000Z.tar.asc",
+            "hashi-backup-20260230T000000Z.tar.asc",
+            "hashi-backup-20260801T000000Z.tar.asc.partial",
+            "other-backup-20260801T000000Z.tar.asc",
+        ];
+        for name in preserved {
+            fs::write(dir.join(name), b"keep").unwrap();
+        }
+        let nested = dir.join("hashi-backup-20260802T000000Z.tar.asc");
+        fs::create_dir(&nested).unwrap();
+        let nested_archive = nested.join("hashi-backup-20260801T000000Z.tar.asc");
+        fs::write(&nested_archive, b"nested").unwrap();
+        let link = dir.join("hashi-backup-20260803T000000Z.tar.asc");
+        std::os::unix::fs::symlink(&current, &link).unwrap();
+
+        cleanup_old_backups(dir, &current, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+
+        assert!(!expired.exists());
+        for name in preserved {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), b"keep", "{name}");
+        }
+        assert_eq!(fs::read(nested_archive).unwrap(), b"nested");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[test]
