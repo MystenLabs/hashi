@@ -390,7 +390,7 @@ Hashi creates encrypted backups of critical state (MPC key shares, DB, config) e
 - **Option 1 (recommended): YubiKey.** Generate the key on the device; the private key never leaves it.
 - **Option 2: local OpenPGP key.** Generate with `sq` or `gpg`.
 
-Set the armored public certificate (a file path or inline armored text) in the node config:
+Set the public certificate and a persistent, node-specific backup directory outside the database directory, writable only by the node's user:
 
 ```toml
 backup-pgp-cert = "/path/to/hashi-backup-cert.asc"   # armored OpenPGP public cert, or inline armored text
@@ -474,8 +474,8 @@ db = "/var/lib/hashi/db"
 # Armored OpenPGP public certificate (file path or inline) for encrypted backups (required)
 backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 
-# Backup output directory (default: /tmp)
-# backup-dir = "/var/lib/hashi/backups"
+# Persistent, node-specific backup output directory (required; restrict write access)
+backup-dir = "/var/lib/hashi/backups"
 
 # ── Optional Integrations ─────────────────────────────────────────────
 
@@ -1096,7 +1096,7 @@ After execution, the previous committee resumes; the system can trigger a new re
 
 The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
-The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. The node writes backups to `backup-dir` (default `/tmp`, so set a persistent path). Encryption needs only the public certificate, so the private key need not be present during normal operation.
+The node automatically writes an encrypted backup every epoch using the required `backup-pgp-cert`: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. Backups go to the required `backup-dir` and follow the retention policy in the [backup guide](node-backup.mdx#configuring-hashi). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
 Because backups use OpenPGP, you can restore over SSH: plug the YubiKey into your laptop, forward your `gpg-agent` to the server, and decrypt the backup there. The private key never leaves the YubiKey.
 

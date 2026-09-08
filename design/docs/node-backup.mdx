@@ -247,21 +247,37 @@ files.
 
 ## Configuring hashi
 
-Every node config must provide the PGP public certificate under the field
-`backup-pgp-cert`. The value can be a certificate file path or inline armored
-text:
+Every node config must provide `backup-pgp-cert` (a certificate file path or inline
+armored text) and `backup-dir`:
 
 ```toml
 backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+backup-dir = "/var/lib/hashi/backups"
 ```
 
-You can also configure the location where Hashi saves backups with the field
-`backup-dir`.
+Use a persistent, node-specific backup directory outside the database directory,
+with write access restricted to the node's user.
 
-After each successful automatic backup, Hashi deletes local backup archives older
-than 14 days, based on their filenames. The new backup and unrelated files are
-preserved. Failed or manual backups do not trigger cleanup, so expired archives
-remain until the next successful automatic backup.
+On epoch housekeeping, cleanup deletes archives older than 14 days by filename
+timestamp, except the newest archive. It also runs for nodes with no role, even
+though those nodes do not write a new backup. Unrelated files are preserved.
+Individual entry errors do not stop the sweep; cleanup failures do not prevent
+backup attempts. Retention runs before saving and still applies if the save fails.
+Manual backups do not trigger cleanup, but archives placed in `backup-dir` follow
+the same policy. Keep longer-term copies elsewhere.
+
+Archives are staged in `backup-dir`, finalized and synced to disk before publication;
+the directory is synced afterward on a best-effort basis. A directory sync failure
+is logged at error level without failing the already-published backup. Failed saves
+remove their temporary files and never overwrite existing archives. Within
+`backup-dir`, cleanup removes abandoned
+`.hashi-backup-*` files and `.hashi-restore-*` directories older than 14 days by
+modification time, without retaining the newest staging entry. Recent staging
+entries and symlinks are left alone. Restore staging and completed restore output
+contain decrypted keys and database data; use a private restore output directory.
+Completed restores, `.hashi-db-restore-*` staging directories beside the destination
+database, and restore output elsewhere are not swept by automatic backup cleanup.
+Operators must remove these plaintext copies when no longer needed.
 
 ## Cloud backup
 

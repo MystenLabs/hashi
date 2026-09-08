@@ -408,6 +408,8 @@ async fn cmd_start(
             server.operator_private_key = cfg.operator_private_key.clone();
             server.sui_rpc = Some(state.sui_rpc_url.clone());
             server.hashi_ids = Some(ids);
+            let node_dir = validators_dir.join(format!("validator_{i}"));
+            server.backup_dir = node_dir.join("backups");
             server
                 .save(&validators_dir.join(format!("validator_{i}.toml")))
                 .context("Failed to write validator server config")?;

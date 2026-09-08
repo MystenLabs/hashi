@@ -98,11 +98,7 @@ pub struct Config {
     pub backup_pgp_cert: hashi_types::pgp::PgpPublicCert,
 
     /// Directory to write automatic encrypted backups into.
-    ///
-    /// Defaults to `/tmp` if not specified.
-    // TODO: eventually we should probably make this field mandatory
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup_dir: Option<PathBuf>,
+    pub backup_dir: PathBuf,
 
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,10 +383,6 @@ impl Config {
         self.force_run_as_leader.clone().unwrap_or_default()
     }
 
-    pub fn backup_dir(&self) -> &Path {
-        self.backup_dir.as_deref().unwrap_or(Path::new("/tmp"))
-    }
-
     pub fn test_weight_divisor(&self) -> u16 {
         self.test_weight_divisor.unwrap_or(1)
     }
@@ -473,7 +465,10 @@ impl Config {
             bitcoin_trusted_peers: None,
             db: None,
             backup_pgp_cert: hashi_types::pgp::test_utils::mock_pgp_cert(),
-            backup_dir: None,
+            backup_dir: std::env::temp_dir().join(format!(
+                "hashi-test-backups-{:032x}",
+                rand::random::<u128>()
+            )),
             force_run_as_leader: None,
             test_weight_divisor: None,
             test_batch_size_per_weight: None,
@@ -596,23 +591,14 @@ mod tests {
             "backup-pgp-cert".to_string(),
             toml::Value::String(cert_path.to_string_lossy().into_owned()),
         );
+        config.insert(
+            "backup-dir".to_string(),
+            toml::Value::String(dir.path().join("backups").to_string_lossy().into_owned()),
+        );
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
 
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.backup_pgp_cert.armored(), public_cert.as_str());
-    }
-
-    #[test]
-    fn backup_pgp_cert_is_required() {
-        let error = toml::from_str::<Config>("").unwrap_err().to_string();
-        assert!(error.contains("missing field `backup-pgp-cert`"), "{error}");
-    }
-
-    #[test]
-    fn backup_dir_uses_configured_path() {
-        let mut config = Config::new_for_testing();
-        config.backup_dir = Some(PathBuf::from("/var/lib/hashi/backups"));
-        assert_eq!(config.backup_dir(), Path::new("/var/lib/hashi/backups"));
     }
 
     #[test]
