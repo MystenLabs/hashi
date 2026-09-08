@@ -30,4 +30,5 @@ non-enclave-dev = ["hashi-types/non-enclave-dev", "hashi-guardian/non-enclave-de
 
 [dev-dependencies]
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
+hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 tempfile.workspace = true

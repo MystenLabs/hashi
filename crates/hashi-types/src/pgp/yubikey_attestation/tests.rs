@@ -231,6 +231,7 @@ impl Fixture {
             dec,
             &[self.issuer.der().as_ref()],
         )
+        .map(|_| ())
     }
 }
 

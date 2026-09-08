@@ -39,6 +39,8 @@
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_guardian_init::load_attested_kp_cert;
+use hashi_types::guardian::AttestedKpCert;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GenesisState;
@@ -48,7 +50,6 @@ use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
-use hashi_types::pgp::PgpPublicCert;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -58,7 +59,6 @@ use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_provisioning_target_info;
 use crate::kp_roster::decrypt_kp_share;
-use crate::kp_roster::load_kp_cert;
 
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
@@ -119,7 +119,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
 
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner provision")?;
-    let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
+    let kp_cert = load_attested_kp_cert(kp_pgp_cert_path)?;
     let kp_fingerprint = kp_cert.fingerprint();
     anyhow::ensure!(
         certs_roster.cert_for_fingerprint(&kp_fingerprint).is_some(),
@@ -470,7 +470,7 @@ async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_guardian_info: GuardianInfo,
     request: ProvisionerInitRequest,
-    signer_cert: &PgpPublicCert,
+    signer_cert: &AttestedKpCert,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let expected_session_id = request.expected_session_id();

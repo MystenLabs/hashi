@@ -157,11 +157,20 @@ message S3BucketInfo {
 //      SetupNewKey
 // =======================
 
+// A KP certificate and its YubiKey device, signing-key, and decryption-key proofs.
+// All proofs are required and verified against the pinned Yubico trust policy.
+message AttestedKpCert {
+  string cert = 1;
+  bytes device_pem = 2;
+  bytes sig_pem = 3;
+  bytes dec_pem = 4;
+}
+
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // Ordered OpenPGP certificates for key provisioners. Each string is the sole
-  // armored certificate for one KP/share, and length must equal `num_shares`.
-  repeated string key_provisioner_pgp_certs = 1;
+  // Ordered attested certificates, one per KP/share.
+  // Length must equal `num_shares`.
+  repeated AttestedKpCert key_provisioner_pgp_certs = 1;
 
   // Total number of shares to split the new BTC key into.
   optional uint32 num_shares = 2;
@@ -232,7 +241,7 @@ message SignedCeremonyConfirmationRequest {
   optional bytes ceremony_digest = 2;
 
   // Complete detached-signature envelope.
-  string signer_cert = 3;
+  AttestedKpCert signer_cert = 3;
   string kp_signature = 4;
 }
 
@@ -322,8 +331,8 @@ message SignedProvisionerInitRequest {
   // The guardian session id the KP pinned before encrypting the share.
   string expected_session_id = 2;
 
-  // Armored OpenPGP certificate of the submitting key provisioner.
-  string signer_cert = 3;
+  // Attested OpenPGP certificate of the submitting key provisioner.
+  AttestedKpCert signer_cert = 3;
 
   // Detached armored OpenPGP signature over the intent-tagged
   // ProvisionerInitRequest payload.
@@ -413,8 +422,8 @@ message ProvisionerInitResponse {}
 // Replace the signing KP's sole certificate. This does not change the BTC key,
 // sharing instance, commitments, share ids, or threshold.
 message SignedProvisionerRotateCertRequest {
-  // Armored replacement cert.
-  string new_kp_pgp_cert = 1;
+  // Attested replacement certificate.
+  AttestedKpCert new_kp_pgp_cert = 1;
 
   // The same plaintext share, HPKE-encrypted to the guardian.
   GuardianEncryptedShare encrypted_share = 2;
@@ -422,9 +431,9 @@ message SignedProvisionerRotateCertRequest {
   // The guardian session id the KP pinned before encrypting the share.
   string expected_session_id = 3;
 
-  // Armored authorizing KP cert and detached signature over the intent-tagged
+  // Attested authorizing KP cert and detached signature over the intent-tagged
   // ProvisionerRotateCertRequest payload.
-  string signer_cert = 4;
+  AttestedKpCert signer_cert = 4;
   string kp_signature = 5;
 
   // Latest kp-shares cert_seq observed and authorized by the caller.
@@ -461,14 +470,14 @@ message SignedProvisionerRotateKpSetRequest {
   // Builds allowed to authenticate the existing ceremony and KP-share state.
   PcrAllowlist pcr_allowlist = 3;
 
-  // Ordered sole OpenPGP certificates for the proposed new KP set.
-  repeated string new_kp_pgp_certs = 4;
+  // Ordered attested certificates for the proposed new KP set.
+  repeated AttestedKpCert new_kp_pgp_certs = 4;
   optional uint32 new_num_shares = 5;
   optional uint32 new_threshold = 6;
 
-  // Armored authorizing current-KP cert and detached signature over the
+  // Attested authorizing current-KP cert and detached signature over the
   // intent-tagged ProvisionerRotateKpSetRequest payload.
-  string signer_cert = 7;
+  AttestedKpCert signer_cert = 7;
   string kp_signature = 8;
 }
 

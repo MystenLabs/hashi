@@ -119,6 +119,8 @@ mod tests {
     use hashi_types::bitcoin::create_btc_keypair_for_test;
     use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
     use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
+    use hashi_types::guardian::AttestedKpCert;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
@@ -129,10 +131,7 @@ mod tests {
     use hashi_types::guardian::Share;
     use hashi_types::guardian::ShareCommitments;
     use hashi_types::guardian::VersionedLogMessage;
-    use hashi_types::pgp::test_utils::mock_pgp_cert;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
     use k256::SecretKey;
     use std::num::NonZeroU16;
 
@@ -142,9 +141,9 @@ mod tests {
 
     fn signed_rotate_request(
         enclave: &Arc<Enclave>,
-        new_cert: PgpPublicCert,
+        new_cert: AttestedKpCert,
         share: &Share,
-        signer_cert: &PgpPublicCert,
+        signer_cert: &AttestedKpCert,
         signer_secret: &str,
     ) -> KpSigned<ProvisionerRotateCertRequest> {
         let request = ProvisionerRotateCertRequest::new(
@@ -214,8 +213,7 @@ mod tests {
         let signer_cert = cert_roster.cert_for_share(shares[0].id).unwrap();
         let signer_fingerprint = signer_cert.fingerprint().to_hex();
         let signer_secret = secret_keys.get(&signer_fingerprint).unwrap();
-        let (new_public, new_secret) = mock_pgp_keypair();
-        let new_cert = PgpPublicCert::new(new_public).unwrap();
+        let (new_cert, new_secret) = mock_attested_kp_keypair();
         let new_fingerprint = new_cert.fingerprint().to_hex();
 
         let signed_wrong_share = signed_rotate_request(
@@ -310,7 +308,7 @@ mod tests {
         let request = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
             "mock-session".into(),
             0,
-            mock_pgp_cert(),
+            mock_attested_kp_keypair().0,
             GuardianEncryptedShare {
                 id: NonZeroU16::new(1).unwrap(),
                 ciphertext: Ciphertext {
@@ -319,8 +317,11 @@ mod tests {
                 },
             },
         );
-        let signed_request =
-            KpSigned::from_parts(request, mock_pgp_cert(), "invalid signature".into());
+        let signed_request = KpSigned::from_parts(
+            request,
+            mock_attested_kp_keypair().0,
+            "invalid signature".into(),
+        );
 
         let err = provisioner_rotate_cert(enclave, signed_request)
             .await

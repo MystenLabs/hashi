@@ -397,14 +397,13 @@ impl<L: LogStore> GuardianRelayService for Relay<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::KpSigned;
     use hashi_types::guardian::ProvisionerInitRequest;
     use hashi_types::guardian::ShareID;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
 
     use crate::widlog::test_store::MemStore;
     use std::sync::atomic::Ordering;
@@ -424,7 +423,7 @@ mod tests {
                 ciphertext: None,
             }),
             expected_session_id: "sess-a".into(),
-            signer_cert: "cert".into(),
+            signer_cert: Some(proto::AttestedKpCert::default()),
             kp_signature: "signature".into(),
             expected_config_hash: Some(vec![7u8; 32].into()),
             expected_genesis_state_hash: None,
@@ -546,8 +545,7 @@ mod tests {
     /// signature was checked first, before any S3 read.
     #[tokio::test]
     async fn bad_signatures_are_rejected_before_the_roster_read() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let (cert, secret_armored) = mock_attested_kp_keypair();
         let relay = relay_with_roster(MemStore::default());
 
         let request = |session: &str, share_id: u16| {

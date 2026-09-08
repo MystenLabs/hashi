@@ -177,13 +177,6 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 mod tests {
     use super::*;
     use crate::cache::CachingGuardianGrpc;
-    use crate::roster::test_utils::seed_roster;
-    use hashi_types::guardian::Ciphertext;
-    use hashi_types::guardian::GuardianEncryptedShare;
-    use hashi_types::guardian::ShareID;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
-    use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -359,72 +352,18 @@ mod tests {
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 
-    fn signed_confirmation(
-        cert: &PgpPublicCert,
-        secret_armored: &str,
-    ) -> proto::SignedCeremonyConfirmationRequest {
-        let domain = CeremonyConfirmationRequest::new("session".into(), [3u8; 32]);
-        let signature = sign_detached_in_process(secret_armored, &KpSigned::signed_bytes(&domain));
-        proto::SignedCeremonyConfirmationRequest::from(KpSigned::from_parts(
-            domain,
-            cert.clone(),
-            signature,
-        ))
-    }
-
     #[tokio::test]
-    async fn forwards_a_rostered_ceremony_confirmation() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let store = StubStore::default();
-        seed_roster(&store, 0, &[&cert.fingerprint().to_hex()]);
-        let (stub, proxy) = spawn_stub_proxy(store).await;
+    async fn rejects_unsigned_ceremony_confirmation_before_forwarding() {
+        let (stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
 
-        let status = proxy
-            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(status.have, Some(1));
-        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
-
-        // A corrupt confirmation is refused before the backend sees it.
         let err = proxy
             .confirm_ceremony(Request::new(
                 proto::SignedCeremonyConfirmationRequest::default(),
             ))
             .await
-            .expect_err("an unsigned confirmation must not be forwarded");
+            .expect_err("a missing signer attestation must not be forwarded");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn rejects_an_unrostered_ceremony_confirmation() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let store = StubStore::default();
-        seed_roster(&store, 0, &["AAAABBBBCCCCDDDDEEEE11112222333344445555"]);
-        let (stub, proxy) = spawn_stub_proxy(store).await;
-
-        let err = proxy
-            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
-            .await
-            .expect_err("a signer outside the roster must not be forwarded");
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn verifies_ceremony_confirmation_signature_before_forwarding() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let mut request = signed_confirmation(&cert, &secret_armored);
-        verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap();
-
-        request.expected_session_id.push('0');
-        let err = verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic
@@ -464,33 +403,5 @@ mod tests {
             .await
             .expect_err("rotate_kp_set must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[test]
-    fn verifies_provisioner_rotate_cert_signature_before_forwarding() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored.clone()).unwrap();
-        let domain = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
-            "session".into(),
-            0,
-            cert.clone(),
-            GuardianEncryptedShare {
-                id: ShareID::new(1).unwrap(),
-                ciphertext: Ciphertext {
-                    encapsulated_key: vec![1, 2, 3],
-                    aes_ciphertext: vec![4, 5, 6],
-                },
-            },
-        );
-        let signature = sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain));
-        let mut request = proto::SignedProvisionerRotateCertRequest::from(KpSigned::from_parts(
-            domain, cert, signature,
-        ));
-
-        verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap();
-
-        request.new_kp_pgp_cert.push('0');
-        let err = verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

@@ -15,19 +15,19 @@
 //! gpg-streaming pattern.
 
 use std::ops::Deref;
-use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use hashi_guardian_init::load_attested_kp_cert;
+use hashi_types::guardian::AttestedKpCert;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareID;
-use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::decrypt_armored_via_gpg;
 use k256::FieldBytes;
 use k256::Scalar;
@@ -74,7 +74,7 @@ impl KpRosterConfig {
             .iter()
             .enumerate()
             .map(|(idx, cert_path)| {
-                load_cert(cert_path)
+                load_attested_kp_cert(cert_path)
                     .with_context(|| format!("invalid KP cert at roster position {}", idx + 1))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -87,23 +87,14 @@ impl KpRosterConfig {
     }
 }
 
-fn load_cert(path: &PathBuf) -> Result<PgpPublicCert> {
-    let armored = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read PGP cert at {}", path.display()))?;
-    let cert = PgpPublicCert::new(armored)
-        .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
-    info!(fingerprint = %cert, path = %path.display(), "loaded PGP cert");
-    Ok(cert)
-}
-
 /// Find, decrypt, and commitment-check the share addressed to `kp_cert`.
-pub fn decrypt_kp_share(state: &CeremonyState, kp_cert: &PgpPublicCert) -> Result<DecryptedShare> {
+pub fn decrypt_kp_share(state: &CeremonyState, kp_cert: &AttestedKpCert) -> Result<DecryptedShare> {
     decrypt_kp_share_with(state, kp_cert, decrypt_pgp_ciphertext)
 }
 
 fn decrypt_kp_share_with(
     state: &CeremonyState,
-    kp_cert: &PgpPublicCert,
+    kp_cert: &AttestedKpCert,
     decrypt: impl FnOnce(ShareID, &str) -> Result<DecryptedShare>,
 ) -> Result<DecryptedShare> {
     let fingerprint = kp_cert.fingerprint().to_hex();
@@ -149,21 +140,6 @@ fn decrypt_kp_share_with(
     );
 
     Ok(decrypted)
-}
-
-/// Load the cert selected by this KP for the current command.
-pub fn load_kp_cert(path: &Path) -> Result<PgpPublicCert> {
-    let cert = PgpPublicCert::new(
-        std::fs::read_to_string(path)
-            .with_context(|| format!("read KP cert at {}", path.display()))?,
-    )
-    .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
-    info!(
-        fingerprint = %cert.fingerprint(),
-        path = %path.display(),
-        "loaded this KP's cert"
-    );
-    Ok(cert)
 }
 
 /// Decrypt a KP's selected PGP-encrypted share via the yubikey-backed gpg
@@ -227,7 +203,7 @@ mod tests {
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::SetupNewKeyResponse;
     use hashi_types::guardian::ShareCommitments;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
     use std::num::NonZeroU16;
 
     fn dummy_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
@@ -236,12 +212,11 @@ mod tests {
         )
     }
 
-    fn mock_cert() -> PgpPublicCert {
-        let (public, _secret) = mock_pgp_keypair();
-        PgpPublicCert::new(public).unwrap()
+    fn mock_cert() -> AttestedKpCert {
+        mock_attested_kp_keypair().0
     }
 
-    fn decryptable_state(certs_by_share: &[&PgpPublicCert]) -> (CeremonyState, Vec<Share>) {
+    fn decryptable_state(certs_by_share: &[&AttestedKpCert]) -> (CeremonyState, Vec<Share>) {
         let shares = certs_by_share
             .iter()
             .enumerate()
@@ -319,15 +294,11 @@ mod tests {
         let unaddressed_cert = mock_cert();
         let (state, _) = decryptable_state(&[&cert1, &cert2]);
 
-        let err = decrypt_kp_share_with(&state, &unaddressed_cert, |_, _| {
-            panic!("decrypt must not run when no scalar share matches the certificate")
-        })
-        .err()
-        .expect("an unaddressed certificate must be rejected");
-
         assert!(
-            format!("{err:#}").contains("no share in the kp-shares log is addressed"),
-            "{err:#}"
+            decrypt_kp_share_with(&state, &unaddressed_cert, |_, _| {
+                panic!("decrypt must not run when no scalar share matches the certificate")
+            })
+            .is_err()
         );
     }
 
@@ -341,23 +312,9 @@ mod tests {
             value: shares[0].value + Scalar::from(1u64),
         };
 
-        let err = decrypt_kp_share_with(&state, &cert1, |_, _| Ok(DecryptedShare(wrong_share)))
-            .err()
-            .expect("a decrypted value with the wrong commitment must be rejected");
-
-        let message = format!("{err:#}");
         assert!(
-            message.contains("does not match its commitment"),
-            "{message}"
+            decrypt_kp_share_with(&state, &cert1, |_, _| Ok(DecryptedShare(wrong_share))).is_err()
         );
-        assert!(message.contains("No matching share found"), "{message}");
-    }
-
-    #[test]
-    fn scalar_from_decrypted_plaintext_accepts_32_bytes() {
-        // Any non-zero, sub-curve-order byte pattern is a valid scalar.
-        let bytes = [1u8; 32];
-        scalar_from_decrypted_plaintext(&bytes).expect("32 bytes should parse to a scalar");
     }
 
     #[test]

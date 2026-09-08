@@ -15,8 +15,6 @@ use hashi_types::guardian::*;
 #[cfg(test)]
 use hashi_types::pgp::decrypt_with_secret_key;
 #[cfg(test)]
-use hashi_types::pgp::PgpPublicCert;
-#[cfg(test)]
 use k256::elliptic_curve::ScalarPrimitive;
 #[cfg(test)]
 use k256::Secp256k1 as K256Secp256k1;
@@ -56,8 +54,7 @@ pub fn mock_kp_certs_roster_with_secrets(num_kps: usize) -> (KpCertRoster, MockK
     let mut secret_keys = MockKpSecretKeys::new();
     let certs = (0..num_kps)
         .map(|_| {
-            let (public, secret) = hashi_types::pgp::test_utils::mock_pgp_keypair();
-            let cert = PgpPublicCert::new(public).expect("mock public cert should parse");
+            let (cert, secret) = hashi_types::guardian::test_utils::mock_attested_kp_keypair();
             let fingerprint = cert.fingerprint().to_hex();
             assert!(
                 secret_keys.insert(fingerprint, secret).is_none(),

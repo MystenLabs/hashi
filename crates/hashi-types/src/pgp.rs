@@ -40,6 +40,15 @@ use tracing::info;
 
 mod yubikey_attestation;
 pub use yubikey_attestation::verify_yubikey_attestations;
+pub(crate) use yubikey_attestation::verify_yubikey_attestations_and_keys;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use yubikey_attestation::verify_yubikey_attestations_with_issuers;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AttestedPgpKeys {
+    pub signing: Fingerprint,
+    pub encryption: Fingerprint,
+}
 
 static POLICY: LazyLock<StandardPolicy> = LazyLock::new(StandardPolicy::new);
 
@@ -158,8 +167,25 @@ fn validate_pgp_cert(cert: &openpgp::Cert) -> Result<()> {
 }
 
 pub fn encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> Result<String> {
+    encrypt_armored_with_key(plaintext, cert, None)
+}
+
+/// Encrypt only to the exact key authenticated by the attestation.
+pub(crate) fn encrypt_armored_for_key(
+    plaintext: &[u8],
+    cert: &PgpPublicCert,
+    key: &Fingerprint,
+) -> Result<String> {
+    encrypt_armored_with_key(plaintext, cert, Some(key))
+}
+
+fn encrypt_armored_with_key(
+    plaintext: &[u8],
+    cert: &PgpPublicCert,
+    key: Option<&Fingerprint>,
+) -> Result<String> {
     let mut ciphertext = Vec::new();
-    let mut writer = armored_encrypt_writer(&mut ciphertext, cert)?;
+    let mut writer = armored_encrypt_writer_with_key(&mut ciphertext, cert, key)?;
     writer
         .write_all(plaintext)
         .context("OpenPGP encryption failed")?;
@@ -173,14 +199,31 @@ pub fn armored_encrypt_writer<'a, W>(output: W, cert: &'a PgpPublicCert) -> Resu
 where
     W: 'a + Write + Send + Sync,
 {
-    let recipients = cert
+    armored_encrypt_writer_with_key(output, cert, None)
+}
+
+fn armored_encrypt_writer_with_key<'a, W>(
+    output: W,
+    cert: &'a PgpPublicCert,
+    key: Option<&'a Fingerprint>,
+) -> Result<Message<'a>>
+where
+    W: 'a + Write + Send + Sync,
+{
+    let mut recipients = cert
         .cert
         .keys()
         .with_policy(&*POLICY, None)
         .supported()
         .alive()
         .revoked(false)
-        .for_transport_encryption();
+        .for_transport_encryption()
+        .filter(|candidate| key.is_none_or(|key| candidate.key().fingerprint() == *key))
+        .peekable();
+    anyhow::ensure!(
+        key.is_none() || recipients.peek().is_some(),
+        "attested encryption key is not usable in the OpenPGP certificate"
+    );
     let message = Message::new(output);
     let message = Armorer::new(message)
         .kind(openpgp::armor::Kind::Message)
@@ -235,19 +278,6 @@ pub fn pgp_message_recipients(armored: &str) -> Result<Vec<openpgp::KeyHandle>> 
         ppr = next_ppr;
     }
     Ok(handles)
-}
-
-/// True if `cert` owns `handle` — i.e. `handle` aliases one of the cert's
-/// (primary or sub) keys. Handles the KeyID-vs-Fingerprint suffix matching so a
-/// PKESK's 8-byte KeyID matches a cert key's full fingerprint.
-pub fn cert_owns_key_handle(cert: &PgpPublicCert, handle: &openpgp::KeyHandle) -> bool {
-    cert.cert
-        .keys()
-        .any(|k| key_handles_alias(&k.key().key_handle(), handle))
-}
-
-fn key_handles_alias(a: &openpgp::KeyHandle, b: &openpgp::KeyHandle) -> bool {
-    a.aliases(b) || b.aliases(a)
 }
 
 pub fn decrypt_with_secret_key<R>(input: R, secret_key: &[u8]) -> Result<impl io::Read + use<R>>
@@ -359,18 +389,18 @@ pub fn decrypt_armored_via_gpg(armored: &str, homedir: Option<&Path>) -> Result<
     )
 }
 
-/// Produce an armored detached OpenPGP signature over `payload` with the local
-/// gpg key selected by `signer_fingerprint` (`gpg --local-user`) — in
-/// production the KP's offline key (e.g. a yubikey).
-pub fn sign_detached_via_gpg(
+/// Force GPG to use the exact attested key instead of selecting a sibling subkey.
+pub(crate) fn sign_detached_via_gpg_for_key(
     payload: &[u8],
-    signer_fingerprint: &Fingerprint,
+    key: &Fingerprint,
     homedir: Option<&Path>,
 ) -> Result<String> {
+    let mut selector = key.to_hex();
+    selector.push('!');
     let signature = run_buffered_gpg(payload, homedir, GpgOperation::Sign, |command| {
         command
             .arg("--local-user")
-            .arg(signer_fingerprint.to_hex())
+            .arg(&selector)
             .arg("--armor")
             .arg("--detach-sign");
     })?;
@@ -597,9 +627,10 @@ fn parse_openpgp_user_pin_retries(card_status: &str) -> Result<u32> {
     retries.parse().context("malformed user PIN retry counter")
 }
 
-/// A `VerificationHelper` that accepts exactly one signer cert.
+/// A `VerificationHelper` that accepts exactly the attested signing key.
 struct DetachedSigVerifier<'a> {
     cert: &'a openpgp::Cert,
+    key: &'a Fingerprint,
 }
 
 impl VerificationHelper for DetachedSigVerifier<'_> {
@@ -610,24 +641,31 @@ impl VerificationHelper for DetachedSigVerifier<'_> {
     fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
         for layer in structure.into_iter() {
             if let MessageLayer::SignatureGroup { results } = layer
-                && results.iter().any(|r| r.is_ok())
+                && results.iter().any(|result| {
+                    result
+                        .as_ref()
+                        .is_ok_and(|good| good.ka.key().fingerprint() == *self.key)
+                })
             {
                 return Ok(());
             }
         }
-        anyhow::bail!("no valid signature from the expected signer cert")
+        anyhow::bail!("no valid signature from the expected signing key")
     }
 }
 
-/// Verify an armored detached OpenPGP `signature` over `payload` was produced
-/// by `cert`. Pure Rust (no gpg subprocess), so it runs inside the distroless
-/// proxy image.
-pub fn verify_detached_signature(
+/// Require the cryptographically verified signing key, not merely its cert,
+/// to match the key authenticated by the attestation.
+pub(crate) fn verify_detached_signature_for_key(
     payload: &[u8],
     signature: &str,
     cert: &PgpPublicCert,
+    key: &Fingerprint,
 ) -> Result<()> {
-    let helper = DetachedSigVerifier { cert: &cert.cert };
+    let helper = DetachedSigVerifier {
+        cert: &cert.cert,
+        key,
+    };
     let mut verifier = DetachedVerifierBuilder::from_bytes(signature.as_bytes())
         .context("parse detached signature")?
         .with_policy(&*POLICY, None, helper)
@@ -869,19 +907,11 @@ pub mod test_utils {
         mock_pgp_keypair().0
     }
 
-    pub fn mock_pgp_certs_armored(n: usize) -> Vec<String> {
-        (0..n).map(|_| mock_pgp_cert_armored()).collect()
-    }
-
     pub fn mock_pgp_cert() -> PgpPublicCert {
         PgpPublicCert::new(mock_pgp_cert_armored()).unwrap()
     }
 
-    pub fn mock_pgp_certs(n: usize) -> Vec<PgpPublicCert> {
-        (0..n).map(|_| mock_pgp_cert()).collect()
-    }
-
-    /// What `sign_detached_via_gpg` produces, minus the gpg keyring.
+    /// Produce an armored detached signature without a GPG keyring.
     pub fn sign_detached_in_process(secret_armored: &str, payload: &[u8]) -> String {
         use openpgp::parse::Parse;
         use openpgp::policy::StandardPolicy;
@@ -930,6 +960,47 @@ mod tests {
     use std::fs;
     use std::io;
     use std::process::Command;
+
+    #[test]
+    fn pinned_encryption_addresses_only_the_selected_subkey() {
+        let (cert, _) = CertBuilder::new()
+            .set_profile(openpgp::Profile::RFC4880)
+            .unwrap()
+            .add_userid("recipient@example.com")
+            .add_signing_subkey()
+            .add_transport_encryption_subkey()
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut public = Vec::new();
+        cert.armored().export(&mut public).unwrap();
+        let public = PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap();
+        let keys: Vec<_> = cert
+            .keys()
+            .with_policy(&*POLICY, None)
+            .for_transport_encryption()
+            .map(|key| key.key().fingerprint())
+            .collect();
+        assert_eq!(keys.len(), 2);
+        let payload = b"guardian share";
+        let generic = encrypt_armored(payload, &public).unwrap();
+        assert_eq!(pgp_message_recipients(&generic).unwrap().len(), 2);
+        let mut secret = Vec::new();
+        cert.as_tsk().serialize(&mut secret).unwrap();
+        for key in &keys {
+            let ciphertext = encrypt_armored_for_key(payload, &public, key).unwrap();
+            let recipients = pgp_message_recipients(&ciphertext).unwrap();
+            assert_eq!(recipients.len(), 1);
+            assert!(recipients[0].aliases(openpgp::KeyHandle::from(key.clone())));
+            let mut plaintext = Vec::new();
+            decrypt_with_secret_key(io::Cursor::new(ciphertext.into_bytes()), &secret)
+                .unwrap()
+                .read_to_end(&mut plaintext)
+                .unwrap();
+            assert_eq!(plaintext, payload);
+        }
+        assert!(encrypt_armored_for_key(payload, &public, &cert.fingerprint()).is_err());
+    }
 
     fn temp_gnupg_home() -> tempfile::TempDir {
         let homedir = tempfile::Builder::new().tempdir().unwrap();
@@ -1094,23 +1165,6 @@ mod tests {
     }
 
     #[test]
-    fn pgp_message_recipients_reports_expected_cert() {
-        let (public, _secret) = test_utils::mock_pgp_keypair();
-        let cert = PgpPublicCert::new(public).unwrap();
-        let ciphertext = encrypt_armored(b"share bytes", &cert).unwrap();
-
-        let recipients = pgp_message_recipients(&ciphertext).unwrap();
-        assert!(
-            !recipients.is_empty(),
-            "should report at least one recipient"
-        );
-        assert!(
-            recipients.iter().all(|h| cert_owns_key_handle(&cert, h)),
-            "all recipients should belong to the cert"
-        );
-    }
-
-    #[test]
     fn pgp_message_recipients_rejects_password_recipient() {
         let (public, _secret) = test_utils::mock_pgp_keypair();
         let cert = PgpPublicCert::new(public).unwrap();
@@ -1141,21 +1195,6 @@ mod tests {
         assert!(
             err.to_string().contains("password recipient"),
             "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn cert_owns_key_handle_rejects_unrelated_cert() {
-        let (public_a, _) = test_utils::mock_pgp_keypair();
-        let (public_b, _) = test_utils::mock_pgp_keypair();
-        let cert_a = PgpPublicCert::new(public_a).unwrap();
-        let cert_b = PgpPublicCert::new(public_b).unwrap();
-
-        let ciphertext = encrypt_armored(b"x", &cert_a).unwrap();
-        let recipients = pgp_message_recipients(&ciphertext).unwrap();
-        assert!(
-            recipients.iter().all(|h| !cert_owns_key_handle(&cert_b, h)),
-            "cert_b must not own cert_a's recipients"
         );
     }
 
@@ -1207,32 +1246,48 @@ mod tests {
     }
 
     #[test]
-    fn verify_detached_signature_accepts_good_rejects_tampered_and_wrong_cert() {
-        let (public, secret) = test_utils::mock_pgp_keypair();
-        let cert = PgpPublicCert::new(public).unwrap();
-        let payload = b"relay submission bytes";
-        let sig = test_utils::sign_detached_in_process(&secret, payload);
-
-        verify_detached_signature(payload, &sig, &cert).unwrap();
-        assert!(verify_detached_signature(b"other bytes", &sig, &cert).is_err());
-        let other = test_utils::mock_pgp_cert();
-        assert!(verify_detached_signature(payload, &sig, &other).is_err());
-    }
-
-    #[test]
-    fn sign_detached_via_gpg_round_trips_through_verify() {
+    fn pinned_gpg_signatures_require_the_exact_subkey_in_the_same_cert() {
         let homedir = temp_gnupg_home();
-        let (public, secret) = test_utils::mock_pgp_keypair();
-        let cert = PgpPublicCert::new(public).unwrap();
-        let secret_key_path = homedir.path().join("secret-key.asc");
-        fs::write(&secret_key_path, secret).unwrap();
-        test_utils::gpg_import_key(homedir.path(), &secret_key_path);
-
-        let payload = b"relay submission bytes";
-        let sig =
-            sign_detached_via_gpg(payload, &cert.fingerprint(), Some(homedir.path())).unwrap();
-
-        verify_detached_signature(payload, &sig, &cert).unwrap();
-        assert!(verify_detached_signature(b"tampered", &sig, &cert).is_err());
+        let (cert, _) = CertBuilder::new()
+            .set_profile(openpgp::Profile::RFC4880)
+            .unwrap()
+            .add_userid("") // Match provisioning's `oct generate --userid ''`.
+            .add_signing_subkey()
+            .add_signing_subkey()
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut secret = Vec::new();
+        cert.as_tsk().armored().serialize(&mut secret).unwrap();
+        test_utils::gpg_import_secret_key(homedir.path(), &String::from_utf8(secret).unwrap());
+        let mut public = Vec::new();
+        cert.armored().export(&mut public).unwrap();
+        let public = PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap();
+        let payload = b"exact signing key";
+        let signing_keys: Vec<_> = cert
+            .keys()
+            .with_policy(&*POLICY, None)
+            .for_signing()
+            .map(|key| key.key().fingerprint())
+            .collect();
+        assert_eq!(signing_keys.len(), 2);
+        let other_cert = test_utils::mock_pgp_cert();
+        for key in &signing_keys {
+            let signature =
+                sign_detached_via_gpg_for_key(payload, key, Some(homedir.path())).unwrap();
+            assert!(
+                verify_detached_signature_for_key(b"tampered", &signature, &public, key).is_err()
+            );
+            assert!(
+                verify_detached_signature_for_key(payload, &signature, &other_cert, key).is_err()
+            );
+            for candidate in &signing_keys {
+                assert_eq!(
+                    verify_detached_signature_for_key(payload, &signature, &public, candidate)
+                        .is_ok(),
+                    candidate == key,
+                );
+            }
+        }
     }
 }

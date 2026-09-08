@@ -8,6 +8,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_guardian_init::load_attested_kp_cert;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CeremonyStage;
@@ -20,7 +21,6 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::decrypt_kp_share;
-use crate::kp_roster::load_kp_cert;
 
 /// Verify this KP can fetch and decrypt its ceremony share, then submit a
 /// signed confirmation to the live ceremony guardian.
@@ -63,7 +63,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // The selected cert identifies this KP's roster entry.
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
-    let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
+    let kp_cert = load_attested_kp_cert(kp_pgp_cert_path)?;
     certs_roster
         .cert_for_fingerprint(&kp_cert.fingerprint())
         .with_context(|| {
