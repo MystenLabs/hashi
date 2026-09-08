@@ -164,9 +164,10 @@ Send all five files to the guardian operator, including for replacement
 certificates. Keep the PEMs beside their `.asc` file. Do not send either PIN or
 local GnuPG private-key material.
 
-The script checks that the exported files are nonempty but does not verify the
-attestations. Neither the CLI nor the guardian currently loads or enforces these
-YubiKey attestations; retain them for later verification.
+The script only checks that its outputs are nonempty. The CLI and guardian
+verify the attestations and reject missing or invalid proofs, binding operations
+to the attested SIG/DEC keys rather than just the primary-key fingerprint.
+Attestation does not check X.509 expiry, revocation, touch policy, or freshness.
 
 The operator configures exactly one `.asc` certificate path per KP, in any order:
 

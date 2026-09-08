@@ -260,6 +260,273 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::activate_enclave_for_testing;
+    use crate::test_utils::decrypt_kp_shares;
+    use crate::test_utils::finalize_enclave;
+    use crate::test_utils::mock_kp_certs_roster_with_secrets;
+    use crate::test_utils::mock_logger_capturing;
+    use crate::test_utils::CapturedPuts;
+    use crate::test_utils::MockKpSecretKeys;
+    use crate::test_utils::OperatorInitTestArgs;
+    use hashi_types::guardian::BuildPcrs;
+    use hashi_types::guardian::CeremonyState;
+    use hashi_types::guardian::KpCertRoster;
+    use hashi_types::guardian::LimiterConfig;
+    use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::PcrAllowlist;
+    use hashi_types::guardian::ProvisionerInitRequest;
+    use hashi_types::guardian::ProvisionerRotateKpSetRequest;
+    use hashi_types::guardian::SecretSharingParams;
+    use hashi_types::pgp::test_utils::sign_detached_in_process;
+    use proto::guardian_service_server::GuardianService;
+
+    // Domain setup trusts only the private test issuer. Sending the same bundles
+    // through RPC must still fail the production-pinned Yubico verifier.
+    async fn pending_ceremony() -> (
+        GuardianGrpc,
+        CeremonyState,
+        KpCertRoster,
+        MockKpSecretKeys,
+        CapturedPuts,
+    ) {
+        let (roster, secrets) = mock_kp_certs_roster_with_secrets(3);
+        let (logger, puts) = mock_logger_capturing();
+        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        let response = crate::ceremony_mode::setup::setup_new_key(
+            enclave.clone(),
+            SetupNewKeyRequest::new(roster.clone(), 3, 2).unwrap(),
+        )
+        .await
+        .unwrap()
+        .verify_into_data(&enclave.signing_pubkey())
+        .unwrap()
+        .response;
+        (
+            GuardianGrpc { enclave },
+            response.into(),
+            roster,
+            secrets,
+            puts,
+        )
+    }
+
+    #[tokio::test]
+    async fn setup_rpc_rejects_missing_attestation_without_starting_ceremony() {
+        let (logger, puts) = mock_logger_capturing();
+        let rpc = GuardianGrpc {
+            enclave: Enclave::create_operator_initialized_ceremony(logger),
+        };
+        let before_puts = puts.lock().unwrap().clone();
+        let mut request = proto_conversions::setup_new_key_request_to_pb(
+            SetupNewKeyRequest::new(mock_kp_certs_roster_with_secrets(3).0, 3, 2).unwrap(),
+        );
+        request.key_provisioner_pgp_certs[0].device_pem.clear();
+
+        let error = rpc.setup_new_key(Request::new(request)).await.unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(rpc.enclave.pending_ceremony().is_err());
+        assert_eq!(*puts.lock().unwrap(), before_puts);
+    }
+
+    #[tokio::test]
+    async fn confirmation_rpc_rejects_untrusted_signer_without_recording_confirmation() {
+        let (rpc, state, roster, secrets, puts) = pending_ceremony().await;
+        let cert = roster.iter().next().unwrap().clone();
+        let request = CeremonyConfirmationRequest::new(rpc.enclave.s3_session_id(), state.digest());
+        let signature = sign_detached_in_process(
+            &secrets[&cert.fingerprint().to_hex()],
+            &KpSigned::signed_bytes(&request),
+        );
+        let signed = KpSigned::from_parts(request.clone(), cert, signature);
+        signed.verify_signature().unwrap();
+        let previous_cert = roster.iter().nth(1).unwrap().clone();
+        let previous_signature = sign_detached_in_process(
+            &secrets[&previous_cert.fingerprint().to_hex()],
+            &KpSigned::signed_bytes(&request),
+        );
+        crate::ceremony_mode::confirm::confirm_ceremony(
+            rpc.enclave.clone(),
+            KpSigned::from_parts(request, previous_cert, previous_signature),
+        )
+        .await
+        .unwrap();
+        let before = rpc.enclave.pending_ceremony().unwrap().status().unwrap();
+        let before_puts = puts.lock().unwrap().clone();
+
+        let error = rpc
+            .confirm_ceremony(Request::new(signed.into()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        let after = rpc.enclave.pending_ceremony().unwrap().status().unwrap();
+        assert_eq!(
+            (after.have, after.need, after.completed),
+            (before.have, before.need, before.completed)
+        );
+        assert_eq!(*puts.lock().unwrap(), before_puts);
+    }
+
+    #[tokio::test]
+    async fn provision_rpc_rejects_untrusted_signer_without_installing_key() {
+        let (_, state, roster, secrets, _) = pending_ceremony().await;
+        let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
+        let (logger, puts) = mock_logger_capturing();
+        let rpc = GuardianGrpc {
+            enclave: Enclave::create_operator_initialized_with(OperatorInitTestArgs {
+                s3_logger: logger,
+                ceremony_state: state,
+                ..Default::default()
+            })
+            .await,
+        };
+        let before = rpc.enclave.temporary_init_state().unwrap();
+        let before_puts = puts.lock().unwrap().clone();
+        let submissions = shares
+            .iter()
+            .take(2)
+            .map(|share| {
+                let cert = roster.cert_for_share(share.id).unwrap().clone();
+                let request = ProvisionerInitRequest::build_from_share(
+                    rpc.enclave.s3_session_id(),
+                    before.config_hash,
+                    before.genesis_state.as_ref().map(|state| state.digest()),
+                    share,
+                    rpc.enclave.encryption_public_key(),
+                    &mut rand::thread_rng(),
+                );
+                let signature = sign_detached_in_process(
+                    &secrets[&cert.fingerprint().to_hex()],
+                    &KpSigned::signed_bytes(&request),
+                );
+                let signed = KpSigned::from_parts(request, cert, signature);
+                signed.verify_signature().unwrap();
+                signed.into()
+            })
+            .collect();
+
+        let error = rpc
+            .provisioner_init(Request::new(proto::BatchProvisionerInitRequest {
+                submissions,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(!rpc.enclave.config.is_enclave_btc_keypair_set());
+        assert_eq!(*puts.lock().unwrap(), before_puts);
+    }
+
+    #[tokio::test]
+    async fn cert_rotation_rpc_rejects_untrusted_replacement_without_writing_rotation() {
+        let (_, state, roster, secrets, _) = pending_ceremony().await;
+        let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
+        let (logger, puts) = mock_logger_capturing();
+        let rpc = GuardianGrpc {
+            enclave: Enclave::create_operator_initialized_with(OperatorInitTestArgs {
+                s3_logger: logger,
+                ceremony_state: state.clone(),
+                ..Default::default()
+            })
+            .await,
+        };
+        finalize_enclave(&rpc.enclave).unwrap();
+        let (_, committee) = StandardWithdrawalRequest::mock_signed_and_committee_for_testing(
+            bitcoin::Network::Regtest,
+        );
+        activate_enclave_for_testing(
+            &rpc.enclave,
+            committee,
+            LimiterConfig {
+                refill_rate: 0,
+                max_bucket_capacity: 1000,
+            },
+            LimiterState {
+                num_tokens_available: 1000,
+                last_updated_at: 0,
+                next_seq: 0,
+            },
+        )
+        .unwrap();
+        let cert = roster.cert_for_share(shares[0].id).unwrap().clone();
+        let replacement = hashi_types::guardian::test_utils::mock_attested_kp_keypair().0;
+        let request = ProvisionerRotateCertRequest::new(
+            rpc.enclave.s3_session_id(),
+            state.cert_seq,
+            replacement,
+            &shares[0],
+            rpc.enclave.encryption_public_key(),
+            &mut rand::thread_rng(),
+        );
+        let signature = sign_detached_in_process(
+            &secrets[&cert.fingerprint().to_hex()],
+            &KpSigned::signed_bytes(&request),
+        );
+        let signed = KpSigned::from_parts(request, cert, signature);
+        signed.verify_signature().unwrap();
+        let lifecycle = rpc.enclave.lifecycle();
+        let before_puts = puts.lock().unwrap().clone();
+
+        // Replacement decoding precedes signer decoding; this does not exercise
+        // rejection of the signer certificate or the persisted-state lookup.
+        let error = rpc
+            .provisioner_rotate_cert(Request::new(signed.into()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(rpc.enclave.lifecycle(), lifecycle);
+        assert_eq!(*puts.lock().unwrap(), before_puts);
+    }
+
+    #[tokio::test]
+    async fn kp_set_rotation_rpc_rejects_untrusted_signer_without_starting_rotation() {
+        let (_, state, roster, secrets, _) = pending_ceremony().await;
+        let shares = decrypt_kp_shares(&state.encrypted_shares, &secrets);
+        let (logger, puts) = mock_logger_capturing();
+        let rpc = GuardianGrpc {
+            enclave: Enclave::create_operator_initialized_ceremony(logger),
+        };
+        let submissions = shares
+            .iter()
+            .take(2)
+            .map(|share| {
+                let cert = roster.cert_for_share(share.id).unwrap().clone();
+                let request = ProvisionerRotateKpSetRequest::build_from_share(
+                    rpc.enclave.s3_session_id(),
+                    PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
+                    share,
+                    rpc.enclave.encryption_public_key(),
+                    roster.clone(),
+                    SecretSharingParams::new(3, 2).unwrap(),
+                    &mut rand::thread_rng(),
+                )
+                .unwrap();
+                let signature = sign_detached_in_process(
+                    &secrets[&cert.fingerprint().to_hex()],
+                    &KpSigned::signed_bytes(&request),
+                );
+                let signed = KpSigned::from_parts(request, cert, signature);
+                signed.verify_signature().unwrap();
+                signed.into()
+            })
+            .collect();
+        let before_puts = puts.lock().unwrap().clone();
+
+        // Signer decoding fails first, so this cannot cover the new roster's
+        // attestation admission without a production-accepted signer bundle.
+        let error = rpc
+            .rotate_kp_set(Request::new(proto::BatchProvisionerRotateKpSetRequest {
+                submissions,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(rpc.enclave.pending_ceremony().is_err());
+        assert_eq!(*puts.lock().unwrap(), before_puts);
+    }
 
     #[test]
     fn heartbeat_readiness_errors_have_actionable_status_codes() {
