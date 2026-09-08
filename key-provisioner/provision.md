@@ -123,9 +123,10 @@ or a node-backup key. The private keys remain on the YubiKey.
 
 ### Provision the YubiKey
 
-Obtain a new [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/) device and label it so its physical identity can
-be matched to its public certificate and storage record.
-Use firmware **5.7 or later** and keep the factory OpenPGP ATT key and certificate intact.
+By default, provisioning requires **firmware 5.7+** and generates Ed25519 signing
+and X25519 decryption keys with standard attestation encodings.
+Keep the original factory OpenPGP ATT key and certificate intact, and label the
+device so its physical identity matches its public certificate and storage record.
 
 Use a setup machine with a physical USB port. Install [`oct`](https://codeberg.org/openpgp-card/openpgp-card-tools), [`gpg`](https://gnupg.org/), [`jq`](https://jqlang.org/), and [`ykman`](https://docs.yubico.com/software/yubikey/tools/ykman/), then
 disconnect every YubiKey except the device being provisioned.
@@ -136,10 +137,16 @@ From the repository root, run the interactive provisioning script:
 ./key-provisioner/scripts/provision-yubikey.sh
 ```
 
-Follow its prompts. The script changes the factory PINs, checks the OpenPGP
-key slots, generates the keys, automatically enables touch for signing and
-decryption, and tests both operations. Empty slots need no confirmation; existing
-keys trigger an irreversible-overwrite warning requiring `y` or `yes`.
+For older devices with firmware **5.2.3+**, explicitly select P-256 signing and
+decryption with `./key-provisioner/scripts/provision-yubikey.sh --legacy`.
+On firmware below 5.7 this requires confirming the
+[known ECDSA physical-attack risk](https://www.yubico.com/support/security-advisories/ysa-2024-03/).
+Both profiles require full-key attestation verification; `--legacy` does not bypass it.
+
+Follow its prompts. The script changes the factory PINs, checks the SIG/DEC
+slots, generates those keys, enables touch, and tests signing and decryption.
+Empty SIG/DEC slots need no confirmation; existing keys require `y` or `yes`
+before irreversible replacement. The Authentication slot is left unchanged.
 
 The user ID only names output files; keys are selected by fingerprint. Choose
 an output directory (default `.`). For user ID `jdoe`, the script retains these
@@ -165,8 +172,8 @@ certificates. Keep the PEMs beside their `.asc` file. Do not send either PIN or
 local GnuPG private-key material.
 
 The script only checks that its outputs are nonempty. The CLI and guardian
-verify the attestations and reject missing or invalid proofs, binding operations
-to the attested SIG/DEC keys rather than just the primary-key fingerprint.
+verify the attestations and reject missing or invalid proofs, comparing complete
+public keys and binding operations to the attested SIG/DEC keys.
 Attestation does not check X.509 expiry, revocation, touch policy, or freshness.
 
 The operator configures exactly one `.asc` certificate path per KP, in any order:

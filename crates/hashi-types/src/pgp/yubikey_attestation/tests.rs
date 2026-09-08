@@ -66,7 +66,7 @@ impl Slot {
     }
 }
 
-struct RawPublicKey(Vec<u8>);
+struct RawPublicKey(Vec<u8>, &'static SignatureAlgorithm);
 
 impl PublicKeyData for RawPublicKey {
     fn der_bytes(&self) -> &[u8] {
@@ -74,7 +74,7 @@ impl PublicKeyData for RawPublicKey {
     }
 
     fn algorithm(&self) -> &SignatureAlgorithm {
-        &PKCS_ED25519
+        self.1
     }
 }
 
@@ -87,10 +87,18 @@ fn params(name: &str) -> CertificateParams {
 }
 
 fn pgp_cert(extra_signing: bool, extra_encryption: bool) -> PgpPublicCert {
+    pgp_cert_with_suite(CipherSuite::Cv25519, extra_signing, extra_encryption)
+}
+
+fn pgp_cert_with_suite(
+    suite: CipherSuite,
+    extra_signing: bool,
+    extra_encryption: bool,
+) -> PgpPublicCert {
     let mut builder = CertBuilder::new()
         .set_profile(Profile::RFC4880)
         .unwrap()
-        .set_cipher_suite(CipherSuite::Cv25519)
+        .set_cipher_suite(suite)
         .set_creation_time(UNIX_EPOCH + Duration::from_secs(1_704_067_200))
         .set_validity_period(None)
         .set_primary_key_flags(KeyFlags::empty().set_certification())
@@ -122,6 +130,18 @@ fn key_material(cert: &PgpPublicCert, slot: Slot) -> (Vec<u8>, Vec<u8>) {
         Slot::Dec => keys.for_transport_encryption().next().unwrap(),
     };
     let bytes = match key.key().mpis() {
+        mpi::PublicKey::ECDSA {
+            curve: Curve::NistP256,
+            q,
+        }
+        | mpi::PublicKey::ECDH {
+            curve: Curve::NistP256,
+            q,
+            ..
+        } => {
+            q.decode_point(&Curve::NistP256).unwrap();
+            q.value().to_vec()
+        }
         mpi::PublicKey::EdDSA { curve, q } | mpi::PublicKey::ECDH { curve, q, .. } => {
             assert!(matches!(curve, Curve::Ed25519 | Curve::Cv25519));
             q.decode_point(curve).unwrap().0.to_vec()
@@ -196,27 +216,46 @@ impl Fixture {
         }
         // This writable metadata always claims the expected PGP fingerprint,
         // including when a negative case substitutes the actual SPKI key.
-        let (_, fingerprint) = key_material(&self.cert, slot);
+        let (expected_key, fingerprint) = key_material(&self.cert, slot);
         let mut metadata = vec![4, fingerprint.len() as u8];
         metadata.extend(fingerprint);
         params
             .custom_extensions
             .push(CustomExtension::from_oid_content(FINGERPRINT_OID, metadata));
+        let p256 = expected_key.len() == 65;
+        let subject_algorithm = if p256 {
+            &PKCS_ECDSA_P256_SHA256
+        } else {
+            &PKCS_ED25519
+        };
         let mut der = params
-            .signed_by(&RawPublicKey(key), &self.device, &self.device_key)
+            .signed_by(
+                &RawPublicKey(key, subject_algorithm),
+                &self.device,
+                &self.device_key,
+            )
             .unwrap()
             .der()
             .to_vec();
-        // rcgen exposes Ed25519 but not X25519 SPKI. Replace only its SPKI OID
-        // and re-sign the TBS so algorithm tests cannot fail on a bad signature.
-        let (_, parsed) = parse_x509_certificate(&der).unwrap();
-        let spki_offset = parsed.public_key().raw.as_ptr() as usize - der.as_ptr() as usize;
-        der[spki_offset + 8] = algorithm;
-        let (_, parsed) = parse_x509_certificate(&der).unwrap();
+        if !p256 {
+            // rcgen exposes Ed25519 but not X25519 SPKI. Replace only its SPKI OID
+            // and re-sign the TBS so algorithm tests cannot fail on a bad signature.
+            let (_, parsed) = parse_x509_certificate(&der).unwrap();
+            let spki_offset = parsed.public_key().raw.as_ptr() as usize - der.as_ptr() as usize;
+            der[spki_offset + 8] = algorithm;
+            self.resign(&mut der);
+        }
+        der
+    }
+
+    fn resign(&self, der: &mut [u8]) {
+        let (_, parsed) = parse_x509_certificate(der).unwrap();
         let signature = self.signing_key.sign(parsed.tbs_certificate.as_ref());
         let signature_offset = der.len() - 64;
         der[signature_offset..].copy_from_slice(&signature.to_bytes());
-        der
+        let (_, parsed) = parse_x509_certificate(der).unwrap();
+        let (_, device) = parse_x509_certificate(self.device.der()).unwrap();
+        parsed.verify_signature(Some(device.public_key())).unwrap();
     }
 
     fn verify(&self) -> anyhow::Result<()> {
@@ -252,8 +291,75 @@ fn valid_binding_accepts_ecdsa_issuer_and_both_slot_keys() {
 }
 
 #[test]
+fn p256_binding_checks_both_coordinates_in_both_slots() {
+    let mut fixture = Fixture::new(pgp_cert_with_suite(CipherSuite::P256, false, false));
+    let other = pgp_cert_with_suite(CipherSuite::P256, false, false);
+    fixture.verify().unwrap();
+    for (index, slot) in [Slot::Sig, Slot::Dec].into_iter().enumerate() {
+        let (mut opposite_y, _) = key_material(&fixture.cert, slot);
+        let mut wrong_x = opposite_y.clone();
+        wrong_x[1] ^= 1;
+        // (X, p-Y) is another valid P-256 point with exactly the same X.
+        let prime: [u8; 32] = [
+            0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff,
+        ];
+        let mut borrow = 0i16;
+        for (byte, modulus) in opposite_y[33..].iter_mut().zip(prime).rev() {
+            let difference = i16::from(modulus) - i16::from(*byte) - borrow;
+            *byte = difference as u8;
+            borrow = i16::from(difference < 0);
+        }
+        let (other_key, _) = key_material(&other, slot);
+        for wrong_key in [wrong_x, opposite_y, other_key] {
+            let wrong = fixture.statement(
+                slot,
+                slot.common_name(),
+                wrong_key,
+                &[GENERATED],
+                slot.algorithm(),
+            );
+            let original = std::mem::replace(&mut fixture.statements[index], wrong);
+            assert!(fixture.verify().is_err());
+            fixture.statements[index] = original;
+        }
+    }
+}
+
+#[test]
+fn p256_rejects_wrong_curve_and_compressed_point_with_valid_signatures() {
+    let mut fixture = Fixture::new(pgp_cert_with_suite(CipherSuite::P256, false, false));
+    fixture.verify().unwrap();
+    for (index, slot) in [Slot::Sig, Slot::Dec].into_iter().enumerate() {
+        let original = fixture.statements[index].clone();
+        let (_, parsed) = parse_x509_certificate(&original).unwrap();
+        let spki_offset = parsed.public_key().raw.as_ptr() as usize - original.as_ptr() as usize;
+        // Keep the complete point, but name prime192v1 instead of prime256v1.
+        fixture.statements[index][spki_offset + 22] = 1;
+        let mut wrong_curve = fixture.statements[index].clone();
+        fixture.resign(&mut wrong_curve);
+        fixture.statements[index] = wrong_curve;
+        assert!(fixture.verify().is_err());
+
+        let (key, _) = key_material(&fixture.cert, slot);
+        let mut compressed = vec![2 | (key[64] & 1)];
+        compressed.extend_from_slice(&key[1..33]);
+        fixture.statements[index] = fixture.statement(
+            slot,
+            slot.common_name(),
+            compressed,
+            &[GENERATED],
+            slot.algorithm(),
+        );
+        assert!(fixture.verify().is_err());
+        fixture.statements[index] = original;
+    }
+}
+
+#[test]
 fn attested_kp_cert_rejects_valid_chain_from_untrusted_issuer() {
-    let fixture = Fixture::new(pgp_cert(false, false));
+    let fixture = Fixture::new(pgp_cert_with_suite(CipherSuite::P256, false, false));
     fixture.verify().unwrap();
 
     let error = crate::guardian::AttestedKpCert::new(

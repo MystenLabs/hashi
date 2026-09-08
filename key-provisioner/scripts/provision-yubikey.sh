@@ -54,6 +54,27 @@ command_package() {
   esac
 }
 
+LEGACY=false
+ALGORITHM=curve25519
+PROFILE="Ed25519 signing and X25519 decryption"
+for argument in "$@"; do
+  case "$argument" in
+    --legacy)
+      LEGACY=true
+      ALGORITHM=nistp256
+      PROFILE="NIST P-256 signing and decryption"
+      ;;
+    -h | --help)
+      printf '%s\n' \
+        "Usage: $0 [--legacy]" \
+        "Default: firmware 5.7+, Ed25519 signing and X25519 decryption." \
+        "--legacy: firmware 5.2.3+, P-256 signing and decryption; older ECDSA has known physical-attack risks."
+      exit 0
+      ;;
+    *) die "Unknown argument: $argument. Usage: $0 [--legacy]" ;;
+  esac
+done
+
 # Fail before prompting the user or making any changes to the YubiKey.
 required_commands=(cmp gpg gpgconf mkdir oct rm ykman)
 missing_commands=()
@@ -86,12 +107,11 @@ run_or_die "GnuPG could not start the agent. No YubiKey changes were made." \
 
 say "Guardian key provisioner YubiKey setup"
 printf '%s\n' \
-  "This script changes the OpenPGP PINs, generates new keys on one YubiKey," \
+  "This script changes the OpenPGP PINs and generates new SIG/DEC keys on one YubiKey," \
   "exports public attestation artifacts, requires a physical touch for signing and decryption," \
   "and tests both operations." \
-  "Supported provisioning requires YubiKey firmware 5.7 or later and the original" \
-  "factory Yubico OpenPGP ATT private key and certificate. Never import or replace ATT."
-warn "Generating keys overwrites any keys already in the OpenPGP slots. Overwritten keys cannot be recovered."
+  "The original factory Yubico OpenPGP ATT key and certificate must remain intact."
+warn "Generating keys overwrites existing SIG and DEC keys irreversibly. The Authentication slot is left unchanged."
 warn "Creating attestations overwrites the SIG and DEC cardholder certificate slots, not their private keys."
 warn "Unplug every YubiKey except the new device you are setting up."
 pause "After only the target YubiKey is connected, press Enter to inspect it. "
@@ -111,6 +131,41 @@ if ((${#yubikeys[@]} != 1)); then
   die "Expected exactly one connected YubiKey; found ${#yubikeys[@]}."
 fi
 
+if ! yubikey_info="$(ykman info)"; then
+  die "Could not read the YubiKey firmware version."
+fi
+FIRMWARE_VERSION=""
+while IFS= read -r line; do
+  if [[ "$line" =~ ^Firmware[[:space:]]version:[[:space:]]+([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})[[:space:]]*$ ]]; then
+    FIRMWARE_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+    firmware_major=$((10#${BASH_REMATCH[1]}))
+    firmware_minor=$((10#${BASH_REMATCH[2]}))
+    firmware_patch=$((10#${BASH_REMATCH[3]}))
+    break
+  fi
+done <<< "$yubikey_info"
+[[ -n "$FIRMWARE_VERSION" ]] || die "YubiKey Manager did not report a numeric firmware version."
+
+if [[ "$LEGACY" == true ]]; then
+  ((firmware_major > 5 || (firmware_major == 5 && (firmware_minor > 2 || (firmware_minor == 2 && firmware_patch >= 3))))) \
+    || die "Legacy provisioning requires firmware 5.2.3 or later."
+  if ((firmware_major == 5 && firmware_minor < 7)); then
+    warn "Firmware $FIRMWARE_VERSION is affected by YSA-2024-03: ECDSA signing keys can be recovered with physical access and specialized equipment."
+    printf '%s\n' "https://www.yubico.com/support/security-advisories/ysa-2024-03/"
+    if ! IFS= read -r -p "Accept this risk and use legacy P-256? Type y/yes to continue: " legacy_confirmation; then
+      die "No input received; legacy provisioning was not approved."
+    fi
+    case "$legacy_confirmation" in
+      y | yes) ;;
+      *) die "Legacy provisioning was not approved." ;;
+    esac
+  fi
+else
+  ((firmware_major > 5 || (firmware_major == 5 && firmware_minor >= 7))) \
+    || die "The default profile requires firmware 5.7 or later (found $FIRMWARE_VERSION). Use --legacy only if you accept its security tradeoff."
+fi
+printf '\nSelected profile: %s (firmware %s)\n' "$PROFILE" "$FIRMWARE_VERSION"
+
 if ! card_output="$(oct list --idents-only)"; then
   die "oct could not list OpenPGP cards. Check the USB connection and smart-card permissions."
 fi
@@ -126,7 +181,7 @@ fi
 
 CARD="${cards[0]}"
 printf '\nConnected YubiKey: %s\nOpenPGP card identifier: %s\n' "${yubikeys[0]}" "$CARD"
-printf '%s\n' "Before continuing, confirm firmware 5.7+ and that the factory Yubico ATT key and certificate are intact."
+printf '%s\n' "Confirm the factory Yubico ATT key and certificate are intact."
 pause "Confirm this is the labeled device you intend to provision, then press Enter. "
 
 # Replace the factory PINs before creating keys. The User PIN authorizes normal
@@ -142,13 +197,13 @@ run_or_die "Changing the User PIN failed. The card has not been fully provisione
 run_or_die "Changing the Admin PIN failed. The card has not been fully provisioned." \
   oct pin --card "$CARD" set-admin
 
-# Use structured status and fail closed if any slot's fingerprint is unreadable.
-say "Check the key slots"
+# Check only the slots that generation will overwrite; AUT is left untouched.
+say "Check the SIG and DEC key slots"
 if ! slot_status="$(oct --output-format json --output-version 0.11.0 status --card "$CARD")"; then
   die "oct could not read the OpenPGP card status."
 fi
 if ! occupied_slots="$(jq -er '
-  [.signature_key, .decryption_key, .authentication_key]
+  [.signature_key, .decryption_key]
   | if all(.[];
       type == "object" and has("fingerprint")
       and (.fingerprint == null or (.fingerprint | type == "string")))
@@ -156,21 +211,21 @@ if ! occupied_slots="$(jq -er '
     else error("Missing or invalid key-slot fingerprints")
     end
 ' <<< "$slot_status")"; then
-  die "Could not determine whether all three key slots are empty; stopping before key generation."
+  die "Could not determine whether the SIG and DEC slots are empty; stopping before key generation."
 fi
 case "$occupied_slots" in
   empty)
-    printf 'All three key slots are empty; continuing automatically.\n'
+    printf 'SIG and DEC slots are empty; continuing automatically.\n'
     ;;
   occupied)
     run_or_die "oct could not display the existing keys." oct status --card "$CARD"
     printf '\n%s\n' \
       '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' \
-      '!!! DANGER: THIS YUBIKEY ALREADY CONTAINS PRIVATE KEYS !!!' \
-      '!!! CONTINUING WILL PERMANENTLY OVERWRITE THE EXISTING KEYS. !!!' \
+      '!!! THIS YUBIKEY ALREADY CONTAINS SIG OR DEC PRIVATE KEYS. !!!' \
+      '!!! CONTINUING WILL PERMANENTLY OVERWRITE THOSE KEYS. !!!' \
       '!!! THEY CANNOT BE RECOVERED. DATA ENCRYPTED TO THEM MAY BE LOST. !!!' \
       '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' >&2
-    if ! IFS= read -r -p "Are you sure you want to overwrite existing keys? Type y/yes to continue: " overwrite_confirmation; then
+    if ! IFS= read -r -p "Overwrite existing SIG/DEC keys? Type y/yes to continue: " overwrite_confirmation; then
       die "No input received; stopping before key generation."
     fi
     case "$overwrite_confirmation" in
@@ -233,15 +288,15 @@ done
 # oct creates all private key material on the card and exports only the public
 # OpenPGP certificate to the requested file. oct requires a --userid field;
 # an empty value supports GPG import without adding a named certificate identity.
-printf '\nThe script will now generate signing, decryption, and authentication keys on:\n  %s\n' "$CARD"
+printf '\nThe script will now generate %s keys, leaving Authentication unchanged, on:\n  %s\n' "$PROFILE" "$CARD"
 printf 'The armored public certificate will be written to:\n  %s\n' "$OUTPUT_FILE"
 printf 'The PEM attestation artifacts will be written to:\n  %s\n  %s\n  %s\n' \
   "$ATTESTATION_DEVICE_FILE" "$ATTESTATION_SIG_FILE" "$ATTESTATION_DEC_FILE"
-warn "This key generation step cannot be undone."
+warn "This SIG/DEC key generation step cannot be undone."
 pause
 printf 'Tap your YubiKey whenever its indicator flashes during key generation and certificate signing.\n'
 run_or_die "Key generation failed. Inspect the card status before attempting any recovery." \
-  oct admin --card "$CARD" generate --userid '' --output "$OUTPUT_FILE" curve25519
+  oct admin --card "$CARD" generate --userid '' --output "$OUTPUT_FILE" --no-aut "$ALGORITHM"
 [[ -s "$OUTPUT_FILE" ]] || die "oct reported success but did not create a non-empty public certificate. Inspect the card; do not rerun key generation to recover missing public artifacts."
 
 # Require a new touch for every signing and decryption operation, then read both
