@@ -29,6 +29,7 @@ aws-credential-types.workspace = true
 aws-smithy-mocks = { version = "0.1", optional = true }
 
 [dev-dependencies]
+hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 aws-sdk-s3 = { version = "1.12.0", features = ["test-util"] }
 aws-smithy-mocks = "0.1"
 tokio = { workspace = true, features = ["test-util"] }
@@ -39,4 +40,4 @@ tokio = { workspace = true, features = ["test-util"] }
 # off-enclave verifier so it accepts the mock document.
 non-enclave-dev = ["hashi-types/non-enclave-dev"]
 # Exposes `test_utils` to external crates.
-test-utils = ["dep:aws-smithy-mocks", "aws-sdk-s3/test-util"]
+test-utils = ["dep:aws-smithy-mocks", "aws-sdk-s3/test-util", "hashi-types/test-utils"]

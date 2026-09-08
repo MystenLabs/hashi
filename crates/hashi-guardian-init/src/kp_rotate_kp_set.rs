@@ -13,6 +13,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_guardian_init::load_attested_kp_cert;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::KpSigned;
@@ -24,7 +25,6 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::verified_ceremony_guardian_info;
 use crate::kp_roster::decrypt_kp_share;
-use crate::kp_roster::load_kp_cert;
 use crate::submission;
 
 pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
@@ -49,7 +49,8 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
     let new_params = new_kp_set.params()?;
-    let kp_cert = load_kp_cert(cfg.require_kp_pgp_cert_path("key-provisioner rotate-kp-set")?)?;
+    let kp_cert =
+        load_attested_kp_cert(cfg.require_kp_pgp_cert_path("key-provisioner rotate-kp-set")?)?;
     ensure!(
         certs_roster
             .cert_for_fingerprint(&kp_cert.fingerprint())

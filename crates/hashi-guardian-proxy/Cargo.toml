@@ -29,5 +29,6 @@ reqwest.workspace = true
 snap.workspace = true
 
 [dev-dependencies]
+hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream.workspace = true

@@ -61,13 +61,12 @@ mod tests {
     use crate::mock_logger_capturing;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use crate::test_utils::MockKpSecretKeys;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
     use hashi_types::guardian::SessionID;
     use hashi_types::guardian::SetupNewKeyRequest;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
 
     const TEST_N: usize = 3;
     const TEST_T: usize = 2;
@@ -198,8 +197,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_unrostered_signer() {
         let context = setup_context().await;
-        let (public, secret) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(public).unwrap();
+        let (cert, secret) = mock_attested_kp_keypair();
         let request = CeremonyConfirmationRequest::new(
             context.enclave.s3_session_id(),
             context.ceremony_digest,

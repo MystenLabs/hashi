@@ -4,10 +4,10 @@
 use super::primitives::*;
 use crate::guardian::errors::GuardianError::InvalidInputs;
 use crate::guardian::errors::GuardianResult;
+use crate::pgp::AttestedPgpKeys;
 use crate::pgp::Fingerprint;
 use crate::pgp::PgpPublicCert;
-use crate::pgp::cert_owns_key_handle;
-use crate::pgp::encrypt_armored;
+use crate::pgp::encrypt_armored_for_key;
 use crate::pgp::pgp_message_recipients;
 use k256::Scalar;
 use k256::Secp256k1;
@@ -18,6 +18,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use tracing::info;
+
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "encryption/attested_test_utils.rs"]
+pub(crate) mod attested_test_utils;
 
 /// A key-provisioner's PGP fingerprint as bare uppercase hex — the string
 /// form persisted in ceremony artifacts. For comparing fingerprints, prefer
@@ -32,14 +36,15 @@ pub type KPFingerprint = String;
 /// verifier does not enforce X.509 dates, revocation, touch, or freshness, or
 /// establish current possession of either private key.
 ///
-/// The fields are immutable and this type deliberately does not implement
-/// `Deserialize`; callers must pass through [`Self::new`] to validate a bundle.
-#[derive(Debug, Clone)]
+/// Fields are immutable; deserialization repeats the pinned attestation checks.
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct AttestedKpCert {
     cert: PgpPublicCert,
     device_pem: Vec<u8>,
     sig_pem: Vec<u8>,
     dec_pem: Vec<u8>,
+    #[serde(skip)]
+    keys: AttestedPgpKeys,
 }
 
 impl AttestedKpCert {
@@ -50,19 +55,36 @@ impl AttestedKpCert {
         sig_pem: Vec<u8>,
         dec_pem: Vec<u8>,
     ) -> GuardianResult<Self> {
-        crate::pgp::verify_yubikey_attestations(&cert, &device_pem, &sig_pem, &dec_pem).map_err(
-            |err| InvalidInputs(format!("invalid KP certificate attestations: {err:#}")),
-        )?;
+        let keys = crate::pgp::verify_yubikey_attestations_and_keys(
+            &cert,
+            &device_pem,
+            &sig_pem,
+            &dec_pem,
+        )
+        .map_err(|err| InvalidInputs(format!("invalid KP certificate attestations: {err:#}")))?;
         Ok(Self {
             cert,
             device_pem,
             sig_pem,
             dec_pem,
+            keys,
         })
     }
 
     pub fn cert(&self) -> &PgpPublicCert {
         &self.cert
+    }
+
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.cert.fingerprint()
+    }
+
+    pub(crate) fn signing_fingerprint(&self) -> &Fingerprint {
+        &self.keys.signing
+    }
+
+    pub(crate) fn encryption_fingerprint(&self) -> &Fingerprint {
+        &self.keys.encryption
     }
 
     pub fn device_pem(&self) -> &[u8] {
@@ -76,6 +98,33 @@ impl AttestedKpCert {
     pub fn dec_pem(&self) -> &[u8] {
         &self.dec_pem
     }
+
+    pub fn into_parts(self) -> (PgpPublicCert, Vec<u8>, Vec<u8>, Vec<u8>) {
+        (self.cert, self.device_pem, self.sig_pem, self.dec_pem)
+    }
+}
+
+impl<'de> Deserialize<'de> for AttestedKpCert {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Bundle {
+            cert: PgpPublicCert,
+            device_pem: Vec<u8>,
+            sig_pem: Vec<u8>,
+            dec_pem: Vec<u8>,
+        }
+        let bundle = Bundle::deserialize(deserializer)?;
+        Self::new(
+            bundle.cert,
+            bundle.device_pem,
+            bundle.sig_pem,
+            bundle.dec_pem,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 /// The ordered KP certificate roster for a sharing instance.
@@ -84,7 +133,7 @@ impl AttestedKpCert {
 /// preserves caller-supplied order and requires every certificate fingerprint
 /// to occur exactly once.
 #[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct KpCertRoster(Vec<PgpPublicCert>);
+pub struct KpCertRoster(Vec<AttestedKpCert>);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GuardianEncryptedShare {
@@ -106,7 +155,7 @@ pub struct KpEncryptedShare {
 pub struct KpEncryptedShareRoster(Vec<KpEncryptedShare>);
 
 impl KpCertRoster {
-    pub fn new(kp_certs: Vec<PgpPublicCert>) -> GuardianResult<Self> {
+    pub fn new(kp_certs: Vec<AttestedKpCert>) -> GuardianResult<Self> {
         let mut seen = HashSet::with_capacity(kp_certs.len());
         for cert in &kp_certs {
             let fingerprint = cert.fingerprint();
@@ -124,15 +173,15 @@ impl KpCertRoster {
         self.0.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &PgpPublicCert> {
+    pub fn iter(&self) -> impl Iterator<Item = &AttestedKpCert> {
         self.0.iter()
     }
 
-    pub fn cert_for_share(&self, share_id: ShareID) -> Option<&PgpPublicCert> {
+    pub fn cert_for_share(&self, share_id: ShareID) -> Option<&AttestedKpCert> {
         self.0.get(usize::from(share_id.get()) - 1)
     }
 
-    pub fn cert_for_fingerprint(&self, fingerprint: &Fingerprint) -> Option<&PgpPublicCert> {
+    pub fn cert_for_fingerprint(&self, fingerprint: &Fingerprint) -> Option<&AttestedKpCert> {
         self.0
             .iter()
             .find(|cert| cert.fingerprint() == *fingerprint)
@@ -145,7 +194,7 @@ impl KpCertRoster {
             .collect()
     }
 
-    pub fn into_vec(self) -> Vec<PgpPublicCert> {
+    pub fn into_vec(self) -> Vec<AttestedKpCert> {
         self.0
     }
 
@@ -154,7 +203,7 @@ impl KpCertRoster {
     pub fn replace_cert(
         &self,
         current_fingerprint: &Fingerprint,
-        new_cert: PgpPublicCert,
+        new_cert: AttestedKpCert,
     ) -> GuardianResult<Self> {
         let new_fingerprint = new_cert.fingerprint();
         if new_fingerprint == *current_fingerprint {
@@ -180,9 +229,9 @@ impl KpCertRoster {
 }
 
 impl KpEncryptedShare {
-    /// Verify that the recorded recipient is `cert` and that every OpenPGP
-    /// recipient key in the ciphertext belongs to that certificate.
-    pub fn verify_recipient(&self, cert: &PgpPublicCert) -> GuardianResult<()> {
+    /// Verify the recorded certificate identity and require every OpenPGP
+    /// recipient to identify its attested encryption key.
+    pub fn verify_recipient(&self, cert: &AttestedKpCert) -> GuardianResult<()> {
         let expected_fingerprint = cert.fingerprint().to_hex();
         if self.recipient_fingerprint != expected_fingerprint {
             return Err(InvalidInputs(format!(
@@ -379,7 +428,7 @@ fn verify_pgp_ciphertext_recipient(
     share_id: ShareID,
     recipient_fingerprint: &str,
     ciphertext: &str,
-    expected_cert: &PgpPublicCert,
+    expected_cert: &AttestedKpCert,
 ) -> GuardianResult<()> {
     let recipients = pgp_message_recipients(ciphertext).map_err(|e| {
         InvalidInputs(format!(
@@ -393,11 +442,13 @@ fn verify_pgp_ciphertext_recipient(
             share_id.get()
         )));
     }
+    let expected_key =
+        sequoia_openpgp::KeyHandle::from(expected_cert.encryption_fingerprint().clone());
     for handle in &recipients {
-        if !cert_owns_key_handle(expected_cert, handle) {
+        if !expected_key.aliases(handle) {
             return Err(InvalidInputs(format!(
-                "share id {} (keyed by {}) is encrypted to key {handle}, which is not in that \
-                 cert",
+                "share id {} (keyed by {}) is encrypted to key {handle}, which is not the \
+                 attested encryption key",
                 share_id.get(),
                 recipient_fingerprint
             )));
@@ -465,9 +516,13 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
 }
 
 /// Encrypt a share for delivery to a key provisioner using OpenPGP ASCII armor.
-pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> String {
-    encrypt_armored(&share.value.to_bytes(), cert)
-        .expect("PgpPublicCert validation ensures OpenPGP encryption works")
+pub fn encrypt_share_for_provisioner(share: &Share, cert: &AttestedKpCert) -> String {
+    encrypt_armored_for_key(
+        &share.value.to_bytes(),
+        cert.cert(),
+        cert.encryption_fingerprint(),
+    )
+    .expect("AttestedKpCert validation ensures the attested encryption key is usable")
 }
 
 /// Decrypt an encrypted share with optional AAD
@@ -523,28 +578,50 @@ pub fn decrypt_verify_shares(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guardian::test_utils::mock_attested_kp_keypair;
     use crate::pgp::decrypt_with_secret_key;
-    use crate::pgp::test_utils::mock_pgp_keypair;
     use k256::SecretKey;
     use std::io::Cursor;
     use std::io::Read;
     use std::num::NonZeroU16;
 
-    fn cert() -> PgpPublicCert {
-        let (public, _) = mock_pgp_keypair();
-        PgpPublicCert::new(public).unwrap()
+    fn cert() -> AttestedKpCert {
+        mock_attested_kp_keypair().0
     }
 
-    fn cert_and_secret() -> (PgpPublicCert, String) {
-        let (public, secret) = mock_pgp_keypair();
-        (PgpPublicCert::new(public).unwrap(), secret)
+    fn cert_and_secret() -> (AttestedKpCert, String) {
+        mock_attested_kp_keypair()
     }
 
     #[test]
     fn attested_kp_cert_rejects_malformed_proof() {
         let proof = b"not a PEM certificate".to_vec();
-        let result = AttestedKpCert::new(cert(), proof.clone(), proof.clone(), proof);
+        let (public, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        let result = AttestedKpCert::new(
+            PgpPublicCert::new(public).unwrap(),
+            proof.clone(),
+            proof.clone(),
+            proof,
+        );
         assert!(matches!(result, Err(InvalidInputs(_))));
+    }
+
+    #[test]
+    fn attested_kp_cert_deserialization_rejects_test_issuer() {
+        let cert = cert();
+        assert!(
+            AttestedKpCert::new(
+                cert.cert().clone(),
+                cert.device_pem().to_vec(),
+                cert.sig_pem().to_vec(),
+                cert.dec_pem().to_vec(),
+            )
+            .is_err()
+        );
+        let json = serde_json::to_vec(&cert).unwrap();
+        assert!(serde_json::from_slice::<AttestedKpCert>(&json).is_err());
+        let bcs = bcs::to_bytes(&cert).unwrap();
+        assert!(bcs::from_bytes::<AttestedKpCert>(&bcs).is_err());
     }
 
     #[test]
@@ -832,10 +909,7 @@ mod tests {
         let err = wrong_ciphertext_recipient
             .verify_recipient(&other)
             .expect_err("ciphertext encrypted to another cert must be rejected");
-        assert!(
-            format!("{err}").contains("which is not in that cert"),
-            "{err}"
-        );
+        assert!(matches!(err, InvalidInputs(_)));
         assert!(
             KpEncryptedShareRoster::new(vec![wrong_ciphertext_recipient])
                 .unwrap()
