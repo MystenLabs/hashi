@@ -175,12 +175,32 @@ Examples include:
 - A bad pending committee was formed from stale or incorrect validator
   metadata, such as invalid endpoint, TLS, BLS, or encryption key updates.
 
-In these cases, governance can create and execute an
-`abort_reconfig::AbortReconfig` proposal for the specific pending epoch being
-aborted. The proposal is voted on by the current committed committee. When
-quorum is reached, execution re-checks that the same epoch is still pending,
-clears the pending epoch change, removes the pending committee, and emits the
-standard `ProposalExecuted<AbortReconfig>` with the aborted epoch in the
-proposal data. The current Hashi epoch and MPC public key remain unchanged.
-Normal operations can then resume under the last committed committee, and a
-later Sui epoch notification can trigger a fresh `start_reconfig`.
+In these cases, anyone can call the `reconfig::abort_reconfig` entry function
+directly. It is deliberately not a governance proposal and takes no vote: the
+committees that could vote on one are exactly the parties a stalled
+reconfiguration puts in doubt. The pending committee may never finish DKG or
+key rotation, and a proposal gated on the outgoing committee's quorum can be
+stranded by the same offline stake that stalled the reconfiguration. Instead
+the abort is bound to two objective onchain conditions, both checked in the
+same transaction:
+
+1. A reconfiguration is in progress, i.e. a pending epoch change exists.
+2. The pending epoch is not Sui's current epoch. `start_reconfig` pins the
+   pending committee's epoch to Sui's epoch at formation time, so while the
+   two still match the reconfiguration is inside its window and may
+   legitimately complete. Only once Sui's epoch has moved past the target is
+   the reconfiguration presumed stuck and abortable.
+
+When both hold, the call clears the pending epoch change, removes the pending
+committee (discarding any committee handoff certificate it had collected), and
+emits `ReconfigAborted` with the aborted epoch. The current Hashi epoch,
+committee, and MPC public key remain unchanged. Normal operations resume under
+the last committed committee, and because the Hashi epoch now lags Sui's, the
+next Sui epoch notification triggers a fresh `start_reconfig` from the
+then-current validator set. A race between a late `end_reconfig` and an abort
+is benign: whichever transaction lands first wins, and the other fails with
+`ENotReconfiguring`.
+
+Operators trigger the abort with `hashi committee abort-reconfig`, which
+refuses up front when nothing is pending or the pending epoch is still Sui's
+current epoch.

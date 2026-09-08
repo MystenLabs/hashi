@@ -20,7 +20,6 @@ fn non_upgrade_payloads_are_refused() {
         ProposalType::EnableVersion,
         ProposalType::DisableVersion,
         ProposalType::EmergencyPause,
-        ProposalType::AbortReconfig,
         ProposalType::UpdateGuardian,
         ProposalType::IgnoreMember,
         ProposalType::Unknown("something_new".to_string()),

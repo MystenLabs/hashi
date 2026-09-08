@@ -829,7 +829,6 @@ hashi proposal create upgrade [--package-path <path> | --digest <hex>] [-m key=v
 hashi proposal create upgrade [--package-path <path> | --digest <hex> [--allow-unverified-exclusive]] --exclusive <true|false> [-m key=value]
 hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
-hashi proposal create abort-reconfig [--epoch <N>] [-m key=value]
 hashi proposal create update-guardian [--url <url>] [--public-key <hex>] [-m key=value]
 hashi proposal create emergency-pause [--unpause] [-m key=value]
 ```
@@ -908,7 +907,6 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | **Upgrade** | 2/3 | Publish a new package version with an explicit version-retirement policy | `--package-path` or `--digest`; required boolean `--exclusive` value; `--digest` with `--exclusive true` additionally requires `--allow-unverified-exclusive` |
 | **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
 | **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
-| **AbortReconfig** | 2/3 | Abort a stuck reconfiguration | `--epoch` of pending reconfig |
 | **UpdateGuardian** | 2/3 | Change guardian endpoint and key | `--url`, `--public-key` |
 | **EmergencyPause** | 5% to pause, 2/3 to unpause | Quickly pause or resume the protocol in an emergency | n/a |
 
@@ -1046,7 +1044,7 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 
 | Condition | Severity | Action |
 |-----------|----------|--------|
-| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG/rotation errors. Might need `AbortReconfig`. |
+| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG/rotation errors. Once the reconfiguration has overrun its Sui epoch, `hashi committee abort-reconfig` clears it (section 9.3). |
 | `hashi_presig_pool_remaining == 0` | Critical | Node cannot sign. Check reconfig status and MPC logs. |
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
@@ -1081,14 +1079,13 @@ On every Sui epoch change, the Hashi committee reconfigures:
 
 ### 9.3 Stuck reconfigurations
 
-If reconfiguration stalls (offline validators, misconfigured endpoints, protocol failures), the committee can abort and retry:
+If reconfiguration stalls (offline validators, misconfigured endpoints, protocol failures), anyone can abort it once it has overrun its Sui epoch. No proposal or vote is involved:
 
 ```bash
-hashi proposal create abort-reconfig --epoch <pending-epoch>
-hashi proposal vote 0x<proposal-id> --execute
+hashi committee abort-reconfig
 ```
 
-After execution, the previous committee resumes; the system can trigger a new reconfiguration on the next Sui epoch boundary. Common causes: too much registered stake offline/unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
+The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and must be left to complete. After the abort, the previous committee resumes and the nodes start a new reconfiguration on the next Sui epoch boundary. Common causes: too much registered stake offline/unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
 
 ---
 

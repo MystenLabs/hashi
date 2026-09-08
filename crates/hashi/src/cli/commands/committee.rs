@@ -10,8 +10,12 @@ use sui_sdk_types::Address;
 use tabled::Table;
 use tabled::Tabled;
 
+use crate::cli::TxOptions;
 use crate::cli::client::HashiClient;
+use crate::cli::commands::proposal::execute_or_simulate;
+use crate::cli::commands::proposal::prompt_continue;
 use crate::cli::config::CliConfig;
+use crate::cli::print_detail;
 use crate::cli::print_info;
 use crate::cli::print_warning;
 use crate::cli::types::display;
@@ -170,3 +174,57 @@ pub async fn show_epoch(config: &CliConfig) -> Result<()> {
 
     Ok(())
 }
+
+/// Refuse an abort the chain would reject, from the scraped pending epoch and
+/// Sui's current epoch: nothing pending (`reconfig::ENotReconfiguring`), or a
+/// pending epoch that is still Sui's current epoch
+/// (`committee_set::EPendingEpochStillCurrent`). Returns the epoch the abort
+/// would tear down.
+pub fn refuse_unabortable_reconfig(pending_epoch: Option<u64>, sui_epoch: u64) -> Result<u64> {
+    let Some(pending_epoch) = pending_epoch else {
+        anyhow::bail!("no reconfiguration is in progress; there is nothing to abort");
+    };
+    anyhow::ensure!(
+        pending_epoch != sui_epoch,
+        "the pending reconfiguration targets Sui's current epoch ({sui_epoch}), so it may still \
+         complete; the chain refuses the abort until Sui's epoch moves past it"
+    );
+    Ok(pending_epoch)
+}
+
+/// Abort a reconfiguration that has overrun its Sui epoch
+/// (`reconfig::abort_reconfig`). Permissionless: any funded signer may send
+/// it, and no vote is involved.
+pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
+    let mut client = HashiClient::new(config).await?;
+    let sui_epoch = client.fetch_sui_epoch().await?;
+    let pending_epoch =
+        refuse_unabortable_reconfig(client.onchain_state().pending_epoch_change(), sui_epoch)?;
+
+    print_detail(&format!(
+        "\n{}",
+        "Aborting the pending reconfiguration:".bold()
+    ));
+    print_detail(&format!("  Pending Hashi epoch: {pending_epoch}"));
+    print_detail(&format!("  Current Sui epoch:   {sui_epoch}"));
+    print_detail(&format!(
+        "  Effect: the pending committee is discarded. Hashi stays at epoch {} under its current \
+         committee, and a fresh reconfiguration can then form a new committee from the current \
+         validator set.",
+        client.fetch_epoch()
+    ));
+
+    if !prompt_continue("abort the pending reconfiguration", tx_opts).await? {
+        print_warning("Aborted.");
+        return Ok(());
+    }
+
+    let tx = client.build_abort_reconfig_transaction()?;
+    print_info("Transaction: reconfig::abort_reconfig");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "committee_tests.rs"]
+mod tests;

@@ -7,7 +7,6 @@
 module hashi::test_utils;
 
 use hashi::{
-    abort_reconfig,
     add_config,
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
@@ -376,15 +375,4 @@ public fun create_ignore_member_proposal(
         clock,
         ctx,
     )
-}
-
-/// Creates an abort reconfig proposal and returns its ID
-public fun create_abort_reconfig_proposal(
-    hashi: &mut Hashi,
-    validator_address: address,
-    epoch: u64,
-    clock: &Clock,
-    ctx: &mut TxContext,
-): ID {
-    abort_reconfig::propose(hashi, validator_address, epoch, vec_map::empty(), clock, ctx)
 }

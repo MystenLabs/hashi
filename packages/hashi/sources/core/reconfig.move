@@ -8,7 +8,9 @@
 /// `end_reconfig` verifies the new committee's certificate over the MPC
 /// threshold public key and activates the epoch. The initial (genesis)
 /// reconfig skips the handoff — no prior committee exists — and is gated on
-/// the publisher's launch switch (`hashi::finish_publish`).
+/// the publisher's launch switch (`hashi::finish_publish`). `abort_reconfig`
+/// is the permissionless escape hatch for a reconfiguration that has overrun
+/// its Sui epoch without reaching `end_reconfig`.
 module hashi::reconfig;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
@@ -52,6 +54,11 @@ public struct ReconfigEnded has copy, drop {
     epoch: u64,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
+}
+
+public struct ReconfigAborted has copy, drop {
+    /// The pending epoch that was torn down; the current epoch is unchanged.
+    epoch: u64,
 }
 
 // ~~~~~~~ Entry Functions ~~~~~~~
@@ -138,6 +145,28 @@ entry fun submit_committee_handoff(
     self.committee_set_mut().set_pending_committee_handoff_cert(committee_handoff_cert);
 }
 
+/// Abort a stuck reconfiguration. Callable by anyone, with no vote: the
+/// only conditions are that a reconfiguration is in flight and that its
+/// target epoch is no longer Sui's current epoch (see
+/// `committee_set::abort_reconfig` for why that is the safe boundary).
+///
+/// Deliberately not a governance proposal. The committees that could vote on
+/// one are exactly the parties a stalled reconfiguration puts in doubt: the
+/// pending committee may never finish DKG or key rotation, and a proposal
+/// gated on the outgoing committee's quorum can be stranded by the same
+/// offline stake that stalled the reconfiguration. Binding the abort to an
+/// objective on-chain fact instead keeps the escape hatch usable precisely
+/// when it is needed.
+///
+/// Races with a late `end_reconfig` are benign: whichever transaction lands
+/// first wins, and the other aborts with `ENotReconfiguring`.
+entry fun abort_reconfig(self: &mut Hashi, ctx: &TxContext) {
+    self.versioning().assert_version_enabled();
+    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    let epoch = self.committee_set_mut().abort_reconfig(ctx);
+    sui::event::emit(ReconfigAborted { epoch });
+}
+
 // ~~~~~~~ Package Functions ~~~~~~~
 
 /// At genesis bootstrap (no MPC key yet) the initial committee may only form
@@ -178,6 +207,21 @@ public fun submit_committee_handoff_for_testing(
     ctx: &TxContext,
 ) {
     submit_committee_handoff(self, committee_handoff_cert, ctx)
+}
+
+#[test_only]
+/// Forwards to `abort_reconfig` so it can be exercised from
+/// `hashi::reconfig_tests` (non-public entry functions are not callable from
+/// other modules).
+public fun abort_reconfig_for_testing(self: &mut Hashi, ctx: &TxContext) {
+    abort_reconfig(self, ctx)
+}
+
+#[test_only]
+/// Constructs a `ReconfigAborted` (private fields) so tests can assert the
+/// emitted payload.
+public fun reconfig_aborted_for_testing(epoch: u64): ReconfigAborted {
+    ReconfigAborted { epoch }
 }
 
 #[test_only]

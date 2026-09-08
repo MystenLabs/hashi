@@ -68,10 +68,6 @@ pub enum CreateProposalParams {
         version: u64,
         metadata: Vec<(String, String)>,
     },
-    AbortReconfig {
-        epoch: u64,
-        metadata: Vec<(String, String)>,
-    },
     UpdateGuardian {
         url: String,
         metadata: Vec<(String, String)>,
@@ -350,6 +346,23 @@ impl HashiClient {
             .context("no package versions known on-chain")
     }
 
+    /// Sui's current epoch, from the fullnode. Distinct from `fetch_epoch`
+    /// (the Hashi epoch): the two differ exactly while a reconfiguration is
+    /// pending or overdue, which is what `reconfig::abort_reconfig` keys on.
+    pub async fn fetch_sui_epoch(&self) -> Result<u64> {
+        use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+
+        let info = self
+            .onchain_state
+            .client()
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await
+            .context("fetching Sui's current epoch")?
+            .into_inner();
+        Ok(info.epoch())
+    }
+
     /// Fetch current epoch from on-chain state
     pub fn fetch_epoch(&self) -> u64 {
         self.onchain_state.epoch()
@@ -484,11 +497,6 @@ impl HashiClient {
                     ProposalType::EmergencyPause => {
                         let p: move_types::Proposal<move_types::EmergencyPause> =
                             bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
-                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                    }
-                    ProposalType::AbortReconfig => {
-                        let p: move_types::Proposal<move_types::AbortReconfig> =
-                            bcs::from_bytes(value_bytes).context("deserialize AbortReconfig")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
                     ProposalType::UpdateGuardian => {
@@ -723,7 +731,6 @@ impl HashiClient {
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
-            ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::UpdateGuardian => "update_guardian",
             ProposalType::IgnoreMember => "ignore_member",
             ProposalType::Upgrade => {
@@ -1002,24 +1009,6 @@ pub fn build_create_proposal_transaction(
                 ],
             );
         }
-        CreateProposalParams::AbortReconfig { epoch, metadata } => {
-            let epoch_arg = builder.pure(&epoch);
-            let metadata_arg = build_metadata(&mut builder, &metadata);
-            builder.move_call(
-                Function::new(
-                    call_package,
-                    Identifier::from_static("abort_reconfig"),
-                    Identifier::from_static("propose"),
-                ),
-                vec![
-                    hashi_arg,
-                    validator_address_arg,
-                    epoch_arg,
-                    metadata_arg,
-                    clock_arg,
-                ],
-            );
-        }
         CreateProposalParams::UpdateGuardian { url, metadata } => {
             let url_arg = builder.pure(&url);
             let metadata_arg = build_metadata(&mut builder, &metadata);
@@ -1258,6 +1247,29 @@ impl HashiClient {
         Ok(builder)
     }
 
+    /// Build a `reconfig::abort_reconfig` transaction — the permissionless
+    /// teardown of a reconfiguration that has overrun its Sui epoch. Latest
+    /// package (the rule for every entry an upgrade may introduce), fully
+    /// resolved shared input (see `build_create_proposal_transaction`).
+    pub fn build_abort_reconfig_transaction(&self) -> anyhow::Result<TransactionBuilder> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
+                .as_shared()
+                .with_mutable(true),
+        );
+        builder.move_call(
+            Function::new(
+                self.latest_package_id()?,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("abort_reconfig"),
+            ),
+            vec![hashi_arg],
+        );
+        Ok(builder)
+    }
+
     fn build_validator_lifecycle_transaction(
         &self,
         function: &'static str,
@@ -1397,7 +1409,6 @@ pub fn get_proposal_type_arg(
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
-        ProposalType::AbortReconfig => ("abort_reconfig", "AbortReconfig"),
         ProposalType::UpdateGuardian => ("update_guardian", "UpdateGuardian"),
         ProposalType::IgnoreMember => ("ignore_member", "IgnoreMember"),
         ProposalType::Unknown(s) => {

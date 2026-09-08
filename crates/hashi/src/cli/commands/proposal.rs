@@ -1504,36 +1504,6 @@ pub async fn create_disable_version_proposal(
     Ok(())
 }
 
-/// Create an abort reconfig proposal
-pub async fn create_abort_reconfig_proposal(
-    config: &CliConfig,
-    epoch: u64,
-    metadata: Vec<(String, String)>,
-    tx_opts: &TxOptions,
-) -> Result<()> {
-    print_detail(&format!("\n{}", "Creating Abort Reconfig Proposal:".bold()));
-    print_info(&format!("Target epoch: {epoch}"));
-    print_metadata(&metadata);
-
-    let mut client = HashiClient::new(config).await?;
-    print_acting_validator(&client)?;
-
-    if !prompt_continue("create this abort reconfig proposal", tx_opts).await? {
-        crate::cli::print_warning("Aborted.");
-        return Ok(());
-    }
-
-    let tx = client.build_create_proposal_transaction(CreateProposalParams::AbortReconfig {
-        epoch,
-        metadata,
-    })?;
-
-    print_info("Transaction: abort_reconfig::propose");
-    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
-    print_created_proposal_id(response.as_ref());
-    Ok(())
-}
-
 /// Create an update guardian proposal
 pub async fn create_update_guardian_proposal(
     config: &CliConfig,

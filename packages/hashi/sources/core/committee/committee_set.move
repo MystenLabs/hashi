@@ -61,6 +61,9 @@ const EInvalidEncryptionPublicKeyLength: vector<u8> =
 #[error(code = 13)]
 const EInvalidBlsProofOfPossession: vector<u8> =
     b"BLS proof of possession does not verify under the submitted public key";
+#[error(code = 14)]
+const EPendingEpochStillCurrent: vector<u8> =
+    b"The pending reconfiguration targets Sui's current epoch and may still complete";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -489,8 +492,24 @@ public(package) fun end_reconfig(
     (next_epoch, committee_handoff_cert)
 }
 
-public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+/// Tear down an in-flight reconfiguration that has overrun its Sui epoch:
+/// clears the pending epoch change and removes the pending committee (and
+/// any handoff certificate it collected). The current epoch, committee, and
+/// MPC public key are untouched, so operations resume under the last
+/// committed committee and a fresh `start_reconfig` can form a new
+/// committee from the now-current validator set.
+///
+/// `start_reconfig` pins the pending committee's epoch to Sui's epoch at
+/// formation time, so a pending epoch that still equals Sui's epoch means the
+/// reconfiguration is inside its window and may legitimately complete; it
+/// must not be torn down under a committee that is mid-protocol. Only once
+/// Sui's epoch has moved past the target is the reconfiguration presumed
+/// stuck and abortable. This is the whole gate: there is no signer check,
+/// because a stalled reconfiguration is exactly the state in which no
+/// committee can be relied on to produce a certificate or a quorum.
+public(package) fun abort_reconfig(self: &mut CommitteeSet, ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
+    assert!(self.pending_epoch_change.borrow().epoch != ctx.epoch(), EPendingEpochStillCurrent);
     let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
         .pending_epoch_change
         .extract();

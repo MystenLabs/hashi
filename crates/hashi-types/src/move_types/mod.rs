@@ -972,12 +972,6 @@ pub struct EmergencyPause {
     pub pause: bool,
 }
 
-/// Rust version of the Move hashi::abort_reconfig::AbortReconfig type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct AbortReconfig {
-    pub epoch: u64,
-}
-
 /// Rust version of the Move hashi::update_guardian::UpdateGuardian type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct UpdateGuardian {
@@ -1160,6 +1154,7 @@ pub enum HashiEvent {
     UtxoSpent(UtxoSpent),
     ReconfigStarted(ReconfigStarted),
     ReconfigEnded(ReconfigEnded),
+    ReconfigAborted(ReconfigAborted),
 }
 
 impl HashiEvent {
@@ -1214,6 +1209,7 @@ impl HashiEvent {
             UtxoSpent::MODULE_NAME => UtxoSpent::from_bcs(bcs.value())?.into(),
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
             ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
+            ReconfigAborted::MODULE_NAME => ReconfigAborted::from_bcs(bcs.value())?.into(),
             PackageUpgraded::MODULE_NAME => PackageUpgraded::from_bcs(bcs.value())?.into(),
             _ => {
                 return Ok(None);
@@ -1826,6 +1822,24 @@ impl MoveType for ReconfigEnded {
 impl From<ReconfigEnded> for HashiEvent {
     fn from(value: ReconfigEnded) -> Self {
         Self::ReconfigEnded(value)
+    }
+}
+
+/// Emitted by `reconfig::abort_reconfig`: the pending epoch was torn down and
+/// the current epoch is unchanged.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct ReconfigAborted {
+    pub epoch: u64,
+}
+
+impl MoveType for ReconfigAborted {
+    const MODULE: &'static str = "reconfig";
+    const NAME: &'static str = "ReconfigAborted";
+}
+
+impl From<ReconfigAborted> for HashiEvent {
+    fn from(value: ReconfigAborted) -> Self {
+        Self::ReconfigAborted(value)
     }
 }
 
