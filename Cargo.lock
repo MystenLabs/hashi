@@ -3174,6 +3174,7 @@ dependencies = [
  "prost-types",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "rcgen",
  "sequoia-openpgp",
  "serde",
  "serde_derive",
@@ -3189,6 +3190,7 @@ dependencies = [
  "tonic-prost",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]
