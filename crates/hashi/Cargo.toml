@@ -30,6 +30,7 @@ prost.workspace = true
 prost-types.workspace = true
 bytes.workspace = true
 http = "1.4"
+http-body = "1"
 
 tonic-health.workspace = true
 serde.workspace = true
@@ -91,7 +92,6 @@ ed25519-dalek.workspace = true
 test-strategy.workspace = true
 proptest.workspace = true
 tracing-test = "0.2"
-http-body = "1"
 # Paused-clock tests (`start_paused`) for deadline/cooldown behavior.
 tokio = { workspace = true, features = ["test-util"] }
 move-binary-format.workspace = true

@@ -24,6 +24,9 @@ pub struct Metrics {
     pub(crate) response_size_bytes: HistogramVec,
     pub(crate) bytes_sent_total: IntCounterVec,
     pub(crate) bytes_received_total: IntCounterVec,
+    pub(crate) peer_inflight_at_admission: HistogramVec,
+    pub(crate) peer_inflight_max: IntGaugeVec,
+    pub(crate) peer_requests_shed_total: IntCounterVec,
 
     // Per-MPC-protocol body-size metrics.
     pub(crate) mpc_request_size_bytes: HistogramVec,
@@ -242,6 +245,10 @@ pub struct Metrics {
     pub withdrawal_duration_seconds: HistogramVec,
 }
 
+const PEER_INFLIGHT_BUCKETS: &[f64] = &[
+    1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 96.0, 128.0, 160.0, 192.0, 256.0, 512.0,
+];
+
 const LATENCY_SEC_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1., 2.5, 5., 10., 20., 30., 60., 90., 120., 180.,
     300., 600., 1200.,
@@ -374,6 +381,28 @@ impl Metrics {
                 "hashi_bytes_received_total",
                 "Total bytes received by this node over HTTP/gRPC bodies, per route",
                 &["path", "role"],
+                registry,
+            )
+            .unwrap(),
+            peer_inflight_at_admission: register_histogram_vec_with_registry!(
+                "hashi_peer_inflight_at_admission",
+                "In-flight requests a peer held when one more was admitted",
+                &["peer"],
+                PEER_INFLIGHT_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            peer_inflight_max: register_int_gauge_vec_with_registry!(
+                "hashi_peer_inflight_max",
+                "Peak in-flight requests per peer since start",
+                &["peer"],
+                registry,
+            )
+            .unwrap(),
+            peer_requests_shed_total: register_int_counter_vec_with_registry!(
+                "hashi_peer_requests_shed_total",
+                "Requests shed because the peer was at its in-flight limit",
+                &["peer"],
                 registry,
             )
             .unwrap(),
