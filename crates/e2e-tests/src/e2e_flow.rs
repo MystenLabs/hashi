@@ -161,7 +161,7 @@ mod tests {
         Ok(networks)
     }
 
-    async fn rotate_into_avid(networks: &mut TestNetworks) -> Result<()> {
+    async fn wait_for_dkg_then_rotate(networks: &mut TestNetworks) -> Result<()> {
         let initial_epoch = {
             let nodes = networks.hashi_network.nodes();
             let futs: Vec<_> = nodes
@@ -1013,7 +1013,7 @@ mod tests {
                 ),
         )
         .await?;
-        rotate_into_avid(&mut networks).await?;
+        wait_for_dkg_then_rotate(&mut networks).await?;
         {
             let hashi = networks.hashi_network.nodes()[0].hashi();
             let mpc_manager = hashi.mpc_manager().expect("mpc manager after rotation");
@@ -1054,7 +1054,7 @@ mod tests {
     async fn test_avid_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
         let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
-        rotate_into_avid(&mut networks).await?;
+        wait_for_dkg_then_rotate(&mut networks).await?;
         presigning_recovery_within_batch_flow(networks).await
     }
 
@@ -1132,7 +1132,7 @@ mod tests {
             .with_batch_size_per_weight(1)
             .build()
             .await?;
-        rotate_into_avid(&mut networks).await?;
+        wait_for_dkg_then_rotate(&mut networks).await?;
         presigning_recovery_across_batch_boundary_flow(networks).await
     }
 
@@ -3416,7 +3416,7 @@ mod tests {
             .with_batch_size_per_weight(100)
             .build()
             .await?;
-        rotate_into_avid(&mut networks).await?;
+        wait_for_dkg_then_rotate(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
@@ -3722,7 +3722,7 @@ mod tests {
             .with_withdrawal_batching_delay_ms(86_400_000)
             .build()
             .await?;
-        rotate_into_avid(&mut networks).await?;
+        wait_for_dkg_then_rotate(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
 

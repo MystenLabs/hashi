@@ -109,10 +109,6 @@ struct TestSetup {
 }
 
 impl TestSetup {
-    fn new_avid(num_validators: usize) -> Self {
-        Self::new(num_validators)
-    }
-
     fn new(num_validators: usize) -> Self {
         let mut rng = rand::thread_rng();
 
@@ -186,10 +182,6 @@ impl TestSetup {
             encryption_keys,
             signing_keys,
         }
-    }
-
-    fn with_weights_avid(weights: &[u16]) -> Self {
-        Self::with_weights(weights)
     }
 
     fn with_weights(weights: &[u16]) -> Self {
@@ -11883,7 +11875,7 @@ fn test_bare_zero_stamp_certs_force_floor_only_window() {
 #[tokio::test]
 async fn test_avid_nonce_dealer_phase_skips_at_zero_weight() {
     let weights: [u16; 4] = [0, 3, 3, 4];
-    let setup = TestSetup::with_weights_avid(&weights);
+    let setup = TestSetup::with_weights(&weights);
     let batch_index = 0u32;
 
     let mut managers: Vec<_> = (0..weights.len())
@@ -11956,7 +11948,7 @@ fn extract_optimistic(messages: &Messages) -> &batch_avss_avid::AvssMessage {
 #[test]
 fn test_avid_nonce_optimistic_messages_yields_one_per_member() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(5);
+    let setup = TestSetup::new(5);
     let dealer = setup.create_manager(0);
     let batch_index = 4u32;
 
@@ -11981,7 +11973,7 @@ fn test_avid_nonce_optimistic_messages_yields_one_per_member() {
 #[test]
 fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(5);
+    let setup = TestSetup::new(5);
     let dealer = setup.create_manager(0);
     let dealer_addr = setup.address(0);
     let batch_index = 0u32;
@@ -12037,7 +12029,7 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
 #[test]
 fn test_avid_round_verified_common_is_cached() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(5);
+    let setup = TestSetup::new(5);
     let dealer = setup.create_manager(0);
     let dealer_addr = setup.address(0);
     let batch_index = 0u32;
@@ -12091,7 +12083,7 @@ fn test_avid_round_verified_common_is_cached() {
 #[test]
 fn test_try_sign_avid_nonce_optimistic_rejects_wrong_recipient() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(5);
+    let setup = TestSetup::new(5);
     let dealer = setup.create_manager(0);
     let dealer_addr = setup.address(0);
     let batch_index = 0u32;
@@ -12215,7 +12207,7 @@ fn extract_echo_for(echoes: &[(Address, Messages)], recipient: Address) -> batch
 #[test]
 fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
     // W=6 -> t=4, f=1; pending = {5} sits exactly on the dispersal bound (pending weight = f).
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 3u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
 
@@ -12239,7 +12231,7 @@ fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
 
 #[test]
 fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 1u32;
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12288,7 +12280,7 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
 #[test]
 fn test_avid_nonce_echo_and_vote_requires_verified_round() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 2u32;
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12352,7 +12344,7 @@ fn test_avid_nonce_echo_and_vote_requires_verified_round() {
 #[test]
 fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=2 echoes; the Vote cert needs W−f=4.
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
@@ -12448,7 +12440,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
 
 #[test]
 fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let mut receiver = setup.create_manager(1);
@@ -12495,7 +12487,7 @@ fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
 
 #[test]
 fn test_handle_avid_optimistic_rejects_dealer_equivocation() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let mut receiver = setup.create_manager(1);
@@ -12540,7 +12532,7 @@ fn test_handle_avid_optimistic_rejects_dealer_equivocation() {
 
 #[test]
 fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12601,7 +12593,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
 
 #[test]
 fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12625,7 +12617,7 @@ fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
 
 #[test]
 fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12669,7 +12661,7 @@ fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
 
 #[test]
 fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals_a = fx
@@ -12771,7 +12763,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
 #[test]
 fn test_avid_optimistic_ingest_fails_closed_when_the_store_read_fails() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(5);
+    let setup = TestSetup::new(5);
     let dealer = setup.create_manager(0);
     let dealer_addr = setup.address(0);
     let batch_index = 0u32;
@@ -12803,7 +12795,7 @@ fn test_avid_optimistic_ingest_fails_closed_when_the_store_read_fails() {
 
 #[test]
 fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12843,7 +12835,7 @@ fn test_avid_dispersal_ingest_fails_closed_when_the_store_read_fails() {
 
 #[test]
 fn test_handle_avid_echo_push_is_rejected() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -12875,7 +12867,7 @@ fn test_handle_avid_echo_push_is_rejected() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_dealer_all_confirm_posts_confirm_cert() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let others: HashMap<_, _> = (1..6)
@@ -12929,7 +12921,7 @@ async fn test_run_as_avid_nonce_dealer_all_confirm_posts_confirm_cert() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     // Node 5 is unreachable: pending weight 1 <= f=2, so the round goes pessimistic.
@@ -12991,7 +12983,7 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     // Nodes 3, 4, 5 unreachable: pending weight 3 > f=1 — beyond AVID's dispersal bound.
@@ -13042,7 +13034,7 @@ async fn test_run_as_avid_nonce_dealer_abandons_beyond_f() {
 #[test]
 fn test_prepare_avid_nonce_dealer_flow_reloads_builder() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let store = SharedMemoryStore::new();
@@ -13106,7 +13098,7 @@ fn test_prepare_avid_nonce_dealer_flow_reloads_builder() {
 
 #[test]
 fn test_handle_send_rejects_retrieval_message() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let mut receiver = setup.create_manager(1);
     let request = SendMessagesRequest {
         messages: Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
@@ -13124,7 +13116,7 @@ fn test_handle_send_rejects_retrieval_message() {
 
 #[test]
 fn test_avid_nonce_retrieval() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -13246,7 +13238,7 @@ fn avid_confirm_signatures(
 #[tokio::test]
 async fn test_avid_sizing_excludes_a_thin_confirm_cert_from_the_decided_set() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let second_dealer_addr = setup.address(2);
     let mut managers: HashMap<Address, MpcManager> = (0..6)
@@ -13312,7 +13304,7 @@ async fn test_avid_sizing_excludes_a_thin_confirm_cert_from_the_decided_set() {
 #[tokio::test]
 async fn test_avid_sizing_excludes_a_zero_weight_dealer_before_the_party_phase() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
@@ -13395,7 +13387,7 @@ async fn test_avid_sizing_excludes_a_zero_weight_dealer_before_the_party_phase()
 #[tokio::test]
 async fn test_nonce_party_phase_does_not_count_a_loop_skip_as_unmaterialised() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
@@ -13494,7 +13486,7 @@ fn two_full_certs_fixture(
 #[tokio::test]
 async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let (party, managers, mut certs) = two_full_certs_fixture(&setup, batch_index, 1, &mut rng);
     let unresolvable_target = AvssVoteMessagesHash {
@@ -13550,7 +13542,7 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_without_round_state() 
 #[tokio::test]
 async fn test_avid_party_accepts_an_output_it_validated_against_the_cert_without_pulling() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(4);
     let party_addr = setup.address(5);
@@ -13726,7 +13718,7 @@ fn cut_off_confirmer_fixture(setup: &TestSetup, batch_index: u32) -> CutOffConfi
 
 #[tokio::test]
 async fn test_avid_party_accepts_a_cut_off_confirmers_cached_output_against_the_pulled_vote() {
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let mut fx = cut_off_confirmer_fixture(&setup, batch_index);
     fx.party
@@ -13758,7 +13750,7 @@ async fn test_avid_party_accepts_a_cut_off_confirmers_cached_output_against_the_
 
 #[tokio::test]
 async fn test_avid_party_rejects_a_cached_output_derived_from_a_different_common() {
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let mut fx = cut_off_confirmer_fixture(&setup, batch_index);
     fx.party
@@ -13791,7 +13783,7 @@ async fn test_avid_party_rejects_a_cached_output_derived_from_a_different_common
 #[tokio::test]
 async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_common() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(4);
     let (mut party, managers, mut certs) = two_full_certs_fixture(&setup, batch_index, 1, &mut rng);
@@ -13858,7 +13850,7 @@ async fn test_avid_party_does_not_pull_for_a_confirm_cert_over_a_different_commo
 #[test]
 fn test_consume_certified_nonce_outputs_drops_avid_entries_the_loop_did_not_stamp() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let (mut party, _, _) = two_full_certs_fixture(&setup, batch_index, 1, &mut rng);
     let stamped = setup.address(0);
@@ -13894,7 +13886,7 @@ fn test_consume_certified_nonce_outputs_drops_avid_entries_the_loop_did_not_stam
 #[test]
 fn test_optimistic_resend_keeps_the_validation_stamp_and_a_held_output_refuses_another_common() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let mut receiver = setup.create_manager(1);
@@ -13953,7 +13945,7 @@ fn test_optimistic_resend_keeps_the_validation_stamp_and_a_held_output_refuses_a
 
 #[test]
 fn test_handle_avid_nonce_message_rejects_a_zero_weight_sender() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let message = AvidNonceMessage {
@@ -13993,7 +13985,7 @@ fn test_handle_avid_nonce_message_rejects_a_zero_weight_sender() {
 #[tokio::test]
 async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_decoded_output() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(4);
     let party_addr = setup.address(5);
@@ -14069,7 +14061,7 @@ async fn test_handle_avid_optimistic_rejects_a_common_that_differs_from_the_deco
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_local_skips_a_confirm_cert_with_no_round_state() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
@@ -14208,7 +14200,7 @@ fn test_avid_below_floor_attribution_distinguishes_cause() {
 async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let mut rng = rand::thread_rng();
     // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let second_dealer_addr = setup.address(2);
@@ -14279,7 +14271,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
 
 #[test]
 fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
-    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
     let mut mgr = setup.create_manager(0);
     mgr.mpc_config.nonce_accumulation_window_ms = 0;
     let batch_index = 3u32;
@@ -14472,7 +14464,7 @@ fn avid_vote_certs(certs: Vec<(Address, CertificateV1)>) -> VerifiedNonceCerts<C
 
 #[tokio::test]
 async fn test_classification_survives_the_carrier_into_sizing() {
-    let setup = TestSetup::with_weights_avid(&[25, 25, 25, 25]);
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mgr = setup.create_manager(0);
     let epoch = mgr.mpc_config.epoch;
     let batch_index = 4u32;
@@ -14529,7 +14521,7 @@ async fn test_classification_survives_the_carrier_into_sizing() {
 
 #[test]
 fn test_avid_local_material_sorts_match_absent_and_mismatch() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 3u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let confirmer = &fx.confirmers[1];
@@ -14568,7 +14560,7 @@ fn test_avid_local_material_sorts_match_absent_and_mismatch() {
 fn test_verify_and_classify_recovers_the_cert_kind() {
     let messages_hash = MessagesHash::from([9u8; 32]);
 
-    let avid = TestSetup::with_weights_avid(&[25, 25, 25, 25]);
+    let avid = TestSetup::with_weights(&[25, 25, 25, 25]);
     let avid_mgr = avid.create_manager(0);
     let dealer = avid.address(0);
 
@@ -14724,7 +14716,7 @@ fn test_verify_and_classify_recovers_the_cert_kind() {
 
 #[test]
 fn test_nonce_cert_does_not_verify_under_another_batch_index() {
-    let avid = TestSetup::with_weights_avid(&[25, 25, 25, 25]);
+    let avid = TestSetup::with_weights(&[25, 25, 25, 25]);
     let mgr = avid.create_manager(0);
     let dealer = avid.address(0);
     let messages_hash = MessagesHash::from([4u8; 32]);
@@ -14763,7 +14755,7 @@ fn test_nonce_cert_does_not_verify_under_another_batch_index() {
 
 #[test]
 fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
-    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
     let mut mgr = setup.create_manager(0);
     mgr.mpc_config.nonce_accumulation_window_ms = 700;
     let batch_index = 3u32;
@@ -14833,7 +14825,7 @@ fn test_avid_cutoff_ignores_certs_the_bar_excludes() {
 
 #[tokio::test]
 async fn test_avid_party_counts_a_zero_weight_dealer_in_a_decided_set_as_a_skip() {
-    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
     let dealer_address = setup.address(1);
     let message = DealerMessagesHash {
         dealer_address,
@@ -14888,7 +14880,7 @@ async fn test_avid_party_counts_a_zero_weight_dealer_in_a_decided_set_as_a_skip(
 
 #[test]
 fn test_avid_sizing_reports_whether_the_window_closed() {
-    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let setup = TestSetup::with_weights(&[4, 3, 2, 1]);
     let mut mgr = setup.create_manager(0);
     mgr.mpc_config.nonce_accumulation_window_ms = 0;
     let all: Vec<usize> = (0..4).collect();
@@ -14940,7 +14932,7 @@ fn test_avid_sizing_reports_whether_the_window_closed() {
 
 #[test]
 fn test_avid_sizing_counts_past_the_floor() {
-    let setup = TestSetup::with_weights_avid(&[3, 3, 3, 1]);
+    let setup = TestSetup::with_weights(&[3, 3, 3, 1]);
     let mgr = setup.create_manager(0);
     let total = mgr.mpc_config.nodes.total_weight() as u32;
     let floor = mgr.required_nonce_weight();
@@ -15000,7 +14992,7 @@ fn test_avid_sizing_counts_past_the_floor() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     // Node 5 is unreachable during the dealer phase, so the round goes pessimistic and node 5
@@ -15063,7 +15055,7 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
 async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
     // W=16, t=6, f=4: each dealer (6) is under the t+f confirm quorum (10) so it
     // must collect peers, and the W-f floor (12) takes both dealers' certs.
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let second_dealer_addr = setup.address(2);
@@ -15140,7 +15132,7 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
 async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let mut rng = rand::thread_rng();
     // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let second_dealer_addr = setup.address(2);
@@ -15194,7 +15186,7 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
 
 #[test]
 fn test_decoded_shares_match_optimistic_shares() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -15331,7 +15323,7 @@ fn test_decoded_shares_match_optimistic_shares() {
 async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let mut rng = rand::thread_rng();
     // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
-    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let setup = TestSetup::with_weights(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let second_dealer_addr = setup.address(2);
@@ -15395,7 +15387,7 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let victim = setup.address(5);
@@ -15465,7 +15457,7 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
 #[test]
 fn test_avid_voter_state_survives_restart() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
     let mut dealer = setup.create_manager(0);
@@ -15676,7 +15668,7 @@ fn test_avid_voter_state_survives_restart() {
 #[test]
 fn test_handle_avid_nonce_complaint_responds_and_gates() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let victim = setup.address(5);
     // Corrupt round harvested at the unit level: confirmers 0..4 verify fine, the victim's
@@ -17235,7 +17227,7 @@ fn avid_retrieval_store_read_does_not_hold_the_manager_lock() {
         .build()
         .unwrap();
 
-    let setup = TestSetup::new_avid(4);
+    let setup = TestSetup::new(4);
     let dealer_message = setup
         .create_manager(0)
         .create_dealer_message(&mut rand::thread_rng());
@@ -17428,7 +17420,7 @@ impl PublicMessagesStore for RacingAvidStore {
 
 #[test]
 fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
@@ -17507,7 +17499,7 @@ fn avid_retrieval_never_serves_a_vote_without_its_common_message() {
 
 #[test]
 fn avid_failed_round_state_write_leaves_no_held_echoes_behind() {
-    let setup = TestSetup::new_avid(6);
+    let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx

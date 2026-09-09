@@ -1230,6 +1230,10 @@ mod tests {
         });
         let bytes = bcs::to_bytes(&retrieval).expect("serialize");
         assert_eq!(bytes[0], 3);
+
+        let rotation = Messages::Rotation(RotationMessages::new());
+        let bytes = bcs::to_bytes(&rotation).expect("serialize");
+        assert_eq!(bytes[0], 1);
     }
     const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
     use super::*;

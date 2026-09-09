@@ -1592,7 +1592,6 @@ pub(crate) mod tests {
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
         let (round_state, _, _) = avid_round_fixture();
-        let avid_state = create_test_avid_round_state();
         // Cutoff far enough above the retention window that key keyspaces
         // also see prunes (i.e., `cutoff - RETENTION_EXTRA_EPOCHS > 1`).
         let cutoff = RETENTION_EXTRA_EPOCHS + 8;
@@ -1605,8 +1604,6 @@ pub(crate) mod tests {
             db.store_rotation_messages(epoch, &dealer, &rotation_msgs)
                 .unwrap();
             db.store_avid_round_state(epoch, 0, &dealer, &round_state)
-                .unwrap();
-            db.store_avid_round_state(epoch, 0, &dealer, &avid_state)
                 .unwrap();
             db.store_encryption_key(epoch, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
                 .unwrap();
@@ -1649,12 +1646,6 @@ pub(crate) mod tests {
                     .is_none(),
                 "avid round state at epoch {epoch} should be pruned (flat cutoff)"
             );
-            assert!(
-                db.get_avid_round_state(epoch, 0, &dealer)
-                    .unwrap()
-                    .is_none(),
-                "avid round state at epoch {epoch} should be pruned (flat cutoff)"
-            );
         }
         for epoch in 1..key_retain_floor {
             assert!(
@@ -1684,12 +1675,6 @@ pub(crate) mod tests {
             assert!(
                 db.get_rotation_messages(epoch, &dealer).unwrap().is_some(),
                 "rotation messages at epoch {epoch} should be kept"
-            );
-            assert!(
-                db.get_avid_round_state(epoch, 0, &dealer)
-                    .unwrap()
-                    .is_some(),
-                "avid round state at epoch {epoch} should be kept"
             );
             assert!(
                 db.get_avid_round_state(epoch, 0, &dealer)

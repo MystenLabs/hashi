@@ -62,6 +62,7 @@ message AvidNonceEcho {
 
 message SendMessagesRequest {
   reserved 4;
+  reserved "nonce_message";
 
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
@@ -118,6 +119,7 @@ message AvidNonceRetrievalMessage {
 
 message RetrieveMessagesResponse {
   reserved 3;
+  reserved "nonce_message";
 
   oneof messages {
     // For DKG: single dealer message.
@@ -154,6 +156,7 @@ message ComplainRequest {
 
 message ComplainResponse {
   reserved 3;
+  reserved "nonce_response";
 
   oneof responses {
     // For DKG

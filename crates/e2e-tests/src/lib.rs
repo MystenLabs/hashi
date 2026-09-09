@@ -2813,7 +2813,7 @@ mod tests {
         Ok(())
     }
 
-    async fn build_avid_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
+    async fn build_and_rotate_once(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         let mut test_networks = builder.build().await?;
         let initial_epoch = {
             let nodes = test_networks.hashi_network().nodes();
@@ -2831,7 +2831,7 @@ mod tests {
         Ok(test_networks)
     }
 
-    fn avid_fault_tolerant_builder() -> TestNetworksBuilder {
+    fn fault_tolerant_builder() -> TestNetworksBuilder {
         TestNetworksBuilder::new()
             .with_nodes(4)
             .with_onchain_config(
@@ -2851,7 +2851,7 @@ mod tests {
             .try_init()
             .ok();
 
-        let test_networks = build_avid_networks(avid_fault_tolerant_builder()).await?;
+        let test_networks = build_and_rotate_once(fault_tolerant_builder()).await?;
         let nodes = test_networks.hashi_network().nodes();
         let epoch = nodes[0].hashi().onchain_state().epoch();
 
@@ -2902,8 +2902,7 @@ mod tests {
             .ok();
 
         let test_networks =
-            build_avid_networks(avid_fault_tolerant_builder().with_corrupt_shares_target(0))
-                .await?;
+            build_and_rotate_once(fault_tolerant_builder().with_corrupt_shares_target(0)).await?;
         let nodes = test_networks.hashi_network().nodes();
         let epoch = nodes[0].hashi().onchain_state().epoch();
         wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
@@ -2926,8 +2925,7 @@ mod tests {
             .ok();
 
         let mut test_networks =
-            build_avid_networks(avid_fault_tolerant_builder().with_corrupt_shares_target(0))
-                .await?;
+            build_and_rotate_once(fault_tolerant_builder().with_corrupt_shares_target(0)).await?;
         {
             let nodes = test_networks.hashi_network().nodes();
             let epoch = nodes[0].hashi().onchain_state().epoch();
@@ -2982,8 +2980,7 @@ mod tests {
             .ok();
 
         let mut test_networks =
-            build_avid_networks(avid_fault_tolerant_builder().with_batch_size_per_weight(1))
-                .await?;
+            build_and_rotate_once(fault_tolerant_builder().with_batch_size_per_weight(1)).await?;
         let epoch = test_networks.hashi_network().nodes()[0]
             .hashi()
             .onchain_state()

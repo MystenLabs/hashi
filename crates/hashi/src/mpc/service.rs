@@ -1321,7 +1321,7 @@ impl MpcService {
                 "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
             ));
         }
-        let outputs = {
+        let (outputs, served_weight) = {
             let avid_certs = nonce_certificates(&certs, epoch, batch_index);
             let admitted = mpc_manager
                 .read()
@@ -1350,7 +1350,7 @@ impl MpcService {
                     outcome.local_skips,
                 );
             }
-            outcome.outputs
+            (outcome.outputs, admitted.weight)
         };
         if outputs.is_empty() {
             return Err(anyhow::anyhow!(
@@ -1366,6 +1366,16 @@ impl MpcService {
         )
         .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         let metrics = &self.inner.metrics;
+        let served_implies = presig_count(served_weight as usize, params, batch_size_per_weight);
+        if presignatures.len() != served_implies {
+            metrics.mpc_nonce_size_mismatch_total.inc();
+            anyhow::bail!(
+                "nonce batch {batch_index} for epoch {epoch} rebuilt from certs: built {} \
+                 presigs but the admitted certs size to {served_implies} (weight \
+                 {served_weight}); refusing to install",
+                presignatures.len(),
+            );
+        }
         metrics.mpc_nonce_batch_index.set(batch_index as i64);
         metrics.mpc_nonce_batch_dealers.set(dealer_count as i64);
         Ok(presignatures)
