@@ -19,9 +19,7 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::VerifiedCertificate;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
-use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::Committee;
@@ -42,12 +40,6 @@ pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoi
 pub(crate) const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
 pub type MessagesHash = Digest;
 pub type RotationMessages = BTreeMap<ShareIndex, avss::Message>;
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NonceMessage {
-    pub batch_index: u32,
-    pub message: batch_avss::Message,
-}
-
 pub type AvidConfirmCertificate = SignedMessage<AvssVoteMessagesHash>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -333,7 +325,6 @@ pub struct GetPublicMpcOutputResponse {
 pub enum Messages {
     Dkg(avss::Message),
     Rotation(RotationMessages),
-    NonceGeneration(NonceMessage),
     NonceGenerationAvid(AvidNonceMessage),
     AvidNonceRetrieval(AvidNonceRetrievalMessage),
 }
@@ -348,7 +339,6 @@ impl Messages {
         match self {
             Messages::Dkg(_) => ProtocolTypeIndicator::Dkg,
             Messages::Rotation(_) => ProtocolTypeIndicator::KeyRotation,
-            Messages::NonceGeneration(_) => ProtocolTypeIndicator::NonceGeneration,
             Messages::NonceGenerationAvid(_) => ProtocolTypeIndicator::NonceGeneration,
             Messages::AvidNonceRetrieval(_) => ProtocolTypeIndicator::NonceGeneration,
         }
@@ -431,7 +421,6 @@ pub(crate) struct RotationReconstructionContext<'a> {
 #[allow(clippy::large_enum_variant)]
 pub enum ProtocolComplaint {
     Avss(avss::Complaint),
-    BatchedAvss(complaint::Complaint),
     AvidReveal(batch_avss_avid::AvssComplaint),
     AvidBlame {
         complaint: batch_avss_avid::AvidComplaint,
@@ -457,7 +446,6 @@ pub struct ComplainRequest {
 pub enum ComplaintResponse {
     Dkg(avss::ComplaintResponse),
     Rotation(avss::ComplaintResponse),
-    NonceGeneration(complaint::ComplaintResponse<batch_avss::SharesForNode>),
     NonceGenerationAvid(batch_avss_avid::ComplaintResponse),
 }
 
@@ -1106,10 +1094,6 @@ pub enum ComplaintsToProcessKey {
         dealer: Address,
         share_index: ShareIndex,
     },
-    NonceGeneration {
-        batch_index: u32,
-        dealer: Address,
-    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1245,7 +1229,7 @@ mod tests {
             avid_vote: None,
         });
         let bytes = bcs::to_bytes(&retrieval).expect("serialize");
-        assert_eq!(bytes[0], 4);
+        assert_eq!(bytes[0], 3);
     }
     const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
     use super::*;

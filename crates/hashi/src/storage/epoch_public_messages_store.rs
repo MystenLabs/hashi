@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
@@ -89,38 +88,6 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
                     .collect()
             })
             .map_err(|e| anyhow::anyhow!("failed to list rotation messages: {e}"))
-    }
-
-    fn store_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-        message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        self.db
-            .store_nonce_message(epoch, batch_index, dealer, message)
-            .map_err(|e| anyhow::anyhow!("failed to store nonce message: {e}"))
-    }
-
-    fn get_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        self.db
-            .get_nonce_message(epoch, batch_index, dealer)
-            .map_err(|e| anyhow::anyhow!("failed to get nonce message: {e}"))
-    }
-
-    fn list_nonce_messages(
-        &self,
-        batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-        self.db
-            .list_nonce_messages(self.epoch, batch_index)
-            .map_err(|e| anyhow::anyhow!("failed to list nonce messages: {e}"))
     }
 
     fn store_avid_round_state(

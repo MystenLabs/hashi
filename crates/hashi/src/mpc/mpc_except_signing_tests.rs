@@ -49,7 +49,6 @@ use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::complaint;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::EncryptionPrivateKey;
@@ -1663,11 +1662,9 @@ fn test_mpc_manager_new_party_id_follows_canonical_order() {
 struct InMemoryPublicMessagesStore {
     stored: std::sync::Mutex<HashMap<Address, avss::Message>>,
     rotation_stored: std::sync::Mutex<HashMap<Address, RotationMessages>>,
-    nonce_stored: std::sync::Mutex<HashMap<(u32, Address), batch_avss::Message>>,
     avid_round_stored: std::sync::Mutex<HashMap<(u32, Address), AvidRoundState>>,
     avid_held_echoes_stored: std::sync::Mutex<HashMap<(u32, Address), HeldAvidEchoes>>,
     avid_dealer_builder_stored: std::sync::Mutex<HashMap<u32, batch_avss_avid::AvssMessageBuilder>>,
-    fail_nonce_reads: bool,
     fail_avid_round_state_reads: bool,
     fail_avid_held_echoes_reads: bool,
     fail_avid_round_state_writes: bool,
@@ -1678,11 +1675,9 @@ impl InMemoryPublicMessagesStore {
         Self {
             stored: std::sync::Mutex::new(HashMap::new()),
             rotation_stored: std::sync::Mutex::new(HashMap::new()),
-            nonce_stored: std::sync::Mutex::new(HashMap::new()),
             avid_round_stored: std::sync::Mutex::new(HashMap::new()),
             avid_held_echoes_stored: std::sync::Mutex::new(HashMap::new()),
             avid_dealer_builder_stored: std::sync::Mutex::new(HashMap::new()),
-            fail_nonce_reads: false,
             fail_avid_round_state_reads: false,
             fail_avid_held_echoes_reads: false,
             fail_avid_round_state_writes: false,
@@ -1747,51 +1742,6 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
             .unwrap()
             .iter()
             .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
-            .collect())
-    }
-
-    fn store_nonce_message(
-        &self,
-        _epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-        message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        self.nonce_stored
-            .lock()
-            .unwrap()
-            .insert((batch_index, *dealer), message.clone());
-        Ok(())
-    }
-
-    fn get_nonce_message(
-        &self,
-        _epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        if self.fail_nonce_reads {
-            return Err(anyhow::anyhow!("nonce read failure"));
-        }
-        Ok(self
-            .nonce_stored
-            .lock()
-            .unwrap()
-            .get(&(batch_index, *dealer))
-            .cloned())
-    }
-
-    fn list_nonce_messages(
-        &self,
-        batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-        Ok(self
-            .nonce_stored
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|((bi, _), _)| *bi == batch_index)
-            .map(|((_, addr), msg)| (*addr, msg.clone()))
             .collect())
     }
 
@@ -1943,32 +1893,6 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
     }
 
     fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
-        Ok(vec![])
-    }
-
-    fn store_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-        _message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!("Storage failure"))
-    }
-
-    fn get_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        Ok(None)
-    }
-
-    fn list_nonce_messages(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
         Ok(vec![])
     }
 
@@ -5270,7 +5194,6 @@ fn create_complaint_for_dealer(
     let dealer_message = match dealer_messages {
         Messages::Dkg(msg) => msg,
         Messages::Rotation(_)
-        | Messages::NonceGeneration(_)
         | Messages::NonceGenerationAvid(_)
         | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected DKG message in create_valid_complaint")
@@ -5913,32 +5836,6 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
             .iter()
             .map(|(k, v)| (*k, Messages::Rotation(v.clone())))
             .collect())
-    }
-
-    fn store_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-        _message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn get_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        Ok(None)
-    }
-
-    fn list_nonce_messages(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-        Ok(vec![])
     }
 
     fn store_avid_round_state(
@@ -6648,10 +6545,7 @@ fn test_try_sign_rotation_messages_all_or_nothing() {
     // Get the rotation messages map from the enum
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map,
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -6866,10 +6760,7 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
     // Tamper with bundle: add a message with a share_index that belongs to party 2 (index 51)
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -8673,10 +8564,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     // Verify we have enough rotation messages for this test
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map,
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -8875,10 +8763,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     // Get the rotation messages map
     let valid_rotation_map = match &valid_rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -9064,10 +8949,7 @@ fn test_rotation_complaints_are_scoped_to_the_epoch_in_their_key() {
 
     let valid_rotation_map = match &valid_rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -9192,10 +9074,7 @@ fn test_handle_complain_request_success() {
     // Get the rotation messages map
     let valid_rotation_map = match &valid_rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -9295,9 +9174,7 @@ fn test_handle_complain_request_success() {
     // Response carries only the responder's shares for the complained share index.
     match &response {
         ComplaintResponse::Rotation(_) => {}
-        ComplaintResponse::Dkg(_)
-        | ComplaintResponse::NonceGeneration(_)
-        | ComplaintResponse::NonceGenerationAvid(_) => {
+        ComplaintResponse::Dkg(_) | ComplaintResponse::NonceGenerationAvid(_) => {
             panic!("Expected rotation complaint response")
         }
     };
@@ -9356,10 +9233,7 @@ fn test_handle_complain_request_rejects_dealer_that_does_not_own_the_share_index
 
     let valid_rotation_map = match &valid_rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -9469,10 +9343,7 @@ fn test_rotation_output_lookup_is_not_shared_across_dealers() {
 
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_)
-        | Messages::NonceGeneration(_)
-        | Messages::NonceGenerationAvid(_)
-        | Messages::AvidNonceRetrieval(_) => {
+        Messages::Dkg(_) | Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -9622,38 +9493,6 @@ impl PublicMessagesStore for SharedMemoryStore {
 
     fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
         self.inner.lock().unwrap().list_all_rotation_messages()
-    }
-
-    fn store_nonce_message(
-        &self,
-        _epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-        message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        self.inner
-            .lock()
-            .unwrap()
-            .store_nonce_message(0, batch_index, dealer, message)
-    }
-
-    fn get_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        self.inner
-            .lock()
-            .unwrap()
-            .get_nonce_message(epoch, batch_index, dealer)
-    }
-
-    fn list_nonce_messages(
-        &self,
-        batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-        self.inner.lock().unwrap().list_nonce_messages(batch_index)
     }
 
     fn store_avid_round_state(
@@ -11436,71 +11275,6 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
     );
 }
 
-fn create_nonce_dealer_message(
-    setup: &TestSetup,
-    dealer_index: usize,
-    batch_index: u32,
-    rng: &mut impl fastcrypto::traits::AllowedRng,
-) -> NonceMessage {
-    let config = setup.dkg_config();
-    let dealer_address = setup.address(dealer_index);
-    let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
-    let dealer_session_id = SessionId::nonce_dealer_session_id(
-        TEST_CHAIN_ID,
-        setup.epoch(),
-        batch_index,
-        &dealer_address,
-    );
-    let dealer = batch_avss::Dealer::new(
-        config.nodes.clone(),
-        dealer_party_id,
-        config.threshold,
-        dealer_session_id.to_vec(),
-        TEST_BATCH_SIZE_PER_WEIGHT,
-    )
-    .unwrap();
-    let message = dealer.create_message(rng).unwrap();
-    NonceMessage {
-        batch_index,
-        message,
-    }
-}
-
-/// Creates a complaint for a nonce message by decrypting with a wrong key.
-fn create_nonce_complaint(
-    setup: &TestSetup,
-    nonce_messages: &NonceMessage,
-    complainer_party_id: u16,
-    dealer_index: usize,
-    rng: &mut impl fastcrypto::traits::AllowedRng,
-) -> complaint::Complaint {
-    let (batch_index, message) = (nonce_messages.batch_index, &nonce_messages.message);
-    let config = setup.dkg_config();
-    let dealer_address = setup.address(dealer_index);
-    let dealer_party_id = setup.committee().index_of(&dealer_address).unwrap() as u16;
-    let dealer_session_id = SessionId::nonce_dealer_session_id(
-        TEST_CHAIN_ID,
-        setup.epoch(),
-        batch_index,
-        &dealer_address,
-    );
-    let wrong_key = EncryptionPrivateKey::new(rng);
-    let receiver = batch_avss::Receiver::new(
-        config.nodes.clone(),
-        complainer_party_id,
-        dealer_party_id,
-        config.threshold,
-        dealer_session_id.to_vec(),
-        wrong_key.inner().clone(),
-        TEST_BATCH_SIZE_PER_WEIGHT,
-    )
-    .unwrap();
-    match receiver.process_message(message).unwrap() {
-        batch_avss::ProcessedMessage::Complaint(c) => c,
-        _ => panic!("Expected complaint with wrong key"),
-    }
-}
-
 /// Send a message via handle_send_messages_request and assert success.
 fn send_and_assert_ok(
     receiver: &mut MpcManager,
@@ -11550,10 +11324,6 @@ fn retrieve_and_verify_hash(
     let (protocol_type, batch_index) = match expected_messages {
         Messages::Dkg(_) => (ProtocolTypeIndicator::Dkg, None),
         Messages::Rotation(_) => (ProtocolTypeIndicator::KeyRotation, None),
-        Messages::NonceGeneration(nonce) => (
-            ProtocolTypeIndicator::NonceGeneration,
-            Some(nonce.batch_index),
-        ),
         Messages::NonceGenerationAvid(avid) => (
             ProtocolTypeIndicator::NonceGeneration,
             Some(avid.batch_index),
@@ -11934,34 +11704,6 @@ fn test_handle_complain_request_rotation_caches_response() {
         "Second call should return cached response"
     );
     assert_eq!(responder.complaint_responses.len(), 1);
-}
-
-#[test]
-fn test_handle_complain_request_nonce_missing_batch_index_rejected() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
-    let dealer_idx = 1;
-    let dealer_addr = setup.address(dealer_idx);
-    let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
-    let complaint = create_nonce_complaint(&setup, &nonce_messages, 0, dealer_idx, &mut rng);
-
-    let mut receiver = setup.create_manager(0);
-    let request = ComplainRequest {
-        dealer: dealer_addr,
-        share_index: None,
-        batch_index: None, // <-- missing; should be rejected.
-        complaint: ProtocolComplaint::BatchedAvss(complaint),
-        protocol_type: ProtocolTypeIndicator::NonceGeneration,
-        epoch: receiver.mpc_config.epoch,
-    };
-    let err = receiver
-        .handle_complain_request(setup.address(0), &request)
-        .expect_err("missing batch_index should be rejected");
-    assert!(
-        matches!(err, MpcError::InvalidMessage { .. }),
-        "expected InvalidMessage, got: {:?}",
-        err
-    );
 }
 
 #[test]
@@ -13377,24 +13119,6 @@ fn test_handle_send_rejects_retrieval_message() {
     assert!(
         matches!(result, Err(MpcError::InvalidMessage { .. })),
         "response-only message must be rejected: {result:?}"
-    );
-}
-
-#[test]
-fn test_handle_send_rejects_a_retired_vanilla_nonce_message() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(6);
-    let nonce_msg = create_nonce_dealer_message(&setup, 0, 0, &mut rng);
-    let mut receiver = setup.create_manager(1);
-    let result = receiver.handle_send_messages_request(
-        setup.address(0),
-        &SendMessagesRequest {
-            messages: Messages::NonceGeneration(nonce_msg),
-        },
-    );
-    assert!(
-        matches!(result, Err(MpcError::InvalidMessage { .. })),
-        "a vanilla nonce message must be rejected: {result:?}"
     );
 }
 
@@ -17299,32 +17023,6 @@ impl PublicMessagesStore for BlockingDealerMessageStore {
         Ok(None)
     }
 
-    fn store_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-        _message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn get_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        Ok(None)
-    }
-
-    fn list_nonce_messages(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-        Ok(Vec::new())
-    }
-
     fn store_avid_round_state(
         &self,
         _epoch: u64,
@@ -17656,32 +17354,6 @@ impl PublicMessagesStore for RacingAvidStore {
     }
 
     fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
-        unimplemented!()
-    }
-
-    fn store_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-        _message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        unimplemented!()
-    }
-
-    fn get_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        unimplemented!()
-    }
-
-    fn list_nonce_messages(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
         unimplemented!()
     }
 

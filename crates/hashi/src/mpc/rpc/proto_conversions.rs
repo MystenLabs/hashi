@@ -4,9 +4,7 @@
 use crate::mpc::types;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
-use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::proto;
@@ -180,12 +178,6 @@ impl types::SendMessagesRequest {
                     messages: rotation_messages_to_proto(messages),
                 })
             }
-            types::Messages::NonceGeneration(nonce) => {
-                Messages::NonceMessage(proto::NonceMessage {
-                    batch_index: Some(nonce.batch_index),
-                    message: Some(serialize_bcs(&nonce.message)),
-                })
-            }
             types::Messages::NonceGenerationAvid(avid) => {
                 Messages::AvidNonceMessage(avid_nonce_message_to_proto(avid))
             }
@@ -212,17 +204,6 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
             }
             Some(Messages::RotationMessages(rotation)) => {
                 types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
-            }
-            Some(Messages::NonceMessage(nonce)) => {
-                let batch_index = required(nonce.batch_index, "nonce_message.batch_index")?;
-                let message: batch_avss::Message = deserialize_bcs(
-                    required(nonce.message.as_ref(), "nonce_message.message")?,
-                    "nonce_message.message",
-                )?;
-                types::Messages::NonceGeneration(types::NonceMessage {
-                    batch_index,
-                    message,
-                })
             }
             Some(Messages::AvidNonceMessage(avid)) => {
                 types::Messages::NonceGenerationAvid(avid_nonce_message_from_proto(avid)?)
@@ -328,12 +309,6 @@ impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse 
                     messages: rotation_messages_to_proto(messages),
                 })
             }
-            types::Messages::NonceGeneration(nonce) => {
-                Messages::NonceMessage(proto::NonceMessage {
-                    batch_index: Some(nonce.batch_index),
-                    message: Some(serialize_bcs(&nonce.message)),
-                })
-            }
             types::Messages::NonceGenerationAvid(_) => {
                 unreachable!("AVID nonce generation send message in a RetrieveMessagesResponse")
             }
@@ -363,17 +338,6 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
             }
             Some(Messages::RotationMessages(rotation)) => {
                 types::Messages::Rotation(parse_rotation_messages_map(&rotation.messages)?)
-            }
-            Some(Messages::NonceMessage(nonce)) => {
-                let batch_index = required(nonce.batch_index, "nonce_message.batch_index")?;
-                let message: batch_avss::Message = deserialize_bcs(
-                    required(nonce.message.as_ref(), "nonce_message.message")?,
-                    "nonce_message.message",
-                )?;
-                types::Messages::NonceGeneration(types::NonceMessage {
-                    batch_index,
-                    message,
-                })
             }
             Some(Messages::AvidNonceRetrievalMessage(retrieval)) => {
                 types::Messages::AvidNonceRetrieval(types::AvidNonceRetrievalMessage {
@@ -465,9 +429,6 @@ impl From<&types::ComplaintResponse> for proto::ComplainResponse {
             types::ComplaintResponse::Rotation(response) => {
                 Responses::RotationResponse(serialize_bcs(response))
             }
-            types::ComplaintResponse::NonceGeneration(response) => {
-                Responses::NonceResponse(serialize_bcs(response))
-            }
             types::ComplaintResponse::NonceGenerationAvid(response) => {
                 Responses::AvidNonceResponse(serialize_bcs(response))
             }
@@ -498,11 +459,6 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponse {
                 let response: batch_avss_avid::ComplaintResponse =
                     deserialize_bcs(avid_response, "avid_nonce_response")?;
                 Ok(types::ComplaintResponse::NonceGenerationAvid(response))
-            }
-            Some(Responses::NonceResponse(nonce_response)) => {
-                let response: complaint::ComplaintResponse<batch_avss::SharesForNode> =
-                    deserialize_bcs(nonce_response, "nonce_response")?;
-                Ok(types::ComplaintResponse::NonceGeneration(response))
             }
             None => Err(TryFromProtoError::missing("responses")),
         }

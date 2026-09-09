@@ -1377,19 +1377,16 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_covers_all_backed_up_keyspaces_and_excludes_nonces() {
+    fn round_trip_covers_all_backed_up_keyspaces() {
         use hashi_types::committee::EncryptionPrivateKey;
         use std::collections::BTreeMap;
         use std::num::NonZeroU16;
 
-        // Populate every keyspace we care about, including the one that
-        // must NOT survive a backup round trip (nonce_messages).
         let src_dir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(src_dir.path()).unwrap();
         let dealer = sui_sdk_types::Address::new([3u8; 32]);
         let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
         let dealer_msg = crate::db::tests::create_test_message();
-        let nonce_msg = crate::db::tests::create_test_nonce_message();
         let mut rotation_msgs: BTreeMap<
             NonZeroU16,
             fastcrypto_tbls::threshold_schnorr::avss::Message,
@@ -1403,7 +1400,6 @@ mod tests {
         db.store_dealer_message(7, &dealer, &dealer_msg).unwrap();
         db.store_rotation_messages(7, &dealer, &rotation_msgs)
             .unwrap();
-        db.store_nonce_message(7, 0, &dealer, &nonce_msg).unwrap();
 
         let mut tar_bytes = Vec::new();
         {
@@ -1444,12 +1440,6 @@ mod tests {
         let restored_rotation = restored.list_all_rotation_messages(7).unwrap();
         assert_eq!(restored_rotation.len(), 1);
         assert_eq!(restored_rotation[0].0, dealer);
-
-        // nonce_messages must NOT come through the backup.
-        assert!(
-            restored.get_nonce_message(7, 0, &dealer).unwrap().is_none(),
-            "nonce_messages keyspace must not be included in backups"
-        );
     }
 
     #[test]

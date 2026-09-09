@@ -53,7 +53,6 @@ pub use crate::mpc::types::MpcResult;
 use crate::mpc::types::NonceCertTimestamp;
 use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceCollectionWindow;
-pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::ProtocolComplaint;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
@@ -211,7 +210,6 @@ pub struct MpcManager {
     pub current_dkg_messages: HashMap<Address, avss::Message>,
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
     pub rotation_ack_signatures: HashMap<Address, (MessagesHash, BLS12381Signature)>,
-    pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub current_avid_verified_common:
         HashMap<(u32, Address), batch_avss_avid::VerifiedAvssCommonMessage>,
@@ -222,7 +220,6 @@ pub struct MpcManager {
     pub public_messages_store: Arc<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
-    pub dealer_nonce_outputs: BTreeMap<(u32, Address), batch_avss::ReceiverOutput>,
     pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), TaggedAvidOutput>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
@@ -507,7 +504,6 @@ impl MpcManager {
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),
             rotation_ack_signatures: HashMap::new(),
-            current_nonce_messages: HashMap::new(),
             current_avid_round_state: HashMap::new(),
             current_avid_verified_common: HashMap::new(),
             avid_held_echoes: HashMap::new(),
@@ -521,7 +517,6 @@ impl MpcManager {
             previous_output: None,
             current_output: None,
             batch_size_per_weight,
-            dealer_nonce_outputs: BTreeMap::new(),
             dealer_avid_nonce_outputs: BTreeMap::new(),
             test_corrupt_shares_for,
         };
@@ -549,29 +544,16 @@ impl MpcManager {
                 reason: "retrieval messages are response-only".into(),
             });
         }
-        if matches!(request.messages, Messages::NonceGeneration(_)) {
-            return Err(MpcError::InvalidMessage {
-                sender,
-                reason: "vanilla nonce generation has been removed".into(),
-            });
-        }
         let cache_key = match &request.messages {
             Messages::Dkg(_) => MessageResponsesKey::Dkg { sender },
             Messages::Rotation(_) => MessageResponsesKey::Rotation { sender },
-            Messages::NonceGeneration(_) => unreachable!("rejected above"),
             Messages::NonceGenerationAvid(avid) => MessageResponsesKey::NonceGeneration {
                 batch_index: avid.batch_index,
                 sender,
             },
             Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         };
-        let batch_index = match &request.messages {
-            Messages::NonceGeneration(_) => unreachable!("rejected above"),
-            Messages::NonceGenerationAvid(avid) => Some(avid.batch_index),
-            _ => None,
-        };
-        let existing =
-            self.accepted_dealer_messages(request.messages.protocol_type(), &sender, batch_index)?;
+        let existing = self.accepted_dealer_messages(request.messages.protocol_type(), &sender)?;
         if let Some(existing_messages) = existing {
             let existing_hash = existing_messages.compute_hash();
             let incoming_hash = request.messages.compute_hash();
@@ -604,9 +586,7 @@ impl MpcManager {
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)
             }
             Messages::NonceGenerationAvid(avid) => self.handle_avid_nonce_message(sender, avid),
-            Messages::NonceGeneration(_) | Messages::AvidNonceRetrieval(_) => {
-                unreachable!("rejected above")
-            }
+            Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         }
         .map(|signature| SendMessagesResponse { signature });
         if !matches!(result, Err(MpcError::InvalidConfig(_))) {
@@ -638,11 +618,7 @@ impl MpcManager {
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveOutcome> {
         if request.epoch == self.mpc_config.epoch
-            && let Some(messages) = self.get_dealer_messages(
-                request.protocol_type,
-                &request.dealer,
-                request.batch_index,
-            )
+            && let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer)
         {
             return Ok(RetrieveOutcome::Ready(RetrieveMessagesResponse {
                 messages,
@@ -767,17 +743,11 @@ impl MpcManager {
         if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
             return Err(MpcError::InvalidMessage {
                 sender: caller,
-                reason: "vanilla nonce complaints have been removed".into(),
+                reason: "nonce complaints must be AVID complaints".into(),
             });
         }
         let cached_messages = cache_is_current
-            .then(|| {
-                self.get_dealer_messages(
-                    request.protocol_type,
-                    &request.dealer,
-                    request.batch_index,
-                )
-            })
+            .then(|| self.get_dealer_messages(request.protocol_type, &request.dealer))
             .flatten();
         let messages = if let Some(m) = cached_messages {
             m
@@ -793,22 +763,7 @@ impl MpcManager {
                     .get_rotation_messages(request.epoch, &request.dealer)
                     .map_err(|e| MpcError::StorageError(e.to_string()))?
                     .map(Messages::Rotation),
-                ProtocolTypeIndicator::NonceGeneration => request
-                    .batch_index
-                    .map(|batch_index| -> MpcResult<Option<Messages>> {
-                        Ok(self
-                            .public_messages_store
-                            .get_nonce_message(request.epoch, batch_index, &request.dealer)
-                            .map_err(|e| MpcError::StorageError(e.to_string()))?
-                            .map(|msg| {
-                                Messages::NonceGeneration(NonceMessage {
-                                    batch_index,
-                                    message: msg,
-                                })
-                            }))
-                    })
-                    .transpose()?
-                    .flatten(),
+                ProtocolTypeIndicator::NonceGeneration => None,
             };
             from_db.ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?
         };
@@ -896,37 +851,6 @@ impl MpcManager {
                     &complained_output,
                 )?;
                 ComplaintResponse::Rotation(response)
-            }
-            Messages::NonceGeneration(NonceMessage {
-                batch_index,
-                message,
-            }) => {
-                let nonce_output = if let Some(output) = self
-                    .dealer_nonce_outputs
-                    .get(&(batch_index, request.dealer))
-                {
-                    output.clone()
-                } else {
-                    let receiver = self.create_nonce_receiver(request.dealer, batch_index)?;
-                    match receiver.process_message(&message)? {
-                        batch_avss::ProcessedMessage::Valid(output) => output,
-                        batch_avss::ProcessedMessage::Complaint(_) => {
-                            return Err(MpcError::NotFound(
-                                "Peer is also a victim of this nonce dealer — cannot help with complaint".into(),
-                            ));
-                        }
-                    }
-                };
-                let receiver = self.create_nonce_receiver(request.dealer, batch_index)?;
-                let ProtocolComplaint::BatchedAvss(complaint) = &request.complaint else {
-                    return Err(MpcError::InvalidMessage {
-                        sender: request.dealer,
-                        reason: "Nonce-generation complaint requires a nonce complaint".into(),
-                    });
-                };
-                let complaint_response =
-                    receiver.handle_complaint(&message, complaint, &nonce_output)?;
-                ComplaintResponse::NonceGeneration(complaint_response)
             }
             Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
                 return Err(MpcError::ProtocolFailed(
@@ -2227,7 +2151,6 @@ impl MpcManager {
         let message = match messages {
             Messages::Dkg(msg) => msg,
             Messages::Rotation(_)
-            | Messages::NonceGeneration(_)
             | Messages::NonceGenerationAvid(_)
             | Messages::AvidNonceRetrieval(_) => {
                 panic!("try_sign_dkg_message called with non-DKG messages")
@@ -2267,36 +2190,6 @@ impl MpcManager {
                 reason: "Invalid shares".to_string(),
             }),
         }
-    }
-
-    fn create_nonce_receiver(
-        &self,
-        dealer: Address,
-        batch_index: u32,
-    ) -> MpcResult<batch_avss::Receiver> {
-        let dealer_party_id =
-            self.committee
-                .index_of(&dealer)
-                .ok_or_else(|| MpcError::InvalidMessage {
-                    sender: dealer,
-                    reason: "Dealer not in committee".into(),
-                })? as u16;
-        let dealer_session_id = SessionId::nonce_dealer_session_id(
-            &self.chain_id,
-            self.mpc_config.epoch,
-            batch_index,
-            &dealer,
-        );
-        batch_avss::Receiver::new(
-            self.mpc_config.nodes.clone(),
-            self.party_id()?,
-            dealer_party_id,
-            self.mpc_config.threshold,
-            dealer_session_id.to_vec(),
-            self.encryption_key()?.inner().clone(),
-            self.batch_size_per_weight,
-        )
-        .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
     fn create_avid_nonce_receiver(
@@ -2658,9 +2551,7 @@ impl MpcManager {
                     )
                     .map_err(|e| MpcError::CryptoError(e.to_string()))?
             }
-            ProtocolComplaint::Avss(_) | ProtocolComplaint::BatchedAvss(_) => {
-                unreachable!("routed by the AVID complaint check")
-            }
+            ProtocolComplaint::Avss(_) => unreachable!("routed by the AVID complaint check"),
         };
         tracing::info!(
             "AVID nonce complaint answered: accuser {:?}, dealer {:?}, batch_index={batch_index}, \
@@ -3996,19 +3887,13 @@ impl MpcManager {
             return;
         }
         let mut mgr = mpc_manager.write().unwrap();
-        mgr.current_nonce_messages.retain(|(b, _), _| *b >= cutoff);
         mgr.current_avid_round_state
             .retain(|(b, _), _| *b >= cutoff);
         mgr.current_avid_verified_common
             .retain(|(b, _), _| *b >= cutoff);
-        mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_avid_nonce_outputs
             .retain(|(b, _), _| *b >= cutoff);
         mgr.avid_held_echoes.retain(|(b, _), _| *b >= cutoff);
-        mgr.complaints_to_process.retain(|k, _| match k {
-            ComplaintsToProcessKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
-            _ => true,
-        });
         mgr.message_responses.retain(|k, _| match k {
             MessageResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
@@ -4430,9 +4315,7 @@ impl MpcManager {
             };
             let complaint_response = match response {
                 ComplaintResponse::Dkg(resp) => resp,
-                ComplaintResponse::Rotation(_)
-                | ComplaintResponse::NonceGeneration(_)
-                | ComplaintResponse::NonceGenerationAvid(_) => {
+                ComplaintResponse::Rotation(_) | ComplaintResponse::NonceGenerationAvid(_) => {
                     tracing::info!("Unexpected non-DKG response in DKG complaint recovery");
                     continue;
                 }
@@ -4684,7 +4567,6 @@ impl MpcManager {
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
             Messages::Dkg(_)
-            | Messages::NonceGeneration(_)
             | Messages::NonceGenerationAvid(_)
             | Messages::AvidNonceRetrieval(_) => {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
@@ -5836,9 +5718,7 @@ impl MpcManager {
                     msgs,
                 )?;
             }
-            Messages::NonceGeneration(_)
-            | Messages::NonceGenerationAvid(_)
-            | Messages::AvidNonceRetrieval(_) => {
+            Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
                 return Err(MpcError::ProtocolFailed(format!(
                     "Retrieved non-key-generation message for dealer {:?} during previous-epoch \
                      repair: {:?}",
@@ -6067,7 +5947,6 @@ impl MpcManager {
         &self,
         protocol_type: ProtocolTypeIndicator,
         dealer: &Address,
-        batch_index: Option<u32>,
     ) -> Option<Messages> {
         match protocol_type {
             ProtocolTypeIndicator::Dkg => self
@@ -6078,12 +5957,7 @@ impl MpcManager {
                 .current_rotation_messages
                 .get(dealer)
                 .map(|m| Messages::Rotation(m.clone())),
-            ProtocolTypeIndicator::NonceGeneration => {
-                let batch_index = batch_index?;
-                self.current_nonce_messages
-                    .get(&(batch_index, *dealer))
-                    .map(|m| Messages::NonceGeneration(m.clone()))
-            }
+            ProtocolTypeIndicator::NonceGeneration => None,
         }
     }
 
@@ -6091,9 +5965,8 @@ impl MpcManager {
         &self,
         protocol_type: ProtocolTypeIndicator,
         dealer: &Address,
-        batch_index: Option<u32>,
     ) -> MpcResult<Option<Messages>> {
-        if let Some(cached) = self.get_dealer_messages(protocol_type, dealer, batch_index) {
+        if let Some(cached) = self.get_dealer_messages(protocol_type, dealer) {
             return Ok(Some(cached));
         }
         let epoch = self.mpc_config.epoch;
@@ -6680,20 +6553,7 @@ pub(crate) fn retrieve_from_store(
             .get_rotation_messages(request.epoch, &request.dealer)
             .map_err(|e| MpcError::StorageError(e.to_string()))?
             .map(Messages::Rotation),
-        ProtocolTypeIndicator::NonceGeneration => {
-            let batch_index = request.batch_index.ok_or_else(|| {
-                MpcError::NotFound("batch_index required for nonce gen retrieval".into())
-            })?;
-            store
-                .get_nonce_message(request.epoch, batch_index, &request.dealer)
-                .map_err(|e| MpcError::StorageError(e.to_string()))?
-                .map(|msg| {
-                    Messages::NonceGeneration(NonceMessage {
-                        batch_index,
-                        message: msg,
-                    })
-                })
-        }
+        ProtocolTypeIndicator::NonceGeneration => None,
     };
     messages
         .map(|m| RetrieveMessagesResponse { messages: m })
