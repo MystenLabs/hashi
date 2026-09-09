@@ -7,6 +7,7 @@ mod guardian;
 mod retry;
 mod withdrawal_request_flow;
 mod withdrawal_transactions;
+use deposits::ApprovedDepositOutcome;
 use deposits::UnapprovedDepositTaskResult;
 pub(crate) use retry::RetryPolicy;
 
@@ -67,7 +68,10 @@ pub(crate) struct LeaderService {
     // Background tasks currently approving Bitcoin deposits.
     unapproved_deposit_tasks: JoinSet<UnapprovedDepositTaskResult>,
     // Background tasks currently confirming approved Bitcoin deposits.
-    approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
+    approved_deposit_tasks: JoinSet<(
+        Address,
+        Result<ApprovedDepositOutcome, ApprovedDepositError>,
+    )>,
     // Deposit requests loaded from Bitcoin/on-chain state and waiting for approval processing.
     pending_unapproved_deposit_requests: VecDeque<DepositRequest>,
     // Last hashi epoch processed by the checkpoint-triggered deposit path.

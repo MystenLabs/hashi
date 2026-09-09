@@ -31,7 +31,6 @@ pub(super) enum Slot {
     Members,
     Committees,
     UtxoRecords,
-    SpentUtxos,
     // ObjectBag containers whose child objects are mirrored.
     DepositRequests,
     WithdrawalRequests,
@@ -50,6 +49,11 @@ pub(super) enum Slot {
     DepositProcessed,
     WithdrawalProcessed,
     ConfirmedTxns,
+    /// The `UtxoPool.spent_utxos` tombstone bag. Append-only and never
+    /// pruned on chain, so mirroring it would grow a node's memory
+    /// without bound; the two replay checks that need membership read
+    /// it live instead (`OnchainState::is_utxo_spent`).
+    SpentUtxos,
     /// The `BitcoinState.user_requests` table of per-user request bags.
     UserRequests,
     /// One per-user `Bag` stored as a `user_requests` value.
@@ -208,7 +212,6 @@ pub(super) enum TrackedKind {
     Committee(u64),
     CommitteeHandoff(u64),
     UtxoRecord(UtxoId),
-    SpentUtxo(UtxoId),
     DepositRequest(Address),
     WithdrawalRequest(Address),
     WithdrawalTxn(Address),

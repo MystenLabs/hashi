@@ -608,14 +608,12 @@ fn apply_write(
             TrackedKind::UtxoRecord(utxo_id)
         }),
         Slot::SpentUtxos => {
-            decode::<move_types::Field<types::UtxoId, u64>>(contents, &id).map(|field| {
-                hashi
-                    .bitcoin_mut()
-                    .utxo_pool
-                    .spent_utxos
-                    .insert(field.name, field.value);
-                TrackedKind::SpentUtxo(field.name)
-            })
+            // A tombstone is created once and never rewritten, moved,
+            // or deleted, so there is no version to guard a replay
+            // with and nothing for a deletion to retire: recording it
+            // would only make the index grow with the bag, the very
+            // growth the mirror stopped tracking the bag to avoid.
+            return;
         }
         Slot::DepositRequests => {
             decode::<move_types::DepositRequest>(contents, &id).map(|request| {
@@ -845,9 +843,6 @@ fn retire(
         TrackedKind::UtxoRecord(utxo_id) => {
             hashi.bitcoin_mut().utxo_pool.utxo_records.remove(utxo_id);
         }
-        TrackedKind::SpentUtxo(utxo_id) => {
-            hashi.bitcoin_mut().utxo_pool.spent_utxos.remove(utxo_id);
-        }
         TrackedKind::DepositRequest(id) => {
             hashi.bitcoin_mut().deposit_queue.requests.remove(id);
             effects.push(Effect::DepositRequestRemoved(*id));
@@ -909,7 +904,6 @@ fn slot_for_kind(kind: &TrackedKind) -> Option<Slot> {
         TrackedKind::Member(_) => Some(Slot::Members),
         TrackedKind::Committee(_) | TrackedKind::CommitteeHandoff(_) => Some(Slot::Committees),
         TrackedKind::UtxoRecord(_) => Some(Slot::UtxoRecords),
-        TrackedKind::SpentUtxo(_) => Some(Slot::SpentUtxos),
         TrackedKind::DepositRequest(_) => Some(Slot::DepositRequests),
         TrackedKind::WithdrawalRequest(_) => Some(Slot::WithdrawalRequests),
         TrackedKind::WithdrawalTxn(_) => Some(Slot::WithdrawalTxns),
@@ -1189,7 +1183,6 @@ mod tests {
                         utxo_records_id: utxo_records_id(),
                         utxo_records: BTreeMap::new(),
                         spent_utxos_id: spent_utxos_id(),
-                        spent_utxos: BTreeMap::new(),
                     },
                 }),
                 proposals: types::Proposals {
@@ -1455,6 +1448,23 @@ mod tests {
         )
     }
 
+    /// A `spent_utxos` bag entry (`Field<UtxoId, u64>`) for the UTXO
+    /// `utxo_field_object` records, as `cleanup_spent_utxos` writes it.
+    fn spent_utxo_tombstone_object(field_id: Address, version: u64) -> Object {
+        let contents = bcs::to_bytes(&FieldEnc {
+            id: field_id,
+            name: utxo(0x77, 0, 1_000).id,
+            value: 7u64,
+        })
+        .unwrap();
+        obj(
+            field_tag(hashi_struct("utxo", "UtxoId", vec![]), TypeTag::U64),
+            version,
+            Owner::Object(spent_utxos_id()),
+            contents,
+        )
+    }
+
     fn deposit_request_object(id: Address, version: u64, approved: bool) -> Object {
         obj(
             tag(addr(PACKAGE), "deposit_queue", "DepositRequest", vec![]),
@@ -1566,11 +1576,28 @@ mod tests {
         assert_eq!(fixture.hashi.bitcoin().utxo_pool.utxo_records.len(), 1);
 
         // The cleanup transaction deletes the Field object with no
-        // event; the mirror must still drop the record.
-        let out = fixture.apply(&tx(vec![TxChange::Deleted { id: field_id }]));
+        // event and writes the UTXO's `spent_utxos` tombstone. The
+        // mirror must still drop the record, and must route the
+        // tombstone as a known write without indexing it: the bag is
+        // not mirrored, and indexing would grow with it.
+        let tombstone_id = addr(0x51);
+        let out = fixture.apply(&tx(vec![
+            written(spent_utxo_tombstone_object(tombstone_id, 1)),
+            TxChange::Deleted { id: field_id },
+        ]));
         assert!(out.unrouted.is_empty());
         assert!(fixture.hashi.bitcoin().utxo_pool.utxo_records.is_empty());
         assert!(fixture.index.get(&field_id).is_none());
+        assert!(fixture.index.get(&tombstone_id).is_none());
+        assert_eq!(fixture.index.len(), 0);
+
+        // A replayed tombstone write is equally inert.
+        let out = fixture.apply(&tx(vec![written(spent_utxo_tombstone_object(
+            tombstone_id,
+            1,
+        ))]));
+        assert!(out.unrouted.is_empty());
+        assert_eq!(fixture.index.len(), 0);
     }
 
     #[test]

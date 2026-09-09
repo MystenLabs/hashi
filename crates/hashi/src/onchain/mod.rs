@@ -73,6 +73,7 @@ pub enum ScrapeScope {
 mod apply;
 mod mirror;
 mod route;
+mod spent_utxos;
 pub mod types;
 pub mod version;
 mod versioned_decode;
@@ -871,17 +872,6 @@ impl OnchainState {
             .any(|t| !t.is_fully_signed())
     }
 
-    pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
-        self.state()
-            .hashi()
-            .bitcoin()
-            .utxo_pool
-            .spent_utxos()
-            .iter()
-            .map(|(utxo_id, epoch)| (*utxo_id, *epoch))
-            .collect()
-    }
-
     pub fn active_utxos(&self) -> Vec<types::Utxo> {
         self.state()
             .hashi()
@@ -892,15 +882,34 @@ impl OnchainState {
             .collect()
     }
 
-    pub fn find_spent_or_active_utxo_ids(
+    /// The subset of `utxo_ids` that have a `utxo_records` entry
+    /// (active, locked, or spent but not yet cleaned up), read from the
+    /// mirror. Tombstoned ids are not covered; see [`Self::is_utxo_spent`].
+    pub fn find_utxo_ids_with_records(
         &self,
         utxo_ids: impl IntoIterator<Item = types::UtxoId>,
     ) -> HashSet<types::UtxoId> {
         let mut utxo_ids: HashSet<_> = utxo_ids.into_iter().collect();
         let state = self.state();
         let utxo_pool = &state.hashi().bitcoin().utxo_pool;
-        utxo_ids.retain(|id| utxo_pool.is_active_or_spent(id));
+        utxo_ids.retain(|id| utxo_pool.has_record(id));
         utxo_ids
+    }
+
+    /// Whether the chain holds a `spent_utxos` tombstone for `utxo_id`.
+    ///
+    /// The tombstone bag is not mirrored (it only ever grows), so this
+    /// is a live read against the fullnode; the `spent_utxos` module
+    /// documents the mechanics and the failure semantics.
+    pub async fn is_utxo_spent(&self, utxo_id: &types::UtxoId) -> Result<bool> {
+        let spent_utxos_id = *self.state().hashi().bitcoin().utxo_pool.spent_utxos_id();
+        spent_utxos::lookup_spent_utxo(
+            self.client(),
+            spent_utxos_id,
+            self.package_id_original(),
+            utxo_id,
+        )
+        .await
     }
 
     pub fn withdrawal_txn(&self, id: &Address) -> Option<types::WithdrawalTransaction> {
@@ -2118,11 +2127,11 @@ async fn scrape_utxo_pool(
     utxo_pool: move_types::UtxoPool,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(route::ContainerSeed, types::UtxoPool)> {
-    let ((mut records_seed, utxo_records), (spent_seed, spent_utxos)) = tokio::try_join!(
-        scrape_utxo_records(client.clone(), utxo_pool.utxo_records.id, metrics),
-        scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id, metrics),
-    )?;
-    records_seed.merge(spent_seed);
+    // The `spent_utxos` tombstones are deliberately not scraped: the
+    // bag is unbounded (see `types::UtxoPool`), and the mirror only
+    // needs its id to answer point lookups.
+    let (records_seed, utxo_records) =
+        scrape_utxo_records(client, utxo_pool.utxo_records.id, metrics).await?;
 
     Ok((
         records_seed,
@@ -2130,7 +2139,6 @@ async fn scrape_utxo_pool(
             utxo_records_id: utxo_pool.utxo_records.id,
             utxo_records,
             spent_utxos_id: utxo_pool.spent_utxos.id,
-            spent_utxos,
         },
     ))
 }
@@ -2179,44 +2187,6 @@ async fn scrape_utxo_records(
     )
     .await?;
     Ok((seed, utxo_records))
-}
-
-async fn scrape_spent_utxos(
-    client: Client,
-    spent_utxos_id: Address,
-    metrics: Option<&crate::metrics::Metrics>,
-) -> Result<(route::ContainerSeed, BTreeMap<types::UtxoId, u64>)> {
-    let mut seed = route::ContainerSeed::default();
-    let mut spent_utxos = BTreeMap::new();
-    seed.height = scrape_dynamic_field_pages(
-        &client,
-        spent_utxos_id,
-        plain_field_mask(),
-        "spent_utxos",
-        metrics,
-        |fields| {
-            for field in fields {
-                let utxo_id: types::UtxoId = field
-                    .name()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize UtxoId: {e}"))?;
-                let spent_epoch: u64 = field
-                    .value()
-                    .deserialize()
-                    .map_err(|e| anyhow!("failed to deserialize spent epoch: {e}"))?;
-                let field_id: Address = field.field_id().parse()?;
-                seed.entries.push((
-                    field_id,
-                    field.field_object().version(),
-                    route::TrackedKind::SpentUtxo(utxo_id),
-                ));
-                spent_utxos.insert(utxo_id, spent_epoch);
-            }
-            Ok(())
-        },
-    )
-    .await?;
-    Ok((seed, spent_utxos))
 }
 
 async fn scrape_proposals(

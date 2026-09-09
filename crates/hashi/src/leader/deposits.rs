@@ -42,6 +42,16 @@ pub(super) struct UnapprovedDepositTaskResult {
     result: Result<(), UnapprovedDepositError>,
 }
 
+/// How a confirm task ended when nothing went wrong.
+#[derive(Debug)]
+pub(super) enum ApprovedDepositOutcome {
+    Confirmed,
+    /// The chain already holds a `spent_utxos` tombstone for the
+    /// request's UTXO, so `confirm_deposit` can never succeed; the
+    /// request is left for expiry GC instead of being retried.
+    UtxoAlreadySpent,
+}
+
 impl LeaderService {
     pub(super) fn process_actionable_unapproved_deposits(&mut self) {
         self.reload_pending_unapproved_deposit_requests(UnapprovedDepositReloadMode::All);
@@ -195,13 +205,18 @@ impl LeaderService {
             .iter()
             .map(|r| r.id)
             .collect();
-        let spent_or_active_utxo_ids = self.inner.onchain_state().find_spent_or_active_utxo_ids(
-            deposit_confirmation_candidates.iter().map(|r| r.utxo.id),
-        );
+        // A request whose UTXO the pool already holds is doomed:
+        // `confirm_deposit` would abort inserting the duplicate record.
+        // The pool's spent tombstones are the other half of that guard;
+        // they are not mirrored, so each confirm task asks the chain.
+        let used_utxo_ids = self
+            .inner
+            .onchain_state()
+            .find_utxo_ids_with_records(deposit_confirmation_candidates.iter().map(|r| r.utxo.id));
         let (utxo_already_used_count, duplicate_utxo_count) =
             filter_deposit_confirmation_candidates(
                 &mut deposit_confirmation_candidates,
-                &spent_or_active_utxo_ids,
+                &used_utxo_ids,
             );
 
         self.inner
@@ -348,15 +363,37 @@ impl LeaderService {
 
     pub(super) fn handle_completed_approved_deposit_task(
         &mut self,
-        result: Result<(Address, Result<(), ApprovedDepositError>), tokio::task::JoinError>,
+        result: Result<
+            (
+                Address,
+                Result<ApprovedDepositOutcome, ApprovedDepositError>,
+            ),
+            tokio::task::JoinError,
+        >,
     ) {
         match result {
             Ok((deposit_id, result)) => {
                 self.inflight_deposits.remove(&deposit_id);
                 match result {
-                    Ok(()) => {
+                    Ok(ApprovedDepositOutcome::Confirmed) => {
                         self.approved_deposit_retry_tracker.clear(&deposit_id);
                         info!(deposit_id = %deposit_id, "Deposit processed successfully");
+                    }
+                    Ok(ApprovedDepositOutcome::UtxoAlreadySpent) => {
+                        // Tombstones are permanent, so no retry can
+                        // ever succeed; the same set that parks
+                        // rejected approvals parks this until the
+                        // request expires and leaves the queue.
+                        self.approved_deposit_retry_tracker.clear(&deposit_id);
+                        self.never_retry_deposit_ids.insert(deposit_id);
+                        self.inner
+                            .metrics
+                            .never_retry_deposit_ids
+                            .set(self.never_retry_deposit_ids.len() as i64);
+                        warn!(
+                            deposit_id = %deposit_id,
+                            "Marking approved deposit as never retry: its UTXO is already spent on Sui"
+                        );
                     }
                     Err(err) => {
                         if !self.inner.onchain_state().has_deposit_request(&deposit_id) {
@@ -534,8 +571,24 @@ impl LeaderService {
         inner: Arc<Hashi>,
         deposit_request: DepositRequest,
         deadline: Instant,
-    ) -> Result<(), ApprovedDepositError> {
+    ) -> Result<ApprovedDepositOutcome, ApprovedDepositError> {
         info!("Confirming approved deposit request");
+
+        // The caller already dropped requests whose UTXO has a pool
+        // record; the spent tombstones are not mirrored, so ask the
+        // chain before spending gas on a confirm it would reject.
+        let spent = tokio::time::timeout_at(
+            deadline,
+            inner
+                .onchain_state()
+                .is_utxo_spent(&deposit_request.utxo.id),
+        )
+        .await
+        .map_err(|_| ApprovedDepositError::TimedOut(LEADER_TASK_TIMEOUT))?
+        .map_err(ApprovedDepositError::SpentUtxoLookupFailed)?;
+        if spent {
+            return Ok(ApprovedDepositOutcome::UtxoAlreadySpent);
+        }
 
         let mut executor = match SuiTxExecutor::from_hashi(inner.clone()) {
             Ok(executor) => executor,
@@ -571,7 +624,7 @@ impl LeaderService {
         )
         .await
         .map_err(|_| ApprovedDepositError::CheckpointWaitTimedOut)?;
-        Ok(())
+        Ok(ApprovedDepositOutcome::Confirmed)
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
@@ -693,11 +746,11 @@ fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequ
 
 fn filter_deposit_confirmation_candidates(
     candidates: &mut Vec<DepositRequest>,
-    spent_or_active_utxo_ids: &HashSet<UtxoId>,
+    used_utxo_ids: &HashSet<UtxoId>,
 ) -> (usize, usize) {
-    // Remove requests for spent or active UTXOs and count them.
+    // Remove requests for UTXOs the pool already holds and count them.
     let count_before_filter = candidates.len();
-    candidates.retain(|r| !spent_or_active_utxo_ids.contains(&r.utxo.id));
+    candidates.retain(|r| !used_utxo_ids.contains(&r.utxo.id));
     let utxo_already_used_count = count_before_filter - candidates.len();
 
     // Keep the earliest-approved request per UTXO and count later duplicates.
@@ -758,7 +811,7 @@ mod tests {
         let distinct = deposit_request(3, 3);
         let used_duplicate = deposit_request(4, 1);
         let duplicate = deposit_request(5, 2);
-        let spent_or_active_utxo_ids = HashSet::from([used.utxo.id]);
+        let used_utxo_ids = HashSet::from([used.utxo.id]);
         let mut candidates = vec![
             used,
             first.clone(),
@@ -767,8 +820,7 @@ mod tests {
             duplicate,
         ];
 
-        let counts =
-            filter_deposit_confirmation_candidates(&mut candidates, &spent_or_active_utxo_ids);
+        let counts = filter_deposit_confirmation_candidates(&mut candidates, &used_utxo_ids);
 
         assert_eq!(candidates, vec![first, distinct]);
         assert_eq!(counts, (2, 1));

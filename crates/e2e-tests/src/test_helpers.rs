@@ -19,6 +19,7 @@ use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::move_types::DepositConfirmed;
 use hashi_types::move_types::ProtocolType;
 use hashi_types::move_types::StampedDealerSubmissionV1;
+use hashi_types::move_types::UtxoId;
 use hashi_types::move_types::WithdrawalConfirmed;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -361,18 +362,29 @@ pub async fn create_withdrawal_and_wait(
     Ok(confirmed)
 }
 
-/// Wait until every node's object mirror shows the spent withdrawal
-/// inputs cleaned up: at least one `spent_utxos` tombstone exists and no
-/// `utxo_records` entry is still marked spent.
+/// Wait until the spent withdrawal inputs are cleaned up: the chain
+/// holds at least one `spent_utxos` tombstone and no node's object
+/// mirror still has a `utxo_records` entry marked spent.
 ///
 /// The cleanup transaction (`cleanup_spent_utxos`) emits no event, so
 /// this passing proves both halves of the eventless-write path: the
 /// leader's GC decided on the cleanup from its mirror, and every node's
 /// mirror applied the resulting Field deletions from the object stream
 /// alone — no rescrape exists to paper over a miss.
+///
+/// The tombstones themselves are not mirrored (the bag only grows), so
+/// they are listed from the chain; every id listed must then read back
+/// as spent through a node's live lookup, which pins the derived-id
+/// read the deposit replay checks depend on against the chain's own
+/// listing.
 pub async fn wait_for_spent_utxo_cleanup(networks: &TestNetworks, timeout: Duration) -> Result<()> {
     info!("Waiting for the spent-UTXO cleanup to reach every node's mirror...");
     let deadline = std::time::Instant::now() + timeout;
+    let state = networks.hashi_network.nodes()[0]
+        .hashi()
+        .onchain_state()
+        .clone();
+    let spent_utxos_id = *state.state().hashi().bitcoin().utxo_pool.spent_utxos_id();
     loop {
         let laggard =
             networks
@@ -381,23 +393,45 @@ pub async fn wait_for_spent_utxo_cleanup(networks: &TestNetworks, timeout: Durat
                 .iter()
                 .enumerate()
                 .find_map(|(index, node)| {
-                    let state = node.hashi().onchain_state();
-                    let pending = state
+                    let pending = node
+                        .hashi()
+                        .onchain_state()
                         .utxo_records()
                         .values()
                         .filter(|record| record.spent_epoch.is_some())
                         .count();
-                    let tombstones = state.spent_utxos_entries().len();
-                    (pending > 0 || tombstones == 0).then_some((index, pending, tombstones))
+                    (pending > 0).then_some((index, pending))
                 });
-        let Some((index, pending, tombstones)) = laggard else {
-            info!("Every node's mirror shows the spent UTXOs cleaned up");
+        let tombstones =
+            list_all_dynamic_fields(&networks.sui_network.client, spent_utxos_id).await?;
+        if laggard.is_none() && !tombstones.is_empty() {
+            info!(
+                tombstones = tombstones.len(),
+                "Every node's mirror shows the spent UTXOs cleaned up"
+            );
+            for field in &tombstones {
+                let utxo_id: UtxoId = field
+                    .name()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize a spent_utxos key: {e}"))?;
+                anyhow::ensure!(
+                    state.is_utxo_spent(&utxo_id).await?,
+                    "the chain lists {utxo_id:?} as spent but the live lookup does not find it"
+                );
+            }
             return Ok(());
-        };
+        }
         if std::time::Instant::now() >= deadline {
+            let mirror = match laggard {
+                Some((index, pending)) => {
+                    format!("node {index}'s mirror still shows {pending} spent record(s)")
+                }
+                None => "every mirror is clean".to_string(),
+            };
             return Err(anyhow!(
-                "Timeout after {timeout:?} waiting for the spent-UTXO cleanup: node {index}'s \
-                 mirror still shows {pending} spent record(s) and {tombstones} tombstone(s)"
+                "Timeout after {timeout:?} waiting for the spent-UTXO cleanup: {mirror} and the \
+                 chain holds {} tombstone(s)",
+                tombstones.len()
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
