@@ -52,20 +52,20 @@ pub enum BackupArchiveFormat {
     Unencrypted,
 }
 
-enum BackupRequest {
+enum BackupMaintenanceRequest {
     EpochChanged { epoch: u64, write_backup: bool },
 }
 
 #[derive(Clone, Debug)]
 pub struct BackupHandle {
-    sender: mpsc::UnboundedSender<BackupRequest>,
+    sender: mpsc::UnboundedSender<BackupMaintenanceRequest>,
 }
 
 impl BackupHandle {
-    pub fn backup_after_epoch_change(&self, epoch: u64, write_backup: bool) {
+    pub fn maintain_backups_after_epoch_change(&self, epoch: u64, write_backup: bool) {
         if self
             .sender
-            .send(BackupRequest::EpochChanged {
+            .send(BackupMaintenanceRequest::EpochChanged {
                 epoch,
                 write_backup,
             })
@@ -73,7 +73,7 @@ impl BackupHandle {
         {
             warn!(
                 epoch,
-                "Skipping automatic backup: backup service is stopped"
+                write_backup, "Skipping epoch backup maintenance: backup service is stopped"
             );
         }
     }
@@ -81,7 +81,7 @@ impl BackupHandle {
 
 pub struct BackupService {
     inner: Arc<Hashi>,
-    receiver: mpsc::UnboundedReceiver<BackupRequest>,
+    receiver: mpsc::UnboundedReceiver<BackupMaintenanceRequest>,
 }
 
 impl BackupService {
@@ -105,22 +105,28 @@ impl BackupService {
     async fn run(mut self) {
         while let Some(request) = self.receiver.recv().await {
             match request {
-                BackupRequest::EpochChanged {
+                BackupMaintenanceRequest::EpochChanged {
                     epoch,
                     write_backup,
                 } => {
                     let hashi = self.inner.clone();
                     match tokio::task::spawn_blocking(move || {
-                        hashi.backup_after_epoch_change(epoch, write_backup)
+                        hashi.maintain_backups_after_epoch_change(epoch, write_backup)
                     })
                     .await
                     {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => {
-                            error!("Automatic backup after epoch {epoch} failed: {e:#}");
+                            error!(
+                                epoch,
+                                write_backup, "Epoch backup maintenance failed: {e:#}"
+                            );
                         }
                         Err(e) => {
-                            error!("Automatic backup after epoch {epoch} failed to join: {e}");
+                            error!(
+                                epoch,
+                                write_backup, "Epoch backup maintenance failed to join: {e}"
+                            );
                         }
                     }
                 }

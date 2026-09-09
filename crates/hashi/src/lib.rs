@@ -341,18 +341,23 @@ impl Hashi {
             .await
     }
 
-    pub(crate) fn backup_after_epoch_change(
+    pub(crate) fn maintain_backups_after_epoch_change(
         &self,
         epoch: u64,
         write_backup: bool,
     ) -> anyhow::Result<Option<PathBuf>> {
-        if let Err(error) =
-            crate::backup::cleanup_old_backups(&self.config.backup_dir, jiff::Timestamp::now())
-        {
-            tracing::warn!(
+        match crate::backup::cleanup_old_backups(&self.config.backup_dir, jiff::Timestamp::now()) {
+            Ok(()) => tracing::info!(
                 epoch,
+                write_backup,
+                directory = %self.config.backup_dir.display(),
+                "Epoch backup retention sweep completed",
+            ),
+            Err(error) => tracing::warn!(
+                epoch,
+                write_backup,
                 "Cleanup of expired backups failed; continuing epoch maintenance: {error:#}",
-            );
+            ),
         }
         if !write_backup {
             return Ok(None);
@@ -1632,13 +1637,13 @@ mod test {
         std::fs::write(&older, b"older archive").unwrap();
         std::fs::remove_file(&config_path).unwrap();
 
-        assert!(hashi.backup_after_epoch_change(6, true).is_err());
+        assert!(hashi.maintain_backups_after_epoch_change(6, true).is_err());
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
         assert!(!older.exists());
         hashi.config.save(&config_path).unwrap();
 
         let output = hashi
-            .backup_after_epoch_change(7, true)
+            .maintain_backups_after_epoch_change(7, true)
             .unwrap()
             .expect("backup should run");
 
@@ -1647,7 +1652,7 @@ mod test {
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
 
         std::fs::remove_file(config_path).unwrap();
-        assert!(hashi.backup_after_epoch_change(8, true).is_err());
+        assert!(hashi.maintain_backups_after_epoch_change(8, true).is_err());
         assert!(!expired.exists());
         assert!(output.is_file());
     }
@@ -1675,7 +1680,10 @@ mod test {
         std::fs::write(&older, b"older archive").unwrap();
         std::fs::write(&newest, b"last recovery archive").unwrap();
 
-        assert_eq!(hashi.backup_after_epoch_change(7, false).unwrap(), None);
+        assert_eq!(
+            hashi.maintain_backups_after_epoch_change(7, false).unwrap(),
+            None
+        );
 
         assert!(!older.exists());
         assert_eq!(std::fs::read(&newest).unwrap(), b"last recovery archive");
@@ -1704,7 +1712,9 @@ mod test {
         )
         .unwrap();
 
-        let error = hashi.backup_after_epoch_change(7, true).unwrap_err();
+        let error = hashi
+            .maintain_backups_after_epoch_change(7, true)
+            .unwrap_err();
         assert!(
             error.to_string().contains(config_path.to_str().unwrap()),
             "backup should attempt to read its input after cleanup fails: {error:#}",
