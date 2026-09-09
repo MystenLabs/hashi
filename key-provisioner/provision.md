@@ -125,15 +125,23 @@ From the repository root, run the interactive provisioning script:
 ./key-provisioner/scripts/provision-yubikey.sh
 ```
 
-Follow its prompts. The script changes the factory PINs, confirms the OpenPGP
-key slots are empty, generates the keys, requires a physical touch for signing
-and decryption, and tests both operations. When setup completes, it prints the
-public certificate path and primary-key fingerprint to provide to the operator.
+Follow its prompts. The script changes the factory PINs, checks the OpenPGP
+key slots, generates the keys, automatically enables touch for signing and
+decryption, and tests both operations. Empty slots need no confirmation; existing
+keys trigger an irreversible-overwrite warning requiring `y` or `yes`.
+When setup completes, it prints the public certificate path and primary-key
+fingerprint to provide to the operator.
+
+The user ID only names output files; keys are selected by fingerprint. Choose
+an output directory (default `.`). For user ID `jdoe`, the script retains
+`jdoe-guardian-kp-pubkey.asc` and `jdoe-guardian-kp-fingerprint.txt` (fingerprint
+only). Test files are deleted on exit; the public certificate remains imported
+in your GnuPG keyring.
 
 ### Provide the public certificate to the operator
 
 Send only the `.asc` public certificate and its fingerprint to the guardian
-operator. Do not send either PIN or any local GnuPG private-key material.
+operator. Do not send either PIN.
 
 The operator assigns each KP one ordered roster entry containing exactly one
 certificate path:
