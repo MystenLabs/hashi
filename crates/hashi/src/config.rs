@@ -17,6 +17,7 @@ const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
 /// Tonic's 4 MiB default is too small to scrape a large on-chain state or
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+pub(crate) const DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT: u32 = 200;
 
 fn deserialize_backup_pgp_cert<'de, D>(
     deserializer: D,
@@ -136,7 +137,16 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
 
-    /// Maximum number of tasks to process concurrently for a leader job such as processing deposit requests.
+    /// Maximum requests served concurrently for one registered peer across all
+    /// its connections; requests above it are shed with `Unavailable`.
+    ///
+    /// Defaults to 200. Zero is rejected at load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grpc_per_peer_inflight_limit: Option<u32>,
+
+    /// Maximum number of tasks each leader job family (unapproved and approved
+    /// deposit processing, withdrawal approval, signing, broadcast, block checks)
+    /// runs concurrently. The cap is per family, not a global budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_leader_job_tasks: Option<usize>,
 
@@ -254,7 +264,12 @@ pub enum ForceRunAsLeader {
 impl Config {
     pub fn load(path: &std::path::Path) -> Result<Self, anyhow::Error> {
         let file = std::fs::read(path)?;
-        toml::from_slice(&file).map_err(Into::into)
+        let config: Self = toml::from_slice(&file)?;
+        anyhow::ensure!(
+            config.grpc_per_peer_inflight_limit != Some(0),
+            "grpc_per_peer_inflight_limit must be at least 1"
+        );
+        Ok(config)
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<(), anyhow::Error> {
@@ -408,6 +423,11 @@ impl Config {
             .unwrap_or(DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE)
     }
 
+    pub fn grpc_per_peer_inflight_limit(&self) -> u32 {
+        self.grpc_per_peer_inflight_limit
+            .unwrap_or(DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT)
+    }
+
     pub fn max_concurrent_leader_job_tasks(&self) -> usize {
         self.max_concurrent_leader_job_tasks.unwrap_or(32)
     }
@@ -480,6 +500,7 @@ impl Config {
             screener_endpoint: None,
             guardian_endpoint: None,
             grpc_max_decoding_message_size: None,
+            grpc_per_peer_inflight_limit: None,
             max_concurrent_leader_job_tasks: None,
             withdrawal_batching_delay_ms: None,
             withdrawal_max_batch_size: None,

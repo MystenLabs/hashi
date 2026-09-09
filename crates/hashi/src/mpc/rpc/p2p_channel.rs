@@ -84,11 +84,14 @@ fn reject_over_answer(
 }
 
 fn map_status(status: tonic::Status) -> ChannelError {
-    if status.code() == tonic::Code::Unavailable
-        && status
-            .message()
-            .contains(crate::grpc::SIGNING_MANAGER_NOT_READY_MSG)
-    {
+    let up_but_not_serving = status.code() == tonic::Code::Unavailable
+        && [
+            crate::grpc::SIGNING_MANAGER_NOT_READY_MSG,
+            crate::grpc::PEER_INFLIGHT_LIMIT_MSG,
+        ]
+        .iter()
+        .any(|marker| status.message().contains(marker));
+    if up_but_not_serving {
         ChannelError::NotReady(status.to_string())
     } else {
         ChannelError::RequestFailed(status.to_string())
@@ -212,12 +215,15 @@ mod tests {
     }
 
     #[test]
-    fn map_status_treats_only_the_not_ready_response_as_not_ready() {
+    fn map_status_treats_only_up_but_not_serving_responses_as_not_ready() {
         let not_ready = tonic::Status::unavailable(format!(
             "{} for epoch 7; retry",
             crate::grpc::SIGNING_MANAGER_NOT_READY_MSG
         ));
         assert!(matches!(map_status(not_ready), ChannelError::NotReady(_)));
+
+        let shed = tonic::Status::unavailable(crate::grpc::PEER_INFLIGHT_LIMIT_MSG);
+        assert!(matches!(map_status(shed), ChannelError::NotReady(_)));
 
         let refused = tonic::Status::unavailable("error trying to connect: connection refused");
         assert!(matches!(

@@ -14,8 +14,10 @@ use crate::Hashi;
 /// transport-generated `Unavailable` statuses (connection refused,
 /// REFUSED_STREAM, 503/504), which must keep counting as peer failures.
 pub(crate) const SIGNING_MANAGER_NOT_READY_MSG: &str = "SigningManager not available";
+pub(crate) const PEER_INFLIGHT_LIMIT_MSG: &str = "per-peer in-flight limit reached";
 
 mod client;
+mod peer_limit;
 pub use client::BoxedChannel;
 pub use client::Client;
 pub use client::MPC_PROTOCOL_METADATA_KEY;
@@ -114,10 +116,18 @@ impl HttpService {
                 axum::routing::get(move || ready(hashi_for_ready.clone())),
             );
 
+        let limiter = peer_limit::PeerInflightLimiter::new(
+            self.inner.config.grpc_per_peer_inflight_limit(),
+            self.inner.metrics.clone(),
+        );
         let layers = ServiceBuilder::new()
             .layer(axum::middleware::from_fn_with_state(
                 self.inner.clone(),
                 require_known_validator,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                limiter,
+                peer_limit::limit_per_peer,
             ))
             .layer(sui_http::middleware::callback::CallbackLayer::new(
                 metrics_layer::RpcMetricsMakeCallbackHandler::server(self.inner.metrics.clone()),
@@ -138,7 +148,10 @@ impl HttpService {
                 // load, failing every in-flight request to that peer at once.
                 .config(
                     sui_http::Config::default()
-                        .max_connection_age(std::time::Duration::from_secs(120)),
+                        .max_concurrent_streams(crate::config::DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT)
+                        .max_connection_age(std::time::Duration::from_secs(120))
+                        .max_connection_age_grace(std::time::Duration::from_secs(120))
+                        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30))),
                 )
                 .tls_config(tls_config)
                 .serve(self.inner.config.listen_address(), router)
