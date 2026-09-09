@@ -6,7 +6,7 @@ set -euo pipefail
 # Keep parsed CLI output stable regardless of the user's locale.
 export LC_ALL=C
 
-WORK_DIR=""
+TEST_FILES_STARTED=false
 
 say() {
   printf '\n== %s ==\n' "$1"
@@ -30,19 +30,6 @@ pause() {
   printf '\n'
 }
 
-confirm_yes() {
-  local message="$1"
-  local reply
-
-  if ! IFS= read -r -p "$message [y/N] " reply; then
-    die "No input received. Run this script from an interactive terminal."
-  fi
-  case "$reply" in
-    y | Y | yes | YES | Yes) return 0 ;;
-    *) die "Confirmation not received; no further changes were made." ;;
-  esac
-}
-
 run_or_die() {
   local failure_message="$1"
   shift
@@ -53,10 +40,8 @@ run_or_die() {
 }
 
 cleanup() {
-  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
-    # Stop the temporary agent before deleting its sockets and keyring.
-    gpgconf --kill gpg-agent >/dev/null 2>&1 || true
-    rm -rf -- "$WORK_DIR"
+  if [[ "$TEST_FILES_STARTED" == true ]]; then
+    rm -f -- "$PLAINTEXT_FILE" "$CIPHERTEXT_FILE" "$DECRYPTED_FILE" "$SIGNATURE_FILE"
   fi
 }
 
@@ -65,15 +50,15 @@ command_package() {
     oct) printf '%s' "openpgp-card-tools" ;;
     gpg | gpgconf) printf '%s' "GnuPG" ;;
     ykman) printf '%s' "YubiKey Manager CLI" ;;
-    cmp | mkdir | mktemp | rm) printf '%s' "standard system utilities (coreutils)" ;;
+    cmp | mkdir | rm) printf '%s' "standard system utilities (coreutils)" ;;
   esac
 }
 
 # Fail before prompting the user or making any changes to the YubiKey.
-required_commands=(cmp gpg gpgconf mkdir mktemp oct rm ykman)
+required_commands=(cmp gpg gpgconf mkdir oct rm ykman)
 missing_commands=()
 for required_command in "${required_commands[@]}"; do
-  if ! command -v "$required_command" >/dev/null 2>&1; then
+  if ! command -v "$required_command" > /dev/null 2>&1; then
     missing_commands+=("$required_command")
   fi
 done
@@ -92,6 +77,12 @@ if [[ ! -t 0 || ! -t 1 ]]; then
 fi
 
 trap cleanup EXIT
+
+# Use the normal GnuPG home (or the caller's GNUPGHOME) and keep it after exit.
+# Check agent startup before making any changes to the YubiKey.
+run_or_die "Could not create the GnuPG home." mkdir -p -m 700 "${GNUPGHOME:-$HOME/.gnupg}"
+run_or_die "GnuPG could not start the agent. No YubiKey changes were made." \
+  gpgconf --launch gpg-agent
 
 say "Guardian key provisioner YubiKey setup"
 printf '%s\n' \
@@ -146,59 +137,97 @@ run_or_die "Changing the User PIN failed. The card has not been fully provisione
 run_or_die "Changing the Admin PIN failed. The card has not been fully provisioned." \
   oct pin --card "$CARD" set-admin
 
-# Show the slots and require a human decision: populated keys may be legitimate,
-# and replacing them is irreversible.
-say "Confirm the key slots are empty"
-run_or_die "oct could not read the OpenPGP card status." oct status --card "$CARD"
-warn "The Signature, Decryption, and Authentication slots above must not contain key fingerprints."
-warn "Continuing with populated slots will irreversibly overwrite their keys."
-if ! IFS= read -r -p "Type EMPTY only after confirming all three slots are empty: " empty_confirmation; then
-  die "No input received. Run this script from an interactive terminal."
+# Use structured status and fail closed if any slot's fingerprint is unreadable.
+say "Check the key slots"
+if ! slot_status="$(oct --output-format json --output-version 0.11.0 status --card "$CARD")"; then
+  die "oct could not read the OpenPGP card status."
 fi
-[[ "$empty_confirmation" == "EMPTY" ]] || die "The empty-slot confirmation did not match; stopping before key generation."
+if ! occupied_slots="$(jq -er '
+  [.signature_key, .decryption_key, .authentication_key]
+  | if all(.[];
+      type == "object" and has("fingerprint")
+      and (.fingerprint == null or (.fingerprint | type == "string")))
+    then map(.fingerprint != null) | if any then "occupied" else "empty" end
+    else error("Missing or invalid key-slot fingerprints")
+    end
+' <<< "$slot_status")"; then
+  die "Could not determine whether all three key slots are empty; stopping before key generation."
+fi
+case "$occupied_slots" in
+  empty)
+    printf 'All three key slots are empty; continuing automatically.\n'
+    ;;
+  occupied)
+    run_or_die "oct could not display the existing keys." oct status --card "$CARD"
+    printf '\n%s\n' \
+      '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' \
+      '!!! DANGER: THIS YUBIKEY ALREADY CONTAINS PRIVATE KEYS !!!' \
+      '!!! CONTINUING WILL PERMANENTLY OVERWRITE THE EXISTING KEYS. !!!' \
+      '!!! THEY CANNOT BE RECOVERED. DATA ENCRYPTED TO THEM MAY BE LOST. !!!' \
+      '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' >&2
+    if ! IFS= read -r -p "Are you sure you want to overwrite existing keys? Type y/yes to continue: " overwrite_confirmation; then
+      die "No input received; stopping before key generation."
+    fi
+    case "$overwrite_confirmation" in
+      y | yes) ;;
+      *) die "Overwrite not confirmed; stopping before key generation." ;;
+    esac
+    ;;
+  *) die "Unexpected key-slot status; stopping before key generation." ;;
+esac
 
-# Collect the certificate identity and a safe destination before key generation.
-say "Choose the certificate identity and output file"
-USER_ID=""
-while [[ -z "$USER_ID" ]]; do
-  if ! IFS= read -r -p "Key user ID (real name or assigned guardian identifier): " USER_ID; then
+# The user ID labels output filenames only; it never becomes certificate identity.
+say "Choose a filename identifier and output directory"
+while true; do
+  if ! IFS= read -r -p "User ID (used for outputted file names): " USER_ID; then
     die "No input received. Run this script from an interactive terminal."
   fi
-  [[ -n "$USER_ID" ]] || printf 'The user ID cannot be empty.\n' >&2
+  [[ "$USER_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && break
+  printf 'Use an ASCII letter or digit first, followed only by ASCII letters, digits, dots, underscores, or hyphens.\n' >&2
 done
 
 while true; do
-  if ! IFS= read -r -p "Public certificate output path [guardian-kp.asc]: " OUTPUT_FILE; then
+  if ! IFS= read -r -p "Output directory [.]: " OUTPUT_DIR; then
     die "No input received. Run this script from an interactive terminal."
   fi
-  OUTPUT_FILE="${OUTPUT_FILE:-guardian-kp.asc}"
-
-  if [[ "$OUTPUT_FILE" == */ ]]; then
-    printf 'Enter a file path, not a directory.\n' >&2
-    continue
-  fi
-  if [[ -e "$OUTPUT_FILE" || -L "$OUTPUT_FILE" ]]; then
-    printf 'Refusing to overwrite existing path: %s\n' "$OUTPUT_FILE" >&2
-    continue
-  fi
-
-  OUTPUT_DIR="${OUTPUT_FILE%/*}"
-  [[ "$OUTPUT_DIR" == "$OUTPUT_FILE" ]] && OUTPUT_DIR="."
+  OUTPUT_DIR="${OUTPUT_DIR:-.}"
   if [[ ! -d "$OUTPUT_DIR" || ! -w "$OUTPUT_DIR" ]]; then
-    printf 'The parent directory does not exist or is not writable: %s\n' "$OUTPUT_DIR" >&2
+    printf 'The output directory does not exist or is not writable: %s\n' "$OUTPUT_DIR" >&2
     continue
   fi
+  if ! OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd -P)"; then
+    printf 'Could not resolve the output directory.\n' >&2
+    continue
+  fi
+
+  OUTPUT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-pubkey.asc"
+  FINGERPRINT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-fingerprint.txt"
+  PLAINTEXT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.txt"
+  CIPHERTEXT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.txt.asc"
+  DECRYPTED_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.decrypted.txt"
+  SIGNATURE_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.sig.asc"
+  output_paths=("$OUTPUT_FILE" "$FINGERPRINT_FILE" "$PLAINTEXT_FILE" "$CIPHERTEXT_FILE" "$DECRYPTED_FILE" "$SIGNATURE_FILE")
+  output_collision=false
+  for output_path in "${output_paths[@]}"; do
+    if [[ -e "$output_path" || -L "$output_path" ]]; then
+      printf 'Refusing to overwrite existing path: %s\n' "$output_path" >&2
+      output_collision=true
+    fi
+  done
+  [[ "$output_collision" == false ]] || continue
   break
 done
 
 # oct creates all private key material on the card and exports only the public
-# OpenPGP certificate to the requested file.
+# OpenPGP certificate to the requested file. oct requires a --userid field;
+# an empty value supports GPG import without adding a named certificate identity.
 printf '\nThe script will now generate signing, decryption, and authentication keys on:\n  %s\n' "$CARD"
 printf 'The armored public certificate will be written to:\n  %s\n' "$OUTPUT_FILE"
 warn "This key generation step cannot be undone."
 pause
+printf 'Tap your YubiKey whenever its indicator flashes during key generation and certificate signing.\n'
 run_or_die "Key generation failed. Inspect the card status before attempting any recovery." \
-  oct admin --card "$CARD" generate --userid "$USER_ID" --output "$OUTPUT_FILE" curve25519
+  oct admin --card "$CARD" generate --userid '' --output "$OUTPUT_FILE" curve25519
 [[ -s "$OUTPUT_FILE" ]] || die "oct reported success but did not create a non-empty public certificate."
 
 # Require a new touch for every signing and decryption operation, then read both
@@ -208,9 +237,9 @@ printf '%s\n' \
   "YubiKey Manager will request the Admin PIN." \
   "The 'on' policy requires a fresh physical touch for every operation; it is not cached."
 run_or_die "Could not enable the signing-key touch policy." \
-  ykman openpgp keys set-touch sig on
+  ykman openpgp keys set-touch --force sig on
 run_or_die "Could not enable the decryption-key touch policy." \
-  ykman openpgp keys set-touch dec on
+  ykman openpgp keys set-touch --force dec on
 
 if ! signature_key_info="$(ykman openpgp keys info sig 2>&1)"; then
   printf '%s\n' "$signature_key_info" >&2
@@ -237,26 +266,26 @@ while IFS=: read -r record _ _ _ _ _ _ _ _ value _; do
   fi
 done <<< "$public_key_data"
 [[ -n "$FINGERPRINT" ]] || die "GnuPG did not report a primary-key fingerprint."
+if ! (
+  set -o noclobber
+  printf '%s\n' "$FINGERPRINT" > "$FINGERPRINT_FILE"
+); then
+  die "Could not write the primary-key fingerprint file."
+fi
 printf '\nGuardian key fingerprint: %s\n' "$FINGERPRINT"
 
-# Isolate testing from the user's normal GnuPG keyring and delete it on exit.
+# Import into the normal keyring and retain the certificate after testing.
 say "Test decryption"
-if ! WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hashi-key-provisioner.XXXXXX")"; then
-  die "Could not create a temporary directory for the key tests."
-fi
-export GNUPGHOME="$WORK_DIR/gnupg"
-run_or_die "Could not create a temporary GnuPG home." mkdir -m 700 "$GNUPGHOME"
 
-PLAINTEXT_FILE="$WORK_DIR/guardian-kp-test.txt"
-CIPHERTEXT_FILE="$WORK_DIR/guardian-kp-test.txt.asc"
-DECRYPTED_FILE="$WORK_DIR/guardian-kp-test.decrypted.txt"
-SIGNATURE_FILE="$WORK_DIR/guardian-kp-test.sig.asc"
-printf 'guardian key test\n' > "$PLAINTEXT_FILE"
+# Enable cleanup only after output collision checks, when test creation begins.
+TEST_FILES_STARTED=true
+printf 'OpenPGP encryption and signing test\n' > "$PLAINTEXT_FILE"
 
 # Import the public certificate and let GnuPG associate it with the private keys
 # on the card before exercising the encryption and signing subkeys.
-run_or_die "GnuPG could not import the public certificate into the temporary test keyring." \
+run_or_die "GnuPG could not import the public certificate into your keyring." \
   gpg --batch --import "$OUTPUT_FILE"
+printf 'Public certificate imported into your GnuPG keyring.\n'
 run_or_die "GnuPG could not connect the generated certificate to the YubiKey." \
   gpg --card-status
 run_or_die "GnuPG could not encrypt the test file." \
@@ -267,13 +296,13 @@ run_or_die "GnuPG could not encrypt the test file." \
 printf '%s\n' \
   "The next command decrypts the test file." \
   "Do not touch the YubiKey immediately: first confirm that decryption waits for a touch." \
-  "When its indicator flashes, touch the YubiKey to finish the operation."
+  "After confirming it waits, tap the YubiKey when its indicator flashes."
 pause "Press Enter to begin the decryption test. "
+printf 'Tap your YubiKey when its indicator flashes, after confirming decryption waits for touch.\n'
 run_or_die "Test decryption failed." \
   gpg --output "$DECRYPTED_FILE" --decrypt "$CIPHERTEXT_FILE"
 run_or_die "The decrypted test content does not match the original." \
   cmp -s "$PLAINTEXT_FILE" "$DECRYPTED_FILE"
-confirm_yes "Did decryption wait for a physical touch?"
 printf 'Decryption succeeded and the plaintext matched.\n'
 
 # Create and verify a detached signature to prove the signing key works too.
@@ -281,12 +310,12 @@ say "Test signing"
 printf '%s\n' \
   "The next command creates a detached signature." \
   "Do not touch the YubiKey immediately: first confirm that signing waits for a touch." \
-  "When its indicator flashes, touch the YubiKey to finish the operation."
+  "After confirming it waits, tap the YubiKey when its indicator flashes."
 pause "Press Enter to begin the signing test. "
+printf 'Tap your YubiKey when its indicator flashes, after confirming signing waits for touch.\n'
 run_or_die "Test signing failed." \
   gpg --armor --detach-sign --local-user "$FINGERPRINT" \
   --output "$SIGNATURE_FILE" "$PLAINTEXT_FILE"
-confirm_yes "Did signing wait for a physical touch?"
 run_or_die "GnuPG could not verify the test signature." \
   gpg --verify "$SIGNATURE_FILE" "$PLAINTEXT_FILE"
 printf 'Signature creation and verification succeeded.\n'
@@ -294,7 +323,10 @@ printf 'Signature creation and verification succeeded.\n'
 say "Setup complete"
 printf 'Public certificate: %s\n' "$OUTPUT_FILE"
 printf 'Primary-key fingerprint: %s\n' "$FINGERPRINT"
+printf 'Fingerprint file: %s\n' "$FINGERPRINT_FILE"
 printf '%s\n' \
   "Give only this public certificate and fingerprint to the guardian operator." \
   "Do not send either PIN or any local GnuPG data." \
-  "The temporary plaintext, ciphertext, signature, and test keyring will now be deleted."
+  "The public certificate and fingerprint file are retained in the selected output directory." \
+  "The public certificate remains in your GnuPG keyring; the four test files will now be deleted."
+printf '\nYubiKey provisioning completed successfully! Public key outputted to %s\n' "$OUTPUT_FILE"
