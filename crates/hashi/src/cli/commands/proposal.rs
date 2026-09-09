@@ -1364,7 +1364,6 @@ pub async fn create_update_mpc_config_proposal(
     config: &CliConfig,
     max_faulty_bps: Option<u64>,
     weight_reduction_allowed_delta: Option<u64>,
-    nonce_generation_protocol: Option<u64>,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
@@ -1390,24 +1389,14 @@ pub async fn create_update_mpc_config_proposal(
             f - 1
         );
     }
-    if let Some(p) = nonce_generation_protocol {
-        anyhow::ensure!(
-            p <= 1,
-            "--nonce-generation-protocol must be 0 (vanilla) or 1 (avid), got {p}"
-        );
-    }
 
-    let count = [
-        max_faulty_bps,
-        weight_reduction_allowed_delta,
-        nonce_generation_protocol,
-    ]
-    .iter()
-    .filter(|v| v.is_some())
-    .count();
+    let count = [max_faulty_bps, weight_reduction_allowed_delta]
+        .iter()
+        .filter(|v| v.is_some())
+        .count();
     if count == 0 {
         anyhow::bail!(
-            "must provide at least one of --max-faulty-bps, --weight-reduction-allowed-delta, --nonce-generation-protocol"
+            "must provide at least one of --max-faulty-bps, --weight-reduction-allowed-delta"
         );
     }
 
@@ -1422,7 +1411,6 @@ pub async fn create_update_mpc_config_proposal(
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
         max_faulty_bps,
         weight_reduction_allowed_delta,
-        nonce_generation_protocol,
         metadata,
     })?;
 

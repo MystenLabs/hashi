@@ -80,27 +80,23 @@ fun test_single_key_update() {
 
     assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == 2000);
     assert!(mpc_config::weight_reduction_allowed_delta(hashi.epoch_config()) == 800);
-    // Seeded by init_defaults and untouched by the update above.
-    assert!(mpc_config::nonce_generation_protocol(hashi.epoch_config()) == 0);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
 
 #[test]
-fun test_update_nonce_generation_protocol() {
+#[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
+fun test_reject_retired_nonce_protocol_key_even_when_present() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
-    assert!(mpc_config::nonce_generation_protocol(hashi.epoch_config()) == 0);
+    hashi.epoch_config_mut().upsert(b"mpc_nonce_generation_protocol", config_value::new_u64(0));
 
     let mut entries = vec_map::empty();
     entries.insert(mpc_nonce_generation_protocol_key(), config_value::new_u64(1));
     propose_and_execute(&mut hashi, entries, &clock, ctx);
-
-    assert!(mpc_config::nonce_generation_protocol(hashi.epoch_config()) == 1);
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.epoch_config()) == 3333);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -238,12 +234,6 @@ fun test_reject_max_faulty_above_max() {
 #[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
 fun test_reject_allowed_delta_above_max() {
     reject_single(mpc_allowed_delta_key(), config_value::new_u64(MAX_BPS + 1));
-}
-
-#[test]
-#[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
-fun test_reject_nonce_protocol_above_one() {
-    reject_single(mpc_nonce_generation_protocol_key(), config_value::new_u64(2));
 }
 
 #[test]

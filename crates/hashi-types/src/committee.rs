@@ -31,7 +31,6 @@ use crate::move_types::Config;
 // source of truth is `crate::move_types`.
 pub use crate::move_types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
-pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // Fixed for non-MPC certificates mirroring Move's `threshold::certificate_threshold`.
 // TODO: Read threshold from on-chain config once it is made configurable.
@@ -221,7 +220,6 @@ impl Committee {
         epoch: u64,
         mpc_weight_reduction_allowed_delta: u16,
         mpc_max_faulty_in_basis_points: u16,
-        mpc_nonce_generation_protocol: u16,
     ) -> Self {
         Self::with_config(
             members,
@@ -229,7 +227,6 @@ impl Committee {
             Config::from_mpc_params(
                 mpc_weight_reduction_allowed_delta,
                 mpc_max_faulty_in_basis_points,
-                mpc_nonce_generation_protocol,
                 0,
             ),
         )
@@ -280,10 +277,6 @@ impl Committee {
 
     pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
         self.config.mpc_max_faulty_in_basis_points()
-    }
-
-    pub fn mpc_nonce_generation_protocol(&self) -> u16 {
-        self.config.mpc_nonce_generation_protocol()
     }
 
     pub fn mpc_nonce_accumulation_window_ms(&self) -> u64 {
@@ -1043,7 +1036,6 @@ mod test {
             epoch,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
         );
 
         let mut aggregator =
@@ -1153,7 +1145,6 @@ mod test {
             epoch,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
         );
 
         let mut aggregator =
@@ -1199,7 +1190,6 @@ mod test {
             999,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
         );
         assert!(
             certificate
@@ -1286,7 +1276,6 @@ mod test {
             epoch,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
         );
 
         // Create a certificate via aggregator
@@ -1414,7 +1403,6 @@ mod test {
             epoch,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
         );
 
         let message = b"regression".to_vec();
@@ -1477,7 +1465,6 @@ mod test {
             epoch,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
         );
         let nodes = Nodes::new(
             (0..4)

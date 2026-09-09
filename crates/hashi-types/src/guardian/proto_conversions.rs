@@ -2182,7 +2182,6 @@ mod tests {
         use crate::committee::BlsSignatureAggregator;
         use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
-        use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
         use rand::SeedableRng;
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(0xCAFE);
@@ -2196,14 +2195,12 @@ mod tests {
             5,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
-            VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         );
         let new_committee = HashiCommittee::new(
             vec![member],
             6,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
-            VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         );
         let transition = CommitteeTransitionRequest {
             new_committee: crate::move_types::Committee::from(&new_committee),

@@ -955,13 +955,6 @@ impl OnchainState {
     /// The governed MPC parameters from the epoch config: what the NEXT
     /// committee will be formed with. The active committee reads its own
     /// pinned copy via [`Committee::config`](hashi_types::committee::Committee::config).
-    pub fn mpc_nonce_generation_protocol(&self) -> u16 {
-        self.state()
-            .hashi()
-            .epoch_config
-            .mpc_nonce_generation_protocol()
-    }
-
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
         self.state()
             .hashi()

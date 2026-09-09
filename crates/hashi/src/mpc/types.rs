@@ -89,25 +89,6 @@ pub(crate) type HeldAvidEchoes = (batch_avss_avid::AvidVote, Vec<(Address, Messa
 const DOMAIN_HASHI: &str =
     "754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959::hashi";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NonceGenerationProtocol {
-    #[default]
-    Vanilla,
-    Avid,
-}
-
-impl NonceGenerationProtocol {
-    pub fn from_onchain(value: u16) -> MpcResult<Self> {
-        match value {
-            0 => Ok(Self::Vanilla),
-            1 => Ok(Self::Avid),
-            other => Err(MpcError::InvalidConfig(format!(
-                "unknown mpc_nonce_generation_protocol: {other}"
-            ))),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
@@ -115,7 +96,6 @@ pub struct MpcConfig {
     pub nodes: Nodes<EncryptionGroupElement>,
     pub threshold: u16,
     pub max_faulty: u16,
-    pub nonce_generation_protocol: NonceGenerationProtocol,
     pub nonce_accumulation_window_ms: u64,
 }
 
@@ -125,7 +105,6 @@ impl MpcConfig {
         nodes: Nodes<EncryptionGroupElement>,
         threshold: u16,
         max_faulty: u16,
-        nonce_generation_protocol: NonceGenerationProtocol,
         nonce_accumulation_window_ms: u64,
     ) -> Self {
         Self {
@@ -133,7 +112,6 @@ impl MpcConfig {
             nodes,
             threshold,
             max_faulty,
-            nonce_generation_protocol,
             nonce_accumulation_window_ms,
         }
     }
@@ -447,16 +425,6 @@ pub(crate) struct RotationReconstructionContext<'a> {
     pub output_max_faulty: u16,
     pub input_threshold: u16,
     pub epoch: u64,
-}
-
-#[allow(clippy::large_enum_variant)]
-pub enum NonceReconstructionOutcome {
-    Success(Vec<batch_avss::ReceiverOutput>),
-    NeedsComplaintRecovery {
-        dealer_address: Address,
-        batch_index: u32,
-        complaint: complaint::Complaint,
-    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1268,6 +1236,17 @@ pub type SigningResult<T> = Result<T, SigningError>;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn messages_bcs_variant_indices_are_pinned() {
+        let retrieval = Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
+            common: None,
+            echo: None,
+            avid_vote: None,
+        });
+        let bytes = bcs::to_bytes(&retrieval).expect("serialize");
+        assert_eq!(bytes[0], 4);
+    }
     const TEST_HASHI_ID: Address = Address::new([0xAA; 32]);
     use super::*;
 
@@ -1345,7 +1324,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 0u16, 3333u16, 0);
+        let committee = Committee::new(members, epoch, 0u16, 3333u16);
         (committee, signing_keys)
     }
 
@@ -1714,7 +1693,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 0u16, 3333u16, 0);
+        let committee = Committee::new(members, epoch, 0u16, 3333u16);
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);
@@ -1787,24 +1766,6 @@ mod tests {
             err.to_string().contains("invalid messages_hash length"),
             "Error should mention invalid hash length: {}",
             err
-        );
-    }
-
-    #[test]
-    fn test_nonce_generation_protocol_from_onchain() {
-        assert_eq!(
-            NonceGenerationProtocol::from_onchain(0).unwrap(),
-            NonceGenerationProtocol::Vanilla
-        );
-        assert_eq!(
-            NonceGenerationProtocol::from_onchain(1).unwrap(),
-            NonceGenerationProtocol::Avid
-        );
-        assert!(NonceGenerationProtocol::from_onchain(2).is_err());
-        assert!(NonceGenerationProtocol::from_onchain(u16::MAX).is_err());
-        assert_eq!(
-            NonceGenerationProtocol::default(),
-            NonceGenerationProtocol::Vanilla
         );
     }
 

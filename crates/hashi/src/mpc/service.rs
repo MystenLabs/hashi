@@ -23,7 +23,6 @@ use tracing::info;
 use tracing::warn;
 
 use crate::Hashi;
-use crate::communication::PrefetchedTobChannel;
 use crate::communication::SuiTobSessionChannel;
 use crate::communication::key_generation_certificates;
 use crate::communication::tob_certificates;
@@ -41,9 +40,7 @@ use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::signing::IdentityInputs;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
-use crate::mpc::types::NonceCertTimestamp;
 use crate::mpc::types::NonceCertToVerify;
-use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::ReconfigOutcome;
 use crate::mpc::types::RotationRole;
@@ -611,50 +608,23 @@ impl MpcService {
         .await?;
         drop(cert_wait_timer);
         let canonical = nonce_certificates(&final_certs, epoch, batch_index);
-        let (cutoff_ms, served_weight, admitted) = {
+        let admitted = {
             let mgr = mpc_manager.read().unwrap();
-            match mgr.mpc_config.nonce_generation_protocol {
-                NonceGenerationProtocol::Avid => {
-                    let admitted =
-                        mgr.avid_admitted_nonce_dealers(&canonical, settled_cutoff_ms)?;
-                    (admitted.cutoff_ms, Some(admitted.weight), Some(admitted))
-                }
-                NonceGenerationProtocol::Vanilla => {
-                    (mgr.nonce_collection_cutoff_ms(&final_certs), None, None)
-                }
-            }
+            mgr.avid_admitted_nonce_dealers(&canonical, settled_cutoff_ms)?
         };
-        if let Some(admitted) = &admitted
-            && !admitted.floor_reached()
-        {
+        let served_weight = admitted.weight;
+        if !admitted.floor_reached() {
             return Err(admitted.below_floor_error(batch_index, metrics).into());
         }
-        let nonce_result = match &admitted {
-            Some(admitted) => {
-                MpcManager::run_avid_nonce_party_phase(
-                    &mpc_manager,
-                    batch_index,
-                    &p2p_channel,
-                    admitted,
-                    Some((onchain_state_for_certs.clone(), epoch)),
-                    metrics,
-                )
-                .await
-            }
-            None => {
-                let mut party_channel = PrefetchedTobChannel::new(canonical.into_inner())
-                    .with_supersede_check(onchain_state_for_certs.clone(), epoch);
-                MpcManager::run_vanilla_nonce_party_phase(
-                    &mpc_manager,
-                    batch_index,
-                    &p2p_channel,
-                    &mut party_channel,
-                    cutoff_ms,
-                    metrics,
-                )
-                .await
-            }
-        };
+        let nonce_result = MpcManager::run_avid_nonce_party_phase(
+            &mpc_manager,
+            batch_index,
+            &p2p_channel,
+            &admitted,
+            Some((onchain_state_for_certs.clone(), epoch)),
+            metrics,
+        )
+        .await;
         drop(_timer);
         let outcome = nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
         if outcome.local_skips > 0 {
@@ -688,19 +658,16 @@ impl MpcService {
         )
         .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
-        if let Some(served_weight) = served_weight {
-            let served_implies =
-                presig_count(served_weight as usize, params, batch_size_per_weight);
-            if presignatures.len() != served_implies {
-                metrics.mpc_nonce_size_mismatch_total.inc();
-                anyhow::bail!(
-                    "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
-                     served certs size to {served_implies} (weight {served_weight}); a dealer \
-                     dealt for a weight other than its configured reduced weight, refusing \
-                     to install",
-                    presignatures.len(),
-                );
-            }
+        let served_implies = presig_count(served_weight as usize, params, batch_size_per_weight);
+        if presignatures.len() != served_implies {
+            metrics.mpc_nonce_size_mismatch_total.inc();
+            anyhow::bail!(
+                "nonce batch {batch_index} for epoch {epoch}: built {} presigs but the \
+                 served certs size to {served_implies} (weight {served_weight}); a dealer \
+                 dealt for a weight other than its configured reduced weight, refusing \
+                 to install",
+                presignatures.len(),
+            );
         }
         metrics.mpc_nonce_batch_index.set(batch_index as i64);
         metrics.mpc_nonce_batch_dealers.set(dealer_count as i64);
@@ -807,7 +774,7 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
-        let (batch_size_per_weight, params, protocol, floor) = {
+        let (batch_size_per_weight, params, floor) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
@@ -815,7 +782,6 @@ impl MpcService {
                     t: mgr.mpc_config.threshold,
                     f: mgr.mpc_config.max_faulty,
                 },
-                mgr.mpc_config.nonce_generation_protocol,
                 mgr.required_nonce_weight(),
             )
         };
@@ -830,7 +796,6 @@ impl MpcService {
                     &mpc_manager,
                     epoch,
                     batch_index,
-                    protocol,
                     params,
                     batch_size_per_weight,
                     floor,
@@ -934,13 +899,11 @@ impl MpcService {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn nonce_batch_size_from_certs(
         &self,
         mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
         epoch: u64,
         batch_index: u32,
-        protocol: NonceGenerationProtocol,
         params: Parameters,
         batch_size_per_weight: u16,
         floor: u32,
@@ -960,15 +923,12 @@ impl MpcService {
                 "nonce cert fetch for epoch {epoch} batch {batch_index} (boundary rebuild): {e}"
             )
         })?;
-        let weight = match protocol {
-            NonceGenerationProtocol::Vanilla => certified_nonce_weight(mpc_manager, &certs),
-            NonceGenerationProtocol::Avid => {
-                let avid_certs = nonce_certificates(&certs, epoch, batch_index);
-                mpc_manager
-                    .read()
-                    .unwrap()
-                    .avid_admitted_nonce_weight(&avid_certs, settled_cutoff_ms)
-            }
+        let weight = {
+            let avid_certs = nonce_certificates(&certs, epoch, batch_index);
+            mpc_manager
+                .read()
+                .unwrap()
+                .avid_admitted_nonce_weight(&avid_certs, settled_cutoff_ms)
         };
         if weight < floor {
             return Ok(None);
@@ -1347,21 +1307,6 @@ impl MpcService {
             epoch,
             MPC_LABEL_NONCE_GENERATION,
         );
-        let (protocol, floor) = {
-            let mgr = mpc_manager.read().unwrap();
-            (
-                mgr.mpc_config.nonce_generation_protocol,
-                mgr.required_nonce_weight(),
-            )
-        };
-        let expected_from = |weight: u32| -> anyhow::Result<usize> {
-            anyhow::ensure!(
-                weight >= floor,
-                "nonce batch {batch_index} for epoch {epoch} refetched below floor \
-                 ({weight} < {floor}); fewer certs cleared sizing than on the first pass",
-            );
-            Ok(presig_count(weight as usize, params, batch_size_per_weight))
-        };
         let (certs, settled_cutoff_ms) = Self::fetch_final_nonce_certs(
             &onchain_state,
             mpc_manager,
@@ -1376,53 +1321,36 @@ impl MpcService {
                 "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
             ));
         }
-        let (outputs, expected_size) = match protocol {
-            NonceGenerationProtocol::Vanilla => {
-                let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
-                let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
-                    mpc_manager,
-                    epoch,
-                    batch_index,
-                    &certs,
-                    &p2p_channel,
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("nonce recovery from certs failed for epoch {epoch} batch {batch_index}: {e}")
-                })?;
-                (outputs, Some(expected_size))
+        let outputs = {
+            let avid_certs = nonce_certificates(&certs, epoch, batch_index);
+            let admitted = mpc_manager
+                .read()
+                .unwrap()
+                .avid_admitted_nonce_dealers(&avid_certs, settled_cutoff_ms)?;
+            if !admitted.floor_reached() {
+                return Err(admitted
+                    .below_floor_error(batch_index, &self.inner.metrics)
+                    .into());
             }
-            NonceGenerationProtocol::Avid => {
-                let avid_certs = nonce_certificates(&certs, epoch, batch_index);
-                let admitted = mpc_manager
-                    .read()
-                    .unwrap()
-                    .avid_admitted_nonce_dealers(&avid_certs, settled_cutoff_ms)?;
-                if !admitted.floor_reached() {
-                    return Err(admitted
-                        .below_floor_error(batch_index, &self.inner.metrics)
-                        .into());
-                }
-                let outcome = MpcManager::run_avid_nonce_party_phase(
-                    mpc_manager,
-                    batch_index,
-                    &p2p_channel,
-                    &admitted,
-                    Some((onchain_state.clone(), epoch)),
-                    &self.inner.metrics,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("AVID nonce recovery from certs failed: {e}"))?;
-                if outcome.local_skips > 0 {
-                    self.inner.metrics.mpc_nonce_local_skip_batches_total.inc();
-                    anyhow::bail!(
-                        "AVID nonce recovery for epoch {epoch} batch {batch_index} skipped {} \
-                         dealer(s) for node-local reasons; cannot rebuild the original batch",
-                        outcome.local_skips,
-                    );
-                }
-                (outcome.outputs, None)
+            let outcome = MpcManager::run_avid_nonce_party_phase(
+                mpc_manager,
+                batch_index,
+                &p2p_channel,
+                &admitted,
+                Some((onchain_state.clone(), epoch)),
+                &self.inner.metrics,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("AVID nonce recovery from certs failed: {e}"))?;
+            if outcome.local_skips > 0 {
+                self.inner.metrics.mpc_nonce_local_skip_batches_total.inc();
+                anyhow::bail!(
+                    "AVID nonce recovery for epoch {epoch} batch {batch_index} skipped {} \
+                     dealer(s) for node-local reasons; cannot rebuild the original batch",
+                    outcome.local_skips,
+                );
             }
+            outcome.outputs
         };
         if outputs.is_empty() {
             return Err(anyhow::anyhow!(
@@ -1437,14 +1365,6 @@ impl MpcService {
             USE_LEGACY_PRESIG_DERIVATION,
         )
         .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
-        if let Some(expected) = expected_size {
-            anyhow::ensure!(
-                presignatures.len() == expected,
-                "Reconstructed nonce batch {batch_index} for epoch {epoch} has {} presigs but \
-                 certificates imply {expected}; sizing and replay admitted different dealers",
-                presignatures.len(),
-            );
-        }
         let metrics = &self.inner.metrics;
         metrics.mpc_nonce_batch_index.set(batch_index as i64);
         metrics.mpc_nonce_batch_dealers.set(dealer_count as i64);
@@ -2129,18 +2049,6 @@ fn nonce_certificates(
     })
 }
 
-fn certified_nonce_weight<T: NonceCertTimestamp>(
-    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
-    certs: &VerifiedNonceCerts<T>,
-) -> u32 {
-    mpc_manager
-        .read()
-        .unwrap()
-        .window_certified_nonce_dealers(certs)
-        .1
-        .weight()
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReconfigSubmissionErrorKind {
     NonMoveAbort,
@@ -2331,7 +2239,6 @@ mod pruning_reference_tests {
                     epoch,
                     0,
                     5_000,
-                    0,
                 ),
             );
         }
@@ -2369,7 +2276,6 @@ mod pruning_reference_tests {
                     epoch,
                     0,
                     5_000,
-                    0,
                 ),
             );
         }

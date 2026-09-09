@@ -207,11 +207,6 @@ impl PrefetchedTobChannel {
             supersede: None,
         }
     }
-
-    pub fn with_supersede_check(mut self, onchain_state: OnchainState, epoch: u64) -> Self {
-        self.supersede = Some((onchain_state, epoch));
-        self
-    }
 }
 
 #[async_trait]

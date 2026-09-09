@@ -175,14 +175,6 @@ mod tests {
             {
                 r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_eq!(
-                nodes[0]
-                    .hashi()
-                    .onchain_state()
-                    .mpc_nonce_generation_protocol(),
-                1,
-                "the AVID protocol override must have landed"
-            );
             nodes[0].current_epoch().unwrap()
         };
         networks.sui_network.force_close_epoch().await?;
@@ -201,13 +193,6 @@ mod tests {
             r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
         }
         Ok(())
-    }
-
-    fn avid_override(builder: TestNetworksBuilder) -> TestNetworksBuilder {
-        builder.with_onchain_config(
-            "mpc_nonce_generation_protocol",
-            hashi_types::move_types::ConfigValue::U64(1),
-        )
     }
 
     async fn wait_for_deposit_approval(
@@ -1020,10 +1005,12 @@ mod tests {
     async fn test_nonce_accumulation_window_open() -> Result<()> {
         init_test_logging();
         let mut networks = setup_test_networks(
-            avid_override(TestNetworksBuilder::new().with_nodes(4)).with_onchain_config(
-                "mpc_nonce_accumulation_window_ms",
-                hashi_types::move_types::ConfigValue::U64(2_000),
-            ),
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_onchain_config(
+                    "mpc_nonce_accumulation_window_ms",
+                    hashi_types::move_types::ConfigValue::U64(2_000),
+                ),
         )
         .await?;
         rotate_into_avid(&mut networks).await?;
@@ -1066,8 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn test_avid_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
-        let mut networks =
-            setup_test_networks(avid_override(TestNetworksBuilder::new().with_nodes(4))).await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
         rotate_into_avid(&mut networks).await?;
         presigning_recovery_within_batch_flow(networks).await
     }
@@ -1141,13 +1127,11 @@ mod tests {
     #[tokio::test]
     async fn test_avid_presigning_recovery_across_batch_boundary() -> Result<()> {
         init_test_logging();
-        let mut networks = avid_override(
-            TestNetworksBuilder::new()
-                .with_nodes(4)
-                .with_batch_size_per_weight(1),
-        )
-        .build()
-        .await?;
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_batch_size_per_weight(1)
+            .build()
+            .await?;
         rotate_into_avid(&mut networks).await?;
         presigning_recovery_across_batch_boundary_flow(networks).await
     }
@@ -2845,9 +2829,7 @@ mod tests {
     #[tokio::test]
     async fn test_avid_varying_t_and_allowed_delta_across_epochs() -> Result<()> {
         init_test_logging();
-        let networks = avid_override(TestNetworksBuilder::new().with_nodes(4))
-            .build()
-            .await?;
+        let networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
         varying_t_and_allowed_delta_flow(networks).await
     }
 
@@ -3427,15 +3409,13 @@ mod tests {
         // With 4 nodes at weight 25 each (total_weight=100), the presig pool
         // is batch_size_per_weight * total_weight. We need enough
         // presignatures for 400 inputs.
-        let mut networks = avid_override(
-            TestNetworksBuilder::new()
-                .with_nodes(4)
-                .with_withdrawal_max_batch_size(num_withdrawals)
-                .with_withdrawal_batching_delay_ms(86_400_000)
-                .with_batch_size_per_weight(100),
-        )
-        .build()
-        .await?;
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_max_batch_size(num_withdrawals)
+            .with_withdrawal_batching_delay_ms(86_400_000)
+            .with_batch_size_per_weight(100)
+            .build()
+            .await?;
         rotate_into_avid(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
@@ -3736,14 +3716,12 @@ mod tests {
 
         // 24-hour batching delay: the batch fires only at capacity, not on
         // a timer, so every request lands in one Bitcoin transaction.
-        let mut networks = avid_override(
-            TestNetworksBuilder::new()
-                .with_nodes(4)
-                .with_withdrawal_max_batch_size(num_withdrawals)
-                .with_withdrawal_batching_delay_ms(86_400_000),
-        )
-        .build()
-        .await?;
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_max_batch_size(num_withdrawals)
+            .with_withdrawal_batching_delay_ms(86_400_000)
+            .build()
+            .await?;
         rotate_into_avid(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();

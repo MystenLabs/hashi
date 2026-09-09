@@ -312,18 +312,13 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose updating MPC parameters (`f`, `allowed_delta`,
-    /// `nonce_generation_protocol`) in one transaction.
+    /// Propose updating MPC parameters (`f`, `allowed_delta`) in one transaction.
     UpdateMpcConfig {
         #[clap(long)]
         max_faulty_bps: Option<u64>,
 
         #[clap(long)]
         weight_reduction_allowed_delta: Option<u64>,
-
-        /// Nonce-generation protocol: 0 = vanilla broadcast, 1 = AVID.
-        #[clap(long)]
-        nonce_generation_protocol: Option<u64>,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -1170,14 +1165,12 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 CreateProposalCommands::UpdateMpcConfig {
                     max_faulty_bps,
                     weight_reduction_allowed_delta,
-                    nonce_generation_protocol,
                     metadata,
                 } => {
                     commands::proposal::create_update_mpc_config_proposal(
                         &config,
                         max_faulty_bps,
                         weight_reduction_allowed_delta,
-                        nonce_generation_protocol,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

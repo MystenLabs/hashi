@@ -116,7 +116,7 @@ public fun create_hashi_with_weighted_committee(
     let committee = committee::new_committee(
         ctx.epoch(),
         members,
-        hashi::mpc_config::new_for_testing(800, 3333, 0, 0),
+        hashi::mpc_config::new_for_testing(800, 3333, 0),
     );
 
     let sk = bls_sk_for_testing();
@@ -176,7 +176,7 @@ public fun create_hashi_with_committee_and_registry(
     let committee = committee::new_committee(
         ctx.epoch(),
         members,
-        hashi::mpc_config::new_for_testing(800, 3333, 0, 0),
+        hashi::mpc_config::new_for_testing(800, 3333, 0),
     );
 
     let sk = bls_sk_for_testing();

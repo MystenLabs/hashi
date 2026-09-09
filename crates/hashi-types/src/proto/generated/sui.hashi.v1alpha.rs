@@ -3823,7 +3823,6 @@ pub mod complain_response {
         /// For key rotation
         #[prost(message, tag = "2")]
         RotationResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
-        /// For vanilla nonce generation
         #[prost(message, tag = "3")]
         NonceResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
         /// For AVID nonce generation

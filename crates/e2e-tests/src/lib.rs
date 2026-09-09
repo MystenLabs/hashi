@@ -680,7 +680,6 @@ pub(crate) async fn apply_onchain_config_overrides(
             CreateProposalParams::UpdateMpcConfig {
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
-                nonce_generation_protocol: None,
                 metadata: vec![],
             },
             update_epoch_config_type_tag.clone(),
@@ -2492,18 +2491,6 @@ mod tests {
             },
             |db, dealer| Ok(db.delete_dealer_message(epoch, dealer)?),
         )?;
-        delete_first_half_of_messages(
-            node0,
-            "nonce",
-            |db| {
-                Ok(db
-                    .list_nonce_messages(epoch, 0)?
-                    .into_iter()
-                    .map(|(addr, _)| addr)
-                    .collect())
-            },
-            |db, dealer| Ok(db.delete_nonce_message(epoch, 0, dealer)?),
-        )?;
 
         test_networks.hashi_network_mut().nodes_mut()[0]
             .start()
@@ -2533,18 +2520,6 @@ mod tests {
                     .collect())
             },
             |db, dealer| Ok(db.delete_rotation_messages(next_epoch, dealer)?),
-        )?;
-        delete_first_half_of_messages(
-            node0,
-            "nonce",
-            |db| {
-                Ok(db
-                    .list_nonce_messages(next_epoch, 0)?
-                    .into_iter()
-                    .map(|(addr, _)| addr)
-                    .collect())
-            },
-            |db, dealer| Ok(db.delete_nonce_message(next_epoch, 0, dealer)?),
         )?;
 
         test_networks.hashi_network_mut().nodes_mut()[0]
@@ -2839,13 +2814,7 @@ mod tests {
     }
 
     async fn build_avid_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
-        let mut test_networks = builder
-            .with_onchain_config(
-                "mpc_nonce_generation_protocol",
-                hashi_types::move_types::ConfigValue::U64(1),
-            )
-            .build()
-            .await?;
+        let mut test_networks = builder.build().await?;
         let initial_epoch = {
             let nodes = test_networks.hashi_network().nodes();
             let mpc_key_futures: Vec<_> = nodes
@@ -2856,14 +2825,6 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_eq!(
-                nodes[0]
-                    .hashi()
-                    .onchain_state()
-                    .mpc_nonce_generation_protocol(),
-                1,
-                "the AVID protocol override must have landed"
-            );
             nodes[0].current_epoch().unwrap()
         };
         force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
