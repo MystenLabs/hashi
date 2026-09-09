@@ -908,8 +908,12 @@ impl hashi_types::intent::IntentMessage for DepositConfirmationMessage {
 pub struct UtxoPool {
     pub(super) utxo_records_id: Address,
     pub(super) utxo_records: BTreeMap<UtxoId, UtxoRecord>,
+    /// The on-chain `spent_utxos` bag (`UtxoId -> spent_epoch`), the
+    /// tombstones kept permanently as replay protection. The bag only
+    /// ever grows — millions of entries on a busy network — so it is
+    /// not mirrored; membership is read live through
+    /// [`super::OnchainState::is_utxo_spent`].
     pub(super) spent_utxos_id: Address,
-    pub(super) spent_utxos: BTreeMap<UtxoId, u64>,
 }
 
 impl UtxoPool {
@@ -930,16 +934,16 @@ impl UtxoPool {
             .map(|(id, r)| (id, &r.utxo))
     }
 
-    pub fn is_active_or_spent(&self, id: &UtxoId) -> bool {
-        self.utxo_records.contains_key(id) || self.spent_utxos.contains_key(id)
+    /// True when `id` has a `utxo_records` entry: active, locked by a
+    /// withdrawal, or spent but not yet cleaned up. This is the mirrored
+    /// half of the on-chain `assert_not_spent_or_active` guard; the
+    /// tombstoned half is [`super::OnchainState::is_utxo_spent`].
+    pub fn has_record(&self, id: &UtxoId) -> bool {
+        self.utxo_records.contains_key(id)
     }
 
     pub fn spent_utxos_id(&self) -> &Address {
         &self.spent_utxos_id
-    }
-
-    pub fn spent_utxos(&self) -> &BTreeMap<UtxoId, u64> {
-        &self.spent_utxos
     }
 }
 

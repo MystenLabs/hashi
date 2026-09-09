@@ -37,6 +37,8 @@ impl Hashi {
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
         self.validate_deposit_request_on_sui(deposit_request)?;
+        self.validate_deposit_utxo_unspent_on_sui(deposit_request)
+            .await?;
         self.validate_deposit_request_on_bitcoin(deposit_request)
             .await?;
         self.screen_deposit(deposit_request).await?;
@@ -129,14 +131,39 @@ impl Hashi {
             }
         }
 
+        // The mirrored half of the on-chain replay guard; the tombstoned
+        // half is `validate_deposit_utxo_unspent_on_sui`.
         let utxo_pool = &state.hashi().bitcoin().utxo_pool;
-        if utxo_pool.is_active_or_spent(&deposit_request.utxo.id) {
+        if utxo_pool.has_record(&deposit_request.utxo.id) {
             return Err(UnapprovedDepositError::DuplicateOrSpentOnSui(anyhow!(
-                "UTXO {:?} is already active or spent",
+                "UTXO {:?} is already in the UTXO pool",
                 deposit_request.utxo.id
             )));
         }
 
+        Ok(())
+    }
+
+    /// Reject a deposit of a UTXO the bridge has already spent. The
+    /// `spent_utxos` tombstones are not mirrored (the bag only grows),
+    /// so this is a live read; a lookup failure is retried rather than
+    /// treated as either answer.
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
+    async fn validate_deposit_utxo_unspent_on_sui(
+        &self,
+        deposit_request: &DepositRequest,
+    ) -> Result<(), UnapprovedDepositError> {
+        let spent = self
+            .onchain_state()
+            .is_utxo_spent(&deposit_request.utxo.id)
+            .await
+            .map_err(UnapprovedDepositError::SpentUtxoLookupFailed)?;
+        if spent {
+            return Err(UnapprovedDepositError::DuplicateOrSpentOnSui(anyhow!(
+                "UTXO {:?} is already spent",
+                deposit_request.utxo.id
+            )));
+        }
         Ok(())
     }
 
@@ -416,6 +443,9 @@ pub enum UnapprovedDepositError {
     #[error("UTXO is already active or spent on Sui: {0}")]
     DuplicateOrSpentOnSui(#[source] anyhow::Error),
 
+    #[error("Failed to look up the UTXO in the on-chain spent set: {0}")]
+    SpentUtxoLookupFailed(#[source] anyhow::Error),
+
     #[error("Deposit UTXO has already been spent on Bitcoin: {0}")]
     BitcoinUtxoSpent(#[source] anyhow::Error),
 
@@ -453,6 +483,7 @@ impl UnapprovedDepositError {
             Self::BitcoinConfirmFailed(_)
             | Self::BitcoinNotConfirmed(_)
             | Self::AmlServiceError(_)
+            | Self::SpentUtxoLookupFailed(_)
             | Self::FailedQuorum { .. }
             | Self::CertificateBuildFailed(_)
             | Self::ExecutorInitFailed(_)
@@ -471,6 +502,7 @@ impl UnapprovedDepositError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ApprovedDepositErrorKind {
+    SpentUtxoLookupFailed,
     ExecutorInitFailed,
     ConfirmDepositFailed,
     TimedOut,
@@ -478,6 +510,9 @@ pub(crate) enum ApprovedDepositErrorKind {
 
 #[derive(Debug, Error)]
 pub enum ApprovedDepositError {
+    #[error("Failed to look up the UTXO in the on-chain spent set: {0}")]
+    SpentUtxoLookupFailed(#[source] anyhow::Error),
+
     #[error("Failed to create Sui transaction executor: {0}")]
     ExecutorInitFailed(#[source] anyhow::Error),
 
@@ -494,6 +529,7 @@ pub enum ApprovedDepositError {
 impl ApprovedDepositError {
     pub(crate) fn kind(&self) -> ApprovedDepositErrorKind {
         match self {
+            Self::SpentUtxoLookupFailed(_) => ApprovedDepositErrorKind::SpentUtxoLookupFailed,
             Self::ExecutorInitFailed(_) => ApprovedDepositErrorKind::ExecutorInitFailed,
             Self::ConfirmDepositFailed(_) => ApprovedDepositErrorKind::ConfirmDepositFailed,
             Self::TimedOut(_) | Self::CheckpointWaitTimedOut => ApprovedDepositErrorKind::TimedOut,

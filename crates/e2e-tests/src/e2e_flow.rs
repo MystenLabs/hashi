@@ -3700,6 +3700,15 @@ mod tests {
         executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
         info!("cleanup_spent_utxos succeeded");
 
+        // The tombstones are not mirrored; the deposit replay checks read
+        // them live, so pin that lookup against what just landed.
+        for utxo_id in &utxo_ids {
+            anyhow::ensure!(
+                hashi.onchain_state().is_utxo_spent(utxo_id).await?,
+                "cleanup landed but {utxo_id:?} does not read back as spent"
+            );
+        }
+
         info!("=== Large Withdrawal Stress Test Passed ===");
         Ok(())
     }
@@ -3994,6 +4003,15 @@ mod tests {
         let utxo_ids: Vec<_> = picked.inputs.iter().map(|u| u.id).collect();
         executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
         info!("cleanup_spent_utxos succeeded");
+
+        // The tombstones are not mirrored; the deposit replay checks read
+        // them live, so pin that lookup against what just landed.
+        for utxo_id in &utxo_ids {
+            anyhow::ensure!(
+                hashi.onchain_state().is_utxo_spent(utxo_id).await?,
+                "cleanup landed but {utxo_id:?} does not read back as spent"
+            );
+        }
 
         info!("=== Drain Mode Max Batch Test Passed ===");
         Ok(())
