@@ -302,10 +302,10 @@ impl Hashi {
 
     pub fn prepare_encryption_key(&self, epoch: u64) -> anyhow::Result<EncryptionPublicKey> {
         if let Some(existing) = self.db.get_encryption_key(epoch)? {
-            return Ok(EncryptionPublicKey::from_private_key(&existing));
+            return Ok(existing.public_key());
         }
         let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
-        let public_key = EncryptionPublicKey::from_private_key(&private_key);
+        let public_key = private_key.public_key();
         self.db
             .store_encryption_key(epoch, &private_key)
             .map_err(|e| anyhow!("failed to store encryption key for epoch {epoch}: {e}"))?;
@@ -1570,9 +1570,7 @@ mod test {
             .expect("private key should be in DB");
         assert_eq!(
             pk.as_element().to_byte_array(),
-            EncryptionPublicKey::from_private_key(&stored)
-                .as_element()
-                .to_byte_array(),
+            stored.public_key().as_element().to_byte_array(),
             "returned public key should match the public key derived from the stored private key"
         );
     }
@@ -1676,9 +1674,7 @@ mod test {
 
         // Committee records a BLS pub key the DB knows nothing about.
         let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
-        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
 
         let err = hashi
@@ -1698,9 +1694,7 @@ mod test {
 
         // Committee records an encryption pub key the DB knows nothing about.
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
-        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let unknown_enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
 
         let err = hashi
@@ -1718,9 +1712,7 @@ mod test {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let validator_address = Address::new([1u8; 32]);
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
-        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let unknown_enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
         assert!(hashi.committee_encryption_key_lost(&committee, validator_address));
     }
@@ -1762,9 +1754,7 @@ mod test {
     fn committee_encryption_key_lost_false_when_not_in_committee() {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
-        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         let committee = one_member_committee(5, Address::new([2u8; 32]), bls_pub, enc_pub);
         assert!(!hashi.committee_encryption_key_lost(&committee, Address::new([1u8; 32])));
     }
@@ -1774,9 +1764,7 @@ mod test {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let validator_address = Address::new([1u8; 32]);
         let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
-        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         let target_epoch = 3;
         let new_committee = one_member_committee(target_epoch, validator_address, bls_pub, enc_pub);
 
@@ -1800,9 +1788,7 @@ mod test {
     fn resolve_previous_encryption_key_lost_key_returns_none() {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let validator_address = Address::new([1u8; 32]);
-        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let unknown_enc_pub = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         let target_epoch = 3;
         let previous_committee = one_member_committee(
             2,

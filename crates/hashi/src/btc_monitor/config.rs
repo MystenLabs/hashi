@@ -11,7 +11,7 @@ pub use bitcoin::Network;
 use bitcoin::blockdata::constants::genesis_block;
 pub use corepc_client;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MonitorConfig {
     /// Bitcoin network to connect to
     pub network: Network,
@@ -29,6 +29,30 @@ pub struct MonitorConfig {
 
     /// bitcoind JSON-RPC server auth config
     pub bitcoind_rpc_auth: corepc_client::client_sync::Auth,
+}
+
+fn redacted_auth(auth: &corepc_client::client_sync::Auth) -> String {
+    match auth {
+        corepc_client::client_sync::Auth::None => "None".to_string(),
+        corepc_client::client_sync::Auth::UserPass(user, _) => {
+            format!("UserPass({user}, <redacted>)")
+        }
+        corepc_client::client_sync::Auth::CookieFile(path) => {
+            format!("CookieFile({})", path.display())
+        }
+    }
+}
+
+impl std::fmt::Debug for MonitorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MonitorConfig")
+            .field("network", &self.network)
+            .field("trusted_peers", &self.trusted_peers)
+            .field("start_height", &self.start_height)
+            .field("bitcoind_rpc_url", &self.bitcoind_rpc_url)
+            .field("bitcoind_rpc_auth", &redacted_auth(&self.bitcoind_rpc_auth))
+            .finish()
+    }
 }
 
 impl Default for MonitorConfig {
@@ -51,13 +75,28 @@ impl MonitorConfig {
 }
 
 /// Builder for constructing monitor configuration.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
     trusted_peers: Vec<kyoto::TrustedPeer>,
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
     bitcoind_rpc_auth: Option<corepc_client::client_sync::Auth>,
+}
+
+impl std::fmt::Debug for MonitorConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MonitorConfigBuilder")
+            .field("network", &self.network)
+            .field("trusted_peers", &self.trusted_peers)
+            .field("start_height", &self.start_height)
+            .field("bitcoind_rpc_url", &self.bitcoind_rpc_url)
+            .field(
+                "bitcoind_rpc_auth",
+                &self.bitcoind_rpc_auth.as_ref().map(redacted_auth),
+            )
+            .finish()
+    }
 }
 
 impl MonitorConfigBuilder {
@@ -105,11 +144,25 @@ impl MonitorConfigBuilder {
 }
 
 /// Wrapper around corepc_client::client_sync::Auth that we can serialize/deserialize from configs
-#[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum BtcRpcAuth {
     None,
     UserPass(String, String),
     CookieFile(PathBuf),
+}
+
+impl std::fmt::Debug for BtcRpcAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::UserPass(user, _) => f
+                .debug_tuple("UserPass")
+                .field(user)
+                .field(&"<redacted>")
+                .finish(),
+            Self::CookieFile(path) => f.debug_tuple("CookieFile").field(path).finish(),
+        }
+    }
 }
 
 impl BtcRpcAuth {

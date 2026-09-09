@@ -103,6 +103,7 @@ use futures::stream::StreamExt;
 use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
+use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::ReducedWeight;
 use hashi_types::committee::SignedMessage;
@@ -192,7 +193,7 @@ pub struct NoncePartyOutcome {
 
 struct TargetIdentity {
     party_id: PartyId,
-    encryption_key: PrivateKey<EncryptionGroupElement>,
+    encryption_key: EncryptionPrivateKey,
     signing_key: Bls12381PrivateKey,
 }
 
@@ -203,7 +204,7 @@ pub struct MpcManager {
     pub address: Address,
     pub mpc_config: MpcConfig,
     protocol_type: ProtocolType,
-    pub previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
+    pub previous_encryption_key: Option<EncryptionPrivateKey>,
     pub committee: Committee,
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
@@ -342,7 +343,7 @@ impl MpcManager {
         Ok(self.identity()?.party_id)
     }
 
-    fn encryption_key(&self) -> MpcResult<&PrivateKey<EncryptionGroupElement>> {
+    fn encryption_key(&self) -> MpcResult<&EncryptionPrivateKey> {
         Ok(&self.identity()?.encryption_key)
     }
 
@@ -356,8 +357,8 @@ impl MpcManager {
         committee_set: &CommitteeSet,
         epoch: u64,
         protocol_type: ProtocolType,
-        encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
-        previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
+        encryption_key: Option<EncryptionPrivateKey>,
+        previous_encryption_key: Option<EncryptionPrivateKey>,
         signing_key: Option<Bls12381PrivateKey>,
         public_message_store: Arc<dyn PublicMessagesStore>,
         chain_id: &str,
@@ -395,7 +396,7 @@ impl MpcManager {
         let party_id_opt = committee.index_of(&address).map(|i| i as u16);
         let my_pk = encryption_key
             .as_ref()
-            .map(PublicKey::<EncryptionGroupElement>::from_private_key);
+            .map(EncryptionPrivateKey::public_key);
         // Both are member-only: a non-member has no committee record to compare against.
         let committee_pk = party_id_opt.map(|pid| {
             mpc_config
@@ -869,7 +870,9 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key_for_epoch(request.epoch)?.clone(),
+                    self.encryption_key_for_epoch(request.epoch)?
+                        .inner()
+                        .clone(),
                 )?;
                 let ProtocolComplaint::Avss(complaint) = &request.complaint else {
                     return Err(MpcError::InvalidMessage {
@@ -915,7 +918,9 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key_for_epoch(request.epoch)?.clone(),
+                    self.encryption_key_for_epoch(request.epoch)?
+                        .inner()
+                        .clone(),
                 )?;
                 let ProtocolComplaint::Avss(complaint) = &request.complaint else {
                     return Err(MpcError::InvalidMessage {
@@ -2819,7 +2824,7 @@ impl MpcManager {
             dealer_party_id,
             self.mpc_config.threshold,
             dealer_session_id.to_vec(),
-            self.encryption_key()?.clone(),
+            self.encryption_key()?.inner().clone(),
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))
@@ -2920,7 +2925,7 @@ impl MpcManager {
                 f: self.mpc_config.max_faulty,
             },
             dealer_session_id.to_vec(),
-            self.encryption_key()?.clone(),
+            self.encryption_key()?.inner().clone(),
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))
@@ -4714,7 +4719,7 @@ impl MpcManager {
             dealer_party_id,
             self.mpc_config.threshold,
             dealer_sid.to_vec(),
-            self.encryption_key()?.clone(),
+            self.encryption_key()?.inner().clone(),
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))?;
@@ -5213,7 +5218,7 @@ impl MpcManager {
                 params,
                 dealer_session_id.to_vec(),
                 None,
-                mgr.encryption_key_for_epoch(epoch)?.clone(),
+                mgr.encryption_key_for_epoch(epoch)?.inner().clone(),
             )?;
             (complaint_request, receiver, committee)
         };
@@ -5316,7 +5321,7 @@ impl MpcManager {
                 dealer_party_id,
                 params.t,
                 dealer_sid.to_vec(),
-                mgr.encryption_key_for_epoch(epoch)?.clone(),
+                mgr.encryption_key_for_epoch(epoch)?.inner().clone(),
                 mgr.batch_size_per_weight,
             )
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
@@ -5532,7 +5537,7 @@ impl MpcManager {
                     params,
                     session_id.to_vec(),
                     None,
-                    self.encryption_key_for_epoch(epoch)?.clone(),
+                    self.encryption_key_for_epoch(epoch)?.inner().clone(),
                 )?;
                 Ok(RotationComplainContext {
                     request: ComplainRequest {
@@ -7018,10 +7023,7 @@ impl MpcManager {
             .ok_or_else(|| MpcError::InvalidConfig("This node is not in the committee".into()))
     }
 
-    fn encryption_key_for_epoch(
-        &self,
-        epoch: u64,
-    ) -> MpcResult<&PrivateKey<EncryptionGroupElement>> {
+    fn encryption_key_for_epoch(&self, epoch: u64) -> MpcResult<&EncryptionPrivateKey> {
         if epoch == self.mpc_config.epoch {
             Ok(self.encryption_key()?)
         } else if epoch == self.previous_epoch {
@@ -7408,7 +7410,7 @@ fn required_previous_commitment(
 }
 
 fn process_avss_message(
-    encryption_key: &PrivateKey<EncryptionGroupElement>,
+    encryption_key: &EncryptionPrivateKey,
     nodes: Nodes<EncryptionGroupElement>,
     party_id: u16,
     params: Parameters,
@@ -7430,7 +7432,7 @@ fn process_avss_message(
         params,
         session_id,
         commitment,
-        encryption_key.clone(),
+        encryption_key.inner().clone(),
     )?;
     match receiver.process_message(message, &mut rand::thread_rng()) {
         Ok(pm) => Ok(pm),

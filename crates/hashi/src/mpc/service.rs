@@ -2309,7 +2309,6 @@ mod pruning_reference_tests {
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
-    use hashi_types::committee::EncryptionPublicKey;
     use std::collections::BTreeMap;
     use sui_sdk_types::Address;
 
@@ -2321,7 +2320,7 @@ mod pruning_reference_tests {
         let mut committees = BTreeMap::new();
         for epoch in [500u64, 520] {
             let enc = EncryptionPrivateKey::new(&mut rand::thread_rng());
-            let enc_pub = EncryptionPublicKey::from_private_key(&enc);
+            let enc_pub = enc.public_key();
             let bls = Bls12381PrivateKey::generate(&mut rand::thread_rng());
             db.store_encryption_key(epoch, &enc).unwrap();
             db.store_signing_key(epoch, &bls).unwrap();
@@ -2359,7 +2358,7 @@ mod pruning_reference_tests {
         let mut committees = BTreeMap::new();
         for epoch in [10u64, 20, 30, 40] {
             let enc = EncryptionPrivateKey::new(&mut rand::thread_rng());
-            let enc_pub = EncryptionPublicKey::from_private_key(&enc);
+            let enc_pub = enc.public_key();
             let bls = Bls12381PrivateKey::generate(&mut rand::thread_rng());
             db.store_encryption_key(epoch, &enc).unwrap();
             db.store_signing_key(epoch, &bls).unwrap();

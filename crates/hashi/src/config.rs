@@ -37,7 +37,7 @@ where
     hashi_types::pgp::PgpPublicCert::new(armored).map_err(serde::de::Error::custom)
 }
 
-#[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -261,8 +261,33 @@ pub enum ForceRunAsLeader {
     Never,
 }
 
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field(
+                "tls_private_key",
+                &self.tls_private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "operator_private_key",
+                &self.operator_private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("validator_address", &self.validator_address)
+            .field("hashi_ids", &self.hashi_ids)
+            .field("sui_chain_id", &self.sui_chain_id)
+            .field("bitcoin_chain_id", &self.bitcoin_chain_id)
+            .field("listen_address", &self.listen_address)
+            .field("endpoint_url", &self.endpoint_url)
+            .field("sui_rpc", &self.sui_rpc)
+            .field("bitcoin_rpc", &self.bitcoin_rpc)
+            .field("bitcoin_rpc_auth", &self.bitcoin_rpc_auth)
+            .field("db", &self.db)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
-    pub fn load(path: &std::path::Path) -> Result<Self, anyhow::Error> {
+    pub fn load(path: &Path) -> Result<Self, anyhow::Error> {
         let file = std::fs::read(path)?;
         let config: Self = toml::from_slice(&file)?;
         anyhow::ensure!(
@@ -272,7 +297,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn save(&self, path: &std::path::Path) -> Result<(), anyhow::Error> {
+    pub fn save(&self, path: &Path) -> Result<(), anyhow::Error> {
         let toml = toml::to_string(self)?;
         std::fs::write(path, toml).map_err(Into::into)
     }

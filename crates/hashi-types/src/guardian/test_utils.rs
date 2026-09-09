@@ -56,7 +56,6 @@ use crate::bitcoin::sign_btc_tx;
 use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
-use crate::committee::EncryptionPublicKey;
 use crate::pgp::PgpPublicCert;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -322,7 +321,9 @@ fn mock_committee_member() -> HashiCommitteeMember {
         // This address must match the one used in signing-related mocks.
         TEST_SIGNER_ADDRESS,
         pk,
-        EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::from_bcs(&[1u8; 32]).unwrap()),
+        EncryptionPrivateKey::from_bcs(&[1u8; 32])
+            .unwrap()
+            .public_key(),
         10,
     )
 }

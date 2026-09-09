@@ -9,7 +9,6 @@ use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::ecies_v1::Ciphertext;
-use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::polynomial::Eval;
@@ -26,6 +25,7 @@ use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::Committee;
+use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DealerSubmissionV1;
@@ -433,7 +433,7 @@ pub(crate) struct DkgReconstructionContext<'a> {
     pub committee: &'a Committee,
     pub nodes: &'a Nodes<EncryptionGroupElement>,
     pub party_id: PartyId,
-    pub encryption_key: &'a PrivateKey<EncryptionGroupElement>,
+    pub encryption_key: &'a EncryptionPrivateKey,
     pub output_threshold: u16,
     pub output_max_faulty: u16,
     pub epoch: u64,
@@ -442,7 +442,7 @@ pub(crate) struct DkgReconstructionContext<'a> {
 pub(crate) struct RotationReconstructionContext<'a> {
     pub nodes: &'a Nodes<EncryptionGroupElement>,
     pub party_id: PartyId,
-    pub encryption_key: &'a PrivateKey<EncryptionGroupElement>,
+    pub encryption_key: &'a EncryptionPrivateKey,
     pub output_threshold: u16,
     pub output_max_faulty: u16,
     pub input_threshold: u16,
@@ -1276,7 +1276,6 @@ mod tests {
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
-    use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
     use hashi_types::move_types::DealerMessagesHashV1;
     use std::num::NonZeroU16;
@@ -1341,7 +1340,7 @@ mod tests {
                 CommitteeMember::new(
                     Address::new([i as u8; 32]),
                     signing_keys[i].public_key(),
-                    EncryptionPublicKey::from_private_key(&enc),
+                    enc.public_key(),
                     1,
                 )
             })
@@ -1503,7 +1502,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let sks: Vec<_> = (0..n)
-            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
             .collect();
         let nodes = Nodes::new(
             sks.iter()
@@ -1571,7 +1570,7 @@ mod tests {
         weight: u16,
     ) -> (Address, Node<EncryptionGroupElement>) {
         let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
-        let public_key = EncryptionPublicKey::from_private_key(&private_key);
+        let public_key = private_key.public_key();
         let address = Address::new([party_id as u8; 32]);
         let node = Node {
             id: party_id,
@@ -1710,7 +1709,7 @@ mod tests {
                 CommitteeMember::new(
                     Address::new([i as u8; 32]),
                     signing_keys[i].public_key(),
-                    EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                    encryption_keys[i].public_key(),
                     1,
                 )
             })

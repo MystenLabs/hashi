@@ -16,7 +16,7 @@ use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 
 /// Bitcoin RPC and wallet configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct BitcoinConfig {
     /// Bitcoin Core RPC endpoint URL
     pub rpc_url: Option<String>,
@@ -32,6 +32,21 @@ pub struct BitcoinConfig {
 
     /// Path to a WIF-encoded private key file for BTC operations
     pub private_key_path: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for BitcoinConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitcoinConfig")
+            .field("rpc_url", &self.rpc_url)
+            .field("rpc_user", &self.rpc_user)
+            .field(
+                "rpc_password",
+                &self.rpc_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("network", &self.network)
+            .field("private_key_path", &self.private_key_path)
+            .finish()
+    }
 }
 
 /// CLI Configuration
