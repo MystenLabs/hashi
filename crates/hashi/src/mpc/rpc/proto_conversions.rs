@@ -57,6 +57,8 @@ fn serialize_bcs<T: Serialize>(value: &T) -> Bcs {
 }
 
 /// Parse a share index map from proto.
+// TODO(defence in depth): `index as u16` silently truncates: proto key 65537 becomes
+// share index 1. Reject invalid indices.
 #[allow(clippy::result_large_err)]
 fn parse_rotation_messages_map(
     map: &std::collections::HashMap<u32, Bcs>,

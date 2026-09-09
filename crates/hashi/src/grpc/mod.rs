@@ -262,6 +262,14 @@ impl RouterExt for axum::Router {
 
 const ANONYMOUS_PATHS: &[&str] = &["/health", "/ready"];
 
+// TODO[defence in depth]: authenticates registered members but not committee members.
+// Add per-handler checks:
+//   MpcService.send_messages      Rotation/AVID check the dealer; DKG does not.
+//   MpcService.complain           checks accuser in committee(request.epoch).
+//   MpcService.retrieve_messages  no check (should be current|previous member).
+//   MpcService.get_public_mpc_output          no check (should be current|pending).
+//   MpcService.get_reconfig_completion_signature no check (should be pending).
+//   MpcService.get_partial_signatures         no check (should be current).
 async fn require_known_validator(
     axum::extract::State(hashi): axum::extract::State<Arc<Hashi>>,
     mut request: axum::extract::Request,
@@ -321,6 +329,18 @@ pub(super) fn is_grpc_content_type(headers: &http::HeaderMap) -> bool {
         })
 }
 
+// TODO(fix): the caller identity is resolved purely from the peer's TLS
+// public key via `tls_public_key_to_address`, and neither the on-chain
+// `set_tls_public_key` (length check only, no proof of possession) nor the
+// mirror enforces uniqueness of TLS keys (the mirror map is last-writer-wins,
+// see `CommitteeSet::update_validator`). A registered member B can therefore
+// register honest member A's *public* TLS key as its own; B still cannot
+// connect as A (no private key), but A's genuine connections are then
+// attributed to B, so A's outbound RPCs (dealings, complaints, retrievals,
+// leader signing calls) fail their role/crypto checks. This is identity
+// shadowing (denial), not impersonation, and it silently turns an honest
+// node into a receive-only one.
+// Should verify uniqueness of TLS keys on chain.
 fn lookup_validator_address<B>(
     hashi: &Hashi,
     request: &http::Request<B>,

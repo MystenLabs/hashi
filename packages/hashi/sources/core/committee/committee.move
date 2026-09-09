@@ -258,6 +258,7 @@ public(package) fun verify_certificate<T>(
     // certificate to this deployment, so a certificate minted for another
     // Hashi instance (byte-identical committee, same epoch) can never verify
     // here.
+    // TODO[defence in depth]: add a random dst string as prefix
     let mut message_bytes = bcs::to_bytes(&intent);
     message_bytes.append(bcs::to_bytes(&hashi_id));
     message_bytes.append(bcs::to_bytes(&signature.epoch));
