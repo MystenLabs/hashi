@@ -120,7 +120,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     );
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
 
-    state.encrypted_shares.verify_recipients(&certs_roster)?;
+    state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let old_cert_seq = state.cert_seq;
     let old_encrypted_shares = state.encrypted_shares.clone();
     let decrypted = decrypt_kp_share(&state, &signing_cert)?;
@@ -128,7 +128,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     let request = ProvisionerRotateCertRequest::new(
         session_id.clone(),
         old_cert_seq,
-        new_cert,
+        new_cert.clone(),
         &decrypted,
         &guardian_pub_key,
         &mut thread_rng(),
@@ -162,11 +162,8 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         decrypted.id.get()
     );
     let rotated_share_id = encrypted_share.id;
-    let expected_cert = expected_certs_roster
-        .cert_for_share(rotated_share_id)
-        .context("rotated share id missing from expected KP certificate roster")?;
     encrypted_share
-        .verify_recipient(expected_cert)
+        .verify_recipient(&new_cert)
         .context("verify the rotated KP share returned by the guardian")?;
 
     let (expected_encrypted_shares, _) = old_encrypted_shares.replace_recipient(
@@ -181,7 +178,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         .context("read the certificate-rotation kp-shares snapshot")?;
     updated_state
         .encrypted_shares
-        .verify_recipients(&expected_certs_roster)
+        .verify_recipient_set(&expected_certs_roster)
         .context("verify persisted kp-shares snapshot against the rotated certificate roster")?;
     anyhow::ensure!(
         updated_state.encrypted_shares == expected_encrypted_shares,

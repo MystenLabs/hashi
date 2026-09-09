@@ -52,9 +52,9 @@ targets that cert (parsed without decrypting) → cross-checks the guardian's
 `ceremony/` audit log and `kp-shares/` recovery log.
 It then waits for every KP to confirm successful share recovery.
 
-`kp_roster.kp_pgp_cert_paths` is an ordered list with one certificate path per
-KP/share id. Each share has one encrypted ciphertext addressed to that
-certificate's fingerprint.
+`kp_roster.kp_pgp_cert_paths` lists one certificate per KP, in any order.
+New ceremonies assign share IDs by fingerprint order; existing assignments
+come from signed `kp-shares/` state.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
@@ -87,9 +87,7 @@ The selected ciphertext is piped from memory to `gpg` over stdin. No temporary
 ciphertext or plaintext file is written locally; only the verified ceremony
 state containing the encrypted shares is persisted.
 
-The selected `kp_pgp_cert_path` must name the certificate configured for this
-KP/share in `kp_roster`; a local certificate outside the roster cannot confirm
-the ceremony.
+`kp_pgp_cert_path` must name a certificate in `kp_roster`.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml --encrypted-shares-path /secure/path/kp-shares.json
@@ -206,14 +204,13 @@ It:
 2. Fetches and verifies the active guardian's `GuardianInfo` through
    `relay_endpoint`, then requires its BTC public key to match the latest
    attested `ceremony/` log and uses that log's sharing instance.
-3. Reads and verifies the latest `kp-shares/{sharing_seq}/` state against the
-   current roster, decrypts the old cert's ciphertext, and verifies the share
-   commitment.
+3. Verifies the latest `kp-shares/{sharing_seq}/` state against the configured
+   certificate set, decrypts this KP's share, and checks its commitment.
 4. HPKE-encrypts the same share to the guardian, signs the request with the old
    cert, binds the observed `cert_seq` to reject stale updates, and calls
    `ProvisionerRotateCert` through the relay.
-5. Verifies the guardian-signed response and the next `kp-shares/` snapshot,
-   including that only this share's recipient and ciphertext changed.
+5. Verifies the signed response and next `kp-shares/` snapshot: only this share's
+   recipient and ciphertext change, targeting the new cert and retaining its ID.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner rotate-cert \

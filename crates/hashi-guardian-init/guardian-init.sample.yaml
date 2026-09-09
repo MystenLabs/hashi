@@ -52,7 +52,8 @@ kp_roster:
   num_shares: 5
   threshold: 3
 
-  # Ordered paths to the armored OpenPGP public cert for each KP/share id.
+  # One armored OpenPGP public cert per KP; path order is irrelevant.
+  # New ceremonies assign IDs by fingerprint order; signed state retains existing IDs.
   kp_pgp_cert_paths:
     - /path/to/kp1.asc
     - /path/to/kp2.asc

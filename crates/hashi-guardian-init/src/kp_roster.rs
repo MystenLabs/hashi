@@ -46,9 +46,9 @@ pub struct KpRosterConfig {
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
-    /// Ordered paths to each KP's armored OpenPGP public certificate. The path
-    /// at index `i` is assigned share id `i + 1`; read-only commands match
-    /// shares by fingerprint.
+    /// Paths to each KP's armored OpenPGP public certificate, in any order.
+    /// New ceremonies assign IDs by fingerprint order; existing signed state
+    /// owns the share assignments.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
@@ -284,21 +284,6 @@ mod tests {
              \x20 pcr0: \"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"\n\
              prev_builds: []\n"
         )
-    }
-
-    #[test]
-    fn flat_kp_cert_paths_deserialize_in_order() {
-        let cfg: KpRosterConfig =
-            serde_yaml::from_str(&roster_yaml("  - /path/kp1.asc\n  - /path/kp2.asc\n")).unwrap();
-
-        assert_eq!(
-            cfg.kp_pgp_cert_paths,
-            vec![
-                PathBuf::from("/path/kp1.asc"),
-                PathBuf::from("/path/kp2.asc")
-            ]
-        );
-        cfg.validate().unwrap();
     }
 
     #[test]

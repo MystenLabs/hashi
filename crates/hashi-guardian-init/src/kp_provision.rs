@@ -365,7 +365,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         sharing_seq, "verifying this KP's encrypted share from kp-shares/",
     );
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    state.encrypted_shares.verify_recipients(&certs_roster)?;
+    state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     info!(
         phase = "share read",
         cert_seq = state.cert_seq,

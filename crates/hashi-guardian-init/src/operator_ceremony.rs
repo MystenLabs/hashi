@@ -22,6 +22,7 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSignedResponse;
+use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -78,7 +79,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP certificate roster",
     );
-    let certs_roster = cfg.kp_roster.load_certs_roster()?;
+    let mut certs = cfg.kp_roster.load_certs_roster()?.into_vec();
+    // Only a new ceremony assigns share IDs; existing state retains its mapping.
+    certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
+    let certs_roster = KpCertRoster::new(certs)?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),
