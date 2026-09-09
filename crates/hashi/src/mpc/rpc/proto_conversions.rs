@@ -63,9 +63,12 @@ fn parse_rotation_messages_map(
 ) -> Result<BTreeMap<ShareIndex, avss::Message>, TryFromProtoError> {
     let mut messages = BTreeMap::new();
     for (&index, bcs) in map {
-        let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
-            TryFromProtoError::invalid("rotation_messages.key", "index must be non-zero")
-        })?;
+        let share_index = u16::try_from(index)
+            .ok()
+            .and_then(ShareIndex::new)
+            .ok_or_else(|| {
+                TryFromProtoError::invalid("rotation_messages.key", "index must be a non-zero u16")
+            })?;
         let message: avss::Message = deserialize_bcs(bcs, "rotation_messages.value")?;
         messages.insert(share_index, message);
     }
@@ -422,14 +425,17 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
     fn try_from(value: &proto::ComplainRequest) -> Result<Self, Self::Error> {
         let epoch = *required(value.epoch.as_ref(), "epoch")?;
         let dealer = parse_address(required(value.dealer.as_ref(), "dealer")?, "dealer")?;
-        let share_index = if let Some(idx) = value.share_index {
-            Some(
-                std::num::NonZeroU16::new(idx as u16)
-                    .ok_or_else(|| TryFromProtoError::invalid("share_index", "must be non-zero"))?,
-            )
-        } else {
-            None
-        };
+        let share_index = value
+            .share_index
+            .map(|idx| {
+                u16::try_from(idx)
+                    .ok()
+                    .and_then(std::num::NonZeroU16::new)
+                    .ok_or_else(|| {
+                        TryFromProtoError::invalid("share_index", "must be a non-zero u16")
+                    })
+            })
+            .transpose()?;
         let protocol_type =
             mpc_protocol_type_from_proto(required(value.protocol_type, "protocol_type")?)?;
         let complaint_bytes = required(value.complaint.as_ref(), "complaint")?;
@@ -554,9 +560,12 @@ impl TryFrom<&proto::GetPublicMpcOutputResponse> for types::GetPublicMpcOutputRe
         )?;
         let mut commitments = BTreeMap::new();
         for (&index, bcs) in &value.commitments {
-            let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
-                TryFromProtoError::invalid("commitments.key", "index must be non-zero")
-            })?;
+            let share_index = u16::try_from(index)
+                .ok()
+                .and_then(ShareIndex::new)
+                .ok_or_else(|| {
+                    TryFromProtoError::invalid("commitments.key", "index must be a non-zero u16")
+                })?;
             let commitment_value: G = deserialize_bcs(bcs, "commitments.value")?;
             commitments.insert(share_index, commitment_value);
         }
@@ -656,6 +665,28 @@ impl TryFrom<&proto::GetPartialSignaturesResponse> for types::GetPartialSignatur
             partial_sigs,
             signing_nonces,
         })
+    }
+}
+
+#[cfg(test)]
+mod share_index_tests {
+    use super::*;
+    use crate::mpc::types;
+
+    #[test]
+    fn share_index_rejects_values_above_u16() {
+        let aliases_onto_one = u32::from(u16::MAX) + 2;
+        let request = proto::ComplainRequest {
+            epoch: Some(7),
+            dealer: Some(Address::ZERO.to_string()),
+            share_index: Some(aliases_onto_one),
+            ..Default::default()
+        };
+
+        let error = types::ComplainRequest::try_from(&request)
+            .expect_err("share index above u16 must be rejected")
+            .to_string();
+        assert!(error.contains("share_index"), "{error}");
     }
 }
 

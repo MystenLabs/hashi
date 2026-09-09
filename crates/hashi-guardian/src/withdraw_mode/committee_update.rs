@@ -154,7 +154,7 @@ mod tests {
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(0xDEAD_BEEF);
         let sk = hashi_types::committee::EncryptionPrivateKey::new(&mut rng);
-        EncryptionPublicKey::from_private_key(&sk)
+        sk.public_key()
     }
 
     fn committee_at(epoch: u64) -> HashiCommittee {

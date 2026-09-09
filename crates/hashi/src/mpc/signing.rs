@@ -1507,7 +1507,6 @@ mod tests {
     use fastcrypto_tbls::types::ShareIndex;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
-    use hashi_types::committee::EncryptionPublicKey;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -1929,7 +1928,7 @@ mod tests {
                     CommitteeMember::new(
                         test_address(i),
                         hashi_types::committee::Bls12381PrivateKey::generate(&mut rng).public_key(),
-                        EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                        encryption_keys[i].public_key(),
                         1,
                     )
                 })
@@ -2285,7 +2284,7 @@ mod tests {
                 CommitteeMember::new(
                     test_address(i),
                     hashi_types::committee::Bls12381PrivateKey::generate(&mut rng).public_key(),
-                    EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                    encryption_keys[i].public_key(),
                     1,
                 )
             })

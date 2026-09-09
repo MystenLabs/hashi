@@ -337,7 +337,8 @@ impl Database {
         if self.encryption_epoch_index.contains_key(epoch_key)? {
             return Ok(());
         }
-        let pubkey = EncryptionPublicKey::from_private_key(encryption_key)
+        let pubkey = encryption_key
+            .public_key()
             .as_element()
             .to_byte_array()
             .to_vec();
@@ -967,7 +968,6 @@ pub(crate) mod tests {
     use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::EncryptionPrivateKey;
-    use hashi_types::committee::EncryptionPublicKey;
     use std::collections::BTreeSet;
     use sui_sdk_types::Address;
 
@@ -982,7 +982,7 @@ pub(crate) mod tests {
         let nodes: Vec<_> = (0..count)
             .map(|i| {
                 let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
-                let public_key = EncryptionPublicKey::from_private_key(&private_key);
+                let public_key = private_key.public_key();
                 Node {
                     id: i,
                     pk: public_key,
@@ -1149,15 +1149,13 @@ pub(crate) mod tests {
 
         // Looking up by each pub key returns the matching private key.
         for key in [&key_a, &key_b, &key_c] {
-            let pub_key = EncryptionPublicKey::from_private_key(key);
+            let pub_key = key.public_key();
             let found = db.find_encryption_key_matching(&pub_key).unwrap().unwrap();
             assert_eq!(&found, key);
         }
 
         // An unrelated pub key has no match.
-        let unrelated = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
-            &mut rand::thread_rng(),
-        ));
+        let unrelated = EncryptionPrivateKey::new(&mut rand::thread_rng()).public_key();
         assert!(
             db.find_encryption_key_matching(&unrelated)
                 .unwrap()
@@ -2132,10 +2130,7 @@ pub(crate) mod tests {
     ) -> PruningReferences {
         let mut result = PruningReferences::default();
         for (enc, sig) in keys {
-            result.add_member_pubkeys(
-                &EncryptionPublicKey::from_private_key(enc),
-                &sig.public_key(),
-            );
+            result.add_member_pubkeys(&enc.public_key(), &sig.public_key());
         }
         result
     }
@@ -2289,9 +2284,7 @@ pub(crate) mod tests {
 
         let mut referenced = PruningReferences::default();
         referenced.add_pending_registration(
-            Some(&EncryptionPublicKey::from_private_key(
-                &registered_encryption,
-            )),
+            Some(&registered_encryption.public_key()),
             &registered_signing.public_key(),
         );
 
@@ -2418,13 +2411,10 @@ pub(crate) mod tests {
 
             let mut referenced = PruningReferences::default();
             referenced.add_member_pubkeys(
-                &EncryptionPublicKey::from_private_key(&pinned_encryption),
+                &pinned_encryption.public_key(),
                 &pinned_signing.public_key(),
             );
-            referenced.add_member_pubkeys(
-                &EncryptionPublicKey::from_private_key(&encryption),
-                &signing.public_key(),
-            );
+            referenced.add_member_pubkeys(&encryption.public_key(), &signing.public_key());
             db.prune_messages_below(epoch, &referenced).unwrap();
         }
 

@@ -44,23 +44,53 @@ pub fn certificate_threshold(total_weight: u64) -> u64 {
 }
 
 pub type EncryptionGroupElement = fastcrypto::groups::ristretto255::RistrettoPoint;
-pub type EncryptionPrivateKey = fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>;
-pub type EncryptionPublicKey = fastcrypto_tbls::ecies_v1::PublicKey<EncryptionGroupElement>;
 
-/// A thin wrapper around min_pk::BLS12381PrivateKey needed to implement Clone.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct EncryptionPrivateKey(fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>);
 
-impl Clone for Bls12381PrivateKey {
-    fn clone(&self) -> Self {
-        // A bit of a hack since min_pk::BLS12381PrivateKey doesn't implement Clone
-        Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
+impl fmt::Debug for EncryptionPrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EncryptionPrivateKey(<elided secret>)")
     }
 }
+
+impl EncryptionPrivateKey {
+    pub fn new<R: AllowedRng>(rng: &mut R) -> Self {
+        Self(fastcrypto_tbls::ecies_v1::PrivateKey::new(rng))
+    }
+
+    pub fn inner(&self) -> &fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement> {
+        &self.0
+    }
+
+    pub fn public_key(&self) -> EncryptionPublicKey {
+        EncryptionPublicKey::from_private_key(&self.0)
+    }
+}
+
+impl From<fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>> for EncryptionPrivateKey {
+    fn from(key: fastcrypto_tbls::ecies_v1::PrivateKey<EncryptionGroupElement>) -> Self {
+        Self(key)
+    }
+}
+
+impl From<fastcrypto::groups::ristretto255::RistrettoScalar> for EncryptionPrivateKey {
+    fn from(scalar: fastcrypto::groups::ristretto255::RistrettoScalar) -> Self {
+        Self(fastcrypto_tbls::ecies_v1::PrivateKey::from(scalar))
+    }
+}
+pub type EncryptionPublicKey = fastcrypto_tbls::ecies_v1::PublicKey<EncryptionGroupElement>;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Bls12381PrivateKey(min_pk::BLS12381PrivateKey);
 
 impl Bls12381PrivateKey {
     /// The length of an BLS12381 private key in bytes.
     pub const LENGTH: usize = BLS_PRIVATE_KEY_LENGTH;
+
+    pub fn duplicate(&self) -> Self {
+        Self(min_pk::BLS12381PrivateKey::from_bytes(self.0.as_bytes()).unwrap())
+    }
 
     pub fn from_bytes(bytes: [u8; Self::LENGTH]) -> Result<Self, SignatureError> {
         min_pk::BLS12381PrivateKey::from_bytes(&bytes)
@@ -874,6 +904,12 @@ mod test {
     use super::*;
     use fastcrypto::groups::FiatShamirChallenge;
 
+    #[test]
+    fn encryption_private_key_debug_elides_the_secret() {
+        let key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        assert_eq!(format!("{key:?}"), "EncryptionPrivateKey(<elided secret>)");
+    }
+
     /// Test-only signature domain for raw byte messages.
     impl IntentMessage for Vec<u8> {
         const INTENT: Intent = Intent::Test;
@@ -989,7 +1025,7 @@ mod test {
         let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
             .iter()
             .enumerate()
-            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .map(|_| EncryptionPrivateKey::new(&mut rng).public_key())
             .collect();
 
         let members = private_keys
@@ -1099,7 +1135,7 @@ mod test {
         let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
             .iter()
             .enumerate()
-            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .map(|_| EncryptionPrivateKey::new(&mut rng).public_key())
             .collect();
 
         let members = private_keys
@@ -1232,7 +1268,7 @@ mod test {
         let encryption_public_keys: Vec<EncryptionPublicKey> = private_keys
             .iter()
             .enumerate()
-            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .map(|_| EncryptionPrivateKey::new(&mut rng).public_key())
             .collect();
 
         let members = private_keys
@@ -1316,7 +1352,7 @@ mod test {
             .collect();
         oversized.push(Node {
             id: 4,
-            pk: EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)),
+            pk: EncryptionPrivateKey::new(&mut rng).public_key(),
             weight: 1,
         });
         let nodes = Nodes::new(oversized).unwrap();
@@ -1362,7 +1398,7 @@ mod test {
             .collect();
         let addresses: Vec<_> = (0..4).map(|i| Address::new([i as u8; 32])).collect();
         let encryption_keys: Vec<EncryptionPublicKey> = (0..4)
-            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .map(|_| EncryptionPrivateKey::new(&mut rng).public_key())
             .collect();
 
         let members: Vec<_> = (0..4)
@@ -1426,7 +1462,7 @@ mod test {
             .collect();
         let addresses: Vec<_> = (0..4).map(|i| Address::new([i as u8; 32])).collect();
         let encryption_keys: Vec<EncryptionPublicKey> = (0..4)
-            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .map(|_| EncryptionPrivateKey::new(&mut rng).public_key())
             .collect();
         let members: Vec<_> = (0..4)
             .map(|i| CommitteeMember {
@@ -1529,7 +1565,7 @@ mod test {
             (0..3)
                 .map(|i| Node {
                     id: i as u16,
-                    pk: EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)),
+                    pk: EncryptionPrivateKey::new(&mut rng).public_key(),
                     weight: 10,
                 })
                 .collect(),
@@ -1545,7 +1581,7 @@ mod test {
             (0..4)
                 .map(|i| Node {
                     id: i as u16,
-                    pk: EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)),
+                    pk: EncryptionPrivateKey::new(&mut rng).public_key(),
                     weight: 10,
                 })
                 .collect(),

@@ -72,7 +72,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
-use hashi_types::committee::EncryptionPublicKey;
+use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -125,7 +125,7 @@ fn receive_dealer_messages(
 
 struct TestSetup {
     pub committee_set: CommitteeSet,
-    pub encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
+    pub encryption_keys: Vec<EncryptionPrivateKey>,
     pub signing_keys: Vec<Bls12381PrivateKey>,
 }
 
@@ -143,7 +143,7 @@ impl TestSetup {
         let mut rng = rand::thread_rng();
 
         let encryption_keys: Vec<_> = (0..num_validators)
-            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .map(|_| EncryptionPrivateKey::new(&mut rng))
             .collect();
 
         let signing_keys: Vec<_> = (0..num_validators)
@@ -156,8 +156,7 @@ impl TestSetup {
         let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
-                let next_epoch_encryption_public_key =
-                    Some(PublicKey::from_private_key(&encryption_keys[i]));
+                let next_epoch_encryption_public_key = Some(encryption_keys[i].public_key());
                 let member_info = MemberInfo {
                     validator_address: addr,
                     operator_address: addr,
@@ -179,7 +178,7 @@ impl TestSetup {
                 CommitteeMember::new(
                     addr,
                     signing_keys[i].public_key(),
-                    EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                    encryption_keys[i].public_key(),
                     1,
                 )
             })
@@ -230,7 +229,7 @@ impl TestSetup {
         let num_validators = weights.len();
 
         let encryption_keys: Vec<_> = (0..num_validators)
-            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .map(|_| EncryptionPrivateKey::new(&mut rng))
             .collect();
 
         let signing_keys: Vec<_> = (0..num_validators)
@@ -243,8 +242,7 @@ impl TestSetup {
         let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
-                let next_epoch_encryption_public_key =
-                    Some(PublicKey::from_private_key(&encryption_keys[i]));
+                let next_epoch_encryption_public_key = Some(encryption_keys[i].public_key());
                 let member_info = MemberInfo {
                     validator_address: addr,
                     operator_address: addr,
@@ -263,7 +261,7 @@ impl TestSetup {
         let members: Vec<_> = (0..num_validators)
             .map(|i| {
                 let addr = Address::new([i as u8; 32]);
-                let encryption_public_key = PublicKey::from_private_key(&encryption_keys[i]);
+                let encryption_public_key = encryption_keys[i].public_key();
                 CommitteeMember::new(
                     addr,
                     signing_keys[i].public_key(),
@@ -325,7 +323,7 @@ impl TestSetup {
             ProtocolType::Dkg,
             Some(self.encryption_keys[validator_index].clone()),
             None,
-            Some(self.signing_keys[validator_index].clone()),
+            Some(self.signing_keys[validator_index].duplicate()),
             store,
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -1057,7 +1055,7 @@ fn test_mpc_manager_new_from_committee_set() {
     let setup = TestSetup::new(5);
 
     let encryption_key = setup.encryption_keys[0].clone();
-    let signing_key = setup.signing_keys[0].clone();
+    let signing_key = setup.signing_keys[0].duplicate();
     let address = setup.address(0);
 
     let manager = MpcManager::new(
@@ -1127,7 +1125,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         ProtocolType::Dkg,
         Some(setup.encryption_keys[0].clone()),
         None,
-        Some(setup.signing_keys[0].clone()),
+        Some(setup.signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -1200,7 +1198,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         ProtocolType::Dkg,
         Some(setup.encryption_keys[0].clone()),
         None,
-        Some(setup.signing_keys[0].clone()),
+        Some(setup.signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -1286,7 +1284,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
     let mut rng = rand::thread_rng();
 
     let encryption_keys: Vec<_> = (0..5)
-        .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+        .map(|_| EncryptionPrivateKey::new(&mut rng))
         .collect();
     let signing_keys: Vec<_> = (0..5)
         .map(|_| Bls12381PrivateKey::generate(&mut rng))
@@ -1303,9 +1301,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
                 next_epoch_public_key: signing_keys[i].public_key(),
                 endpoint_url: None,
                 tls_public_key: None,
-                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
-                    &encryption_keys[i],
-                )),
+                next_epoch_encryption_public_key: Some(encryption_keys[i].public_key()),
                 ignored: false,
                 resigned: false,
             };
@@ -1327,7 +1323,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         ProtocolType::Dkg,
         Some(encryption_keys[0].clone()),
         None,
-        Some(signing_keys[0].clone()),
+        Some(signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         "test",
         TEST_HASHI_ID,
@@ -1351,7 +1347,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
 fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
     let setup = TestSetup::new(5);
     let mut rng = rand::thread_rng();
-    let wrong_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+    let wrong_encryption_key = EncryptionPrivateKey::new(&mut rng);
 
     let result = MpcManager::new(
         setup.address(0),
@@ -1360,7 +1356,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         ProtocolType::Dkg,
         Some(wrong_encryption_key),
         None,
-        Some(setup.signing_keys[0].clone()),
+        Some(setup.signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -1385,7 +1381,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
     let mut rng = rand::thread_rng();
     let num_validators = 4usize;
     let encryption_keys: Vec<_> = (0..num_validators)
-        .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+        .map(|_| EncryptionPrivateKey::new(&mut rng))
         .collect();
     let signing_keys: Vec<_> = (0..num_validators)
         .map(|_| Bls12381PrivateKey::generate(&mut rng))
@@ -1400,9 +1396,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
                 next_epoch_public_key: signing_keys[i].public_key(),
                 endpoint_url: None,
                 tls_public_key: None,
-                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
-                    &encryption_keys[i],
-                )),
+                next_epoch_encryption_public_key: Some(encryption_keys[i].public_key()),
                 ignored: false,
                 resigned: false,
             };
@@ -1415,7 +1409,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
             CommitteeMember::new(
                 Address::new([i as u8; 32]),
                 signing_keys[i].public_key(),
-                EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                encryption_keys[i].public_key(),
                 1,
             )
         })
@@ -1449,7 +1443,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         ProtocolType::KeyRotation,
         Some(encryption_keys[0].clone()),
         Some(encryption_keys[0].clone()),
-        Some(signing_keys[0].clone()),
+        Some(signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -1473,7 +1467,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
     let mut rng = rand::thread_rng();
     let num_validators = 4usize;
     let encryption_keys: Vec<_> = (0..num_validators)
-        .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+        .map(|_| EncryptionPrivateKey::new(&mut rng))
         .collect();
     let signing_keys: Vec<_> = (0..num_validators)
         .map(|_| Bls12381PrivateKey::generate(&mut rng))
@@ -1488,9 +1482,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
                 next_epoch_public_key: signing_keys[i].public_key(),
                 endpoint_url: None,
                 tls_public_key: None,
-                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
-                    &encryption_keys[i],
-                )),
+                next_epoch_encryption_public_key: Some(encryption_keys[i].public_key()),
                 ignored: false,
                 resigned: false,
             };
@@ -1503,7 +1495,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
             CommitteeMember::new(
                 Address::new([i as u8; 32]),
                 signing_keys[i].public_key(),
-                EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                encryption_keys[i].public_key(),
                 1,
             )
         })
@@ -1537,7 +1529,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         ProtocolType::KeyRotation,
         Some(encryption_keys[0].clone()),
         Some(encryption_keys[0].clone()),
-        Some(signing_keys[0].clone()),
+        Some(signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -1581,7 +1573,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
     let mut rng = rand::thread_rng();
     let num_validators = 4usize;
     let encryption_keys: Vec<_> = (0..num_validators)
-        .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+        .map(|_| EncryptionPrivateKey::new(&mut rng))
         .collect();
     let signing_keys: Vec<_> = (0..num_validators)
         .map(|_| Bls12381PrivateKey::generate(&mut rng))
@@ -1596,9 +1588,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
                 next_epoch_public_key: signing_keys[i].public_key(),
                 endpoint_url: None,
                 tls_public_key: None,
-                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
-                    &encryption_keys[i],
-                )),
+                next_epoch_encryption_public_key: Some(encryption_keys[i].public_key()),
                 ignored: false,
                 resigned: false,
             };
@@ -1611,7 +1601,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
             CommitteeMember::new(
                 Address::new([i as u8; 32]),
                 signing_keys[i].public_key(),
-                EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                encryption_keys[i].public_key(),
                 1,
             )
         })
@@ -1644,7 +1634,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         ProtocolType::KeyRotation,
         Some(encryption_keys[0].clone()),
         Some(encryption_keys[0].clone()),
-        Some(signing_keys[0].clone()),
+        Some(signing_keys[0].duplicate()),
         Arc::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -4645,7 +4635,7 @@ fn test_handle_complain_request_caches_response() {
         },
         dealer_session_id.to_vec(),
         None,
-        setup.encryption_keys[1].clone(),
+        setup.encryption_keys[1].inner().clone(),
     )
     .unwrap();
 
@@ -5498,7 +5488,7 @@ fn create_complaint_for_dealer(
     let session_id = setup.session_id();
     let dealer_address = setup.address(dealer_index);
     let dealer_session_id = session_id.dealer_session_id(&dealer_address);
-    let wrong_key = PrivateKey::<EncryptionGroupElement>::new(rng);
+    let wrong_key = EncryptionPrivateKey::new(rng);
     let receiver = avss::Receiver::new(
         config.nodes.clone(),
         party_id,
@@ -5508,7 +5498,7 @@ fn create_complaint_for_dealer(
         },
         dealer_session_id.to_vec(),
         None,
-        wrong_key,
+        wrong_key.inner().clone(),
     )
     .unwrap();
     match receiver.process_message(dealer_message, rng).unwrap() {
@@ -6731,7 +6721,7 @@ impl RotationTestSetup {
             ProtocolType::KeyRotation,
             in_target.then(|| self.setup.encryption_keys[index].clone()),
             Some(self.setup.encryption_keys[index].clone()),
-            in_target.then(|| self.setup.signing_keys[index].clone()),
+            in_target.then(|| self.setup.signing_keys[index].duplicate()),
             store,
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -8261,7 +8251,7 @@ async fn test_prepare_previous_output_for_new_member() {
     // Create a new member that's in the current committee but NOT in previous
     let mut rng = rand::thread_rng();
     let new_member_addr = Address::new([99u8; 32]);
-    let new_member_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+    let new_member_encryption_key = EncryptionPrivateKey::new(&mut rng);
     let new_member_signing_key = Bls12381PrivateKey::generate(&mut rng);
 
     let epoch = rotation_setup.setup.committee_set.epoch();
@@ -8276,7 +8266,7 @@ async fn test_prepare_previous_output_for_new_member() {
         .chain(std::iter::once(CommitteeMember::new(
             new_member_addr,
             new_member_signing_key.public_key(),
-            EncryptionPublicKey::from_private_key(&new_member_encryption_key),
+            new_member_encryption_key.public_key(),
             2,
         )))
         .collect();
@@ -9119,7 +9109,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
         },
         session_id.to_vec(),
         None,
-        receiver_manager.encryption_key().unwrap().clone(),
+        receiver_manager.encryption_key().unwrap().inner().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -9287,7 +9277,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         },
         session_id.to_vec(),
         None, // No expected commitment
-        test_manager.encryption_key().unwrap().clone(),
+        test_manager.encryption_key().unwrap().inner().clone(),
     )
     .unwrap();
     let valid_complaint = match receiver
@@ -9458,7 +9448,7 @@ fn test_rotation_complaints_are_scoped_to_the_epoch_in_their_key() {
         },
         session_id.to_vec(),
         None,
-        test_manager.encryption_key().unwrap().clone(),
+        test_manager.encryption_key().unwrap().inner().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -9598,7 +9588,7 @@ fn test_handle_complain_request_success() {
         },
         session_id.to_vec(),
         commitment,
-        victim_manager.encryption_key().unwrap().clone(),
+        victim_manager.encryption_key().unwrap().inner().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -9756,7 +9746,7 @@ fn test_handle_complain_request_rejects_dealer_that_does_not_own_the_share_index
         },
         session_id.to_vec(),
         commitment,
-        victim_manager.encryption_key().unwrap().clone(),
+        victim_manager.encryption_key().unwrap().inner().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -10395,7 +10385,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     //
     // addr_4's party_id shifts from 4 (previous) to 5 (target).
     let new_member_addr = Address::new([99u8; 32]);
-    let new_member_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+    let new_member_encryption_key = EncryptionPrivateKey::new(&mut rng);
     let new_member_signing_key = Bls12381PrivateKey::generate(&mut rng);
 
     let previous_members: Vec<_> = rotation_setup.setup.committee().members().to_vec();
@@ -10406,7 +10396,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         CommitteeMember::new(
             new_member_addr,
             new_member_signing_key.public_key(),
-            EncryptionPublicKey::from_private_key(&new_member_encryption_key),
+            new_member_encryption_key.public_key(),
             2,
         ),
     );
@@ -10470,7 +10460,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         ProtocolType::Dkg,
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
-        Some(rotation_setup.setup.signing_keys[shifted_member_index].clone()),
+        Some(rotation_setup.setup.signing_keys[shifted_member_index].duplicate()),
         Arc::new(store),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -10654,7 +10644,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         ProtocolType::Dkg,
         Some(setup.encryption_keys[target_index].clone()),
         Some(setup.encryption_keys[target_index].clone()),
-        Some(setup.signing_keys[target_index].clone()),
+        Some(setup.signing_keys[target_index].duplicate()),
         Arc::new(store),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -10790,7 +10780,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         ProtocolType::Dkg,
         Some(prev_key.clone()),
         Some(prev_key.clone()),
-        Some(setup.signing_keys[target_index].clone()),
+        Some(setup.signing_keys[target_index].duplicate()),
         Arc::new(build_store()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -10819,7 +10809,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         ProtocolType::Dkg,
         Some(prev_key),
         None,
-        Some(setup.signing_keys[target_index].clone()),
+        Some(setup.signing_keys[target_index].duplicate()),
         Arc::new(build_store()),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -10926,7 +10916,7 @@ fn test_recover_current_dkg() {
             Some(setup.encryption_keys[target_index].clone()),
             // genesis: no previous encryption key
             None,
-            Some(setup.signing_keys[target_index].clone()),
+            Some(setup.signing_keys[target_index].duplicate()),
             store,
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -11099,7 +11089,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         ProtocolType::Dkg,
         Some(setup.encryption_keys[target_index].clone()),
         None,
-        Some(setup.signing_keys[target_index].clone()),
+        Some(setup.signing_keys[target_index].duplicate()),
         Arc::new(store),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -11192,7 +11182,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             ProtocolType::KeyRotation,
             Some(rotation_setup.setup.encryption_keys[dealer_idx].clone()),
             None,
-            Some(rotation_setup.setup.signing_keys[dealer_idx].clone()),
+            Some(rotation_setup.setup.signing_keys[dealer_idx].duplicate()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -11226,7 +11216,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             ProtocolType::KeyRotation,
             Some(rotation_setup.setup.encryption_keys[other_idx].clone()),
             None,
-            Some(rotation_setup.setup.signing_keys[other_idx].clone()),
+            Some(rotation_setup.setup.signing_keys[other_idx].duplicate()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -11266,7 +11256,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     // Step 3: Create a 6-member target committee for epoch 102 with a new member
     // inserted at position 2, shifting members 2, 3, 4.
     let new_member_addr = Address::new([99u8; 32]);
-    let new_member_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+    let new_member_encryption_key = EncryptionPrivateKey::new(&mut rng);
     let new_member_signing_key = Bls12381PrivateKey::generate(&mut rng);
 
     let mut target_members: Vec<_> = members.clone();
@@ -11275,7 +11265,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         CommitteeMember::new(
             new_member_addr,
             new_member_signing_key.public_key(),
-            EncryptionPublicKey::from_private_key(&new_member_encryption_key),
+            new_member_encryption_key.public_key(),
             2,
         ),
     );
@@ -11337,7 +11327,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         ProtocolType::KeyRotation,
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
-        Some(rotation_setup.setup.signing_keys[shifted_member_index].clone()),
+        Some(rotation_setup.setup.signing_keys[shifted_member_index].duplicate()),
         Arc::new(store),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -11427,7 +11417,7 @@ fn test_recover_current_rotation() {
             ProtocolType::KeyRotation,
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
-            Some(rotation_setup.setup.signing_keys[idx].clone()),
+            Some(rotation_setup.setup.signing_keys[idx].duplicate()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -11506,7 +11496,7 @@ fn test_recover_current_rotation() {
             ProtocolType::KeyRotation,
             Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
             Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
-            Some(rotation_setup.setup.signing_keys[receiver_index].clone()),
+            Some(rotation_setup.setup.signing_keys[receiver_index].duplicate()),
             store,
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -11694,7 +11684,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             ProtocolType::KeyRotation,
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
             Some(rotation_setup.setup.encryption_keys[idx].clone()),
-            Some(rotation_setup.setup.signing_keys[idx].clone()),
+            Some(rotation_setup.setup.signing_keys[idx].duplicate()),
             Arc::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
             TEST_HASHI_ID,
@@ -11775,7 +11765,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         ProtocolType::KeyRotation,
         Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
         Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
-        Some(rotation_setup.setup.signing_keys[receiver_index].clone()),
+        Some(rotation_setup.setup.signing_keys[receiver_index].duplicate()),
         Arc::new(store),
         TEST_CHAIN_ID,
         TEST_HASHI_ID,
@@ -11979,14 +11969,14 @@ fn create_nonce_complaint(
         batch_index,
         &dealer_address,
     );
-    let wrong_key = PrivateKey::<EncryptionGroupElement>::new(rng);
+    let wrong_key = EncryptionPrivateKey::new(rng);
     let receiver = batch_avss::Receiver::new(
         config.nodes.clone(),
         complainer_party_id,
         dealer_party_id,
         config.threshold,
         dealer_session_id.to_vec(),
-        wrong_key,
+        wrong_key.inner().clone(),
         TEST_BATCH_SIZE_PER_WEIGHT,
     )
     .unwrap();
@@ -12210,7 +12200,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
         .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
     let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
-    let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+    let wrong_key = EncryptionPrivateKey::new(&mut rng);
     let Messages::Rotation(map) = &rotation_messages else {
         unreachable!()
     };
@@ -12224,7 +12214,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
         },
         session_id.to_vec(),
         commitment,
-        wrong_key,
+        wrong_key.inner().clone(),
     )
     .unwrap();
     let complaint = match avss_receiver
@@ -12276,7 +12266,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
         .current_session_id()
         .rotation_session_id(&dealer_addr, share_index);
     let commitment = receiver_dkg_output.commitments.get(&share_index).copied();
-    let wrong_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+    let wrong_key = EncryptionPrivateKey::new(&mut rng);
     let Messages::Rotation(map) = &rotation_messages else {
         unreachable!()
     };
@@ -12290,7 +12280,7 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
         },
         session_id.to_vec(),
         commitment,
-        wrong_key,
+        wrong_key.inner().clone(),
     )
     .unwrap();
     let complaint = match avss_receiver
@@ -12378,7 +12368,7 @@ fn test_handle_complain_request_rotation_caches_response() {
         },
         session_id.to_vec(),
         commitment,
-        victim_manager.encryption_key().unwrap().clone(),
+        victim_manager.encryption_key().unwrap().inner().clone(),
     )
     .unwrap();
     let complaint = match receiver
@@ -12693,7 +12683,7 @@ fn test_handle_complain_request_nonce_caches_response() {
         dealer_party_id,
         config.threshold,
         dealer_session_id.to_vec(),
-        setup.encryption_keys[0].clone(),
+        setup.encryption_keys[0].inner().clone(),
         TEST_BATCH_SIZE_PER_WEIGHT,
     )
     .unwrap();

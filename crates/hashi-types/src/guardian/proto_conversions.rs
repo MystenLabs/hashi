@@ -2182,14 +2182,13 @@ mod tests {
         use crate::committee::BlsSignatureAggregator;
         use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
-        use crate::committee::EncryptionPublicKey;
         use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
         use rand::SeedableRng;
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(0xCAFE);
         let sk = Bls12381PrivateKey::generate(&mut rng);
         let enc_sk = crate::committee::EncryptionPrivateKey::new(&mut rng);
-        let enc_pk = EncryptionPublicKey::from_private_key(&enc_sk);
+        let enc_pk = enc_sk.public_key();
         let addr = sui_sdk_types::Address::new([7u8; 32]);
         let member = HashiCommitteeMember::new(addr, sk.public_key(), enc_pk, 10);
         let outgoing = HashiCommittee::new(
