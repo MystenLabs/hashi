@@ -209,6 +209,9 @@ pub(super) enum Effect {
     ValidatorInfoUpdated(Address),
     /// The root's `pending_epoch_change` became set for this epoch.
     ReconfigStarted(u64),
+    /// The root's `pending_epoch_change` for this epoch was cleared without
+    /// activating: the reconfiguration was aborted.
+    ReconfigAborted(u64),
     /// The root's `UpgradeCap` now points at a new package id. The
     /// cap's counter starts at 1 on publish and increments in lockstep
     /// with the package chain, so `version` is the new package's
@@ -417,11 +420,22 @@ fn apply_root(
     hashi.epoch_config = epoch_config;
     hashi.num_consumed_presigs = num_consumed_presigs;
 
+    let old_pending = hashi.committees.pending_epoch_change();
     let new_pending = committees.pending_epoch_change.as_ref().map(|p| p.epoch);
     if let Some(epoch) = new_pending
-        && hashi.committees.pending_epoch_change() != new_pending
+        && old_pending != new_pending
     {
         out.effects.push(Effect::ReconfigStarted(epoch));
+    }
+    // Pending cleared without activating. `end_reconfig` advances the epoch,
+    // or, for the genesis DKG on a fresh network where the epoch stays 0,
+    // sets the MPC key; an unchanged epoch and key mean `abort_reconfig`.
+    if let Some(epoch) = old_pending
+        && new_pending.is_none()
+        && committees.epoch == hashi.committees.epoch()
+        && committees.mpc_public_key.as_slice() == hashi.committees.mpc_public_key()
+    {
+        out.effects.push(Effect::ReconfigAborted(epoch));
     }
     hashi
         .committees
@@ -1377,17 +1391,35 @@ mod tests {
         pending_epoch: Option<u64>,
         upgrade_cap: Option<(Address, u64)>,
     ) -> Vec<u8> {
+        root_bytes_at(
+            7,
+            vec![9u8; 4],
+            num_consumed_presigs,
+            pending_epoch,
+            upgrade_cap,
+        )
+    }
+
+    /// `root_bytes` with the committee set's epoch and MPC key chosen, for
+    /// transitions that advance the epoch or set the key.
+    fn root_bytes_at(
+        epoch: u64,
+        mpc_public_key: Vec<u8>,
+        num_consumed_presigs: u64,
+        pending_epoch: Option<u64>,
+        upgrade_cap: Option<(Address, u64)>,
+    ) -> Vec<u8> {
         bcs::to_bytes(&HashiEnc {
             id: hashi_id(),
             committees: CommitteeSetEnc {
                 members: BagEnc::new(members_id()),
-                epoch: 7,
+                epoch,
                 committees: BagEnc::new(committees_id()),
                 pending_epoch_change: pending_epoch.map(|epoch| PendingEnc {
                     epoch,
                     committee_handoff_cert: None,
                 }),
-                mpc_public_key: vec![9u8; 4],
+                mpc_public_key,
             },
             config: move_types::Config::from_entries(vec![]),
             epoch_config: move_types::Config::from_entries(vec![]),
@@ -1786,6 +1818,78 @@ mod tests {
         let out = fixture.apply(&tx(vec![TxChange::Deleted { id: field_id }]));
         assert!(out.effects.is_empty());
         assert!(!fixture.hashi.committees.members().contains_key(&validator));
+    }
+
+    #[test]
+    fn pending_cleared_without_activation_is_an_abort() {
+        let mut fixture = Fixture::new();
+        let root_tag = tag(addr(PACKAGE), "hashi", "Hashi", vec![]);
+        let cap = Some((addr(0x60), 1));
+        let root =
+            |version, bytes| written(obj(root_tag.clone(), version, Owner::Shared(1), bytes));
+
+        let out = fixture.apply(&tx(vec![root(1, root_bytes(0, Some(8), cap))]));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::ReconfigStarted(8)]
+        ));
+
+        // Pending cleared with the epoch and MPC key unchanged: an abort.
+        let out = fixture.apply(&tx(vec![root(2, root_bytes(0, None, cap))]));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::ReconfigAborted(8)]
+        ));
+        assert_eq!(fixture.hashi.committees.epoch(), 7);
+
+        // Started again and cleared by activation (epoch advanced): no abort.
+        let out = fixture.apply(&tx(vec![root(3, root_bytes(0, Some(9), cap))]));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::ReconfigStarted(9)]
+        ));
+        let out = fixture.apply(&tx(vec![root(
+            4,
+            root_bytes_at(9, vec![9u8; 4], 0, None, cap),
+        )]));
+        assert!(out.effects.is_empty());
+        assert_eq!(fixture.hashi.committees.epoch(), 9);
+    }
+
+    #[test]
+    fn genesis_activation_at_sui_epoch_zero_is_told_from_an_abort_by_the_key() {
+        // Fresh network: the genesis committee is pinned to Sui epoch 0, so
+        // activation leaves the epoch at 0 and only the MPC key changes.
+        let root_tag = tag(addr(PACKAGE), "hashi", "Hashi", vec![]);
+        let cap = Some((addr(0x60), 1));
+        let root =
+            |version, bytes| written(obj(root_tag.clone(), version, Owner::Shared(1), bytes));
+
+        let mut activated = Fixture::new();
+        let out = activated.apply(&tx(vec![root(
+            1,
+            root_bytes_at(0, vec![], 0, Some(0), cap),
+        )]));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::ReconfigStarted(0)]
+        ));
+        let out = activated.apply(&tx(vec![root(
+            2,
+            root_bytes_at(0, vec![9u8; 4], 0, None, cap),
+        )]));
+        assert!(out.effects.is_empty());
+
+        let mut aborted = Fixture::new();
+        aborted.apply(&tx(vec![root(
+            1,
+            root_bytes_at(0, vec![], 0, Some(0), cap),
+        )]));
+        let out = aborted.apply(&tx(vec![root(2, root_bytes_at(0, vec![], 0, None, cap))]));
+        assert!(matches!(
+            out.effects.as_slice(),
+            [Effect::ReconfigAborted(0)]
+        ));
     }
 
     #[test]

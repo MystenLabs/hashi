@@ -194,7 +194,8 @@ pub fn refuse_unabortable_reconfig(pending_epoch: Option<u64>, sui_epoch: u64) -
 
 /// Abort a reconfiguration that has overrun its Sui epoch
 /// (`reconfig::abort_reconfig`). Permissionless: any funded signer may send
-/// it, and no vote is involved.
+/// it, and no vote is involved. Running nodes do this themselves at the
+/// epoch boundary, so this is the manual fallback.
 pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
     let sui_epoch = client.fetch_sui_epoch().await?;
@@ -208,9 +209,11 @@ pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<(
     print_detail(&format!("  Pending Hashi epoch: {pending_epoch}"));
     print_detail(&format!("  Current Sui epoch:   {sui_epoch}"));
     print_detail(&format!(
-        "  Effect: the pending committee is discarded. Hashi stays at epoch {} under its current \
-         committee, and a fresh reconfiguration can then form a new committee from the current \
-         validator set.",
+        "  Effect: the pending committee is discarded and Hashi stays at epoch {} under its \
+         current committee. Running nodes abort an overrun reconfiguration themselves at the \
+         Sui epoch boundary, so this is the manual fallback; either way, nodes that observe \
+         the abort submit a fresh start_reconfig right away. If no node is running, the \
+         replacement starts when one comes up.",
         client.fetch_epoch()
     ));
 
@@ -219,7 +222,7 @@ pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<(
         return Ok(());
     }
 
-    let tx = client.build_abort_reconfig_transaction()?;
+    let tx = client.build_abort_reconfig_transaction(pending_epoch)?;
     print_info("Transaction: reconfig::abort_reconfig");
     execute_or_simulate(&mut client, tx, tx_opts).await?;
     Ok(())

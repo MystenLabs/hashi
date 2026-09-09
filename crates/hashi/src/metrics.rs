@@ -96,6 +96,10 @@ pub struct Metrics {
     epoch: IntGauge,
     committee_total_weight: IntGauge,
     reconfig_in_progress: IntGauge,
+    /// Pending reconfigurations torn down by `abort_reconfig`, as observed
+    /// on chain whoever submitted it. Worth alerting on: an abort means a
+    /// reconfiguration stalled for a whole Sui epoch.
+    pub reconfig_aborted_total: IntCounter,
     paused: IntGauge,
     deposit_queue_size: IntGauge,
     pub deposit_outpoint_confirmations: IntGaugeVec,
@@ -730,6 +734,13 @@ impl Metrics {
             reconfig_in_progress: register_int_gauge_with_registry!(
                 "hashi_reconfig_in_progress",
                 "whether a reconfiguration is in progress (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            reconfig_aborted_total: register_int_counter_with_registry!(
+                "hashi_reconfig_aborted_total",
+                "Pending reconfigurations torn down by abort_reconfig, as observed on chain \
+                 (submitted by this node, another node, or an operator).",
                 registry,
             )
             .unwrap(),

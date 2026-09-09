@@ -1248,10 +1248,14 @@ impl HashiClient {
     }
 
     /// Build a `reconfig::abort_reconfig` transaction — the permissionless
-    /// teardown of a reconfiguration that has overrun its Sui epoch. Latest
-    /// package (the rule for every entry an upgrade may introduce), fully
-    /// resolved shared input (see `build_create_proposal_transaction`).
-    pub fn build_abort_reconfig_transaction(&self) -> anyhow::Result<TransactionBuilder> {
+    /// teardown of the pending reconfiguration to `epoch` once it has
+    /// overrun its Sui epoch. Latest package (the rule for every entry an
+    /// upgrade may introduce), fully resolved shared input (see
+    /// `build_create_proposal_transaction`).
+    pub fn build_abort_reconfig_transaction(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<TransactionBuilder> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
             ObjectInput::new(self.hashi_ids.hashi_object_id)
@@ -1259,13 +1263,14 @@ impl HashiClient {
                 .as_shared()
                 .with_mutable(true),
         );
+        let epoch_arg = builder.pure(&epoch);
         builder.move_call(
             Function::new(
                 self.latest_package_id()?,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("abort_reconfig"),
             ),
-            vec![hashi_arg],
+            vec![hashi_arg, epoch_arg],
         );
         Ok(builder)
     }

@@ -1008,6 +1008,7 @@ Notes:
 | `hashi_sui_epoch` | gauge | Current Sui epoch. |
 | `hashi_sui_rpc_info` | gauge | Configured Sui RPC endpoint. The `endpoint` label identifies the fullnode used by this validator. |
 | `hashi_reconfig_in_progress` | gauge | 1 during reconfiguration. Extended periods = problem. |
+| `hashi_reconfig_aborted_total` | counter | Reconfigurations torn down by `abort_reconfig`, whoever submitted it. Each one means a reconfiguration stalled for a whole Sui epoch. |
 | `hashi_paused` | gauge | 1 when the onchain `paused` config flag is set (governance emergency pause). Healthy: `0`. This tracks the governance flag only. The separate pause that occurs during reconfiguration is reflected by `hashi_reconfig_in_progress`, not here. |
 | `hashi_presig_pool_remaining` | gauge | Presignatures available. Should not reach 0. |
 | `hashi_is_leader` | gauge | 1 when this node is the current leader. |
@@ -1044,7 +1045,8 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 
 | Condition | Severity | Action |
 |-----------|----------|--------|
-| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG/rotation errors. Once the reconfiguration has overrun its Sui epoch, `hashi committee abort-reconfig` clears it (section 9.3). |
+| `hashi_reconfig_in_progress == 1` for > 10 min | Critical | Check logs for DKG/rotation errors. Nodes abort and restart it themselves once it overruns its Sui epoch; `hashi committee abort-reconfig` is the manual fallback (section 9.3). |
+| `increase(hashi_reconfig_aborted_total[1h]) > 0` | Warning | A reconfiguration stalled for a full Sui epoch and was aborted; the replacement starts on its own. Find out why the first one stalled (offline stake, bad endpoints or keys, partitions). |
 | `hashi_presig_pool_remaining == 0` | Critical | Node cannot sign. Check reconfig status and MPC logs. |
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
@@ -1079,13 +1081,15 @@ On every Sui epoch change, the Hashi committee reconfigures:
 
 ### 9.3 Stuck reconfigurations
 
-If reconfiguration stalls (offline validators, misconfigured endpoints, protocol failures), anyone can abort it once it has overrun its Sui epoch. No proposal or vote is involved:
+A reconfiguration must complete within the Sui epoch it started in. If it stalls (offline validators, misconfigured endpoints, protocol failures), the nodes handle it: at the next Sui epoch boundary they stop working on it, one of them submits `abort_reconfig` (no proposal or vote is involved; the chain settles the race), and they submit a fresh `start_reconfig` as soon as the abort is reflected. `hashi_reconfig_aborted_total` counts these; alert on it and find out why the reconfiguration stalled. Common causes: too much registered stake offline/unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
+
+If no node is running to do this, anyone can abort by hand:
 
 ```bash
 hashi committee abort-reconfig
 ```
 
-The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and must be left to complete. After the abort, the previous committee resumes and the nodes start a new reconfiguration on the next Sui epoch boundary. Common causes: too much registered stake offline/unreachable, invalid endpoints or stale TLS keys, network partitions preventing MPC message exchange.
+The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and must be left to complete. After the abort, the previous committee resumes and any running node that observes it starts the replacement reconfiguration right away.
 
 ---
 

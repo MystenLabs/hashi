@@ -1246,6 +1246,40 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Tear down a reconfiguration that has overrun its Sui epoch
+    /// (`reconfig::abort_reconfig`). Permissionless on chain; `epoch` names
+    /// the pending target so a stale submission cannot abort a newer one.
+    /// A failed status surfaces as [`TransactionExecutionError`] so the
+    /// caller can tell a lost abort race from a real failure.
+    #[tracing::instrument(level = "info", skip_all, fields(epoch))]
+    pub async fn execute_abort_reconfig(&mut self, epoch: u64) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let epoch_arg = builder.pure(&epoch);
+        builder.move_call(
+            Function::new(
+                self.active_call_package_id(),
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("abort_reconfig"),
+            ),
+            vec![hashi_arg, epoch_arg],
+        );
+        let response = self.execute(builder).await?;
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "abort_reconfig",
+                status: status.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Submit the outgoing committee handoff and activate its successor in one
     /// PTB, so the handoff certificate is never committed before activation.
     #[tracing::instrument(level = "info", skip_all)]

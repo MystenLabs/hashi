@@ -109,6 +109,9 @@ pub enum Notification {
     ValidatorInfoUpdated(Address),
     /// Reconfig started, transitioning to the given epoch.
     StartReconfig(u64),
+    /// The pending reconfig to the given epoch was torn down by
+    /// `abort_reconfig` (by this node, another node, or an operator).
+    ReconfigAborted(u64),
     SuiEpochChanged(u64),
 }
 
