@@ -1249,7 +1249,7 @@ impl SuiTxExecutor {
     /// Tear down a reconfiguration that has overrun its Sui epoch
     /// (`reconfig::abort_reconfig`). Permissionless on chain; `epoch` names
     /// the pending target so a stale submission cannot abort a newer one.
-    /// A failed status surfaces as [`TransactionExecutionError`] so the
+    /// A failed status surfaces as `TransactionExecutionError` so the
     /// caller can tell a lost abort race from a real failure.
     #[tracing::instrument(level = "info", skip_all, fields(epoch))]
     pub async fn execute_abort_reconfig(&mut self, epoch: u64) -> anyhow::Result<()> {

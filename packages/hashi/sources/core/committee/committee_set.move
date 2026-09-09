@@ -558,6 +558,15 @@ public(package) fun has_committee_handoff(self: &CommitteeSet, from_epoch: u64):
         })
 }
 
+/// The epoch the handoff stored for `from_epoch` activated. Aborts when none
+/// is stored; check `has_committee_handoff` first.
+public(package) fun committee_handoff_next_epoch(self: &CommitteeSet, from_epoch: u64): u64 {
+    self
+        .committees
+        .borrow<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey { epoch: from_epoch })
+        .next_epoch
+}
+
 public(package) fun insert_committee_handoff(
     self: &mut CommitteeSet,
     from_epoch: u64,

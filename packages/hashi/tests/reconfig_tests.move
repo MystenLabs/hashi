@@ -589,6 +589,70 @@ fun test_abort_reconfig_rejects_wrong_epoch() {
     std::unit_test::destroy(hashi);
 }
 
+/// Aborts the pending epoch-1 reconfiguration at Sui epoch 2 and pends a
+/// replacement for epoch 2, i.e. the abort-and-restart cycle from the same
+/// source epoch 0.
+fun abort_and_pend_replacement(hashi: &mut hashi::hashi::Hashi) {
+    let late = &test_utils::new_tx_context(VOTER1, 2);
+    reconfig::abort_reconfig_for_testing(hashi, 1, late);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee_for_testing(2));
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::committee::ESigVerification)]
+/// A handoff certificate binds its target inside the signed message (the
+/// incoming committee, epoch included), so one for an aborted target cannot
+/// verify against the replacement now pending from the same source epoch.
+fun test_submit_committee_handoff_rejects_aborted_target_while_replacement_pending() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    let (_mpc_cert, stale_handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
+    abort_and_pend_replacement(&mut hashi);
+
+    let in_window = &test_utils::new_tx_context(VOTER1, 2);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, stale_handoff_cert, in_window);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = reconfig::EWrongReconfigEpoch)]
+fun test_end_reconfig_rejects_aborted_target_while_replacement_pending() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    let (stale_mpc_cert, _handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
+    abort_and_pend_replacement(&mut hashi);
+
+    let in_window = &test_utils::new_tx_context(VOTER1, 2);
+    reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], stale_mpc_cert, in_window);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::committee::ESigVerification)]
+/// Handoffs are stored by source epoch, so once the replacement (0 -> 2) has
+/// activated a handoff for the aborted target (0 -> 1) must not read that
+/// record as its own completion. The certificate is verified against the
+/// stored transition before the benign race is reported, and a certificate
+/// over the aborted committee fails that verification.
+fun test_submit_committee_handoff_for_aborted_target_after_replacement_completed() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    let (_mpc_cert, stale_handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
+    abort_and_pend_replacement(&mut hashi);
+    let (mpc_cert, handoff_cert) = transition_certs(&hashi, 2, vector[1, 2, 3]);
+    let in_window = &test_utils::new_tx_context(VOTER1, 2);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
+    assert!(hashi.committee_set().epoch() == 2);
+    assert!(hashi.committee_set().has_committee_handoff_for_testing(0));
+
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, stale_handoff_cert, in_window);
+
+    std::unit_test::destroy(hashi);
+}
+
 // ======== Restart after abort ========
 
 fun equal_voting_powers(): sui::vec_map::VecMap<address, u64> {

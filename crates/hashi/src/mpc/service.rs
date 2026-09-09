@@ -72,14 +72,16 @@ const USE_LEGACY_PRESIG_DERIVATION: bool = false;
 /// Move `hashi::reconfig` abort constants, matched by their clever-error
 /// constant names (the `#[error]` abort code encodes a source line, so the
 /// numeric code is not stable). Together they tell the benign "another node
-/// already completed it" race from a dead target: aborted, or past its Sui
-/// epoch window.
+/// already completed it" race from a dead target: aborted, aborted and
+/// replaced by a different pending epoch, or past its Sui epoch window.
 const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 const RECONFIG_E_ALREADY_COMPLETED: &str = "EReconfigAlreadyCompleted";
 const RECONFIG_E_WINDOW_CLOSED: &str = "EReconfigWindowClosed";
-/// `abort_reconfig` outcomes that mean the chain already resolved the target
-/// (`hashi::reconfig`) or still protects it (`hashi::committee_set`).
+/// Raised by the completion entries when a different epoch is pending (the
+/// target is dead) and by `abort_reconfig` when the chain already resolved
+/// the named target.
 const RECONFIG_E_WRONG_EPOCH: &str = "EWrongReconfigEpoch";
+/// `abort_reconfig` refused because the chain still protects the target.
 const COMMITTEE_SET_E_PENDING_EPOCH_STILL_CURRENT: &str = "EPendingEpochStillCurrent";
 
 #[derive(Clone)]
@@ -1705,6 +1707,12 @@ impl MpcService {
                         );
                         _end_reconfig_timer.stop_and_discard();
                         _reconfig_timer.stop_and_discard();
+                        // The chain knows the target is dead before the
+                        // mirror does. Until the mirror catches up the outer
+                        // loop still sees it pending and would re-enter here
+                        // immediately, re-collecting signatures and
+                        // submitting another doomed transaction each pass.
+                        self.sleep_if_still_pending(target_epoch).await;
                         return;
                     }
                     ReconfigSubmissionErrorKind::NonRetryableMoveAbort
@@ -2298,13 +2306,16 @@ fn classify_reconfig_execution_error(error: &ExecutionError) -> ReconfigSubmissi
         }
         // The race and window checks live in a private helper shared by
         // `submit_committee_handoff` and `end_reconfig`, so the abort
-        // location names that helper; the constant carries the meaning.
+        // location names that helper, while `end_reconfig` raises the
+        // wrong-epoch abort itself; the constant carries the meaning.
         (Some("reconfig"), _, Some(RECONFIG_E_ALREADY_COMPLETED)) => {
             ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
         }
-        (Some("reconfig"), _, Some(RECONFIG_E_NOT_RECONFIGURING | RECONFIG_E_WINDOW_CLOSED)) => {
-            ReconfigSubmissionErrorKind::ReconfigTargetDead
-        }
+        (
+            Some("reconfig"),
+            _,
+            Some(RECONFIG_E_NOT_RECONFIGURING | RECONFIG_E_WINDOW_CLOSED | RECONFIG_E_WRONG_EPOCH),
+        ) => ReconfigSubmissionErrorKind::ReconfigTargetDead,
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
     }
 }
@@ -2592,7 +2603,11 @@ mod reconfig_submission_classifier_tests {
 
     #[test]
     fn an_aborted_or_overrun_target_is_dead_not_completed() {
-        for constant in ["ENotReconfiguring", "EReconfigWindowClosed"] {
+        for constant in [
+            "ENotReconfiguring",
+            "EReconfigWindowClosed",
+            "EWrongReconfigEpoch",
+        ] {
             let error = move_abort("reconfig", "pending_epoch_in_window", Some(constant));
             assert_eq!(
                 classify_reconfig_execution_error(&error),
@@ -2678,8 +2693,11 @@ mod reconfig_target_tests {
 
     #[test]
     fn an_aborted_genesis_at_sui_epoch_zero_is_not_live() {
-        // Pre-genesis: epoch 0, no committee, and the genesis target is 0.
-        assert!(reconfig_target_live(Some(0), 0, false, 0));
+        // Genesis pending: epoch 0 with the pending epoch-0 committee already
+        // inserted by start_reconfig, so the current committee exists.
+        assert!(reconfig_target_live(Some(0), 0, true, 0));
+        // Aborted genesis: the epoch-0 committee was removed, back to
+        // pre-genesis.
         assert!(!reconfig_target_live(None, 0, false, 0));
         // Activated genesis: the committee for epoch 0 now exists.
         assert!(reconfig_target_live(None, 0, true, 0));

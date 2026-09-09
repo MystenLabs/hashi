@@ -25,9 +25,9 @@ use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 // NOTE: the node's reconfig-submission classifier
 // (crates/hashi/src/mpc/service.rs) matches `ENotReconfiguring`,
-// `EReconfigAlreadyCompleted`, and `EReconfigWindowClosed` BY NAME to tell the
-// benign "another node already completed it" race from a dead target — keep
-// the names.
+// `EReconfigAlreadyCompleted`, `EReconfigWindowClosed`, and
+// `EWrongReconfigEpoch` BY NAME to tell the benign "another node already
+// completed it" race from a dead target — keep the names.
 #[error]
 const ENotReconfiguring: vector<u8> = b"No reconfiguration is in progress";
 #[error]
@@ -112,10 +112,13 @@ entry fun end_reconfig(
     // The certificate is signed by the incoming committee, so its epoch is
     // this submission's target. An activated target is the current epoch and
     // still has its committee; an aborted one has neither.
-    let target = mpc_cert.signature_epoch();
+    let next_epoch = mpc_cert.signature_epoch();
     let already_completed =
-        self.committee_set().epoch() == target && self.committee_set().has_committee(target);
-    let next_epoch = pending_epoch_in_window(self, already_completed, ctx);
+        self.committee_set().epoch() == next_epoch &&
+        self.committee_set().has_committee(next_epoch);
+    let pending_epoch = pending_epoch_in_window(self, already_completed, ctx);
+    // A different pending epoch means this target was aborted and replaced.
+    assert!(pending_epoch == next_epoch, EWrongReconfigEpoch);
     let from_epoch = self.committee_set().epoch();
     let next_committee = self.committee_set().get_committee(next_epoch);
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
@@ -152,10 +155,12 @@ entry fun submit_committee_handoff(
 ) {
     self.versioning().assert_version_enabled();
     // The certificate is signed by the outgoing committee, so its epoch is
-    // the handoff's source epoch, and a stored handoff for that epoch means
-    // the transition it approved already activated.
-    let from_epoch = committee_handoff_cert.signature_epoch();
-    let already_completed = self.committee_set().has_committee_handoff(from_epoch);
+    // the handoff's source epoch; its target is bound only inside the signed
+    // message. With nothing pending, the completion it can be reporting is
+    // the handoff stored out of that source epoch, which it must certify.
+    let already_completed =
+        !self.committee_set().is_reconfiguring() &&
+        certifies_stored_handoff(self, committee_handoff_cert);
     let next_epoch = pending_epoch_in_window(self, already_completed, ctx);
     assert!(!self.committee_set().mpc_public_key().is_empty(), EInitialReconfig);
     let next_committee = self.committee_set().get_committee(next_epoch);
@@ -185,8 +190,9 @@ entry fun submit_committee_handoff(
 /// objective on-chain fact instead keeps the escape hatch usable precisely
 /// when it is needed.
 ///
-/// The launch switch applies exactly as it does to `start_reconfig`, so the
-/// pre-launch state machine is the same at both ends of a reconfiguration.
+/// Not gated on the launch switch: a pending genesis committee can only exist
+/// because `start_reconfig` passed that gate, and `versioning` never releases
+/// the `UpgradeCap` it checks for, so the gate could not fail here.
 entry fun abort_reconfig(self: &mut Hashi, epoch: u64, ctx: &TxContext) {
     self.versioning().assert_version_enabled();
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
@@ -194,7 +200,6 @@ entry fun abort_reconfig(self: &mut Hashi, epoch: u64, ctx: &TxContext) {
         self.committee_set().pending_epoch_change().destroy_some() == epoch,
         EWrongReconfigEpoch,
     );
-    assert_genesis_launch_authorized(self);
     let aborted = self.committee_set_mut().abort_reconfig(ctx);
     sui::event::emit(ReconfigAborted { epoch: aborted });
 }
@@ -216,7 +221,7 @@ public(package) fun assert_genesis_launch_authorized(self: &Hashi) {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
-/// The pending epoch, provided the reconfiguration can still complete.
+/// The pending epoch, provided the reconfiguration to it can still complete.
 ///
 /// Aborts with `EReconfigAlreadyCompleted` when nothing is pending because
 /// this transaction's target already activated (another node won the
@@ -234,6 +239,28 @@ fun pending_epoch_in_window(self: &Hashi, already_completed: bool, ctx: &TxConte
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     assert!(next_epoch == ctx.epoch(), EReconfigWindowClosed);
     next_epoch
+}
+
+/// Whether `cert` certifies the handoff already stored out of its signing
+/// epoch. Handoffs are keyed by source epoch, and after an abort a
+/// replacement can form from the same source epoch, so the source alone does
+/// not identify a transition. The target is bound only inside the signed
+/// message (the incoming committee, epoch included), so the certificate is
+/// verified against the stored transition to read it out: a certificate for
+/// a target that was aborted and then replaced from the same source epoch
+/// fails verification here instead of passing as a completion of itself.
+fun certifies_stored_handoff(self: &Hashi, cert: CommitteeSignature): bool {
+    let from_epoch = cert.signature_epoch();
+    if (!self.committee_set().has_committee_handoff(from_epoch)) return false;
+    let completed_epoch = self.committee_set().committee_handoff_next_epoch(from_epoch);
+    let new_committee = *self.committee_set().get_committee(completed_epoch);
+    self.verify_with_committee(
+        self.committee_set().get_committee(from_epoch),
+        hashi::intent::committee_transition(),
+        CommitteeTransitionRequest { new_committee },
+        cert,
+    );
+    true
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~

@@ -84,7 +84,11 @@ fun run_epoch_transition(
 
     // Completion must land inside the target's Sui epoch window.
     let end_ctx = &test_utils::new_tx_context(ctx.sender(), next_epoch);
-    reconfig::submit_committee_handoff_for_testing(hashi, committee_handoff_cert, end_ctx);
+    reconfig::submit_committee_handoff_for_testing(
+        hashi,
+        committee_handoff_cert,
+        end_ctx,
+    );
     reconfig::end_reconfig_for_testing(hashi, mpc_public_key, mpc_cert, end_ctx);
 }
 

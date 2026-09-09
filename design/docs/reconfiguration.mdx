@@ -149,12 +149,21 @@ Completion must land inside the Sui epoch the reconfiguration was formed in.
 `start_reconfig` pins the pending committee to Sui's epoch, and both
 `submit_committee_handoff` and `end_reconfig` abort with
 `EReconfigWindowClosed` once Sui's epoch has moved past it; from then on only
-[abort reconfig](#abort-reconfig) can resolve the pending state. Nothing
-pending at all is reported as `EReconfigAlreadyCompleted` when the
-submission's own target already activated (another node's `end_reconfig` won
-the race, which the node treats as success) and as `ENotReconfiguring`
-otherwise (the target was aborted). Nodes key their retry-or-give-up decision
-on which of these fires.
+[abort reconfig](#abort-reconfig) can resolve the pending state. Each
+submission is bound to its target. `end_reconfig` reads it from the
+completion certificate's signing epoch and aborts with `EWrongReconfigEpoch`
+when a different epoch is pending (the target was aborted and a replacement
+has formed). A handoff certificate carries its target inside the signed
+message (the incoming committee, epoch included), so one for an aborted
+target fails verification against whatever is pending. Nothing pending at
+all is reported as `EReconfigAlreadyCompleted` when the submission's own
+target already activated (another node's `end_reconfig` won the race, which
+the node treats as success) and as `ENotReconfiguring` otherwise (the target
+was aborted). Handoffs are stored by source epoch, and a replacement can form
+from the same source epoch after an abort, so for a handoff "own target" is
+established by verifying the certificate against the stored transition out
+of its signing epoch. Nodes key their retry-or-give-up decision on which of
+these fires.
 
 After the new epoch begins, the new committee initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of
@@ -205,7 +214,10 @@ conditions, all checked in the same transaction:
    the reconfiguration stuck by definition: [end reconfig](#end-reconfig)
    refuses to land after the window, so completion and abort are mutually
    exclusive by Sui epoch and can never race each other.
-3. The launch switch, exactly as for `start_reconfig`.
+
+The launch switch is not re-checked: a pending genesis committee can only
+exist because `start_reconfig` passed it, and the package `UpgradeCap` it
+looks for never leaves onchain custody.
 
 When these hold, the call clears the pending epoch change, removes the pending
 committee (discarding any committee handoff certificate it had collected), and
