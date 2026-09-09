@@ -148,7 +148,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     ceremony_state
         .encrypted_shares
-        .verify_recipients(&certs_roster)?;
+        .verify_recipient_set(&certs_roster)?;
     let scraped_instance = ceremony_state.secret_sharing_instance.clone();
     let sharing_seq = scraped_instance.sharing_seq();
     info!(

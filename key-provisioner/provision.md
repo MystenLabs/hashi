@@ -143,8 +143,7 @@ in your GnuPG keyring.
 Send only the `.asc` public certificate and its fingerprint to the guardian
 operator. Do not send either PIN.
 
-The operator assigns each KP one ordered roster entry containing exactly one
-certificate path:
+The operator configures exactly one certificate path per KP, in any order:
 
 ```yaml
 kp_roster:
@@ -157,8 +156,10 @@ kp_roster:
 ```
 
 Each entry represents one KP, one guardian share, and one YubiKey-backed OpenPGP
-certificate. The KP's local `kp_pgp_cert_path` points to the same certificate
-for ceremony and provisioning commands.
+certificate. New ceremonies assign share IDs by fingerprint order; existing
+signed guardian state retains those assignments. The KP's local
+`kp_pgp_cert_path` points to the same certificate for ceremony and provisioning
+commands.
 
 Store the YubiKey separately from the public certificate and guardian
 configuration. Losing the YubiKey prevents that KP from decrypting and

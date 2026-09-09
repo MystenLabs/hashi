@@ -117,7 +117,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         share_count = state.encrypted_shares.share_count(),
         "verifying every PGP-encrypted share against the expected KP certs (without decrypting)",
     );
-    state.encrypted_shares.verify_recipients(&certs_roster)?;
+    state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     info!(
         phase = "roster verify",
         "ceremony/ and kp-shares/ logs verified against expected params and KP certs",
