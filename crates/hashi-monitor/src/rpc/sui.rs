@@ -59,28 +59,17 @@ fn completed_checkpoint_for_scan(
         start_checkpoint < end_checkpoint,
         "empty Sui transaction checkpoint range"
     );
-    let completed_checkpoint = match (end_reason, watermark_checkpoint) {
-        (QueryEndReason::CheckpointBound, None) => {
-            anyhow::bail!(
-                "Sui transaction scan reached checkpoint bound {end_checkpoint} without a completion watermark"
-            );
-        }
-        (QueryEndReason::LedgerTip, None) => return Ok(None),
-        (_, Some(completed_checkpoint)) => completed_checkpoint,
-        (end_reason, None) => {
-            anyhow::bail!("unexpected Sui transaction scan end reason {end_reason:?}");
-        }
+    let completed_checkpoint = match end_reason {
+        QueryEndReason::CheckpointBound => end_checkpoint - 1,
+        QueryEndReason::LedgerTip if watermark_checkpoint.is_none() => return Ok(None),
+        _ => watermark_checkpoint.context(format!(
+            "Sui transaction scan ended with {end_reason:?} without a completion watermark"
+        ))?,
     };
     anyhow::ensure!(
         completed_checkpoint < end_checkpoint,
         "Sui transaction scan watermark checkpoint {completed_checkpoint} is outside requested range ending at {end_checkpoint}"
     );
-    if end_reason == QueryEndReason::CheckpointBound {
-        anyhow::ensure!(
-            completed_checkpoint == end_checkpoint - 1,
-            "Sui transaction scan reached checkpoint bound {end_checkpoint} but only covered checkpoint {completed_checkpoint}"
-        );
-    }
     Ok((completed_checkpoint >= start_checkpoint).then_some(completed_checkpoint))
 }
 
@@ -132,9 +121,10 @@ impl SuiEventsPoller {
     /// is the inclusive boundary that `ListTransactions` reports as fully
     /// covered. Transactions provide the
     /// checkpoint timestamp needed by `DepositConfirmed`, while their nested
-    /// events provide the Hashi payloads. The server stream handles its own item
-    /// and scan limits with resumable cursors. A partial response caused by an
-    /// RPC failure is discarded; that range is retried and may be split.
+    /// events provide the Hashi payloads. The Sui SDK handles item and scan
+    /// limits, resumable cursors, and retryable partial streams. A terminal
+    /// failure discards the partial range; that range is retried and may be
+    /// split.
     pub async fn poll(&mut self, up_to: UnixSeconds) -> anyhow::Result<PollOutcome> {
         if up_to <= self.cursor_seconds {
             return Ok(PollOutcome::CursorUnmoved);
@@ -173,10 +163,14 @@ impl SuiEventsPoller {
 
         let mut range_attempt = 0u32;
         let scan = loop {
-            match self
-                .list_transactions_in_range(start_checkpoint, end_checkpoint)
-                .await
-            {
+            let scan = tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                self.list_transactions_in_range(start_checkpoint, end_checkpoint),
+            )
+            .await
+            .context("Sui transaction scan timed out")
+            .and_then(|result| result);
+            match scan {
                 Ok(transactions) => break transactions,
                 Err(error) if range_attempt + 1 < MAX_RANGE_ATTEMPTS => {
                     let delay = INITIAL_RETRY_DELAY.saturating_mul(1 << range_attempt);
@@ -233,8 +227,8 @@ impl SuiEventsPoller {
             events.extend(self.parse_transaction(transaction)?);
         }
 
-        self.next_checkpoint_to_scan = Some(completed_checkpoint.saturating_add(1));
         let scanned_through_timestamp = self.checkpoint_timestamp(completed_checkpoint).await?;
+        self.next_checkpoint_to_scan = Some(completed_checkpoint.saturating_add(1));
         self.cursor_seconds = self.cursor_seconds.max(scanned_through_timestamp);
         tracing::info!(
             start_checkpoint,
@@ -403,108 +397,59 @@ impl SuiEventsPoller {
             anyhow::bail!("empty Sui transaction checkpoint range");
         }
 
-        let filter = self.transaction_filter();
-        let mut after = None;
+        let request = ListTransactionsRequest::default()
+            .with_read_mask(FieldMask::from_paths([
+                "timestamp",
+                "checkpoint",
+                "events.events.event_type",
+                "events.events.contents",
+            ]))
+            .with_start_checkpoint(start_checkpoint)
+            .with_end_checkpoint(end_checkpoint)
+            .with_filter(self.transaction_filter())
+            .with_options(
+                QueryOptions::default()
+                    .with_limit(PAGE_SIZE)
+                    .with_ordering(Ordering::Ascending),
+            );
+        let stream = self.client.list_transactions(request);
+        futures::pin_mut!(stream);
+
         let mut all_transactions = Vec::new();
         let mut completed_checkpoint = None;
+        let mut end_reason = None;
         tracing::info!(
             start_checkpoint,
             end_checkpoint,
             "starting Sui transaction scan"
         );
 
-        loop {
-            let mut options = QueryOptions::default()
-                .with_limit(PAGE_SIZE)
-                .with_ordering(Ordering::Ascending);
-            if let Some(cursor) = after.clone() {
-                options = options.with_after(cursor);
+        while let Some(frame) = stream.next().await {
+            // The SDK validates watermarks and transparently resumes page
+            // limits and retryable partial streams before yielding frames.
+            let frame = frame.context("Sui ListTransactions stream failed")?;
+            if let Some(checkpoint) = frame
+                .watermark
+                .as_ref()
+                .and_then(|watermark| watermark.checkpoint)
+            {
+                completed_checkpoint = Some(checkpoint);
             }
-            let request = ListTransactionsRequest::default()
-                .with_read_mask(FieldMask::from_paths([
-                    "timestamp",
-                    "checkpoint",
-                    "events.events.event_type",
-                    "events.events.contents",
-                ]))
-                .with_start_checkpoint(start_checkpoint)
-                .with_end_checkpoint(end_checkpoint)
-                .with_filter(filter.clone())
-                .with_options(options);
-
-            let mut stream = self
-                .client
-                .ledger_client()
-                .list_transactions(request)
-                .await
-                .context("failed to list Sui transactions")?
-                .into_inner();
-            let mut end_reason = None;
-            let mut page_cursor = None;
-
-            while let Some(frame) = stream.next().await {
-                let frame = frame.context("Sui ListTransactions stream failed")?;
-                let watermark = frame
-                    .watermark
-                    .as_ref()
-                    .context("Sui ListTransactions frame is missing watermark")?;
-                page_cursor = Some(
-                    watermark
-                        .cursor
-                        .clone()
-                        .context("Sui ListTransactions watermark is missing cursor")?,
-                );
-                if let Some(checkpoint) = watermark.checkpoint {
-                    if let Some(current) = completed_checkpoint {
-                        anyhow::ensure!(
-                            checkpoint >= current,
-                            "Sui ListTransactions checkpoint watermark regressed from {current} to {checkpoint}"
-                        );
-                    }
-                    completed_checkpoint = Some(checkpoint);
-                }
-                if let Some(transaction) = frame.transaction {
-                    all_transactions.push(transaction);
-                }
-                if let Some(end) = frame.end {
-                    end_reason = end
-                        .reason
-                        .and_then(|reason| QueryEndReason::try_from(reason).ok());
-                    break;
-                }
+            if let Some(transaction) = frame.transaction {
+                all_transactions.push(transaction);
             }
-
-            let end_reason = end_reason.context("Sui ListTransactions ended without QueryEnd")?;
-            match end_reason {
-                QueryEndReason::CheckpointBound | QueryEndReason::LedgerTip => {
-                    return Ok(TransactionScan {
-                        transactions: all_transactions,
-                        completed_checkpoint,
-                        end_reason,
-                    });
-                }
-                QueryEndReason::ItemLimit | QueryEndReason::ScanLimit => {
-                    tracing::info!(
-                        start_checkpoint,
-                        end_checkpoint,
-                        transactions = all_transactions.len(),
-                        ?end_reason,
-                        "Sui transaction scan progress"
-                    );
-                    let next = page_cursor.context(
-                        "Sui ListTransactions reached a page limit without a resume cursor",
-                    )?;
-                    anyhow::ensure!(
-                        after.as_ref() != Some(&next),
-                        "Sui ListTransactions resume cursor did not advance"
-                    );
-                    after = Some(next);
-                }
-                reason => anyhow::bail!(
-                    "Sui ListTransactions stopped before checkpoint {end_checkpoint}: {reason:?}"
-                ),
+            if let Some(end) = frame.end {
+                end_reason = end
+                    .reason
+                    .and_then(|reason| QueryEndReason::try_from(reason).ok());
             }
         }
+
+        Ok(TransactionScan {
+            transactions: all_transactions,
+            completed_checkpoint,
+            end_reason: end_reason.context("Sui ListTransactions ended without QueryEnd")?,
+        })
     }
 
     fn transaction_filter(&self) -> TransactionFilter {
@@ -598,19 +543,18 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_bound_requires_full_requested_coverage() {
-        assert!(
-            completed_checkpoint_for_scan(100, 111, QueryEndReason::CheckpointBound, None,)
-                .is_err()
-        );
-        assert!(
-            completed_checkpoint_for_scan(100, 111, QueryEndReason::CheckpointBound, Some(109),)
-                .is_err()
-        );
-        assert_eq!(
-            completed_checkpoint_for_scan(100, 111, QueryEndReason::CheckpointBound, Some(110),)
+    fn checkpoint_bound_advances_through_requested_range() {
+        for watermark in [None, Some(109), Some(110)] {
+            assert_eq!(
+                completed_checkpoint_for_scan(
+                    100,
+                    111,
+                    QueryEndReason::CheckpointBound,
+                    watermark,
+                )
                 .unwrap(),
-            Some(110)
-        );
+                Some(110)
+            );
+        }
     }
 }
