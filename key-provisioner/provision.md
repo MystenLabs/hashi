@@ -93,9 +93,20 @@ applies the nix-darwin configuration that installs the required tooling.
    the `kp` account password and check **Remember this password in my keychain**
    before unlocking it.
 
-   Quit Terminal completely with **Command-Q**, then reopen it to load the new
-   shell environment. Do not continue in a Terminal session restored after the
-   restart; the installed tools may not be on its `PATH`.
+   Open **Ghostty** from the Dock and use it instead of macOS Terminal for all
+   remaining commands. Ghostty was installed by the nix-darwin configuration.
+   If Terminal reopened after the restart, quit it with **Command-Q** rather
+   than continuing in the restored session.
+
+   If macOS asks whether to allow Ghostty to modify system settings, access
+   files or folders, or grant other permissions needed for provisioning,
+   select **Allow** or approve the request.
+
+   In Ghostty, return to the repository directory:
+
+   ```sh
+   cd ~/hashi
+   ```
 
 Congratulations, your MacBook Neo setup is complete! Continue below to set up
 your YubiKey.
