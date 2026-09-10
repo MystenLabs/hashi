@@ -287,9 +287,8 @@ impl MpcService {
         if tombstoned {
             self.run_major_compaction(target_epoch).await;
         }
-        if backup == Backup::Write {
-            self.backup_handle.backup_after_epoch_change(target_epoch);
-        }
+        self.backup_handle
+            .maintain_backups_after_epoch_change(target_epoch, backup == Backup::Write);
     }
 
     async fn sleep_if_still_pending(&self, epoch: u64) {

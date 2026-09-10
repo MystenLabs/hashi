@@ -41,31 +41,39 @@ pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
 
+const BACKUP_FILE_NAME_SUFFIX_FORMAT: &str = "-%Y%m%dT%H%M%SZ.tar.asc";
+const BACKUP_STAGING_FILE_NAME_PREFIX: &str = ".hashi-backup-";
+pub(crate) const RESTORE_STAGING_DIR_NAME_PREFIX: &str = ".hashi-restore-";
+const BACKUP_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(14 * 24);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupArchiveFormat {
     Encrypted,
     Unencrypted,
 }
 
-enum BackupRequest {
-    EpochChanged(u64),
+enum BackupMaintenanceRequest {
+    EpochChanged { epoch: u64, write_backup: bool },
 }
 
 #[derive(Clone, Debug)]
 pub struct BackupHandle {
-    sender: mpsc::UnboundedSender<BackupRequest>,
+    sender: mpsc::UnboundedSender<BackupMaintenanceRequest>,
 }
 
 impl BackupHandle {
-    pub fn backup_after_epoch_change(&self, epoch: u64) {
+    pub fn maintain_backups_after_epoch_change(&self, epoch: u64, write_backup: bool) {
         if self
             .sender
-            .send(BackupRequest::EpochChanged(epoch))
+            .send(BackupMaintenanceRequest::EpochChanged {
+                epoch,
+                write_backup,
+            })
             .is_err()
         {
             warn!(
                 epoch,
-                "Skipping automatic backup: backup service is stopped"
+                write_backup, "Skipping epoch backup maintenance: backup service is stopped"
             );
         }
     }
@@ -73,7 +81,7 @@ impl BackupHandle {
 
 pub struct BackupService {
     inner: Arc<Hashi>,
-    receiver: mpsc::UnboundedReceiver<BackupRequest>,
+    receiver: mpsc::UnboundedReceiver<BackupMaintenanceRequest>,
 }
 
 impl BackupService {
@@ -97,19 +105,28 @@ impl BackupService {
     async fn run(mut self) {
         while let Some(request) = self.receiver.recv().await {
             match request {
-                BackupRequest::EpochChanged(epoch) => {
+                BackupMaintenanceRequest::EpochChanged {
+                    epoch,
+                    write_backup,
+                } => {
                     let hashi = self.inner.clone();
                     match tokio::task::spawn_blocking(move || {
-                        hashi.backup_after_epoch_change(epoch)
+                        hashi.maintain_backups_after_epoch_change(epoch, write_backup)
                     })
                     .await
                     {
                         Ok(Ok(_)) => {}
                         Ok(Err(e)) => {
-                            error!("Automatic backup after epoch {epoch} failed: {e:#}");
+                            error!(
+                                epoch,
+                                write_backup, "Epoch backup maintenance failed: {e:#}"
+                            );
                         }
                         Err(e) => {
-                            error!("Automatic backup after epoch {epoch} failed to join: {e}");
+                            error!(
+                                epoch,
+                                write_backup, "Epoch backup maintenance failed to join: {e}"
+                            );
                         }
                     }
                 }
@@ -248,8 +265,21 @@ pub fn encrypt_files_to_pgp_archive(
     recipient: &PgpPublicCert,
     output_path: &Path,
 ) -> Result<()> {
-    let output = create_file_strict(output_path)?;
-    let mut encrypted = armored_encrypt_writer(output, recipient)?;
+    // Stage beside the destination so retention sees only fully finalized archives.
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staging = tempfile::Builder::new()
+        .prefix(BACKUP_STAGING_FILE_NAME_PREFIX)
+        .tempfile_in(parent)
+        .with_context(|| {
+            format!(
+                "Failed to create backup staging file in {}",
+                parent.display()
+            )
+        })?;
+    let mut encrypted = armored_encrypt_writer(staging.as_file_mut(), recipient)?;
     {
         let mut archive = tar::Builder::new(&mut encrypted);
         append_backup_manifest(&mut archive, manifest)?;
@@ -269,6 +299,21 @@ pub fn encrypt_files_to_pgp_archive(
         archive.finish()?;
     }
     encrypted.finalize()?;
+    staging
+        .as_file()
+        .sync_all()
+        .context("Failed to sync backup staging file")?;
+    staging
+        .persist_noclobber(output_path)
+        // Drop the temporary file even if the caller retains the error.
+        .map_err(|e| e.error)
+        .with_context(|| format!("Failed to publish backup {}", output_path.display()))?;
+    if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {
+        error!(
+            directory = %parent.display(),
+            "Backup published, but syncing its directory failed: {error}"
+        );
+    }
 
     Ok(())
 }
@@ -364,11 +409,139 @@ pub fn encrypted_backup_file_name() -> PathBuf {
     // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
     // lexicographically, and contains no characters that need escaping on any
     // common filesystem.
-    let timestamp = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
-        .strftime("%Y%m%dT%H%M%SZ")
-        .to_string();
-    PathBuf::from(format!("{BACKUP_FILE_NAME_PREFIX}-{timestamp}.tar.asc"))
+    format!(
+        "{BACKUP_FILE_NAME_PREFIX}{}",
+        jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
+    )
+    .into()
+}
+
+#[derive(Default)]
+pub(crate) struct CleanupStats {
+    pub(crate) removed: usize,
+    pub(crate) failed: usize,
+}
+
+/// Remove expired archives and abandoned staging entries, always keeping the newest archive.
+pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Result<CleanupStats> {
+    let cutoff = now.checked_sub(BACKUP_RETENTION)?;
+    let staging_cutoff: std::time::SystemTime = cutoff.into();
+    let mut stats = CleanupStats::default();
+    let entries = match fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(stats),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("Failed to read backup directory {}", output_dir.display())
+            });
+        }
+    };
+    let mut newest: Option<(jiff::Timestamp, PathBuf)> = None;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                stats.failed += 1;
+                warn!(
+                    directory = %output_dir.display(),
+                    "Failed to read backup directory entry: {error}"
+                );
+                continue;
+            }
+        };
+        let file_name = entry.file_name();
+        let file_name = file_name.as_encoded_bytes();
+        let restore_staging = file_name.starts_with(RESTORE_STAGING_DIR_NAME_PREFIX.as_bytes());
+        if restore_staging || file_name.starts_with(BACKUP_STAGING_FILE_NAME_PREFIX.as_bytes()) {
+            let path = entry.path();
+            // DirEntry::metadata does not follow symlinks.
+            let modified = entry.metadata().and_then(|metadata| {
+                if (restore_staging && metadata.is_dir())
+                    || (!restore_staging && metadata.is_file())
+                {
+                    metadata.modified().map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+            match modified {
+                Ok(Some(modified)) if modified < staging_cutoff => {
+                    let removed = if restore_staging {
+                        fs::remove_dir_all(&path)
+                    } else {
+                        fs::remove_file(&path)
+                    };
+                    if let Err(error) = removed {
+                        stats.failed += 1;
+                        warn!(
+                            path = %path.display(),
+                            "Failed to remove expired staging entry: {error}"
+                        );
+                    } else {
+                        stats.removed += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    stats.failed += 1;
+                    warn!(
+                        path = %path.display(),
+                        "Failed to read staging entry metadata: {error}"
+                    );
+                }
+            }
+            continue;
+        }
+        let Some(suffix) = file_name.strip_prefix(BACKUP_FILE_NAME_PREFIX.as_bytes()) else {
+            continue;
+        };
+        let Ok(created_at) =
+            jiff::civil::DateTime::strptime(BACKUP_FILE_NAME_SUFFIX_FORMAT, suffix)
+                .and_then(|datetime| datetime.to_zoned(jiff::tz::TimeZone::UTC))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                stats.failed += 1;
+                warn!(
+                    path = %path.display(),
+                    "Failed to read backup file type: {error}"
+                );
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let candidate = (created_at.timestamp(), path);
+        // Only delete an archive once another valid regular archive is known to be newer.
+        let (created_at, path) = match newest.as_mut() {
+            Some(newest) if candidate.0 > newest.0 => std::mem::replace(newest, candidate),
+            Some(_) => candidate,
+            None => {
+                newest = Some(candidate);
+                continue;
+            }
+        };
+        if created_at >= cutoff {
+            continue;
+        }
+        if let Err(error) = fs::remove_file(&path) {
+            stats.failed += 1;
+            warn!(
+                path = %path.display(),
+                "Failed to remove expired backup: {error}"
+            );
+        } else {
+            stats.removed += 1;
+        }
+    }
+    Ok(stats)
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -1060,6 +1233,257 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_old_backups_accepts_missing_directory() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let missing = tmpdir.path().join("missing");
+
+        let stats = cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.failed, 0);
+
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn cleanup_old_backups_recognizes_generated_archive_name() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let now = jiff::Timestamp::now();
+        let older = tmpdir.path().join(format!(
+            "{BACKUP_FILE_NAME_PREFIX}{}",
+            now.checked_sub(jiff::SignedDuration::from_hours(24))
+                .unwrap()
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .strftime(BACKUP_FILE_NAME_SUFFIX_FORMAT)
+        ));
+        let generated = tmpdir.path().join(encrypted_backup_file_name());
+        fs::write(&older, b"older archive").unwrap();
+        fs::write(&generated, b"generated recovery archive").unwrap();
+        let sweep_time = now
+            .checked_add(BACKUP_RETENTION)
+            .unwrap()
+            .checked_add(jiff::SignedDuration::from_hours(24))
+            .unwrap();
+
+        cleanup_old_backups(tmpdir.path(), sweep_time).unwrap();
+
+        assert!(!older.exists());
+        assert_eq!(fs::read(generated).unwrap(), b"generated recovery archive");
+    }
+
+    #[test]
+    fn cleanup_old_backups_removes_only_expired_restore_staging_directories() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let now: jiff::Timestamp = "2026-09-08T12:00:00Z".parse().unwrap();
+        let cutoff: std::time::SystemTime = now.checked_sub(BACKUP_RETENTION).unwrap().into();
+        let expired = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}expired"));
+        let boundary = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}boundary"));
+        let recent = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}recent"));
+        let contents = [
+            ("operator.key", b"secret key".as_slice()),
+            ("config.toml", b"node config".as_slice()),
+            (
+                "hashi-db-snapshot/keyspace/segment",
+                b"database data".as_slice(),
+            ),
+        ];
+        for (path, modified) in [
+            (&expired, cutoff - std::time::Duration::from_secs(1)),
+            (&boundary, cutoff),
+            (&recent, now.into()),
+        ] {
+            fs::create_dir_all(path.join("hashi-db-snapshot/keyspace")).unwrap();
+            for (name, data) in contents {
+                fs::write(path.join(name), data).unwrap();
+            }
+            // Set the directory's mtime last; child files deliberately have fresh mtimes.
+            File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        }
+
+        let stats = cleanup_old_backups(dir, now).unwrap();
+        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.failed, 0);
+
+        assert!(!expired.exists());
+        for path in [boundary, recent] {
+            for (name, data) in contents {
+                assert_eq!(fs::read(path.join(name)).unwrap(), data);
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_old_backups_preserves_restore_symlink_targets_and_unrelated_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.key");
+        fs::write(&target, b"outside secret").unwrap();
+        let old: jiff::Timestamp = "2026-08-01T00:00:00Z".parse().unwrap();
+        let times = fs::FileTimes::new().set_modified(old.into());
+        File::open(outside.path())
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        let staging = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}abandoned"));
+        fs::create_dir(&staging).unwrap();
+        std::os::unix::fs::symlink(outside.path(), staging.join("linked-db")).unwrap();
+        File::open(&staging).unwrap().set_times(times).unwrap();
+        let link = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}symlink"));
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let wrong_type = dir.join(format!("{RESTORE_STAGING_DIR_NAME_PREFIX}regular-file"));
+        fs::write(&wrong_type, b"not a staging directory").unwrap();
+        File::open(&wrong_type).unwrap().set_times(times).unwrap();
+        let completed = dir.join(extract_dir_name(&encrypted_backup_file_name()).unwrap());
+        let db_restore = dir.join(".hashi-db-restore-abandoned");
+        for path in [&completed, &db_restore] {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("config.toml"), b"preserved config").unwrap();
+            File::open(path).unwrap().set_times(times).unwrap();
+        }
+
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+
+        assert!(!staging.exists());
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(target).unwrap(), b"outside secret");
+        assert_eq!(fs::read(wrong_type).unwrap(), b"not a staging directory");
+        for path in [completed, db_restore] {
+            assert_eq!(
+                fs::read(path.join("config.toml")).unwrap(),
+                b"preserved config"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_old_backups_removes_only_expired_staging_files() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let now: jiff::Timestamp = "2026-09-08T12:00:00Z".parse().unwrap();
+        let cutoff: std::time::SystemTime = now.checked_sub(BACKUP_RETENTION).unwrap().into();
+        let expired = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}expired"));
+        let boundary = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}boundary"));
+        let recent = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}recent"));
+        for (path, modified) in [
+            (&expired, cutoff - std::time::Duration::from_secs(1)),
+            (&boundary, cutoff),
+            (&recent, now.into()),
+        ] {
+            let mut file = File::create(path).unwrap();
+            file.write_all(b"staged data").unwrap();
+            file.set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+        }
+
+        cleanup_old_backups(dir, now).unwrap();
+
+        assert!(!expired.exists());
+        assert_eq!(fs::read(boundary).unwrap(), b"staged data");
+        assert_eq!(fs::read(recent).unwrap(), b"staged data");
+    }
+
+    #[test]
+    fn cleanup_old_backups_ignores_staging_directories_and_symlinks() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let old: jiff::Timestamp = "2026-08-01T00:00:00Z".parse().unwrap();
+        let times = fs::FileTimes::new().set_modified(old.into());
+        let nested = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}directory"));
+        fs::create_dir(&nested).unwrap();
+        let nested_file = nested.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}nested"));
+        fs::write(&nested_file, b"nested data").unwrap();
+        File::open(&nested_file).unwrap().set_times(times).unwrap();
+        File::open(&nested).unwrap().set_times(times).unwrap();
+        let link = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}symlink"));
+        std::os::unix::fs::symlink(&nested_file, &link).unwrap();
+
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+
+        assert_eq!(fs::read(nested_file).unwrap(), b"nested data");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn cleanup_old_backups_preserves_boundary_and_unrelated_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let expired = dir.join("hashi-backup-20260825T115959Z.tar.asc");
+        fs::write(&expired, b"expired despite fresh mtime").unwrap();
+        let preserved = [
+            "hashi-backup-20260825T120000Z.tar.asc",
+            "hashi-backup-20260908T120000Z.tar.asc",
+            "hashi-backup-20260230T000000Z.tar.asc",
+            "hashi-backup-20260801T000000Z.tar.asc.partial",
+            "other-backup-20260801T000000Z.tar.asc",
+        ];
+        for name in preserved {
+            fs::write(dir.join(name), b"keep").unwrap();
+        }
+
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+
+        assert!(!expired.exists());
+        for name in preserved {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), b"keep", "{name}");
+        }
+    }
+
+    #[test]
+    fn cleanup_old_backups_preserves_newest_expired_regular_archive() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let newest = dir.join("hashi-backup-20260803T000000Z.tar.asc");
+        fs::write(&newest, b"newest recovery archive").unwrap();
+        let staging = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}abandoned"));
+        fs::write(&staging, b"not a recovery archive").unwrap();
+        let staging_modified: jiff::Timestamp = "2026-08-24T00:00:00Z".parse().unwrap();
+        File::open(&staging)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(staging_modified.into()))
+            .unwrap();
+        let older = [
+            dir.join("hashi-backup-20260801T000000Z.tar.asc"),
+            dir.join("hashi-backup-20260802T000000Z.tar.asc"),
+        ];
+        for archive in &older {
+            fs::write(archive, b"older archive with newer mtime").unwrap();
+        }
+        let unrelated = [
+            "hashi-backup-20260831T000000Z.tar.asc.partial",
+            "other-backup-20260831T000000Z.tar.asc",
+            "hashi-backup-20260931T000000Z.tar.asc",
+        ];
+        for name in unrelated {
+            fs::write(dir.join(name), b"unrelated").unwrap();
+        }
+        let nested = dir.join("hashi-backup-20260804T000000Z.tar.asc");
+        fs::create_dir(&nested).unwrap();
+        let nested_archive = nested.join("hashi-backup-20260801T000000Z.tar.asc");
+        fs::write(&nested_archive, b"nested").unwrap();
+        let link = dir.join("hashi-backup-20260805T000000Z.tar.asc");
+        std::os::unix::fs::symlink(&newest, &link).unwrap();
+
+        let stats = cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        assert_eq!(stats.removed, 3);
+        assert_eq!(stats.failed, 0);
+
+        assert_eq!(fs::read(newest).unwrap(), b"newest recovery archive");
+        assert!(!staging.exists());
+        for archive in older {
+            assert!(!archive.exists());
+        }
+        for name in unrelated {
+            assert_eq!(fs::read(dir.join(name)).unwrap(), b"unrelated");
+        }
+        assert_eq!(fs::read(nested_archive).unwrap(), b"nested");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
     fn manifest_disambiguates_user_file_colliding_with_db_prefix() {
         // A user-backed-up file whose basename equals DB_SNAPSHOT_TAR_PREFIX
         // must be renamed so it doesn't collide with the db snapshot
@@ -1311,6 +1735,54 @@ mod tests {
         assert!(
             format!("{err:#}").contains("failed to deserialize backup keyspace encryption_keys"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn failed_encrypted_archive_leaves_no_partial_backup_for_retention() {
+        let src = tempfile::tempdir().unwrap();
+        let db = Database::open(src.path()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let recovery = out.path().join("hashi-backup-20260801T000000Z.tar.asc");
+        fs::write(&recovery, b"last recovery archive").unwrap();
+        let output = out.path().join("hashi-backup-20260802T000000Z.tar.asc");
+        let mut manifest = db_only_manifest();
+        manifest.paths.push(BackupManifestEntry {
+            original_path: src.path().join("missing-config.toml"),
+            archive_name: PathBuf::from("config.toml"),
+        });
+
+        let result = encrypt_files_to_pgp_archive(&manifest, &db, &mock_pgp_cert(), &output);
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_dir(out.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>(),
+            vec![recovery.clone()],
+        );
+        cleanup_old_backups(out.path(), "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        assert_eq!(fs::read(recovery).unwrap(), b"last recovery archive");
+    }
+
+    #[test]
+    fn encrypted_archive_collision_preserves_existing_backup() {
+        let src = tempfile::tempdir().unwrap();
+        let db = Database::open(src.path()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let output = out.path().join("hashi-backup-20260801T000000Z.tar.asc");
+        fs::write(&output, b"existing recovery archive").unwrap();
+        let recipient = mock_pgp_cert();
+        let collision = encrypt_files_to_pgp_archive(&db_only_manifest(), &db, &recipient, &output);
+        assert!(collision.is_err());
+        assert_eq!(fs::read(&output).unwrap(), b"existing recovery archive");
+        assert_eq!(
+            fs::read_dir(out.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>(),
+            vec![output],
         );
     }
 

@@ -131,7 +131,7 @@ pub fn restore(
     // cleaned on `TempDir` drop) so the user can retry without manual cleanup
     // and the final `extract_dir` never appears half-populated.
     let staging = tempfile::Builder::new()
-        .prefix(".hashi-restore-")
+        .prefix(backup::RESTORE_STAGING_DIR_NAME_PREFIX)
         .tempdir_in(output_dir)
         .with_context(|| {
             format!(

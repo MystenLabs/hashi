@@ -584,7 +584,9 @@ impl HashiNetworkBuilder {
             config.bitcoin_chain_id = Some(hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string());
             config.sui_chain_id = service_info.chain_id.clone();
             config.screener_endpoint = Some(screener_endpoint.clone());
-            config.db = Some(dir.join(validator_address.to_string()));
+            let node_name = validator_address.to_string();
+            config.backup_dir = dir.join("backups").join(&node_name);
+            config.db = Some(dir.join(node_name));
             configs.push(config);
         }
 

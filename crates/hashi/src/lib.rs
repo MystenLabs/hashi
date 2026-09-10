@@ -341,7 +341,29 @@ impl Hashi {
             .await
     }
 
-    pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
+    pub(crate) fn maintain_backups_after_epoch_change(
+        &self,
+        epoch: u64,
+        write_backup: bool,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        match crate::backup::cleanup_old_backups(&self.config.backup_dir, jiff::Timestamp::now()) {
+            Ok(stats) => tracing::info!(
+                epoch,
+                write_backup,
+                directory = %self.config.backup_dir.display(),
+                removed = stats.removed,
+                failed = stats.failed,
+                "Epoch backup retention sweep completed",
+            ),
+            Err(error) => tracing::warn!(
+                epoch,
+                write_backup,
+                "Cleanup of expired backups failed; continuing epoch maintenance: {error:#}",
+            ),
+        }
+        if !write_backup {
+            return Ok(None);
+        }
         let Some(config_path) = self.config_path.as_deref() else {
             tracing::warn!(
                 epoch,
@@ -354,7 +376,7 @@ impl Hashi {
             &self.config,
             self.db.as_ref(),
             &self.config.backup_pgp_cert,
-            self.config.backup_dir(),
+            &self.config.backup_dir,
         )?;
         tracing::info!(
             epoch,
@@ -1588,7 +1610,7 @@ mod test {
     }
 
     #[test]
-    fn automatic_backup_after_epoch_change_uses_configured_backup_dir() {
+    fn automatic_backup_expires_archives_without_losing_recovery_after_failed_save() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db_path = tmpdir.path().join("db");
         let backup_dir = tmpdir.path().join("backups");
@@ -1597,19 +1619,106 @@ mod test {
         let mut config = Config::new_for_testing();
         config.db = Some(db_path);
         config.backup_pgp_cert = mock_pgp_cert();
-        config.backup_dir = Some(backup_dir.clone());
+        config.backup_dir = backup_dir.clone();
         config.save(&config_path).unwrap();
 
         let server_version = ServerVersion::new("unknown", "unknown");
-        let hashi = Hashi::new(server_version, Some(config_path), config).unwrap();
+        let hashi = Hashi::new_with_registry(
+            server_version,
+            Some(config_path.clone()),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let expired = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&expired, b"old archive").unwrap();
+        let older = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
+        std::fs::write(&older, b"older archive").unwrap();
+        std::fs::remove_file(&config_path).unwrap();
+
+        assert!(hashi.maintain_backups_after_epoch_change(6, true).is_err());
+        assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
+        assert!(!older.exists());
+        hashi.config.save(&config_path).unwrap();
 
         let output = hashi
-            .backup_after_epoch_change(7)
+            .maintain_backups_after_epoch_change(7, true)
             .unwrap()
             .expect("backup should run");
 
         assert!(output.is_file());
-        assert_eq!(output.parent(), Some(backup_dir.as_path()));
+        // The pre-save sweep keeps the previous recovery archive even after a successful save.
+        assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
+
+        std::fs::remove_file(config_path).unwrap();
+        assert!(hashi.maintain_backups_after_epoch_change(8, true).is_err());
+        assert!(!expired.exists());
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn automatic_backup_cleanup_only_preserves_recovery_without_writing() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let config_path = tmpdir.path().join("config.toml");
+        let backup_dir = tmpdir.path().join("backups");
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().join("db"));
+        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_dir = backup_dir.clone();
+        config.save(&config_path).unwrap();
+        let hashi = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            Some(config_path),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let older = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
+        let newest = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&older, b"older archive").unwrap();
+        std::fs::write(&newest, b"last recovery archive").unwrap();
+
+        assert_eq!(
+            hashi.maintain_backups_after_epoch_change(7, false).unwrap(),
+            None
+        );
+
+        assert!(!older.exists());
+        assert_eq!(std::fs::read(&newest).unwrap(), b"last recovery archive");
+        let remaining = std::fs::read_dir(&backup_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec![newest]);
+    }
+
+    #[test]
+    fn automatic_backup_attempts_save_after_cleanup_error() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let config_path = tmpdir.path().join("missing-config.toml");
+        let backup_dir = tmpdir.path().join("not-a-directory");
+        std::fs::write(&backup_dir, b"not a directory").unwrap();
+
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().join("db"));
+        config.backup_dir = backup_dir;
+        let hashi = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            Some(config_path.clone()),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+
+        let error = hashi
+            .maintain_backups_after_epoch_change(7, true)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(config_path.to_str().unwrap()),
+            "backup should attempt to read its input after cleanup fails: {error:#}",
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context;
     use anyhow::Result;
     use anyhow::anyhow;
     use bitcoin::Amount;
@@ -1694,6 +1695,17 @@ mod tests {
         };
         info!(?target, "resignation submitted; closing the epoch");
 
+        let backup_dir = networks.hashi_network.nodes()[3]
+            .hashi()
+            .config
+            .backup_dir
+            .clone();
+        std::fs::create_dir_all(&backup_dir)?;
+        let older_backup = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
+        let newest_backup = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&older_backup, b"older archive")?;
+        std::fs::write(&newest_backup, b"last recovery archive")?;
+
         networks.sui_network.force_close_epoch().await?;
         let target_epoch = initial_epoch + 1;
         let futs: Vec<_> = networks
@@ -1819,6 +1831,17 @@ mod tests {
         }
         info!("registration removed; closing the second epoch");
 
+        // Finish the dealer-only epoch's worker before seeding the next sweep.
+        // These in-process nodes have no config path, but must still run retention.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while older_backup.exists() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("departed dealer did not sweep backups without a config path")?;
+        std::fs::write(&older_backup, b"older archive")?;
+
         networks.sui_network.force_close_epoch().await?;
         let second_epoch = target_epoch + 1;
         let futs: Vec<_> = networks
@@ -1853,6 +1876,20 @@ mod tests {
                 .ok_or_else(|| anyhow!("no committee after second epoch change"))?;
             assert!(committee.index_of(&target).is_none());
         }
+        // Node 3 is now in neither committee: NoRole must enqueue housekeeping
+        // through the real backup worker even though it must not write an archive.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while older_backup.exists() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("no-role validator did not sweep its expired backup")?;
+        assert_eq!(std::fs::read(&newest_backup)?, b"last recovery archive");
+        let remaining_backups = std::fs::read_dir(&backup_dir)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(remaining_backups, vec![newest_backup]);
         networks.hashi_network.nodes_mut()[3].restart().await?;
         {
             let nodes = networks.hashi_network.nodes();

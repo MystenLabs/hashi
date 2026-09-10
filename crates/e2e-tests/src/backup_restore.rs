@@ -25,7 +25,6 @@ mod tests {
     use hashi::cli::commands::backup::RestoreDecryptor;
     use hashi::config::Config as HashiConfig;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
-    use tempfile::TempDir;
 
     use crate::HashiNodeHandle;
     use crate::TestNetworksBuilder;
@@ -168,22 +167,22 @@ mod tests {
             .clone();
 
         // 3. Serialise config, generate OpenPGP keypair, save backup.
-        let backup_dir = tempfile::Builder::new()
+        let config_dir = tempfile::Builder::new()
             .prefix("hashi-backup-e2e-")
             .tempdir()?;
-        let node_config_path = write_node_config_to_disk(&node0_config, backup_dir.path());
-        let (recipient, secret_key_path) = generate_pgp_keypair(backup_dir.path());
+        let node_config_path = write_node_config_to_disk(&node0_config, config_dir.path());
+        let (recipient, secret_key_path) = generate_pgp_keypair(config_dir.path());
 
-        let save_out_dir: TempDir = tempfile::Builder::new()
-            .prefix("hashi-backup-out-")
-            .tempdir()?;
-        commands::backup::save(&node_config_path, Some(recipient), save_out_dir.path())?;
-        let tarball = find_backup_tarball(save_out_dir.path());
+        // Keep this manual archive separate from automatic backups, which use
+        // the node's configured recipient rather than the key generated above.
+        let save_out_dir = node0_config.backup_dir.join("manual");
+        commands::backup::save(&node_config_path, Some(recipient), &save_out_dir)?;
+        let tarball = find_backup_tarball(&save_out_dir);
 
         // 4. Destroy node 0's on-disk state so `restore --copy-to-original-paths`
-        //    actually has to put things back. The node config lives under
-        //    `backup_dir`; the DB lives under the TestNetworks tempdir, which
-        //    stays alive because the handle still owns it.
+        //    actually has to put things back. The config has its own tempdir;
+        //    both the DB and configured backups live under the TestNetworks
+        //    tempdir, which stays alive because the handle still owns it.
         std::fs::remove_dir_all(&original_db_path)?;
         std::fs::remove_file(&node_config_path)?;
 
