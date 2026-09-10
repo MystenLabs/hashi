@@ -1108,10 +1108,7 @@ impl MpcManager {
             )
             .await;
             if let Err(e) = dealer_result {
-                tracing::error!(
-                    "Nonce dealer phase failed: {}. Continuing as party only.",
-                    e
-                );
+                tracing::error!("Nonce dealer phase failed for batch {batch_index}: {e}");
             }
         }
     }
@@ -3057,7 +3054,7 @@ impl MpcManager {
         Ok(())
     }
 
-    fn this_node_deals_nothing(&self) -> bool {
+    pub(crate) fn this_node_deals_nothing(&self) -> bool {
         let Ok(party_id) = self.party_id() else {
             return true;
         };

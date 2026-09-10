@@ -63,6 +63,8 @@ const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
+const REPAIR_MIN_INTERVAL: Duration = Duration::from_secs(900);
+const REPAIR_HEARTBEAT_TICK: Duration = Duration::from_secs(10);
 const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
 const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
@@ -122,8 +124,44 @@ pub struct MpcService {
     refill_tx: Arc<watch::Sender<u32>>,
     refill_rx: watch::Receiver<u32>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
+    next_batch_repair: Mutex<Option<(u64, u32, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalkStep {
+    Continue(usize),
+    Last(usize),
+    Stop,
+    Missing,
+}
+
+fn repair_rate_limited(
+    gate: Option<(u64, u32, tokio::time::Instant)>,
+    epoch: u64,
+    batch_index: u32,
+    now: tokio::time::Instant,
+) -> bool {
+    matches!(gate, Some((e, b, not_before)) if e == epoch && b == batch_index && now < not_before)
+}
+
+fn walk_step(size: Option<usize>, batch_start: u64, num_consumed: u64) -> WalkStep {
+    match size {
+        Some(size) if num_consumed < batch_start + size as u64 => WalkStep::Last(size),
+        Some(size) => WalkStep::Continue(size),
+        None if batch_start < num_consumed => WalkStep::Missing,
+        None => WalkStep::Stop,
+    }
+}
+
+enum PresigRecovery {
+    Installed,
+    MissingBatch {
+        epoch: u64,
+        batch_index: u32,
+        batch_start: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,6 +180,7 @@ impl MpcService {
             refill_tx: Arc::new(refill_tx),
             refill_rx,
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
+            next_batch_repair: Mutex::new(None),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
         };
@@ -176,6 +215,7 @@ impl MpcService {
             self.try_submit_genesis_reconfig().await;
         } else if self.inner.is_in_current_committee() {
             loop {
+                self.inner.metrics.task_heartbeat("mpc_service");
                 if let Some(epoch) = self.get_pending_epoch_change() {
                     self.drive_reconfig(epoch).await;
                     continue;
@@ -838,7 +878,7 @@ impl MpcService {
         )
     }
 
-    async fn recover_presigning_state(&self, output: &MpcOutput) -> anyhow::Result<()> {
+    async fn recover_presigning_state(&self, output: &MpcOutput) -> anyhow::Result<PresigRecovery> {
         let (num_consumed, epoch, committee, pending) = {
             let state = self.inner.onchain_state().state();
             let hashi = state.hashi();
@@ -901,16 +941,20 @@ impl MpcService {
                     floor,
                 )
                 .await?;
-            let Some(size) = size else {
-                anyhow::ensure!(
-                    batch_start >= num_consumed,
-                    "nonce batch {batch_index} at start {batch_start} sized below the floor but \
-                     the cursor {num_consumed} has already drawn from it",
-                );
-                break;
+            let (size, holds_cursor) = match walk_step(size, batch_start, num_consumed) {
+                WalkStep::Missing => {
+                    return Ok(PresigRecovery::MissingBatch {
+                        epoch,
+                        batch_index,
+                        batch_start,
+                    });
+                }
+                WalkStep::Stop => break,
+                WalkStep::Last(size) => (size, true),
+                WalkStep::Continue(size) => (size, false),
             };
             boundaries.push((batch_index, batch_start, size));
-            if num_consumed < batch_start + size as u64 {
+            if holds_cursor {
                 break;
             }
             batch_start += size as u64;
@@ -918,7 +962,8 @@ impl MpcService {
         }
         anyhow::ensure!(
             !boundaries.is_empty(),
-            "no certified nonce batches to recover for epoch {epoch} at cursor {num_consumed}",
+            "no certified nonce batches for epoch {epoch}: batch 0 is not yet sizeable and \
+             the cursor has drawn nothing",
         );
         let recovered_end = boundaries
             .last()
@@ -989,7 +1034,7 @@ impl MpcService {
             boundaries.len(),
             pending.len(),
         );
-        Ok(())
+        Ok(PresigRecovery::Installed)
     }
 
     fn identity_inputs(&self, epoch: u64, batch_size_per_weight: u16) -> IdentityInputs {
@@ -1073,8 +1118,17 @@ impl MpcService {
             }
         };
         match self.recover_presigning_state(&output).await {
-            Ok(()) => {
+            Ok(PresigRecovery::Installed) => {
                 info!("sync_if_stale: recovered epoch {epoch} via certs path");
+            }
+            Ok(PresigRecovery::MissingBatch {
+                epoch: walk_epoch,
+                batch_index,
+                batch_start,
+            }) => {
+                self.repair_missing_batch(walk_epoch, batch_index, batch_start)
+                    .await;
+                return;
             }
             Err(certs_err) => {
                 if let Some(p) = self.get_pending_epoch_change() {
@@ -1109,6 +1163,141 @@ impl MpcService {
             }
         }
         let _ = self.key_ready_tx.send(Some(output.public_key));
+    }
+
+    async fn repair_missing_batch(&self, epoch: u64, batch_index: u32, batch_start: u64) {
+        let metrics = &self.inner.metrics;
+        let repair_total = &metrics.mpc_presig_batch_repair_total;
+        let skip = |outcome: &str| repair_total.with_label_values(&[outcome]).inc();
+        let now = tokio::time::Instant::now;
+        let rearm_soon = || {
+            *self.next_batch_repair.lock().unwrap() =
+                Some((epoch, batch_index, now() + RETRY_INTERVAL))
+        };
+        if self.inner.onchain_state().epoch() != epoch {
+            skip("epoch_moved");
+            return;
+        }
+        {
+            let mut next = self.next_batch_repair.lock().unwrap();
+            if repair_rate_limited(*next, epoch, batch_index, now()) {
+                skip("rate_limited");
+                return;
+            }
+            *next = Some((epoch, batch_index, now() + REPAIR_MIN_INTERVAL));
+        }
+        let certs = match tob_certificates(
+            self.inner.onchain_state(),
+            epoch,
+            Some(batch_index),
+            move_types::ProtocolType::NonceGeneration,
+        ) {
+            Ok(certs) => certs,
+            Err(e) => {
+                skip("read_failed");
+                rearm_soon();
+                warn!(
+                    "repair_missing_batch: cert read failed for epoch {epoch} batch \
+                     {batch_index}: {e}"
+                );
+                return;
+            }
+        };
+
+        let address = match self.inner.config.validator_address() {
+            Ok(address) => address,
+            Err(e) => {
+                skip("no_address");
+                error!("repair_missing_batch: no validator address: {e}");
+                return;
+            }
+        };
+        if certs.iter().any(|(dealer, _)| *dealer == address) {
+            skip("already_dealt");
+            warn!(
+                "repair_missing_batch: epoch {epoch} batch {batch_index} already carries our \
+                 cert and is still below floor; no withdrawal signing"
+            );
+            return;
+        }
+
+        let Some(mpc_manager) = self.inner.mpc_manager() else {
+            skip("no_manager");
+            error!("repair_missing_batch: no MpcManager for epoch {epoch} batch {batch_index}");
+            return;
+        };
+        {
+            let mgr = mpc_manager.read().unwrap();
+            if let Err(e) = mgr.ensure_manager_epoch(epoch) {
+                skip("manager_epoch");
+                rearm_soon();
+                warn!("repair_missing_batch: {e}");
+                return;
+            }
+            if mgr.this_node_deals_nothing() {
+                skip("no_weight");
+                warn!(
+                    "repair_missing_batch: epoch {epoch} batch {batch_index} is below floor and \
+                     this node has nothing to deal into it; no withdrawal signing"
+                );
+                return;
+            }
+        }
+        if let Err(e) = self.bail_if_reconfig_pending() {
+            skip("reconfig_pending");
+            rearm_soon();
+            info!("repair_missing_batch: {e}");
+            return;
+        }
+        let signer = match self.inner.config.operator_private_key() {
+            Ok(signer) => signer,
+            Err(e) => {
+                skip("no_signer");
+                error!("repair_missing_batch: no operator key: {e}");
+                return;
+            }
+        };
+        warn!(
+            "repair_missing_batch: epoch {epoch} batch {batch_index} below floor at {batch_start} \
+             with {} cert(s), cursor has drawn from it; dealing into it, no withdrawal \
+             signing",
+            certs.len(),
+        );
+        let onchain_state = self.inner.onchain_state().clone();
+        let p2p_channel =
+            RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GENERATION);
+        let mut tob_channel = SuiTobSessionChannel::new(
+            self.inner.config.hashi_ids(),
+            onchain_state,
+            epoch,
+            Some(batch_index),
+            move_types::ProtocolType::NonceGeneration,
+            signer,
+        )
+        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT);
+        repair_total.with_label_values(&["attempted"]).inc();
+        let started = now();
+        let round = MpcManager::run_nonce_dealer_phase(
+            &mpc_manager,
+            batch_index,
+            &p2p_channel,
+            &mut tob_channel,
+            metrics,
+        );
+        tokio::pin!(round);
+        let mut heartbeat = tokio::time::interval(REPAIR_HEARTBEAT_TICK);
+        loop {
+            tokio::select! {
+                () = &mut round => break,
+                _ = heartbeat.tick() => metrics.task_heartbeat("mpc_service"),
+            }
+        }
+        *self.next_batch_repair.lock().unwrap() =
+            Some((epoch, batch_index, now() + REPAIR_MIN_INTERVAL));
+        info!(
+            "repair_missing_batch: epoch {epoch} batch {batch_index} round returned after {:?}",
+            started.elapsed(),
+        );
     }
 
     async fn re_register_keys_if_lost(&self) {
@@ -2432,6 +2621,47 @@ pub(crate) fn build_pruning_references(
         );
     }
     referenced
+}
+
+#[cfg(test)]
+mod repair_gate_tests {
+    use super::repair_rate_limited;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn only_the_same_epoch_and_batch_before_the_deadline_is_limited() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(900);
+        assert!(repair_rate_limited(Some((7, 3, deadline)), 7, 3, now));
+        assert!(!repair_rate_limited(Some((7, 3, now)), 7, 3, now));
+        assert!(!repair_rate_limited(Some((7, 4, deadline)), 7, 3, now));
+        assert!(!repair_rate_limited(Some((8, 3, deadline)), 7, 3, now));
+        assert!(!repair_rate_limited(None, 7, 3, now));
+    }
+}
+
+#[cfg(test)]
+mod walk_step_tests {
+    use super::WalkStep;
+    use super::walk_step;
+
+    #[test]
+    fn missing_only_once_the_cursor_has_drawn_from_the_batch() {
+        assert_eq!(walk_step(None, 0, 400), WalkStep::Missing);
+        assert_eq!(walk_step(None, 300, 400), WalkStep::Missing);
+        assert_eq!(walk_step(None, 400, 400), WalkStep::Stop);
+        assert_eq!(walk_step(None, 500, 400), WalkStep::Stop);
+        assert_eq!(walk_step(None, 0, 0), WalkStep::Stop);
+    }
+
+    #[test]
+    fn a_sized_batch_is_the_last_one_when_it_holds_the_cursor() {
+        assert_eq!(walk_step(Some(100), 0, 400), WalkStep::Continue(100));
+        assert_eq!(walk_step(Some(100), 300, 400), WalkStep::Continue(100));
+        assert_eq!(walk_step(Some(200), 300, 400), WalkStep::Last(200));
+        assert_eq!(walk_step(Some(1080), 0, 400), WalkStep::Last(1080));
+    }
 }
 
 /// Whether `target_epoch` is still worth acting on after the protocol ran:

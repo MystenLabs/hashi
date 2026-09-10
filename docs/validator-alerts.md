@@ -35,6 +35,8 @@ Dashboard-worthy but **not** alerts:
   which version the node operates at, and the highest version the build
   implements. During a rollout, `supported_max` is how the fleet's binary
   upgrade progress is counted before the on-chain upgrade flips `active`.
+- `hashi_mpc_presig_batch_repair_total` — a nonce batch the allocation cursor
+  outran, and what this node did about it, by `outcome`.
 - `hashi_is_leader` — leadership rotates; useful context when reading other
   metrics, meaningless to alert on.
 - `hashi_db_keyspace_disk_bytes` — live table bytes per keyspace. Each one
