@@ -9,17 +9,35 @@
 /// threshold public key and activates the epoch. The initial (genesis)
 /// reconfig skips the handoff — no prior committee exists — and is gated on
 /// the publisher's launch switch (`hashi::finish_publish`).
+///
+/// A reconfiguration must complete within the Sui epoch it was formed in:
+/// `start_reconfig` pins the pending committee to Sui's epoch, and
+/// `submit_committee_handoff` and `end_reconfig` refuse to land once Sui's
+/// epoch has moved past it. From then on only `abort_reconfig`, the
+/// permissionless escape hatch, can resolve it, and it is refused while the
+/// epochs still match. Completion and abort are therefore mutually exclusive
+/// by Sui epoch and can never race each other.
 module hashi::reconfig;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 // ~~~~~~~ Errors ~~~~~~~
 
-// NOTE: `ENotReconfiguring` is matched BY NAME in the node's reconfig-abort
-// classifier (crates/hashi/src/mpc/service.rs) to detect the benign
-// "end_reconfig already completed by another node" race — keep the name.
+// NOTE: the node's reconfig-submission classifier
+// (crates/hashi/src/mpc/service.rs) matches `ENotReconfiguring`,
+// `EReconfigAlreadyCompleted`, `EReconfigWindowClosed`, and
+// `EWrongReconfigEpoch` BY NAME to tell the benign "another node already
+// completed it" race from a dead target — keep the names.
 #[error]
 const ENotReconfiguring: vector<u8> = b"No reconfiguration is in progress";
+#[error]
+const EReconfigAlreadyCompleted: vector<u8> =
+    b"This reconfiguration has already completed; nothing is pending";
+#[error]
+const EReconfigWindowClosed: vector<u8> =
+    b"The pending reconfiguration's Sui epoch has passed; it can only be aborted now";
+#[error]
+const EWrongReconfigEpoch: vector<u8> = b"Epoch does not match the pending reconfiguration";
 #[error]
 const EInitialReconfig: vector<u8> =
     b"Not allowed during the initial reconfig (no committee handoff exists yet)";
@@ -54,6 +72,11 @@ public struct ReconfigEnded has copy, drop {
     mpc_public_key: vector<u8>,
 }
 
+public struct ReconfigAborted has copy, drop {
+    /// The pending epoch that was torn down; the current epoch is unchanged.
+    epoch: u64,
+}
+
 // ~~~~~~~ Entry Functions ~~~~~~~
 
 entry fun start_reconfig(
@@ -86,9 +109,25 @@ entry fun end_reconfig(
     ctx: &TxContext,
 ) {
     self.versioning().assert_version_enabled();
-    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    // The certificate is signed by the incoming committee, so its epoch is
+    // this submission's target. An activated target is the current epoch,
+    // still has its committee, and is no longer pending; an aborted one has
+    // no committee. The pending check matters at genesis on a fresh network,
+    // where the pending epoch-0 committee already sits under the current
+    // epoch 0 before it activates. This is decided before the pending state
+    // is consulted so that a completion that lost the race is still reported
+    // as such once the next reconfiguration is pending, rather than as a dead
+    // target the node should give up on.
+    let next_epoch = mpc_cert.signature_epoch();
+    let already_completed =
+        self.committee_set().pending_epoch_change() != option::some(next_epoch) &&
+        self.committee_set().epoch() == next_epoch &&
+        self.committee_set().has_committee(next_epoch);
+    assert!(!already_completed, EReconfigAlreadyCompleted);
+    let pending_epoch = pending_epoch_in_window(self, ctx);
+    // A different pending epoch means this target was aborted and replaced.
+    assert!(pending_epoch == next_epoch, EWrongReconfigEpoch);
     let from_epoch = self.committee_set().epoch();
-    let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     let next_committee = self.committee_set().get_committee(next_epoch);
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     self.verify_with_committee(
@@ -117,17 +156,45 @@ entry fun end_reconfig(
     sui::event::emit(ReconfigEnded { from_epoch, epoch, mpc_public_key });
 }
 
+/// Record the outgoing committee's certificate approving the incoming
+/// committee for `epoch`.
+///
+/// `epoch` is a declaration, not a safety check. The signed message already
+/// binds the target (the incoming committee, epoch included), so a
+/// certificate for any other target could never verify here. What the
+/// signature cannot do is say why it failed. The certificate's own epoch is
+/// the source epoch, and its target is only inside the signed message, which
+/// the chain reconstructs rather than receives; without `epoch`, a stale
+/// submission for an aborted target and a genuinely bad certificate are the
+/// same `committee::ESigVerification` abort, and a stored handoff out of the
+/// same source epoch cannot be told apart from this submission's own
+/// completion. Declaring the target lets the chain answer with the named
+/// `reconfig` constants the node keys its retry/give-up decision on, the same
+/// way `abort_reconfig` names the epoch it aborts.
 entry fun submit_committee_handoff(
     self: &mut Hashi,
+    epoch: u64,
     committee_handoff_cert: CommitteeSignature,
-    _ctx: &TxContext,
+    ctx: &TxContext,
 ) {
     self.versioning().assert_version_enabled();
-    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    // Handoffs are stored by source epoch when their target activates, and a
+    // replacement can form from the same source epoch after an abort, so the
+    // stored record must name `epoch` too before this submission counts as a
+    // completion that already happened. A stored record into `epoch` also
+    // rules out `epoch` still being pending (a later reconfiguration targets
+    // a later Sui epoch), so, as in `end_reconfig`, this is decided before
+    // the pending state is consulted.
+    let from_epoch = committee_handoff_cert.signature_epoch();
+    let already_completed =
+        self.committee_set().has_committee_handoff(from_epoch) &&
+        self.committee_set().committee_handoff_next_epoch(from_epoch) == epoch;
+    assert!(!already_completed, EReconfigAlreadyCompleted);
+    let pending_epoch = pending_epoch_in_window(self, ctx);
+    // A different pending epoch means this target was aborted and replaced.
+    assert!(pending_epoch == epoch, EWrongReconfigEpoch);
     assert!(!self.committee_set().mpc_public_key().is_empty(), EInitialReconfig);
-    let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
-    let next_committee = self.committee_set().get_committee(next_epoch);
-    let new_committee = *next_committee;
+    let new_committee = *self.committee_set().get_committee(epoch);
     let message = CommitteeTransitionRequest { new_committee };
     self.verify_with_committee(
         self.current_committee(),
@@ -136,6 +203,35 @@ entry fun submit_committee_handoff(
         committee_handoff_cert,
     );
     self.committee_set_mut().set_pending_committee_handoff_cert(committee_handoff_cert);
+}
+
+/// Abort a reconfiguration that has overrun its Sui epoch. Callable by
+/// anyone, with no vote. The conditions are that a reconfiguration is in
+/// flight, that `epoch` names it (so a stale transaction cannot tear down a
+/// different one), and that its epoch is no longer Sui's current epoch (see
+/// `committee_set::abort_reconfig`). `end_reconfig` is gated on the opposite
+/// condition, so an abort can never race a completion.
+///
+/// Deliberately not a governance proposal. The committees that could vote on
+/// one are exactly the parties a stalled reconfiguration puts in doubt: the
+/// pending committee may never finish DKG or key rotation, and a proposal
+/// gated on the outgoing committee's quorum can be stranded by the same
+/// offline stake that stalled the reconfiguration. Binding the abort to an
+/// objective on-chain fact instead keeps the escape hatch usable precisely
+/// when it is needed.
+///
+/// Not gated on the launch switch: a pending genesis committee can only exist
+/// because `start_reconfig` passed that gate, and `versioning` never releases
+/// the `UpgradeCap` it checks for, so the gate could not fail here.
+entry fun abort_reconfig(self: &mut Hashi, epoch: u64, ctx: &TxContext) {
+    self.versioning().assert_version_enabled();
+    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    assert!(
+        self.committee_set().pending_epoch_change().destroy_some() == epoch,
+        EWrongReconfigEpoch,
+    );
+    let aborted = self.committee_set_mut().abort_reconfig(ctx);
+    sui::event::emit(ReconfigAborted { epoch: aborted });
 }
 
 // ~~~~~~~ Package Functions ~~~~~~~
@@ -151,6 +247,24 @@ public(package) fun assert_genesis_launch_authorized(self: &Hashi) {
     if (self.committee_set().mpc_public_key().is_empty()) {
         assert!(self.versioning().has_upgrade_cap(), EGenesisNotAuthorized);
     }
+}
+
+// ~~~~~~~ Private Functions ~~~~~~~
+
+/// The pending epoch, provided the reconfiguration to it can still complete.
+///
+/// Callers first rule out their own target having activated (the benign
+/// race, `EReconfigAlreadyCompleted`, which the node treats as success).
+/// Past that, aborts with `ENotReconfiguring` when nothing is pending (the
+/// target was aborted) and with `EReconfigWindowClosed` once Sui's epoch has
+/// moved past the pending epoch, from which point only `abort_reconfig` can
+/// resolve it. The node keys its retry/give-up decision on which of these
+/// fires, so the distinction is load-bearing.
+fun pending_epoch_in_window(self: &Hashi, ctx: &TxContext): u64 {
+    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
+    assert!(next_epoch == ctx.epoch(), EReconfigWindowClosed);
+    next_epoch
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~
@@ -174,10 +288,26 @@ public fun end_reconfig_for_testing(
 /// other modules).
 public fun submit_committee_handoff_for_testing(
     self: &mut Hashi,
+    epoch: u64,
     committee_handoff_cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
-    submit_committee_handoff(self, committee_handoff_cert, ctx)
+    submit_committee_handoff(self, epoch, committee_handoff_cert, ctx)
+}
+
+#[test_only]
+/// Forwards to `abort_reconfig` so it can be exercised from
+/// `hashi::reconfig_tests` (non-public entry functions are not callable from
+/// other modules).
+public fun abort_reconfig_for_testing(self: &mut Hashi, epoch: u64, ctx: &TxContext) {
+    abort_reconfig(self, epoch, ctx)
+}
+
+#[test_only]
+/// Constructs a `ReconfigAborted` (private fields) so tests can assert the
+/// emitted payload.
+public fun reconfig_aborted_for_testing(epoch: u64): ReconfigAborted {
+    ReconfigAborted { epoch }
 }
 
 #[test_only]

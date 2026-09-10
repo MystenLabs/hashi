@@ -63,22 +63,30 @@ fn build_committee_signature_arg(
     )
 }
 
+/// Arguments of the `submit_committee_handoff` call that precedes
+/// `end_reconfig` in the PTB: the target epoch the handoff is for and the
+/// outgoing committee's certificate.
+struct HandoffCallArgs {
+    epoch: sui_transaction_builder::Argument,
+    cert: sui_transaction_builder::Argument,
+}
+
 fn add_end_reconfig_calls(
     builder: &mut TransactionBuilder,
     package_id: Address,
     hashi_arg: sui_transaction_builder::Argument,
-    committee_handoff_cert_arg: Option<sui_transaction_builder::Argument>,
+    committee_handoff: Option<HandoffCallArgs>,
     mpc_public_key_arg: sui_transaction_builder::Argument,
     mpc_cert_arg: sui_transaction_builder::Argument,
 ) {
-    if let Some(committee_handoff_cert_arg) = committee_handoff_cert_arg {
+    if let Some(HandoffCallArgs { epoch, cert }) = committee_handoff {
         builder.move_call(
             Function::new(
                 package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("submit_committee_handoff"),
             ),
-            vec![hashi_arg, committee_handoff_cert_arg],
+            vec![hashi_arg, epoch, cert],
         );
     }
     builder.move_call(
@@ -1246,6 +1254,40 @@ impl SuiTxExecutor {
         Ok(())
     }
 
+    /// Tear down a reconfiguration that has overrun its Sui epoch
+    /// (`reconfig::abort_reconfig`). Permissionless on chain; `epoch` names
+    /// the pending target so a stale submission cannot abort a newer one.
+    /// A failed status surfaces as `TransactionExecutionError` so the
+    /// caller can tell a lost abort race from a real failure.
+    #[tracing::instrument(level = "info", skip_all, fields(epoch))]
+    pub async fn execute_abort_reconfig(&mut self, epoch: u64) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let epoch_arg = builder.pure(&epoch);
+        builder.move_call(
+            Function::new(
+                self.active_call_package_id(),
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("abort_reconfig"),
+            ),
+            vec![hashi_arg, epoch_arg],
+        );
+        let response = self.execute(builder).await?;
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "abort_reconfig",
+                status: status.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// Submit the outgoing committee handoff and activate its successor in one
     /// PTB, so the handoff certificate is never committed before activation.
     #[tracing::instrument(level = "info", skip_all)]
@@ -1262,15 +1304,23 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
-        let committee_handoff_cert_arg = committee_handoff_cert
-            .map(|cert| build_committee_signature_arg(&mut builder, package_id, cert));
+        // The handoff declares its target so a stale submission fails with a
+        // named reconfig abort the classifier understands rather than a bare
+        // signature failure (the signed message binds the target already).
+        // The completion certificate is signed by the incoming committee, so
+        // its epoch is that target; reading it from there keeps the two calls
+        // in this PTB bound to the same epoch by construction.
+        let committee_handoff = committee_handoff_cert.map(|cert| HandoffCallArgs {
+            epoch: builder.pure(&mpc_cert.epoch()),
+            cert: build_committee_signature_arg(&mut builder, package_id, cert),
+        });
         let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
         let mpc_cert_arg = build_committee_signature_arg(&mut builder, package_id, mpc_cert);
         add_end_reconfig_calls(
             &mut builder,
             package_id,
             hashi_arg,
-            committee_handoff_cert_arg,
+            committee_handoff,
             mpc_public_key_arg,
             mpc_cert_arg,
         );
@@ -2934,14 +2984,17 @@ mod tests {
     fn build_reconfig_commands(with_handoff: bool) -> Vec<sui_sdk_types::Command> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.pure(&0u8);
-        let handoff_arg = with_handoff.then(|| builder.pure(&1u8));
+        let handoff = with_handoff.then(|| HandoffCallArgs {
+            epoch: builder.pure(&4u64),
+            cert: builder.pure(&1u8),
+        });
         let mpc_public_key_arg = builder.pure(&2u8);
         let mpc_cert_arg = builder.pure(&3u8);
         add_end_reconfig_calls(
             &mut builder,
             Address::TWO,
             hashi_arg,
-            handoff_arg,
+            handoff,
             mpc_public_key_arg,
             mpc_cert_arg,
         );
@@ -2973,6 +3026,8 @@ mod tests {
         assert_eq!(submit.function.as_str(), "submit_committee_handoff");
         assert_eq!(end.function.as_str(), "end_reconfig");
         assert_eq!(submit.arguments[0], end.arguments[0]);
+        // Hashi object, target epoch, handoff certificate.
+        assert_eq!(submit.arguments.len(), 3);
 
         let genesis_commands = build_reconfig_commands(false);
         assert!(matches!(

@@ -465,6 +465,12 @@ fn handle_effects(state: &OnchainState, timestamp_ms: u64, effects: Vec<apply::E
             apply::Effect::ReconfigStarted(epoch) => {
                 state.notify(Notification::StartReconfig(epoch));
             }
+            apply::Effect::ReconfigAborted(epoch) => {
+                if let Some(metrics) = state.metrics() {
+                    metrics.reconfig_aborted_total.inc();
+                }
+                state.notify(Notification::ReconfigAborted(epoch));
+            }
             apply::Effect::PackageUpgraded { package, version } => {
                 // The apply layer already extended the version map
                 // under the state guard; this is the operator signal.

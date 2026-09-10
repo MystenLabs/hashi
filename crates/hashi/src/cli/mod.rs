@@ -342,16 +342,6 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose aborting a pending Hashi reconfiguration
-    AbortReconfig {
-        /// Pending Hashi epoch to abort
-        #[clap(long)]
-        epoch: u64,
-
-        #[clap(flatten)]
-        metadata: MetadataArgs,
-    },
-
     /// Propose updating the guardian URL
     UpdateGuardian {
         /// The guardian gRPC endpoint URL
@@ -456,6 +446,14 @@ pub enum CommitteeCommands {
 
     /// Show current epoch information
     Epoch,
+
+    /// Abort a stuck reconfiguration. Permissionless and unvoted: the chain
+    /// accepts it only while a reconfiguration is pending AND its target
+    /// epoch is no longer Sui's current epoch, i.e. the reconfiguration has
+    /// overrun the Sui epoch it was formed for. The current committee stays
+    /// in place and a fresh reconfiguration can then start from the current
+    /// validator set.
+    AbortReconfig,
 }
 
 #[derive(Subcommand)]
@@ -1194,15 +1192,6 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     )
                     .await?;
                 }
-                CreateProposalCommands::AbortReconfig { epoch, metadata } => {
-                    commands::proposal::create_abort_reconfig_proposal(
-                        &config,
-                        epoch,
-                        parse_metadata(metadata.metadata),
-                        &tx_opts,
-                    )
-                    .await?;
-                }
                 CreateProposalCommands::UpdateGuardian { url, metadata } => {
                     commands::proposal::create_update_guardian_proposal(
                         &config,
@@ -1257,6 +1246,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             CommitteeCommands::Epoch => {
                 commands::committee::show_epoch(&config).await?;
+            }
+            CommitteeCommands::AbortReconfig => {
+                commands::committee::abort_reconfig(&config, &tx_opts).await?;
             }
         },
         CliCommand::Config { action } => match action {

@@ -108,10 +108,7 @@ Updates the guardian's URL in the global config. Only the URL is governable:
 the guardian's BTC public key is immutable once set, because rotating it would
 invalidate derived deposit addresses.
 
-## `AbortReconfig`
-
-Aborts a pending reconfiguration for a specific epoch, clearing the pending
-epoch change and removing the pending committee. Voted on by the **current**
-committed committee, which is the only committee with stable onchain voting
-power if the pending committee cannot complete DKG or key rotation. See
-[Reconfiguration](reconfiguration.mdx) for when and how this is used.
+Aborting a stuck reconfiguration is deliberately **not** a proposal: the
+committees that could vote on one are the parties a stalled reconfiguration
+puts in doubt. It is a permissionless entry function gated on onchain state
+instead; see [Abort Reconfig](reconfiguration.mdx#abort-reconfig).

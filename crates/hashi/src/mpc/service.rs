@@ -69,10 +69,20 @@ const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_WAIT_TOTAL_BUDGET: Duration = Duration::from_secs(600);
 const USE_LEGACY_PRESIG_DERIVATION: bool = false;
-/// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
-/// constant name (the `#[error]` abort code encodes a source line, so the
-/// numeric code is not stable).
+/// Move `hashi::reconfig` abort constants, matched by their clever-error
+/// constant names (the `#[error]` abort code encodes a source line, so the
+/// numeric code is not stable). Together they tell the benign "another node
+/// already completed it" race from a dead target: aborted, aborted and
+/// replaced by a different pending epoch, or past its Sui epoch window.
 const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
+const RECONFIG_E_ALREADY_COMPLETED: &str = "EReconfigAlreadyCompleted";
+const RECONFIG_E_WINDOW_CLOSED: &str = "EReconfigWindowClosed";
+/// Raised by both completion entries when a different epoch is pending (the
+/// target is dead) and by `abort_reconfig` when the chain already resolved
+/// the named target.
+const RECONFIG_E_WRONG_EPOCH: &str = "EWrongReconfigEpoch";
+/// `abort_reconfig` refused because the chain still protects the target.
+const COMMITTEE_SET_E_PENDING_EPOCH_STILL_CURRENT: &str = "EPendingEpochStillCurrent";
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -158,8 +168,7 @@ impl MpcService {
             .await;
         let mut notifications = self.inner.onchain_state().subscribe();
         if let Some(epoch) = pending {
-            info!("Entering handle_reconfig for epoch {epoch}");
-            self.handle_reconfig(epoch).await;
+            self.drive_reconfig(epoch).await;
         } else if self.is_awaiting_genesis() {
             // No committee has been formed yet (epoch 0, no committee for epoch 0).
             // Wait for enough validators to register then trigger genesis reconfig.
@@ -168,7 +177,7 @@ impl MpcService {
         } else if self.inner.is_in_current_committee() {
             loop {
                 if let Some(epoch) = self.get_pending_epoch_change() {
-                    self.handle_reconfig(epoch).await;
+                    self.drive_reconfig(epoch).await;
                     continue;
                 }
                 self.sync_if_stale().await;
@@ -181,6 +190,11 @@ impl MpcService {
         } else {
             info!("Node is not in the current committee, waiting for reconfig notification...");
         }
+        // Hashi lagging Sui with nothing pending is what a manual abort, or a
+        // boundary missed while this node was down, leaves behind; catch up
+        // now rather than wait for the next boundary.
+        self.try_submit_start_reconfig(self.inner.onchain_state().latest_checkpoint_epoch())
+            .await;
 
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut reconcile_tick = tokio::time::interval(RECONCILE_TICK);
@@ -199,7 +213,7 @@ impl MpcService {
             }
             // Check for pending reconfig before blocking on `recv()`.
             if let Some(epoch) = self.get_pending_epoch_change() {
-                self.handle_reconfig(epoch).await;
+                self.drive_reconfig(epoch).await;
                 continue;
             }
             tokio::select! {
@@ -207,9 +221,18 @@ impl MpcService {
                     match notification {
                         Ok(notification) => match notification {
                             Notification::StartReconfig(epoch) => {
-                                self.handle_reconfig(epoch).await;
+                                self.drive_reconfig(epoch).await;
                             }
                             Notification::SuiEpochChanged(sui_epoch) => {
+                                self.try_submit_start_reconfig(sui_epoch).await;
+                            }
+                            Notification::ReconfigAborted(epoch) => {
+                                // Whoever tore it down, Hashi now lags Sui;
+                                // start the replacement rather than wait for
+                                // the next boundary.
+                                warn!("reconfiguration to epoch {epoch} was aborted on chain");
+                                let sui_epoch =
+                                    self.inner.onchain_state().latest_checkpoint_epoch();
                                 self.try_submit_start_reconfig(sui_epoch).await;
                             }
                             _ => {}
@@ -292,16 +315,93 @@ impl MpcService {
     }
 
     async fn sleep_if_still_pending(&self, epoch: u64) {
-        if self.get_pending_epoch_change() == Some(epoch) {
+        if self.reconfig_target_pending(epoch) {
             tokio::time::sleep(RETRY_INTERVAL).await;
         }
     }
 
-    /// Wait (bounded) for the object mirror to reflect the epoch change
-    /// another node's `end_reconfig` completed. The lossless watcher
-    /// applies the winning transaction as a root object write within a
-    /// few checkpoints; clock ticks pace the re-checks.
-    async fn wait_for_epoch_change_visibility(&self, epoch: u64) {
+    /// Whether `target_epoch` is still the live reconfiguration: pending on
+    /// chain and inside its Sui epoch window. Once a checkpoint from a later
+    /// Sui epoch has been observed the chain refuses to complete it
+    /// (`EReconfigWindowClosed`) and only an abort can resolve it, so any
+    /// further protocol work on it is wasted.
+    fn reconfig_target_pending(&self, target_epoch: u64) -> bool {
+        reconfig_target_pending(
+            self.get_pending_epoch_change(),
+            self.inner.onchain_state().latest_checkpoint_epoch(),
+            target_epoch,
+        )
+    }
+
+    fn reconfig_window_closed(&self, target_epoch: u64) -> bool {
+        reconfig_window_closed(
+            self.inner.onchain_state().latest_checkpoint_epoch(),
+            target_epoch,
+        )
+    }
+
+    /// Advance the pending reconfiguration to `epoch`: run it while its Sui
+    /// epoch window is open, then reconcile with Sui's epoch, which aborts
+    /// it if the window closed without `end_reconfig` landing and starts a
+    /// replacement whenever Hashi lags Sui with nothing pending (the abort
+    /// path, a manual abort observed from inside `handle_reconfig`, or a
+    /// completion that itself overran the boundary).
+    async fn drive_reconfig(&self, epoch: u64) {
+        if !self.reconfig_window_closed(epoch) {
+            info!("Entering handle_reconfig for epoch {epoch}");
+            self.handle_reconfig(epoch).await;
+        }
+        let sui_epoch = self.inner.onchain_state().latest_checkpoint_epoch();
+        self.try_submit_start_reconfig(sui_epoch).await;
+    }
+
+    /// Submit `abort_reconfig` for a pending reconfiguration whose Sui epoch
+    /// window has closed, then wait (bounded) for the mirror to reflect it.
+    /// Any node may do this and several usually race to; the chain settles
+    /// the race, so "nothing pending" or "wrong epoch" back from it means
+    /// another node got there first.
+    async fn abort_stale_reconfig(&self, epoch: u64) {
+        warn!(
+            "reconfiguration to epoch {epoch} overran its Sui epoch window without completing; \
+             submitting abort_reconfig"
+        );
+        let result = async {
+            let mut executor =
+                crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
+            executor.execute_abort_reconfig(epoch).await
+        };
+        match result.await {
+            Ok(()) => info!("abort_reconfig for epoch {epoch} landed"),
+            Err(e) => match classify_abort_submission_error(&e) {
+                AbortSubmissionErrorKind::AlreadyResolved => {
+                    info!("abort_reconfig for epoch {epoch}: already resolved on chain: {e:#}");
+                }
+                AbortSubmissionErrorKind::StillCurrent => {
+                    // Our checkpoint view of Sui's epoch ran ahead of the
+                    // chain's, which should not happen; let the chain win.
+                    warn!(
+                        "abort_reconfig for epoch {epoch} refused: the chain still considers \
+                         its Sui epoch current: {e:#}"
+                    );
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    return;
+                }
+                AbortSubmissionErrorKind::Other => {
+                    warn!("abort_reconfig for epoch {epoch} failed: {e:#}; retrying later");
+                    tokio::time::sleep(RETRY_INTERVAL).await;
+                    return;
+                }
+            },
+        }
+        self.wait_for_pending_clear_visibility(epoch).await;
+    }
+
+    /// Wait (bounded) for the object mirror to reflect that `epoch` is no
+    /// longer pending: another node's `end_reconfig` activated it, or an
+    /// abort tore it down. The lossless watcher applies the winning
+    /// transaction as a root object write within a few checkpoints; clock
+    /// ticks pace the re-checks.
+    async fn wait_for_pending_clear_visibility(&self, epoch: u64) {
         const VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let _ = tokio::time::timeout(VISIBILITY_TIMEOUT, async {
@@ -733,6 +833,7 @@ impl MpcService {
         reconfig_target_live(
             committees.pending_epoch_change(),
             committees.epoch(),
+            committees.current_committee().is_some(),
             target_epoch,
         )
     }
@@ -1381,8 +1482,17 @@ impl MpcService {
     }
 
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {
-        if self.get_pending_epoch_change().is_some() {
-            return;
+        if let Some(pending) = self.get_pending_epoch_change() {
+            if !reconfig_window_closed(sui_epoch, pending) {
+                return;
+            }
+            // The pending reconfiguration overran its window, so the chain
+            // will not let it complete; abort it (any node may) so the
+            // replacement can form in the new epoch.
+            self.abort_stale_reconfig(pending).await;
+            if self.get_pending_epoch_change().is_some() {
+                return;
+            }
         }
         let hashi_epoch = self
             .inner
@@ -1392,6 +1502,15 @@ impl MpcService {
             .committees
             .epoch();
         if hashi_epoch >= sui_epoch {
+            return;
+        }
+        if self.is_awaiting_genesis() {
+            // Pre-genesis (where an aborted genesis DKG lands) there is no
+            // committee to serve, so block in the same retry-until-pending
+            // loop startup uses rather than give up after a few attempts and
+            // leave the replacement to the next Sui epoch boundary or a
+            // restart.
+            self.try_submit_genesis_reconfig().await;
             return;
         }
         if let Err(e) = self.inner.prepare_and_register_keys(sui_epoch).await {
@@ -1445,9 +1564,10 @@ impl MpcService {
         } else {
             MPC_LABEL_KEY_ROTATION
         };
-        if self.get_pending_epoch_change() != Some(target_epoch) {
+        if !self.reconfig_target_pending(target_epoch) {
             info!(
-                "handle_reconfig: epoch {target_epoch} no longer pending at entry, aborting before start",
+                "handle_reconfig: epoch {target_epoch} no longer pending (or past its Sui epoch \
+                 window) at entry, aborting before start",
             );
             return;
         }
@@ -1463,8 +1583,11 @@ impl MpcService {
             .start_timer();
         info!("handle_reconfig: epoch={target_epoch}, run_dkg={run_dkg}, entering retry loop",);
         let output = loop {
-            if self.get_pending_epoch_change() != Some(target_epoch) {
-                info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
+            if !self.reconfig_target_pending(target_epoch) {
+                info!(
+                    "handle_reconfig: epoch {target_epoch} no longer pending or past its Sui \
+                     epoch window, aborting"
+                );
                 return;
             }
             let in_committee = self.inner.is_in_committee_for(target_epoch);
@@ -1521,7 +1644,7 @@ impl MpcService {
                         .with_label_values(&[protocol_label, reason])
                         .inc();
                     _reconfig_timer.stop_and_discard();
-                    while self.get_pending_epoch_change() == Some(target_epoch) {
+                    while self.reconfig_target_pending(target_epoch) {
                         metrics.task_heartbeat("mpc_service");
                         self.sleep_if_still_pending(target_epoch).await;
                     }
@@ -1557,8 +1680,21 @@ impl MpcService {
             .start_timer();
         let mut end_reconfig_confirmed = false;
         loop {
+            // Pending cleared: activated by another node (signing setup
+            // below) or aborted (nothing to do). Checked before the window
+            // so a completion that landed in the window's last moments is
+            // not mistaken for an overrun.
             if self.get_pending_epoch_change() != Some(target_epoch) {
                 break;
+            }
+            if self.reconfig_window_closed(target_epoch) {
+                info!(
+                    "handle_reconfig: epoch {target_epoch} overran its Sui epoch window before \
+                     end_reconfig landed; it can only be aborted now"
+                );
+                _end_reconfig_timer.stop_and_discard();
+                _reconfig_timer.stop_and_discard();
+                return;
             }
             match self.submit_end_reconfig(target_epoch, &output).await {
                 Ok(()) => {
@@ -1572,6 +1708,21 @@ impl MpcService {
                             target_epoch
                         );
                         self.sleep_if_still_pending(target_epoch).await;
+                    }
+                    ReconfigSubmissionErrorKind::ReconfigTargetDead => {
+                        info!(
+                            "handle_reconfig: epoch {target_epoch} can no longer complete \
+                             (aborted, or past its Sui epoch window); giving up on it: {e:#}"
+                        );
+                        _end_reconfig_timer.stop_and_discard();
+                        _reconfig_timer.stop_and_discard();
+                        // The chain knows the target is dead before the
+                        // mirror does. Until the mirror catches up the outer
+                        // loop still sees it pending and would re-enter here
+                        // immediately, re-collecting signatures and
+                        // submitting another doomed transaction each pass.
+                        self.sleep_if_still_pending(target_epoch).await;
+                        return;
                     }
                     ReconfigSubmissionErrorKind::NonRetryableMoveAbort
                     | ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
@@ -1783,8 +1934,10 @@ impl MpcService {
         self.inner
             .store_reconfig_signature(epoch, my_sig.signature().as_bytes().to_vec());
         let cert = loop {
-            if self.get_pending_epoch_change() != Some(epoch) {
-                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            if !self.reconfig_target_pending(epoch) {
+                return Err(anyhow::anyhow!(
+                    "epoch {epoch} no longer pending or past its Sui epoch window"
+                ));
             }
             match self
                 .collect_reconfig_signatures(epoch, &mpc_public_key, &target_committee)
@@ -1802,8 +1955,10 @@ impl MpcService {
         };
         let mut committee_handoff_cert = self.collect_committee_handoff_if_needed(epoch).await?;
         loop {
-            if self.get_pending_epoch_change() != Some(epoch) {
-                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            if !self.reconfig_target_pending(epoch) {
+                return Err(anyhow::anyhow!(
+                    "epoch {epoch} no longer pending or past its Sui epoch window"
+                ));
             }
             let result = async {
                 let mut executor =
@@ -1823,7 +1978,7 @@ impl MpcService {
                         warn!(
                             "end_reconfig submission for epoch {epoch} found reconfig already completed; waiting for the watcher to observe it: {e:#}"
                         );
-                        self.wait_for_epoch_change_visibility(epoch).await;
+                        self.wait_for_pending_clear_visibility(epoch).await;
                         if self.get_pending_epoch_change() != Some(epoch) {
                             return Ok(());
                         }
@@ -1849,6 +2004,14 @@ impl MpcService {
                         Err(e).with_context(|| {
                             format!(
                                 "end_reconfig submission for epoch {epoch} failed with non-retryable error"
+                            )
+                        })?;
+                    }
+                    ReconfigSubmissionErrorKind::ReconfigTargetDead => {
+                        Err(e).with_context(|| {
+                            format!(
+                                "end_reconfig submission for epoch {epoch} found the target dead: \
+                                 aborted, or past its Sui epoch window"
                             )
                         })?;
                     }
@@ -1882,8 +2045,10 @@ impl MpcService {
         }
 
         let committee_handoff = loop {
-            if self.get_pending_epoch_change() != Some(epoch) {
-                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            if !self.reconfig_target_pending(epoch) {
+                return Err(anyhow::anyhow!(
+                    "epoch {epoch} no longer pending or past its Sui epoch window"
+                ));
             }
             match crate::leader::LeaderService::collect_committee_transition_signatures(
                 &self.inner,
@@ -1931,9 +2096,10 @@ impl MpcService {
             .map_err(|e| anyhow::anyhow!("failed to add own signature: {e}"))?;
         let required_weight = certificate_threshold(committee.total_weight());
         while aggregator.weight() < required_weight {
-            if self.get_pending_epoch_change() != Some(epoch) {
+            if !self.reconfig_target_pending(epoch) {
                 return Err(anyhow::anyhow!(
-                    "epoch {epoch} no longer pending during signature collection"
+                    "epoch {epoch} no longer pending (or past its Sui epoch window) during \
+                     signature collection"
                 ));
             }
             let other_members: Vec<_> = committee
@@ -2064,6 +2230,54 @@ enum ReconfigSubmissionErrorKind {
     NonRetryableMoveAbort,
     CommitteeHandoffAlreadySubmitted,
     EndReconfigAlreadyCompleted,
+    /// The target can no longer complete: it was aborted, or Sui's epoch
+    /// moved past it and only an abort can resolve it now. Give up on it
+    /// without claiming success (no prune, no signing setup).
+    ReconfigTargetDead,
+}
+
+/// How an `abort_reconfig` submission failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbortSubmissionErrorKind {
+    /// Nothing to abort any more: another node aborted it first, or it
+    /// completed inside its window after all.
+    AlreadyResolved,
+    /// The chain still considers the pending epoch current.
+    StillCurrent,
+    Other,
+}
+
+fn classify_abort_submission_error(err: &anyhow::Error) -> AbortSubmissionErrorKind {
+    let Some(error) = crate::sui_tx_executor::transaction_execution_error(err) else {
+        return AbortSubmissionErrorKind::Other;
+    };
+    classify_abort_execution_error(error)
+}
+
+fn classify_abort_execution_error(error: &ExecutionError) -> AbortSubmissionErrorKind {
+    if error
+        .kind
+        .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
+        != Some(ExecutionErrorKind::MoveAbort)
+    {
+        return AbortSubmissionErrorKind::Other;
+    }
+    let Some(abort) = error.abort_opt() else {
+        return AbortSubmissionErrorKind::Other;
+    };
+    let abort_constant_name = abort
+        .clever_error
+        .as_ref()
+        .and_then(|clever| clever.constant_name.as_deref());
+    match (abort.location().module_opt(), abort_constant_name) {
+        (Some("reconfig"), Some(RECONFIG_E_NOT_RECONFIGURING | RECONFIG_E_WRONG_EPOCH)) => {
+            AbortSubmissionErrorKind::AlreadyResolved
+        }
+        (Some("committee_set"), Some(COMMITTEE_SET_E_PENDING_EPOCH_STILL_CURRENT)) => {
+            AbortSubmissionErrorKind::StillCurrent
+        }
+        _ => AbortSubmissionErrorKind::Other,
+    }
 }
 
 fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmissionErrorKind {
@@ -2099,11 +2313,19 @@ fn classify_reconfig_execution_error(error: &ExecutionError) -> ReconfigSubmissi
         (Some("committee_set"), Some("set_pending_committee_handoff_cert"), _) => {
             ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
         }
+        // `ENotReconfiguring` and the window check live in a private helper
+        // shared by `submit_committee_handoff` and `end_reconfig`, while the
+        // entries raise the already-completed and wrong-epoch aborts
+        // themselves, so the location varies; the constant carries the
+        // meaning.
+        (Some("reconfig"), _, Some(RECONFIG_E_ALREADY_COMPLETED)) => {
+            ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
+        }
         (
             Some("reconfig"),
-            Some("submit_committee_handoff") | Some("end_reconfig"),
-            Some(RECONFIG_E_NOT_RECONFIGURING),
-        ) => ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted,
+            _,
+            Some(RECONFIG_E_NOT_RECONFIGURING | RECONFIG_E_WINDOW_CLOSED | RECONFIG_E_WRONG_EPOCH),
+        ) => ReconfigSubmissionErrorKind::ReconfigTargetDead,
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
     }
 }
@@ -2212,8 +2434,32 @@ pub(crate) fn build_pruning_references(
     referenced
 }
 
-fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
-    pending == Some(target_epoch) || current_epoch == target_epoch
+/// Whether `target_epoch` is still worth acting on after the protocol ran:
+/// pending, or already the current epoch (another node's `end_reconfig`
+/// activated it). "Current" needs a committee to exist for it: before
+/// genesis the epoch is 0 with no committee, and the genesis committee on a
+/// fresh network is pinned to Sui epoch 0 too, so an aborted genesis DKG
+/// would otherwise look activated.
+fn reconfig_target_live(
+    pending: Option<u64>,
+    current_epoch: u64,
+    current_committee_exists: bool,
+    target_epoch: u64,
+) -> bool {
+    pending == Some(target_epoch) || (current_epoch == target_epoch && current_committee_exists)
+}
+
+/// `start_reconfig` pins the pending committee to Sui's epoch, and the chain
+/// refuses to complete it once Sui's epoch has moved on. `latest_sui_epoch`
+/// is the watcher's checkpoint view, which can lag the chain but never lead
+/// it, so a closed window here is closed on chain too.
+fn reconfig_window_closed(latest_sui_epoch: u64, target_epoch: u64) -> bool {
+    latest_sui_epoch > target_epoch
+}
+
+/// Pending on chain and inside its Sui epoch window.
+fn reconfig_target_pending(pending: Option<u64>, latest_sui_epoch: u64, target_epoch: u64) -> bool {
+    pending == Some(target_epoch) && !reconfig_window_closed(latest_sui_epoch, target_epoch)
 }
 
 #[cfg(test)]
@@ -2318,15 +2564,172 @@ mod pruning_reference_tests {
 }
 
 #[cfg(test)]
+mod reconfig_submission_classifier_tests {
+    use sui_rpc::proto::sui::rpc::v2::CleverError;
+    use sui_rpc::proto::sui::rpc::v2::ExecutionError;
+    use sui_rpc::proto::sui::rpc::v2::MoveAbort;
+    use sui_rpc::proto::sui::rpc::v2::MoveLocation;
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ErrorDetails;
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+    use super::AbortSubmissionErrorKind;
+    use super::ReconfigSubmissionErrorKind;
+    use super::classify_abort_execution_error;
+    use super::classify_reconfig_execution_error;
+
+    /// A Move abort raised in `module::function`, with the clever-error
+    /// constant name the fullnode attaches for `#[error]` constants.
+    fn move_abort(module: &str, function: &str, constant: Option<&str>) -> ExecutionError {
+        let mut location = MoveLocation::default();
+        location.module = Some(module.to_string());
+        location.function_name = Some(function.to_string());
+        let mut abort = MoveAbort::default();
+        abort.abort_code = Some(1);
+        abort.location = Some(location);
+        abort.clever_error = constant.map(|name| {
+            let mut clever = CleverError::default();
+            clever.constant_name = Some(name.to_string());
+            clever
+        });
+        let mut error = ExecutionError::default();
+        error.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+        error.error_details = Some(ErrorDetails::Abort(abort));
+        error
+    }
+
+    #[test]
+    fn a_won_end_reconfig_race_is_reported_as_completed() {
+        // Each completion entry raises this itself.
+        for function in ["end_reconfig", "submit_committee_handoff"] {
+            let error = move_abort("reconfig", function, Some("EReconfigAlreadyCompleted"));
+            assert_eq!(
+                classify_reconfig_execution_error(&error),
+                ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted,
+                "{function}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_aborted_or_overrun_target_is_dead_not_completed() {
+        // The first two are raised by the private helper both entries share;
+        // each entry raises the wrong-epoch abort itself.
+        for (function, constant) in [
+            ("pending_epoch_in_window", "ENotReconfiguring"),
+            ("pending_epoch_in_window", "EReconfigWindowClosed"),
+            ("end_reconfig", "EWrongReconfigEpoch"),
+            ("submit_committee_handoff", "EWrongReconfigEpoch"),
+        ] {
+            let error = move_abort("reconfig", function, Some(constant));
+            assert_eq!(
+                classify_reconfig_execution_error(&error),
+                ReconfigSubmissionErrorKind::ReconfigTargetDead,
+                "{constant}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_failures_keep_their_existing_classification() {
+        let handoff = move_abort("committee_set", "set_pending_committee_handoff_cert", None);
+        assert_eq!(
+            classify_reconfig_execution_error(&handoff),
+            ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
+        );
+        let other = move_abort(
+            "reconfig",
+            "submit_committee_handoff",
+            Some("EInitialReconfig"),
+        );
+        assert_eq!(
+            classify_reconfig_execution_error(&other),
+            ReconfigSubmissionErrorKind::NonRetryableMoveAbort
+        );
+        let mut not_an_abort = ExecutionError::default();
+        not_an_abort.kind = Some(ExecutionErrorKind::InsufficientGas as i32);
+        assert_eq!(
+            classify_reconfig_execution_error(&not_an_abort),
+            ReconfigSubmissionErrorKind::NonMoveAbort
+        );
+    }
+
+    #[test]
+    fn a_lost_abort_race_is_already_resolved() {
+        for constant in ["ENotReconfiguring", "EWrongReconfigEpoch"] {
+            let error = move_abort("reconfig", "abort_reconfig", Some(constant));
+            assert_eq!(
+                classify_abort_execution_error(&error),
+                AbortSubmissionErrorKind::AlreadyResolved,
+                "{constant}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_abort_inside_the_window_is_still_current() {
+        let error = move_abort(
+            "committee_set",
+            "abort_reconfig",
+            Some("EPendingEpochStillCurrent"),
+        );
+        assert_eq!(
+            classify_abort_execution_error(&error),
+            AbortSubmissionErrorKind::StillCurrent
+        );
+        let other = move_abort(
+            "versioning",
+            "assert_version_enabled",
+            Some("EVersionDisabled"),
+        );
+        assert_eq!(
+            classify_abort_execution_error(&other),
+            AbortSubmissionErrorKind::Other
+        );
+    }
+}
+
+#[cfg(test)]
 mod reconfig_target_tests {
     use super::reconfig_target_live;
+    use super::reconfig_target_pending;
+    use super::reconfig_window_closed;
 
     #[test]
     fn live_while_pending_or_current_only() {
-        assert!(reconfig_target_live(Some(6), 5, 6));
-        assert!(reconfig_target_live(None, 6, 6));
-        assert!(!reconfig_target_live(None, 5, 6));
-        assert!(!reconfig_target_live(Some(7), 5, 6));
-        assert!(!reconfig_target_live(None, 7, 6));
+        assert!(reconfig_target_live(Some(6), 5, true, 6));
+        assert!(reconfig_target_live(None, 6, true, 6));
+        assert!(!reconfig_target_live(None, 5, true, 6));
+        assert!(!reconfig_target_live(Some(7), 5, true, 6));
+        assert!(!reconfig_target_live(None, 7, true, 6));
+    }
+
+    #[test]
+    fn an_aborted_genesis_at_sui_epoch_zero_is_not_live() {
+        // Genesis pending: epoch 0 with the pending epoch-0 committee already
+        // inserted by start_reconfig, so the current committee exists.
+        assert!(reconfig_target_live(Some(0), 0, true, 0));
+        // Aborted genesis: the epoch-0 committee was removed, back to
+        // pre-genesis.
+        assert!(!reconfig_target_live(None, 0, false, 0));
+        // Activated genesis: the committee for epoch 0 now exists.
+        assert!(reconfig_target_live(None, 0, true, 0));
+    }
+
+    #[test]
+    fn the_window_closes_once_a_later_sui_epoch_is_seen() {
+        assert!(!reconfig_window_closed(6, 6));
+        assert!(reconfig_window_closed(7, 6));
+        // A lagging checkpoint view never closes the window early.
+        assert!(!reconfig_window_closed(5, 6));
+        assert!(!reconfig_window_closed(0, 6));
+    }
+
+    #[test]
+    fn pending_means_pending_and_inside_the_window() {
+        assert!(reconfig_target_pending(Some(6), 6, 6));
+        assert!(reconfig_target_pending(Some(6), 5, 6));
+        assert!(!reconfig_target_pending(Some(6), 7, 6));
+        assert!(!reconfig_target_pending(None, 6, 6));
+        assert!(!reconfig_target_pending(Some(7), 6, 6));
     }
 }

@@ -61,6 +61,9 @@ const EInvalidEncryptionPublicKeyLength: vector<u8> =
 #[error(code = 13)]
 const EInvalidBlsProofOfPossession: vector<u8> =
     b"BLS proof of possession does not verify under the submitted public key";
+#[error(code = 14)]
+const EPendingEpochStillCurrent: vector<u8> =
+    b"The pending reconfiguration targets Sui's current epoch and may still complete";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -421,35 +424,21 @@ public(package) fun clear_resignation(
     self.member_mut(validator_address).resigned = false;
 }
 
+/// Thin wrapper extracting the voting powers from the system object. Split
+/// from `start_reconfig_from_voting_powers` because unit tests cannot
+/// construct a `SuiSystemState`: the inner function is what lets the
+/// start/abort/restart cycle be unit-tested at all.
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
     epoch_config: Config,
     ctx: &TxContext,
 ): u64 {
-    // We can't trigger reconfig if we are already reconfiguring
-    assert!(!self.is_reconfiguring());
-    // Don't start a reconfig for an epoch where we already have a committee
-    // determined.
-    assert!(!self.has_committee(ctx.epoch()));
-    // We can only trigger reconfig if the current epoch is 0 (for genesis) or
-    // our current epoch is not the same as Sui's epoch
-    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
-
-    let committee = self.new_committee_from_validator_set(
-        sui_system,
+    self.start_reconfig_from_voting_powers(
+        sui_system.active_validator_voting_powers(),
         epoch_config,
         ctx,
-    );
-
-    let epoch = committee.epoch();
-    self.pending_epoch_change =
-        option::some(PendingEpochChange {
-            epoch,
-            committee_handoff_cert: option::none(),
-        });
-    self.insert_committee(committee);
-    epoch
+    )
 }
 
 public(package) fun set_pending_committee_handoff_cert(
@@ -489,8 +478,26 @@ public(package) fun end_reconfig(
     (next_epoch, committee_handoff_cert)
 }
 
-public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+/// Tear down an in-flight reconfiguration that has overrun its Sui epoch:
+/// clears the pending epoch change and removes the pending committee (and
+/// any handoff certificate it collected). The current epoch, committee, and
+/// MPC public key are untouched. After genesis that means operations resume
+/// under the last committed committee; at genesis there is no committee yet,
+/// so Hashi is back in its pre-genesis state. Either way a fresh
+/// `start_reconfig` can form a new committee from the now-current validator
+/// set.
+///
+/// `start_reconfig` pins the pending committee's epoch to Sui's epoch at
+/// formation time, so a pending epoch that still equals Sui's epoch means the
+/// reconfiguration is inside its window and may legitimately complete; it
+/// must not be torn down under a committee that is mid-protocol. Only once
+/// Sui's epoch has moved past the target is the reconfiguration presumed
+/// stuck and abortable. This is the whole gate: there is no signer check,
+/// because a stalled reconfiguration is exactly the state in which no
+/// committee can be relied on to produce a certificate or a quorum.
+public(package) fun abort_reconfig(self: &mut CommitteeSet, ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
+    assert!(self.pending_epoch_change.borrow().epoch != ctx.epoch(), EPendingEpochStillCurrent);
     let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
         .pending_epoch_change
         .extract();
@@ -502,6 +509,58 @@ public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u
 
     self.remove_committee(next_epoch);
     next_epoch
+}
+
+/// Form the next committee from a validator -> voting-power map and record
+/// it as pending for Sui's current epoch. See `start_reconfig`.
+fun start_reconfig_from_voting_powers(
+    self: &mut CommitteeSet,
+    validator_set: sui::vec_map::VecMap<address, u64>,
+    epoch_config: Config,
+    ctx: &TxContext,
+): u64 {
+    // We can't trigger reconfig if we are already reconfiguring
+    assert!(!self.is_reconfiguring());
+    // Don't start a reconfig for an epoch where we already have a committee
+    // determined.
+    assert!(!self.has_committee(ctx.epoch()));
+    // We can only trigger reconfig if the current epoch is 0 (for genesis) or
+    // our current epoch is not the same as Sui's epoch
+    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
+
+    let committee = self.new_committee_from_voting_powers(
+        ctx.epoch(),
+        validator_set,
+        epoch_config,
+    );
+
+    let epoch = committee.epoch();
+    self.pending_epoch_change =
+        option::some(PendingEpochChange {
+            epoch,
+            committee_handoff_cert: option::none(),
+        });
+    self.insert_committee(committee);
+    epoch
+}
+
+/// Whether a completed handoff is stored for `from_epoch`, i.e. whether a
+/// reconfiguration out of that epoch already activated.
+public(package) fun has_committee_handoff(self: &CommitteeSet, from_epoch: u64): bool {
+    self
+        .committees
+        .contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey {
+            epoch: from_epoch,
+        })
+}
+
+/// The epoch the handoff stored for `from_epoch` activated. Aborts when none
+/// is stored; check `has_committee_handoff` first.
+public(package) fun committee_handoff_next_epoch(self: &CommitteeSet, from_epoch: u64): u64 {
+    self
+        .committees
+        .borrow<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey { epoch: from_epoch })
+        .next_epoch
 }
 
 public(package) fun insert_committee_handoff(
@@ -590,23 +649,6 @@ fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
 
 fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
     self.committees.remove(epoch)
-}
-
-/// Thin wrapper extracting the epoch and voting powers from the system
-/// object. Split from `new_committee_from_voting_powers` because unit tests
-/// cannot construct a `SuiSystemState`: the pure inner function is what lets
-/// formation (including the ignore filtering) be unit-tested at all.
-fun new_committee_from_validator_set(
-    self: &CommitteeSet,
-    sui_system: &sui_system::sui_system::SuiSystemState,
-    epoch_config: Config,
-    ctx: &TxContext,
-): Committee {
-    self.new_committee_from_voting_powers(
-        ctx.epoch(),
-        sui_system.active_validator_voting_powers(),
-        epoch_config,
-    )
 }
 
 /// Build a committee for `epoch` from a validator -> voting-power map,
@@ -891,11 +933,19 @@ public fun tls_key_holder_for_testing(
 
 #[test_only]
 public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
-    self
-        .committees
-        .contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey {
-            epoch: from_epoch,
-        })
+    self.has_committee_handoff(from_epoch)
+}
+
+#[test_only]
+/// Exercise `start_reconfig` (checks, formation, and pending state) without
+/// a SuiSystemState by supplying the voting-power map directly.
+public fun start_reconfig_from_voting_powers_for_testing(
+    self: &mut CommitteeSet,
+    validator_set: sui::vec_map::VecMap<address, u64>,
+    epoch_config: Config,
+    ctx: &TxContext,
+): u64 {
+    self.start_reconfig_from_voting_powers(validator_set, epoch_config, ctx)
 }
 
 #[test_only]
