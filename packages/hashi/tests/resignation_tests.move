@@ -86,6 +86,7 @@ fun run_epoch_transition(
     let end_ctx = &test_utils::new_tx_context(ctx.sender(), next_epoch);
     reconfig::submit_committee_handoff_for_testing(
         hashi,
+        next_epoch,
         committee_handoff_cert,
         end_ctx,
     );
@@ -381,7 +382,7 @@ fun test_resign_mid_reconfig_survives_one_boundary() {
     );
     // Completion must land inside the target's Sui epoch window.
     let ctx = &mut test_utils::new_tx_context(VOTER1, 1);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, ctx);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, ctx);
     reconfig::end_reconfig_for_testing(&mut hashi, mpc_public_key, mpc_cert, ctx);
 
     assert!(hashi.committee_set().epoch() == 1);

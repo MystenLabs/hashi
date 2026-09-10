@@ -156,24 +156,45 @@ entry fun end_reconfig(
     sui::event::emit(ReconfigEnded { from_epoch, epoch, mpc_public_key });
 }
 
+/// Record the outgoing committee's certificate approving the incoming
+/// committee for `epoch`.
+///
+/// `epoch` is a declaration, not a safety check. The signed message already
+/// binds the target (the incoming committee, epoch included), so a
+/// certificate for any other target could never verify here. What the
+/// signature cannot do is say why it failed. The certificate's own epoch is
+/// the source epoch, and its target is only inside the signed message, which
+/// the chain reconstructs rather than receives; without `epoch`, a stale
+/// submission for an aborted target and a genuinely bad certificate are the
+/// same `committee::ESigVerification` abort, and a stored handoff out of the
+/// same source epoch cannot be told apart from this submission's own
+/// completion. Declaring the target lets the chain answer with the named
+/// `reconfig` constants the node keys its retry/give-up decision on, the same
+/// way `abort_reconfig` names the epoch it aborts.
 entry fun submit_committee_handoff(
     self: &mut Hashi,
+    epoch: u64,
     committee_handoff_cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
     self.versioning().assert_version_enabled();
-    // The certificate is signed by the outgoing committee, so its epoch is
-    // the handoff's source epoch; its target is bound only inside the signed
-    // message. With nothing pending, the completion it can be reporting is
-    // the handoff stored out of that source epoch, which it must certify.
+    // Handoffs are stored by source epoch when their target activates, and a
+    // replacement can form from the same source epoch after an abort, so the
+    // stored record must name `epoch` too before this submission counts as a
+    // completion that already happened. A stored record into `epoch` also
+    // rules out `epoch` still being pending (a later reconfiguration targets
+    // a later Sui epoch), so, as in `end_reconfig`, this is decided before
+    // the pending state is consulted.
+    let from_epoch = committee_handoff_cert.signature_epoch();
     let already_completed =
-        !self.committee_set().is_reconfiguring() &&
-        certifies_stored_handoff(self, committee_handoff_cert);
+        self.committee_set().has_committee_handoff(from_epoch) &&
+        self.committee_set().committee_handoff_next_epoch(from_epoch) == epoch;
     assert!(!already_completed, EReconfigAlreadyCompleted);
-    let next_epoch = pending_epoch_in_window(self, ctx);
+    let pending_epoch = pending_epoch_in_window(self, ctx);
+    // A different pending epoch means this target was aborted and replaced.
+    assert!(pending_epoch == epoch, EWrongReconfigEpoch);
     assert!(!self.committee_set().mpc_public_key().is_empty(), EInitialReconfig);
-    let next_committee = self.committee_set().get_committee(next_epoch);
-    let new_committee = *next_committee;
+    let new_committee = *self.committee_set().get_committee(epoch);
     let message = CommitteeTransitionRequest { new_committee };
     self.verify_with_committee(
         self.current_committee(),
@@ -246,28 +267,6 @@ fun pending_epoch_in_window(self: &Hashi, ctx: &TxContext): u64 {
     next_epoch
 }
 
-/// Whether `cert` certifies the handoff already stored out of its signing
-/// epoch. Handoffs are keyed by source epoch, and after an abort a
-/// replacement can form from the same source epoch, so the source alone does
-/// not identify a transition. The target is bound only inside the signed
-/// message (the incoming committee, epoch included), so the certificate is
-/// verified against the stored transition to read it out: a certificate for
-/// a target that was aborted and then replaced from the same source epoch
-/// fails verification here instead of passing as a completion of itself.
-fun certifies_stored_handoff(self: &Hashi, cert: CommitteeSignature): bool {
-    let from_epoch = cert.signature_epoch();
-    if (!self.committee_set().has_committee_handoff(from_epoch)) return false;
-    let completed_epoch = self.committee_set().committee_handoff_next_epoch(from_epoch);
-    let new_committee = *self.committee_set().get_committee(completed_epoch);
-    self.verify_with_committee(
-        self.committee_set().get_committee(from_epoch),
-        hashi::intent::committee_transition(),
-        CommitteeTransitionRequest { new_committee },
-        cert,
-    );
-    true
-}
-
 // ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
@@ -289,10 +288,11 @@ public fun end_reconfig_for_testing(
 /// other modules).
 public fun submit_committee_handoff_for_testing(
     self: &mut Hashi,
+    epoch: u64,
     committee_handoff_cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
-    submit_committee_handoff(self, committee_handoff_cert, ctx)
+    submit_committee_handoff(self, epoch, committee_handoff_cert, ctx)
 }
 
 #[test_only]

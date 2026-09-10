@@ -77,10 +77,9 @@ const USE_LEGACY_PRESIG_DERIVATION: bool = false;
 const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 const RECONFIG_E_ALREADY_COMPLETED: &str = "EReconfigAlreadyCompleted";
 const RECONFIG_E_WINDOW_CLOSED: &str = "EReconfigWindowClosed";
-/// Raised by `end_reconfig` when a different epoch is pending (the target is
-/// dead) and by `abort_reconfig` when the chain already resolved the named
-/// target. `submit_committee_handoff` carries no target epoch and never
-/// raises it.
+/// Raised by both completion entries when a different epoch is pending (the
+/// target is dead) and by `abort_reconfig` when the chain already resolved
+/// the named target.
 const RECONFIG_E_WRONG_EPOCH: &str = "EWrongReconfigEpoch";
 /// `abort_reconfig` refused because the chain still protects the target.
 const COMMITTEE_SET_E_PENDING_EPOCH_STILL_CURRENT: &str = "EPendingEpochStillCurrent";
@@ -2614,11 +2613,12 @@ mod reconfig_submission_classifier_tests {
     #[test]
     fn an_aborted_or_overrun_target_is_dead_not_completed() {
         // The first two are raised by the private helper both entries share;
-        // `end_reconfig` raises the wrong-epoch abort itself.
+        // each entry raises the wrong-epoch abort itself.
         for (function, constant) in [
             ("pending_epoch_in_window", "ENotReconfiguring"),
             ("pending_epoch_in_window", "EReconfigWindowClosed"),
             ("end_reconfig", "EWrongReconfigEpoch"),
+            ("submit_committee_handoff", "EWrongReconfigEpoch"),
         ] {
             let error = move_abort("reconfig", function, Some(constant));
             assert_eq!(

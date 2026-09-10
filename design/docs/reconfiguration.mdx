@@ -151,19 +151,21 @@ Completion must land inside the Sui epoch the reconfiguration was formed in.
 `EReconfigWindowClosed` once Sui's epoch has moved past it; from then on only
 [abort reconfig](#abort-reconfig) can resolve the pending state. Each
 submission is bound to its target. `end_reconfig` reads it from the
-completion certificate's signing epoch and aborts with `EWrongReconfigEpoch`
-when a different epoch is pending (the target was aborted and a replacement
-has formed). A handoff certificate carries its target inside the signed
-message (the incoming committee, epoch included), so one for an aborted
-target fails verification against whatever is pending. A submission whose
-own target already activated is reported as `EReconfigAlreadyCompleted`
-(another node's `end_reconfig` won the race, which the node treats as
-success), whether or not the next reconfiguration is already pending; nothing
-pending otherwise is `ENotReconfiguring` (the target was aborted). Handoffs
-are stored by source epoch, and a replacement can form from the same source
-epoch after an abort, so for a handoff "own target" is established by
-verifying the certificate against the stored transition out of its signing
-epoch. Nodes key their retry-or-give-up decision on which of these fires.
+completion certificate's signing epoch; `submit_committee_handoff` takes it
+as an explicit `epoch` argument, because the handoff certificate is signed by
+the outgoing committee and its signing epoch is the source epoch. The signed
+handoff message already binds the target, so the argument adds no security;
+it lets the chain name the failure. Both entries abort with
+`EWrongReconfigEpoch` when a different epoch is pending (the target was
+aborted and a replacement has formed), before any signature is checked. A
+submission whose own target already activated is reported as
+`EReconfigAlreadyCompleted` (another node's `end_reconfig` won the race, which
+the node treats as success), whether or not the next reconfiguration is
+already pending; nothing pending otherwise is `ENotReconfiguring` (the target
+was aborted). Handoffs are stored by source epoch, and a replacement can form
+from the same source epoch after an abort, so for a handoff "own target" means
+the stored handoff out of its signing epoch names the submitted `epoch`. Nodes
+key their retry-or-give-up decision on which of these fires.
 
 After the new epoch begins, the new committee initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of

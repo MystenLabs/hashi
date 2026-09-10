@@ -110,7 +110,12 @@ fun test_end_reconfig_stores_committee_handoff() {
     );
 
     let in_window = &test_utils::new_tx_context(VOTER1, next_epoch);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, committee_handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(
+        &mut hashi,
+        next_epoch,
+        committee_handoff_cert,
+        in_window,
+    );
     reconfig::end_reconfig_for_testing(&mut hashi, mpc_public_key, mpc_cert, in_window);
 
     assert!(hashi.committee_set().epoch() == next_epoch);
@@ -173,7 +178,12 @@ fun test_submit_committee_handoff_rejects_initial_reconfig() {
     );
 
     let in_window = &test_utils::new_tx_context(VOTER1, next_epoch);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, committee_handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(
+        &mut hashi,
+        next_epoch,
+        committee_handoff_cert,
+        in_window,
+    );
     std::unit_test::destroy(hashi);
 }
 
@@ -216,7 +226,12 @@ fun test_submit_committee_handoff_rejects_handoff_signed_by_wrong_committee() {
     );
 
     let in_window = &test_utils::new_tx_context(VOTER1, next_epoch);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, committee_handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(
+        &mut hashi,
+        next_epoch,
+        committee_handoff_cert,
+        in_window,
+    );
     reconfig::end_reconfig_for_testing(&mut hashi, mpc_public_key, mpc_cert, in_window);
     std::unit_test::destroy(hashi);
 }
@@ -319,7 +334,12 @@ fun test_abort_reconfig_discards_submitted_handoff_cert() {
         3,
     );
     let in_window = &test_utils::new_tx_context(VOTER1, 1);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, committee_handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(
+        &mut hashi,
+        1,
+        committee_handoff_cert,
+        in_window,
+    );
 
     let later_ctx = &test_utils::new_tx_context(VOTER1, 2);
     reconfig::abort_reconfig_for_testing(&mut hashi, 1, later_ctx);
@@ -490,7 +510,7 @@ fun test_end_reconfig_rejects_closed_window() {
     let mut hashi = hashi_with_pending_reconfig(ctx);
     let (mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
     let in_window = &test_utils::new_tx_context(VOTER1, 1);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, in_window);
 
     let late = &test_utils::new_tx_context(VOTER1, 2);
     reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, late);
@@ -506,7 +526,7 @@ fun test_submit_committee_handoff_rejects_closed_window() {
     let (_mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
 
     let late = &test_utils::new_tx_context(VOTER1, 2);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, late);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, late);
 
     std::unit_test::destroy(hashi);
 }
@@ -520,7 +540,7 @@ fun test_end_reconfig_after_completion_reports_already_completed() {
     let mut hashi = hashi_with_pending_reconfig(ctx);
     let (mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
     let in_window = &test_utils::new_tx_context(VOTER1, 1);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, in_window);
     reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
     assert!(hashi.committee_set().epoch() == 1);
 
@@ -539,7 +559,7 @@ fun test_end_reconfig_after_completion_reports_already_completed_while_next_pend
     let mut hashi = hashi_with_pending_reconfig(ctx);
     let (mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
     let in_window = &test_utils::new_tx_context(VOTER1, 1);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, in_window);
     reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
     assert!(hashi.committee_set().epoch() == 1);
     hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee_for_testing(2));
@@ -588,11 +608,32 @@ fun test_submit_committee_handoff_after_completion_reports_already_completed() {
     let mut hashi = hashi_with_pending_reconfig(ctx);
     let (mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
     let in_window = &test_utils::new_tx_context(VOTER1, 1);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, in_window);
     reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
     assert!(hashi.committee_set().epoch() == 1);
 
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, in_window);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = reconfig::EReconfigAlreadyCompleted)]
+/// The handoff side of the same race: once 0 -> 1 has activated, a late
+/// handoff for it is "already completed" even after the next reconfiguration
+/// (1 -> 2) is pending.
+fun test_submit_committee_handoff_after_completion_reports_already_completed_while_next_pending() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    let (mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
+    let in_window = &test_utils::new_tx_context(VOTER1, 1);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, in_window);
+    reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
+    assert!(hashi.committee_set().epoch() == 1);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee_for_testing(2));
+
+    let next_window = &test_utils::new_tx_context(VOTER1, 2);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, next_window);
 
     std::unit_test::destroy(hashi);
 }
@@ -622,7 +663,7 @@ fun test_submit_committee_handoff_after_abort_is_not_reconfiguring() {
     let late = &test_utils::new_tx_context(VOTER1, 2);
     reconfig::abort_reconfig_for_testing(&mut hashi, 1, late);
 
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, late);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, handoff_cert, late);
 
     std::unit_test::destroy(hashi);
 }
@@ -641,6 +682,22 @@ fun test_abort_reconfig_rejects_wrong_epoch() {
     std::unit_test::destroy(hashi);
 }
 
+#[test]
+#[expected_failure(abort_code = reconfig::EWrongReconfigEpoch)]
+/// The handoff names its target like `abort_reconfig` does, so a submission
+/// for an epoch other than the pending one is refused before any signature is
+/// checked.
+fun test_submit_committee_handoff_rejects_wrong_epoch() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    let (_mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
+
+    let in_window = &test_utils::new_tx_context(VOTER1, 1);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 2, handoff_cert, in_window);
+
+    std::unit_test::destroy(hashi);
+}
+
 /// Aborts the pending epoch-1 reconfiguration at Sui epoch 2 and pends a
 /// replacement for epoch 2, i.e. the abort-and-restart cycle from the same
 /// source epoch 0.
@@ -651,10 +708,11 @@ fun abort_and_pend_replacement(hashi: &mut hashi::hashi::Hashi) {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::committee::ESigVerification)]
-/// A handoff certificate binds its target inside the signed message (the
-/// incoming committee, epoch included), so one for an aborted target cannot
-/// verify against the replacement now pending from the same source epoch.
+#[expected_failure(abort_code = reconfig::EWrongReconfigEpoch)]
+/// The handoff names its target, so one for an aborted target is refused as
+/// a dead target before any signature is checked, instead of failing
+/// verification against the replacement now pending from the same source
+/// epoch with a committee-module abort the node cannot classify.
 fun test_submit_committee_handoff_rejects_aborted_target_while_replacement_pending() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = hashi_with_pending_reconfig(ctx);
@@ -662,7 +720,7 @@ fun test_submit_committee_handoff_rejects_aborted_target_while_replacement_pendi
     abort_and_pend_replacement(&mut hashi);
 
     let in_window = &test_utils::new_tx_context(VOTER1, 2);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, stale_handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, stale_handoff_cert, in_window);
 
     std::unit_test::destroy(hashi);
 }
@@ -682,12 +740,11 @@ fun test_end_reconfig_rejects_aborted_target_while_replacement_pending() {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::committee::ESigVerification)]
+#[expected_failure(abort_code = reconfig::ENotReconfiguring)]
 /// Handoffs are stored by source epoch, so once the replacement (0 -> 2) has
 /// activated a handoff for the aborted target (0 -> 1) must not read that
-/// record as its own completion. The certificate is verified against the
-/// stored transition before the benign race is reported, and a certificate
-/// over the aborted committee fails that verification.
+/// record as its own completion. The stored record names target 2, so a
+/// submission for target 1 finds nothing of its own and is simply dead.
 fun test_submit_committee_handoff_for_aborted_target_after_replacement_completed() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = hashi_with_pending_reconfig(ctx);
@@ -695,12 +752,12 @@ fun test_submit_committee_handoff_for_aborted_target_after_replacement_completed
     abort_and_pend_replacement(&mut hashi);
     let (mpc_cert, handoff_cert) = transition_certs(&hashi, 2, vector[1, 2, 3]);
     let in_window = &test_utils::new_tx_context(VOTER1, 2);
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 2, handoff_cert, in_window);
     reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
     assert!(hashi.committee_set().epoch() == 2);
     assert!(hashi.committee_set().has_committee_handoff_for_testing(0));
 
-    reconfig::submit_committee_handoff_for_testing(&mut hashi, stale_handoff_cert, in_window);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, 1, stale_handoff_cert, in_window);
 
     std::unit_test::destroy(hashi);
 }
