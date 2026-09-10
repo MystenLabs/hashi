@@ -504,7 +504,6 @@ impl LeaderService {
         // the BLS certificate via fan-out.
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: txn.id,
-            request_ids: txn.request_ids.clone(),
             signatures: witness_signatures.clone(),
             guardian_signatures: guardian_signatures.clone(),
         };
@@ -560,7 +559,6 @@ impl LeaderService {
         let included_checkpoint_seq = Self::submit_finalize_withdrawal(
             inner,
             &txn.id,
-            &txn.request_ids.clone(),
             &guardian_signatures,
             signed.committee_signature(),
         )
@@ -1072,7 +1070,6 @@ impl LeaderService {
     async fn submit_finalize_withdrawal(
         inner: &Arc<Hashi>,
         withdrawal_id: &Address,
-        request_ids: &[Address],
         guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
@@ -1080,7 +1077,7 @@ impl LeaderService {
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
-            .execute_finalize_withdrawal(withdrawal_id, request_ids, guardian_signatures, cert)
+            .execute_finalize_withdrawal(withdrawal_id, guardian_signatures, cert)
             .await
     }
 
@@ -1615,11 +1612,6 @@ impl WithdrawalTxSigning {
     ) -> SignWithdrawalTxSigningRequest {
         SignWithdrawalTxSigningRequest {
             withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),
-            request_ids: self
-                .request_ids
-                .iter()
-                .map(|id| id.as_bytes().to_vec().into())
-                .collect(),
             signatures: self
                 .signatures
                 .iter()

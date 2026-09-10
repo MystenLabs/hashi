@@ -1695,17 +1695,16 @@ impl SuiTxExecutor {
 
     /// Execute `withdraw::finalize_withdrawal` to attach the one-shot guardian
     /// signatures and flip the broadcast gate once every input is MPC-signed.
-    /// Cert is over `WithdrawalSignedMessage { withdrawal_id, request_ids,
-    /// signatures (read from the batch on-chain), guardian_signatures }`.
+    /// Cert is over `WithdrawalSignedMessage { withdrawal_id, signatures (read
+    /// from the batch on-chain), guardian_signatures }`.
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(withdrawal_txn_id = %withdrawal_id, request_count = request_ids.len()),
+        fields(withdrawal_txn_id = %withdrawal_id),
     )]
     pub async fn execute_finalize_withdrawal(
         &mut self,
         withdrawal_id: &Address,
-        request_ids: &[Address],
         guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
@@ -1718,8 +1717,6 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
-        let request_ids_vec = request_ids.to_vec();
-        let request_ids_arg = builder.pure(&request_ids_vec);
         let guardian_signatures_arg =
             build_chunked_vec_vec_u8_arg(&mut builder, guardian_signatures);
         let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
@@ -1738,7 +1735,6 @@ impl SuiTxExecutor {
             vec![
                 hashi_arg,
                 withdrawal_id_arg,
-                request_ids_arg,
                 guardian_signatures_arg,
                 cert_arg,
                 clock_arg,

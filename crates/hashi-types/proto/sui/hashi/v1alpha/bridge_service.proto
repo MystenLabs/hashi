@@ -170,11 +170,11 @@ message SignMpcInputSignaturesResponse {
 
 // Maps to crate::withdrawals::WithdrawalTxSigning
 message SignWithdrawalTxSigningRequest {
+  reserved 2;
+  reserved "request_ids";
+
   // The id of the WithdrawalTransaction on Sui (32 bytes).
   bytes withdrawal_id = 1;
-
-  // Withdrawal request ids (each 32 bytes).
-  repeated bytes request_ids = 2;
 
   // One MPC Schnorr signature per transaction input (64 bytes each).
   repeated bytes signatures = 3;

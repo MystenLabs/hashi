@@ -392,7 +392,6 @@ impl hashi_types::intent::IntentMessage for WithdrawalTxCommitment {
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalTxSigning {
     pub withdrawal_id: Address,
-    pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
     pub guardian_signatures: Vec<Vec<u8>>,
 }
@@ -835,12 +834,6 @@ impl Hashi {
         anyhow::ensure!(
             !txn.is_fully_signed(),
             "WithdrawalTransaction {} is already finalized",
-            message.withdrawal_id
-        );
-
-        anyhow::ensure!(
-            message.request_ids == txn.request_ids,
-            "Request IDs mismatch for WithdrawalTransaction {}",
             message.withdrawal_id
         );
 
