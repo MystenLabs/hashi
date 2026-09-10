@@ -17,7 +17,9 @@ use sui::{
     bag::Bag,
     bcs,
     bls12381::{UncompressedG1, bls12381_min_pk_verify, g1_from_bytes, g1_to_uncompressed_g1},
-    group_ops::Element
+    ed25519::ed25519_verify,
+    group_ops::Element,
+    table::Table
 };
 
 // ~~~~~~~ Errors ~~~~~~~
@@ -39,8 +41,30 @@ const EMemberNotRemovable: vector<u8> =
 #[error(code = 3)]
 const ELastActiveMember: vector<u8> =
     b"Cannot resign as the last active committee member; the committee would be unable to form";
+#[error(code = 7)]
+const ETlsPublicKeyInUse: vector<u8> =
+    b"TLS public key is already registered to another member; each member needs its own key - generate a new one for this address";
+#[error(code = 8)]
+const EInvalidTlsPublicKeyLength: vector<u8> = b"TLS public key must be 32 bytes";
+#[error(code = 9)]
+const EInvalidTlsProofOfPossession: vector<u8> =
+    b"TLS proof of possession does not verify under the submitted public key";
+#[error(code = 10)]
+const ENotAuthorized: vector<u8> =
+    b"Sender is neither the member's validator address nor its operator address";
+#[error(code = 11)]
+const ENotAnActiveSuiValidator: vector<u8> =
+    b"Only an active Sui validator may register as a Hashi member";
+#[error(code = 12)]
+const EInvalidEncryptionPublicKeyLength: vector<u8> =
+    b"Next-epoch encryption public key must be 32 bytes";
+#[error(code = 13)]
+const EInvalidBlsProofOfPossession: vector<u8> =
+    b"BLS proof of possession does not verify under the submitted public key";
 
 // ~~~~~~~ Structs ~~~~~~~
+
+public struct TlsKeyIndexKey has copy, drop, store {}
 
 public struct CommitteeSet has store {
     members: Bag,
@@ -149,7 +173,10 @@ public(package) fun new_member(
     let validator_address = ctx.sender();
 
     // Only allow Sui Validators to register as Hashi members
-    assert!(sui_system.active_validator_addresses_ref().contains(&validator_address));
+    assert!(
+        sui_system.active_validator_addresses_ref().contains(&validator_address),
+        ENotAnActiveSuiValidator,
+    );
 
     let member = MemberInfo {
         validator_address: validator_address,
@@ -221,18 +248,50 @@ public(package) fun set_endpoint_url(
     member.endpoint_url = endpoint_url;
 }
 
-/// Set the tls_public_key of the member.
+public(package) fun tls_key_index_key(): TlsKeyIndexKey { TlsKeyIndexKey {} }
+
 public(package) fun set_tls_public_key(
     self: &mut CommitteeSet,
+    tls_keys: &mut Table<vector<u8>, address>,
+    hashi_id: address,
     validator_address: address,
     tls_public_key: vector<u8>,
+    proof_of_possession_signature: vector<u8>,
     ctx: &TxContext,
 ) {
-    assert!(tls_public_key.length() == 32);
+    assert!(tls_public_key.length() == 32, EInvalidTlsPublicKeyLength);
+    self.member(validator_address).assert_authorized(ctx);
+    assert!(
+        verify_tls_proof_of_possession(
+            hashi_id,
+            &validator_address,
+            &tls_public_key,
+            &proof_of_possession_signature,
+        ),
+        EInvalidTlsProofOfPossession,
+    );
 
+    self.write_tls_public_key(tls_keys, validator_address, tls_public_key);
+}
+
+fun write_tls_public_key(
+    self: &mut CommitteeSet,
+    tls_keys: &mut Table<vector<u8>, address>,
+    validator_address: address,
+    tls_public_key: vector<u8>,
+) {
+    assert!(tls_public_key.length() == 32, EInvalidTlsPublicKeyLength);
+    assert!(
+        !tls_keys.contains(tls_public_key) || tls_keys[tls_public_key] == validator_address,
+        ETlsPublicKeyInUse,
+    );
     let member = self.member_mut(validator_address);
-    member.assert_authorized(ctx);
+    let previous = member.tls_public_key;
     member.tls_public_key = tls_public_key;
+    if (!previous.is_empty()) {
+        tls_keys.remove(previous);
+    };
+    tls_keys.add(tls_public_key, validator_address);
 }
 
 /// Set the next_epoch_encryption_public_key of the member.
@@ -242,7 +301,7 @@ public(package) fun set_next_epoch_encryption_public_key(
     next_epoch_encryption_public_key: vector<u8>,
     ctx: &TxContext,
 ) {
-    assert!(next_epoch_encryption_public_key.length() == 32);
+    assert!(next_epoch_encryption_public_key.length() == 32, EInvalidEncryptionPublicKeyLength);
 
     let member = self.member_mut(validator_address);
     member.assert_authorized(ctx);
@@ -335,6 +394,7 @@ public(package) fun request_resignation(
 /// governance lifts the ignore.
 public(package) fun remove_inactive_member(
     self: &mut CommitteeSet,
+    tls_keys: &mut Table<vector<u8>, address>,
     validator_address: address,
     is_active_sui_validator: bool,
 ) {
@@ -343,7 +403,7 @@ public(package) fun remove_inactive_member(
     let member = self.member(validator_address);
     assert!(!member.is_ignored(), ECannotRemoveIgnoredMember);
     assert!(member.is_resigned() || !is_active_sui_validator, EMemberNotRemovable);
-    self.remove_member(validator_address);
+    self.remove_member(tls_keys, validator_address);
 }
 
 /// Withdraw a pending resignation. If the next committee has already been
@@ -684,22 +744,29 @@ fun assert_not_last_active_member(self: &CommitteeSet, validator_address: addres
 
 /// Delete a member's registration. The first (and only) removal path from
 /// the members bag; MemberInfo has only `store`, so it is destructured.
-fun remove_member(self: &mut CommitteeSet, validator_address: address) {
+fun remove_member(
+    self: &mut CommitteeSet,
+    tls_keys: &mut Table<vector<u8>, address>,
+    validator_address: address,
+) {
     let MemberInfo {
         validator_address: _,
         operator_address: _,
         next_epoch_public_key: _,
         endpoint_url: _,
-        tls_public_key: _,
+        tls_public_key,
         next_epoch_encryption_public_key: _,
         ignored: _,
         resigned: _,
         extra_fields: _,
     } = self.members.remove(validator_address);
+    if (!tls_public_key.is_empty()) {
+        tls_keys.remove(tls_public_key);
+    };
 }
 
 fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {
-    assert!(self.is_authorized(ctx));
+    assert!(self.is_authorized(ctx), ENotAuthorized);
 }
 
 // === Accessors ===
@@ -747,6 +814,7 @@ fun verify_bls_public_key(
             &bls_public_key,
             &proof_of_possession_signature,
         ),
+        EInvalidBlsProofOfPossession,
     );
 
     // Convert the public key to its Uncompressed form
@@ -776,7 +844,50 @@ fun verify_proof_of_possession(
     )
 }
 
+public(package) fun verify_tls_proof_of_possession(
+    hashi_id: address,
+    validator_address: &address,
+    tls_public_key: &vector<u8>,
+    proof_of_possession_signature: &vector<u8>,
+): bool {
+    let mut message = vector[];
+    message.append(bcs::to_bytes(&hashi::intent::tls_proof_of_possession()));
+    message.append(bcs::to_bytes(&hashi_id));
+    message.append(bcs::to_bytes(validator_address));
+    tls_public_key.do_ref!(|key_byte| message.append(bcs::to_bytes(key_byte)));
+
+    ed25519_verify(
+        proof_of_possession_signature,
+        tls_public_key,
+        &message,
+    )
+}
+
 // ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public fun set_tls_public_key_unproven_for_testing(
+    self: &mut CommitteeSet,
+    tls_keys: &mut Table<vector<u8>, address>,
+    validator_address: address,
+    tls_public_key: vector<u8>,
+    ctx: &TxContext,
+) {
+    self.member(validator_address).assert_authorized(ctx);
+    self.write_tls_public_key(tls_keys, validator_address, tls_public_key);
+}
+
+#[test_only]
+public fun tls_key_holder_for_testing(
+    tls_keys: &Table<vector<u8>, address>,
+    tls_public_key: vector<u8>,
+): Option<address> {
+    if (tls_keys.contains(tls_public_key)) {
+        option::some(tls_keys[tls_public_key])
+    } else {
+        option::none()
+    }
+}
 
 #[test_only]
 public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {

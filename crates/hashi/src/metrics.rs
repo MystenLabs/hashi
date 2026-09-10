@@ -43,6 +43,7 @@ pub struct Metrics {
     pub guardian_limiter_next_seq: IntGauge,
     pub guardian_limiter_last_updated_at_seconds: IntGauge,
     pub unknown_caller_refused_total: IntCounterVec,
+    pub validator_registration_aborts_total: IntCounterVec,
     pub guardian_bootstrap_attempts_total: IntCounter,
     pub guardian_bootstrap_outcomes_total: IntCounterVec,
     pub guardian_limiter_validate_total: IntCounterVec,
@@ -485,6 +486,13 @@ impl Metrics {
             guardian_limiter_last_updated_at_seconds: register_int_gauge_with_registry!(
                 "hashi_guardian_limiter_last_updated_at_seconds",
                 "Unix timestamp (seconds) of the last apply_consume on the local guardian-limiter",
+                registry,
+            )
+            .unwrap(),
+            validator_registration_aborts_total: register_int_counter_vec_with_registry!(
+                "hashi_validator_registration_aborts_total",
+                "Validator registration transactions the chain rejected by aborting, at simulation or execution.",
+                &["abort"],
                 registry,
             )
             .unwrap(),

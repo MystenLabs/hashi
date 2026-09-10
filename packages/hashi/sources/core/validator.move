@@ -105,10 +105,20 @@ entry fun update_tls_public_key(
     self: &mut Hashi,
     validator: address,
     tls_public_key: vector<u8>,
+    proof_of_possession_signature: vector<u8>,
     ctx: &mut TxContext,
 ) {
     self.versioning().assert_version_enabled();
-    self.committee_set_mut().set_tls_public_key(validator, tls_public_key, ctx);
+    let hashi_id = self.id().uid_to_address();
+    let (committee_set, tls_keys) = self.committee_set_and_tls_keys_mut();
+    committee_set.set_tls_public_key(
+        tls_keys,
+        hashi_id,
+        validator,
+        tls_public_key,
+        proof_of_possession_signature,
+        ctx,
+    );
 
     event::emit(ValidatorUpdated { validator });
 }
@@ -144,7 +154,8 @@ entry fun remove_inactive_member(
 ) {
     self.versioning().assert_version_enabled();
     let is_active_sui_validator = sui_system.active_validator_addresses_ref().contains(&validator);
-    self.committee_set_mut().remove_inactive_member(validator, is_active_sui_validator);
+    let (committee_set, tls_keys) = self.committee_set_and_tls_keys_mut();
+    committee_set.remove_inactive_member(tls_keys, validator, is_active_sui_validator);
     event::emit(ValidatorDeregistered { validator });
 }
 
@@ -199,6 +210,7 @@ public fun remove_inactive_member_for_testing(
     is_active_sui_validator: bool,
 ) {
     self.versioning().assert_version_enabled();
-    self.committee_set_mut().remove_inactive_member(validator, is_active_sui_validator);
+    let (committee_set, tls_keys) = self.committee_set_and_tls_keys_mut();
+    committee_set.remove_inactive_member(tls_keys, validator, is_active_sui_validator);
     event::emit(ValidatorDeregistered { validator });
 }

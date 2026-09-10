@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -72,6 +73,7 @@ pub struct Hashi {
     guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
+    reported_registration_aborts: RwLock<HashSet<String>>,
 }
 
 impl Hashi {
@@ -104,6 +106,7 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
+            reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
     }
 
@@ -137,6 +140,7 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
+            reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
     }
 
@@ -330,7 +334,7 @@ impl Hashi {
     ) -> anyhow::Result<Option<u64>> {
         let keys = self.prepare_next_epoch_keys(epoch)?;
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
-        executor
+        let result = executor
             .execute_register_or_update_validator(
                 &self.config,
                 None,
@@ -338,7 +342,41 @@ impl Hashi {
                 Some(&keys.signing_private_key),
                 self.is_awaiting_genesis(),
             )
-            .await
+            .await;
+        match &result {
+            Err(e) => {
+                let _ = self.report_registration_failure(e);
+            }
+            Ok(Some(_)) => self.reported_registration_aborts.write().unwrap().clear(),
+            Ok(None) => {}
+        }
+        result
+    }
+
+    pub(crate) fn report_registration_failure(&self, err: &anyhow::Error) -> bool {
+        let Some(abort_name) = sui_tx_executor::move_abort_name(err) else {
+            return false;
+        };
+
+        self.metrics
+            .validator_registration_aborts_total
+            .with_label_values(&[abort_name.as_str()])
+            .inc();
+
+        if self
+            .reported_registration_aborts
+            .write()
+            .unwrap()
+            .insert(abort_name.clone())
+        {
+            tracing::error!(
+                abort_name,
+                "The chain rejected this node's validator registration, so whichever \
+                 of its next-epoch keys, endpoint or TLS key this attempt would have \
+                 written is unregistered. Error: {err}"
+            );
+        }
+        true
     }
 
     pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
@@ -856,9 +894,16 @@ impl Hashi {
             )
             .await
         {
-            Ok(Some(_)) => tracing::info!("Validator registered/updated on-chain"),
+            Ok(Some(_)) => {
+                tracing::info!("Validator registered/updated on-chain");
+                self.reported_registration_aborts.write().unwrap().clear();
+            }
             Ok(None) => tracing::debug!("No validator registration or update to send"),
-            Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
+            Err(e) => {
+                if !self.report_registration_failure(&e) {
+                    tracing::warn!("Failed to register/update validator metadata: {e}");
+                }
+            }
         }
 
         if self.is_in_current_committee() {

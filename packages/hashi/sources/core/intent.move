@@ -1,11 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Domain-separation intents for everything signed by Hashi member BLS keys.
+/// Domain-separation intents for everything a Hashi member signs, under its
+/// BLS key or its TLS key.
 ///
 /// The signing preimage is `intent (u16 LE) || bcs(hashi object id) ||
-/// bcs(epoch) || bcs(message)`. Every message type signed under the
-/// committee's keys carries a unique intent value, so a certificate produced
+/// bcs(epoch) || bcs(message)`, except where a message is not epoch-scoped
+/// and omits the epoch. Every message type signed under a member's keys
+/// carries a unique intent value, so a certificate produced
 /// for one message type can never verify as another, regardless of whether
 /// two types happen to share a BCS layout, and the Hashi object id binds
 /// every signature to one deployment, so a certificate minted for another
@@ -34,6 +36,8 @@ const DEALER_MESSAGES_HASH: u16 = 0x0003;
 const AVSS_VOTE_MESSAGES_HASH: u16 = 0x0004;
 /// AVID pessimistic-path certificate.
 const AVID_VOTE_MESSAGES_HASH: u16 = 0x0005;
+/// Proof of possession of a member TLS key (address, public key).
+const TLS_PROOF_OF_POSSESSION: u16 = 0x0006;
 
 // ==== Bitcoin (0x0100..=0x01FF) ====
 
@@ -66,6 +70,8 @@ public(package) fun dealer_messages_hash(): u16 { DEALER_MESSAGES_HASH }
 public(package) fun avss_vote_messages_hash(): u16 { AVSS_VOTE_MESSAGES_HASH }
 
 public(package) fun avid_vote_messages_hash(): u16 { AVID_VOTE_MESSAGES_HASH }
+
+public(package) fun tls_proof_of_possession(): u16 { TLS_PROOF_OF_POSSESSION }
 
 public(package) fun deposit_confirmation(): u16 { DEPOSIT_CONFIRMATION }
 

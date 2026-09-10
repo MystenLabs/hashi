@@ -378,7 +378,10 @@ impl TransactionExecutionError {
 }
 
 /// The SDK build error behind `e`, if `e` is a [`TxFailure::NotSubmitted`]
-/// raised by [`finalize`] wrapping one.
+/// wrapping one. [`finalize`] wraps when it executes, and the
+/// validator-registration path wraps its own build; an unwrapped build error
+/// (such as `finalize`'s serialize-unsigned and dry-run modes produce) is
+/// invisible here.
 fn builder_error(e: &anyhow::Error) -> Option<&sui_transaction_builder::Error> {
     match e.downcast_ref::<TxFailure>()? {
         TxFailure::NotSubmitted(inner) => inner.downcast_ref(),
@@ -398,6 +401,46 @@ pub(crate) fn transaction_execution_error(
             Some(failure.execution_error())
         }
         _ => None,
+    }
+}
+
+/// Whether `code` is a Move clever-error bitset rather than a plain constant.
+fn is_clever_bitset(code: u64) -> bool {
+    matches!(code >> 60, 0b1000 | 0b1100)
+}
+
+pub(crate) fn move_abort_name(err: &anyhow::Error) -> Option<String> {
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+    let error = transaction_execution_error(err)?;
+    if error
+        .kind
+        .and_then(|kind| ExecutionErrorKind::try_from(kind).ok())
+        != Some(ExecutionErrorKind::MoveAbort)
+    {
+        return None;
+    }
+    let Some(abort) = error.abort_opt() else {
+        return Some("unknown".to_owned());
+    };
+    match abort.clever_error.as_ref() {
+        Some(clever) => clever.constant_name.clone().or_else(|| {
+            Some(format!(
+                "unnamed_in_{}",
+                abort.location().module_opt().unwrap_or("unknown")
+            ))
+        }),
+        None => Some(match abort.abort_code {
+            Some(code) if !is_clever_bitset(code) => format!(
+                "{}_code_{code}",
+                abort.location().module_opt().unwrap_or("unknown")
+            ),
+            Some(_) => format!(
+                "unrendered_in_{}",
+                abort.location().module_opt().unwrap_or("unknown")
+            ),
+            None => "unknown".to_owned(),
+        }),
     }
 }
 
@@ -1304,7 +1347,8 @@ impl SuiTxExecutor {
             next_epoch_signing_key,
             allow_first_registration,
         )
-        .await?;
+        .await
+        .map_err(TxFailure::NotSubmitted)?;
 
         let Some(transaction) = transaction else {
             return Ok(None);
@@ -1322,11 +1366,13 @@ impl SuiTxExecutor {
             .await?
             .into_inner();
 
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "register_validator transaction failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "register_validator",
+                status: status.clone(),
+            }
+            .into());
         }
         let checkpoint = response
             .transaction()
@@ -2681,14 +2727,23 @@ pub(crate) async fn build_validator_tx(
             .map(|m| m.tls_public_key() != Some(&tls_key))
             .unwrap_or(true)
         {
+            let tls_signing_key = config.tls_private_key()?;
+            let tls_key = tls_signing_key.verifying_key();
+            let preimage = hashi_types::committee::tls_proof_of_possession_preimage(
+                hashi_ids.hashi_object_id,
+                validator_address,
+                *tls_key.as_bytes(),
+            );
+            let pop = ed25519_dalek::Signer::sign(&tls_signing_key, &preimage);
             let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
+            let tls_pop_arg = builder.pure(&pop.to_bytes().to_vec());
             builder.move_call(
                 Function::new(
                     call_package,
                     Identifier::from_static("validator"),
                     Identifier::from_static("update_tls_public_key"),
                 ),
-                vec![hashi_arg, validator_address_arg, tls_key_arg],
+                vec![hashi_arg, validator_address_arg, tls_key_arg, tls_pop_arg],
             );
             has_calls = true;
         }
@@ -2928,6 +2983,97 @@ mod tests {
             genesis_commands.as_slice(),
             [sui_sdk_types::Command::MoveCall(end)] if end.function.as_str() == "end_reconfig"
         ));
+    }
+
+    #[test]
+    fn only_a_move_abort_yields_a_label() {
+        use sui_rpc::proto::sui::rpc::v2::CleverError;
+        use sui_rpc::proto::sui::rpc::v2::ExecutionError;
+        use sui_rpc::proto::sui::rpc::v2::MoveAbort;
+        use sui_rpc::proto::sui::rpc::v2::MoveLocation;
+        use sui_rpc::proto::sui::rpc::v2::execution_error::ErrorDetails;
+        use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+        let status_with = |error: ExecutionError| {
+            let mut status = ExecutionStatus::default();
+            status.error = Some(error);
+            let err: anyhow::Error = TransactionExecutionError {
+                function: "register_validator",
+                status,
+            }
+            .into();
+            err
+        };
+
+        const CLEVER_CODE: u64 = 0xC000_0029_0000_0007;
+        let aborted = |clever: Option<Option<&str>>| {
+            let mut abort = MoveAbort::default();
+            abort.abort_code = Some(if clever.is_some() { CLEVER_CODE } else { 1 });
+            abort.clever_error = clever.map(|name| {
+                let mut clever = CleverError::default();
+                clever.constant_name = name.map(str::to_owned);
+                clever
+            });
+            let mut location = MoveLocation::default();
+            location.module = Some("committee_set".to_owned());
+            abort.location = Some(location);
+            let mut error = ExecutionError::default();
+            error.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+            error.error_details = Some(ErrorDetails::Abort(abort));
+            status_with(error)
+        };
+        let unrendered_clever = || {
+            let mut abort = MoveAbort::default();
+            abort.abort_code = Some(CLEVER_CODE);
+            let mut location = MoveLocation::default();
+            location.module = Some("committee_set".to_owned());
+            abort.location = Some(location);
+            let mut error = ExecutionError::default();
+            error.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+            error.error_details = Some(ErrorDetails::Abort(abort));
+            status_with(error)
+        };
+
+        assert_eq!(
+            move_abort_name(&aborted(Some(Some("ETlsPublicKeyInUse")))),
+            Some("ETlsPublicKeyInUse".to_owned())
+        );
+        assert_eq!(
+            move_abort_name(&aborted(Some(None))),
+            Some("unnamed_in_committee_set".to_owned())
+        );
+        assert_eq!(
+            move_abort_name(&aborted(None)),
+            Some("committee_set_code_1".to_owned())
+        );
+        assert_eq!(
+            move_abort_name(&unrendered_clever()),
+            Some("unrendered_in_committee_set".to_owned())
+        );
+        let mut detail_less = ExecutionError::default();
+        detail_less.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+        assert_eq!(
+            move_abort_name(&status_with(detail_less)),
+            Some("unknown".to_owned())
+        );
+        let mut codeless = MoveAbort::default();
+        codeless.location = Some(MoveLocation::default());
+        let mut codeless_error = ExecutionError::default();
+        codeless_error.kind = Some(ExecutionErrorKind::MoveAbort as i32);
+        codeless_error.error_details = Some(ErrorDetails::Abort(codeless));
+        assert_eq!(
+            move_abort_name(&status_with(codeless_error)),
+            Some("unknown".to_owned())
+        );
+
+        let mut insufficient_gas = ExecutionError::default();
+        insufficient_gas.kind = Some(ExecutionErrorKind::InsufficientGas as i32);
+        assert_eq!(move_abort_name(&status_with(insufficient_gas)), None);
+
+        assert_eq!(
+            move_abort_name(&anyhow::anyhow!("connection refused")),
+            None
+        );
     }
 
     #[test]

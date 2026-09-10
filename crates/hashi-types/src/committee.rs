@@ -860,6 +860,24 @@ impl IntentMessage for ProofOfPossessionMessage {
     const INTENT: Intent = Intent::ProofOfPossession;
 }
 
+#[derive(Serialize)]
+pub struct TlsProofOfPossessionMessage {
+    pub address: Address,
+    pub tls_public_key: [u8; 32],
+}
+
+pub fn tls_proof_of_possession_preimage(
+    hashi_id: Address,
+    address: Address,
+    tls_public_key: [u8; 32],
+) -> Vec<u8> {
+    let message = TlsProofOfPossessionMessage {
+        address,
+        tls_public_key,
+    };
+    bcs::to_bytes(&(Intent::TlsProofOfPossession.as_u16(), hashi_id, &message)).unwrap()
+}
+
 fn signing_message<T: IntentMessage>(hashi_id: Address, epoch: u64, message: &T) -> Vec<u8> {
     // Preimage: intent (u16 LE) || bcs(hashi_id) || bcs(epoch) || bcs(message).
     // Intent leads so the signed bytes are domain-tagged before anything else;
@@ -898,6 +916,37 @@ mod test {
         // The hashi object id follows as 32 raw bytes (Move `address` BCS),
         // ahead of the epoch.
         assert_eq!(&bytes[2..34], &[0xAB; 32]);
+    }
+
+    #[test]
+    fn tls_proof_of_possession_preimage_matches_move() {
+        use ed25519_dalek::Signer;
+
+        let hashi_id = Address::new([0xAB; 32]);
+        let address = Address::new([0xCD; 32]);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+
+        let bytes = tls_proof_of_possession_preimage(hashi_id, address, public_key);
+
+        let mut expected = bcs::to_bytes(&(Intent::TlsProofOfPossession as u16)).unwrap();
+        expected.extend(bcs::to_bytes(&hashi_id).unwrap());
+        expected.extend(bcs::to_bytes(&address).unwrap());
+        expected.extend_from_slice(&public_key);
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes.len(), 2 + 32 + 32 + 32);
+        assert_eq!(&bytes[..2], &[0x06, 0x00]);
+
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        assert_eq!(
+            hex(&public_key),
+            "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        );
+        assert_eq!(
+            hex(&signing_key.sign(&bytes).to_bytes()),
+            "440c4f5d01b811edf09afc277eebbcfff5f6c732887dd8ea4acf3aa54119a3db\
+             c24255993e8074390b3c43aa256ab5c47750322ec1f07696a6f1339454a7cc0d"
+        );
     }
 
     /// A certificate minted for one Hashi deployment must not verify against

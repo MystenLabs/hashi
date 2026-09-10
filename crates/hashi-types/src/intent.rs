@@ -1,11 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Domain-separation intents for everything signed by Hashi member BLS keys.
+//! Domain-separation intents for everything a Hashi member signs, under its
+//! BLS key or its TLS key.
 //!
 //! The signing preimage is `intent (u16 LE) || bcs(hashi object id) ||
-//! bcs(epoch) || bcs(message)`. Every message type signed under the
-//! committee's keys carries a unique intent value, so a certificate produced
+//! bcs(epoch) || bcs(message)`, except where a message is not epoch-scoped and
+//! omits the epoch. Every message type signed under a member's keys
+//! carries a unique intent value, so a certificate produced
 //! for one message type can never verify as another, regardless of whether
 //! two types happen to share a BCS layout, and the Hashi object id binds
 //! every signature to one deployment, so a certificate minted for another
@@ -44,6 +46,8 @@ pub enum Intent {
     AvssVoteMessagesHash = 0x0004,
     /// AVID nonce pessimistic-path certificate (`CertKind::AvidVote`).
     AvidVoteMessagesHash = 0x0005,
+    /// Proof of possession of a member TLS key (address, public key).
+    TlsProofOfPossession = 0x0006,
 
     // ==== Bitcoin (0x0100..=0x01FF) ====
     /// Deposit confirmation over (request_id, utxo).
@@ -75,8 +79,9 @@ impl Intent {
     }
 }
 
-/// A message signed by Hashi member BLS keys. `INTENT` is bound into the
-/// signing preimage, giving each message type its own signature domain.
+/// A message a Hashi member signs under its BLS or TLS key. `INTENT` is bound
+/// into the signing preimage, giving each message type its own signature
+/// domain.
 pub trait IntentMessage: serde::Serialize {
     const INTENT: Intent;
 }
@@ -100,6 +105,7 @@ mod tests {
         assert_eq!(Intent::DealerMessagesHash as u16, 0x0003);
         assert_eq!(Intent::AvssVoteMessagesHash as u16, 0x0004);
         assert_eq!(Intent::AvidVoteMessagesHash as u16, 0x0005);
+        assert_eq!(Intent::TlsProofOfPossession as u16, 0x0006);
         assert_eq!(Intent::DepositConfirmation as u16, 0x0100);
         assert_eq!(Intent::WithdrawalRequestApproval as u16, 0x0101);
         assert_eq!(Intent::WithdrawalCommitment as u16, 0x0102);
