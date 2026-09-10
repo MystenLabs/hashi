@@ -573,6 +573,7 @@ impl MpcManager {
         }
         let result = match &request.messages {
             Messages::Dkg(msg) => {
+                Self::member_party_id(&self.committee, &sender, "committee")?;
                 self.persist_and_cache_dkg_message(self.mpc_config.epoch, sender, msg)?;
                 self.try_sign_dkg_message(sender, &request.messages)
             }
@@ -2156,6 +2157,7 @@ impl MpcManager {
                 panic!("try_sign_dkg_message called with non-DKG messages")
             }
         };
+        Self::member_party_id(&self.committee, &dealer, "committee")?;
         let dealer_session_id = self.current_session_id().dealer_session_id(&dealer);
         let result = process_avss_message(
             self.encryption_key()?,
@@ -2197,13 +2199,7 @@ impl MpcManager {
         dealer: Address,
         batch_index: u32,
     ) -> MpcResult<batch_avss_avid::Receiver> {
-        let dealer_party_id =
-            self.committee
-                .index_of(&dealer)
-                .ok_or_else(|| MpcError::InvalidMessage {
-                    sender: dealer,
-                    reason: "Dealer not in committee".into(),
-                })? as u16;
+        let dealer_party_id = Self::member_party_id(&self.committee, &dealer, "committee")?;
         let dealer_session_id = SessionId::nonce_dealer_session_id(
             &self.chain_id,
             self.mpc_config.epoch,
@@ -2280,6 +2276,7 @@ impl MpcManager {
         batch_index: u32,
         message: &batch_avss_avid::AvssMessage,
     ) -> MpcResult<BLS12381Signature> {
+        Self::member_party_id(&self.committee, &dealer, "committee")?;
         let common_hash = MessagesHash::from(message.common.hash().digest);
         let cert_digest = match self.dealer_avid_nonce_outputs.get(&(batch_index, dealer)) {
             Some(cached) if cached.common_hash == common_hash => cached.cert_digest,
@@ -3068,6 +3065,16 @@ impl MpcManager {
             .nodes
             .weight_of(party_id)
             .is_ok_and(|weight| weight == 0)
+    }
+
+    fn member_party_id(committee: &Committee, dealer: &Address, scope: &str) -> MpcResult<PartyId> {
+        committee
+            .index_of(dealer)
+            .map(|i| i as PartyId)
+            .ok_or_else(|| MpcError::InvalidMessage {
+                sender: *dealer,
+                reason: format!("Dealer not in {scope}"),
+            })
     }
 
     fn certified_dealer_party_id(committee: &Committee, dealer: &Address) -> MpcResult<PartyId> {
@@ -4572,6 +4579,10 @@ impl MpcManager {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
+        let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig("Key rotation requires previous committee".into())
+        })?;
+        Self::member_party_id(previous_committee, &dealer, "previous committee")?;
         let messages_hash = messages.compute_hash();
         if let Some((acked_hash, ack)) = self.rotation_ack_signatures.get(&dealer) {
             if *acked_hash == messages_hash {
@@ -4951,7 +4962,13 @@ impl MpcManager {
                 });
             }
             let dealer_party_id =
-                Self::certified_dealer_party_id(context.committee, &dealer_address)?;
+                match Self::certified_dealer_party_id(context.committee, &dealer_address) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        tracing::warn!("Skipping certified dealer during reconstruction: {e}");
+                        continue;
+                    }
+                };
             let session_id = source_session_id.dealer_session_id(&dealer_address);
             if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
@@ -5834,13 +5851,7 @@ impl MpcManager {
         let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Key rotation requires previous nodes".into())
         })?;
-        let party_id =
-            previous_committee
-                .index_of(dealer)
-                .ok_or_else(|| MpcError::InvalidMessage {
-                    sender: *dealer,
-                    reason: "Dealer not in previous committee".into(),
-                })? as PartyId;
+        let party_id = Self::member_party_id(previous_committee, dealer, "previous committee")?;
         previous_nodes
             .share_ids_of(party_id)
             .map_err(|_| MpcError::InvalidMessage {
