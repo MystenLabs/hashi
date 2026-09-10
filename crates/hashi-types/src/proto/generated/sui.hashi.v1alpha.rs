@@ -152,9 +152,6 @@ pub struct SignWithdrawalTxSigningRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub withdrawal_id: ::prost::bytes::Bytes,
-    /// Withdrawal request ids (each 32 bytes).
-    #[prost(bytes = "bytes", repeated, tag = "2")]
-    pub request_ids: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
     /// One MPC Schnorr signature per transaction input (64 bytes each).
     #[prost(bytes = "bytes", repeated, tag = "3")]
     pub signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,

@@ -68,7 +68,6 @@ public struct WithdrawalCommitmentMessage has copy, drop, store {
 // would still pass.
 public struct WithdrawalSignedMessage has copy, drop, store {
     withdrawal_id: address,
-    request_ids: vector<address>,
     signatures: vector<vector<u8>>,
     guardian_signatures: vector<vector<u8>>,
 }
@@ -226,7 +225,6 @@ entry fun commit_input_signatures(
 entry fun finalize_withdrawal(
     hashi: &mut Hashi,
     withdrawal_id: address,
-    request_ids: vector<address>,
     guardian_signatures: vector<vector<u8>>,
     cert: CommitteeSignature,
     clock: &Clock,
@@ -244,7 +242,6 @@ entry fun finalize_withdrawal(
 
     let approval = WithdrawalSignedMessage {
         withdrawal_id,
-        request_ids,
         signatures,
         guardian_signatures,
     };
@@ -506,13 +503,11 @@ public(package) fun new_withdrawal_commitment_message(
 
 public(package) fun new_withdrawal_signed_message(
     withdrawal_id: address,
-    request_ids: vector<address>,
     signatures: vector<vector<u8>>,
     guardian_signatures: vector<vector<u8>>,
 ): WithdrawalSignedMessage {
     WithdrawalSignedMessage {
         withdrawal_id,
-        request_ids,
         signatures,
         guardian_signatures,
     }

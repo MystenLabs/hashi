@@ -433,11 +433,6 @@ fn parse_withdrawal_tx_signing(
     request: &SignWithdrawalTxSigningRequest,
 ) -> anyhow::Result<WithdrawalTxSigning> {
     let withdrawal_id = parse_address(&request.withdrawal_id)?;
-    let request_ids: Vec<Address> = request
-        .request_ids
-        .iter()
-        .map(|bytes| parse_address(bytes))
-        .collect::<anyhow::Result<_>>()?;
     let signatures: Vec<Vec<u8>> = request
         .signatures
         .iter()
@@ -450,7 +445,6 @@ fn parse_withdrawal_tx_signing(
         .collect();
     Ok(WithdrawalTxSigning {
         withdrawal_id,
-        request_ids,
         signatures,
         guardian_signatures,
     })
