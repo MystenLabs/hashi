@@ -77,9 +77,10 @@ const USE_LEGACY_PRESIG_DERIVATION: bool = false;
 const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 const RECONFIG_E_ALREADY_COMPLETED: &str = "EReconfigAlreadyCompleted";
 const RECONFIG_E_WINDOW_CLOSED: &str = "EReconfigWindowClosed";
-/// Raised by the completion entries when a different epoch is pending (the
-/// target is dead) and by `abort_reconfig` when the chain already resolved
-/// the named target.
+/// Raised by `end_reconfig` when a different epoch is pending (the target is
+/// dead) and by `abort_reconfig` when the chain already resolved the named
+/// target. `submit_committee_handoff` carries no target epoch and never
+/// raises it.
 const RECONFIG_E_WRONG_EPOCH: &str = "EWrongReconfigEpoch";
 /// `abort_reconfig` refused because the chain still protects the target.
 const COMMITTEE_SET_E_PENDING_EPOCH_STILL_CURRENT: &str = "EPendingEpochStillCurrent";
@@ -1504,6 +1505,15 @@ impl MpcService {
         if hashi_epoch >= sui_epoch {
             return;
         }
+        if self.is_awaiting_genesis() {
+            // Pre-genesis (where an aborted genesis DKG lands) there is no
+            // committee to serve, so block in the same retry-until-pending
+            // loop startup uses rather than give up after a few attempts and
+            // leave the replacement to the next Sui epoch boundary or a
+            // restart.
+            self.try_submit_genesis_reconfig().await;
+            return;
+        }
         if let Err(e) = self.inner.prepare_and_register_keys(sui_epoch).await {
             warn!(
                 "Failed to prepare/register encryption+signing keys for epoch {sui_epoch}: {e}; \
@@ -2304,10 +2314,11 @@ fn classify_reconfig_execution_error(error: &ExecutionError) -> ReconfigSubmissi
         (Some("committee_set"), Some("set_pending_committee_handoff_cert"), _) => {
             ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
         }
-        // The race and window checks live in a private helper shared by
-        // `submit_committee_handoff` and `end_reconfig`, so the abort
-        // location names that helper, while `end_reconfig` raises the
-        // wrong-epoch abort itself; the constant carries the meaning.
+        // `ENotReconfiguring` and the window check live in a private helper
+        // shared by `submit_committee_handoff` and `end_reconfig`, while the
+        // entries raise the already-completed and wrong-epoch aborts
+        // themselves, so the location varies; the constant carries the
+        // meaning.
         (Some("reconfig"), _, Some(RECONFIG_E_ALREADY_COMPLETED)) => {
             ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
         }
@@ -2589,26 +2600,27 @@ mod reconfig_submission_classifier_tests {
 
     #[test]
     fn a_won_end_reconfig_race_is_reported_as_completed() {
-        // The check lives in a private helper, so the abort names it.
-        let error = move_abort(
-            "reconfig",
-            "pending_epoch_in_window",
-            Some("EReconfigAlreadyCompleted"),
-        );
-        assert_eq!(
-            classify_reconfig_execution_error(&error),
-            ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
-        );
+        // Each completion entry raises this itself.
+        for function in ["end_reconfig", "submit_committee_handoff"] {
+            let error = move_abort("reconfig", function, Some("EReconfigAlreadyCompleted"));
+            assert_eq!(
+                classify_reconfig_execution_error(&error),
+                ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted,
+                "{function}"
+            );
+        }
     }
 
     #[test]
     fn an_aborted_or_overrun_target_is_dead_not_completed() {
-        for constant in [
-            "ENotReconfiguring",
-            "EReconfigWindowClosed",
-            "EWrongReconfigEpoch",
+        // The first two are raised by the private helper both entries share;
+        // `end_reconfig` raises the wrong-epoch abort itself.
+        for (function, constant) in [
+            ("pending_epoch_in_window", "ENotReconfiguring"),
+            ("pending_epoch_in_window", "EReconfigWindowClosed"),
+            ("end_reconfig", "EWrongReconfigEpoch"),
         ] {
-            let error = move_abort("reconfig", "pending_epoch_in_window", Some(constant));
+            let error = move_abort("reconfig", function, Some(constant));
             assert_eq!(
                 classify_reconfig_execution_error(&error),
                 ReconfigSubmissionErrorKind::ReconfigTargetDead,

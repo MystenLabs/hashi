@@ -110,13 +110,21 @@ entry fun end_reconfig(
 ) {
     self.versioning().assert_version_enabled();
     // The certificate is signed by the incoming committee, so its epoch is
-    // this submission's target. An activated target is the current epoch and
-    // still has its committee; an aborted one has neither.
+    // this submission's target. An activated target is the current epoch,
+    // still has its committee, and is no longer pending; an aborted one has
+    // no committee. The pending check matters at genesis on a fresh network,
+    // where the pending epoch-0 committee already sits under the current
+    // epoch 0 before it activates. This is decided before the pending state
+    // is consulted so that a completion that lost the race is still reported
+    // as such once the next reconfiguration is pending, rather than as a dead
+    // target the node should give up on.
     let next_epoch = mpc_cert.signature_epoch();
     let already_completed =
+        self.committee_set().pending_epoch_change() != option::some(next_epoch) &&
         self.committee_set().epoch() == next_epoch &&
         self.committee_set().has_committee(next_epoch);
-    let pending_epoch = pending_epoch_in_window(self, already_completed, ctx);
+    assert!(!already_completed, EReconfigAlreadyCompleted);
+    let pending_epoch = pending_epoch_in_window(self, ctx);
     // A different pending epoch means this target was aborted and replaced.
     assert!(pending_epoch == next_epoch, EWrongReconfigEpoch);
     let from_epoch = self.committee_set().epoch();
@@ -161,7 +169,8 @@ entry fun submit_committee_handoff(
     let already_completed =
         !self.committee_set().is_reconfiguring() &&
         certifies_stored_handoff(self, committee_handoff_cert);
-    let next_epoch = pending_epoch_in_window(self, already_completed, ctx);
+    assert!(!already_completed, EReconfigAlreadyCompleted);
+    let next_epoch = pending_epoch_in_window(self, ctx);
     assert!(!self.committee_set().mpc_public_key().is_empty(), EInitialReconfig);
     let next_committee = self.committee_set().get_committee(next_epoch);
     let new_committee = *next_committee;
@@ -223,19 +232,15 @@ public(package) fun assert_genesis_launch_authorized(self: &Hashi) {
 
 /// The pending epoch, provided the reconfiguration to it can still complete.
 ///
-/// Aborts with `EReconfigAlreadyCompleted` when nothing is pending because
-/// this transaction's target already activated (another node won the
-/// `end_reconfig` race; the node treats this as success), with
-/// `ENotReconfiguring` when nothing is pending for any other reason (the
-/// target was aborted), and with `EReconfigWindowClosed` once Sui's epoch has
+/// Callers first rule out their own target having activated (the benign
+/// race, `EReconfigAlreadyCompleted`, which the node treats as success).
+/// Past that, aborts with `ENotReconfiguring` when nothing is pending (the
+/// target was aborted) and with `EReconfigWindowClosed` once Sui's epoch has
 /// moved past the pending epoch, from which point only `abort_reconfig` can
 /// resolve it. The node keys its retry/give-up decision on which of these
 /// fires, so the distinction is load-bearing.
-fun pending_epoch_in_window(self: &Hashi, already_completed: bool, ctx: &TxContext): u64 {
-    if (!self.committee_set().is_reconfiguring()) {
-        if (already_completed) abort EReconfigAlreadyCompleted;
-        abort ENotReconfiguring
-    };
+fun pending_epoch_in_window(self: &Hashi, ctx: &TxContext): u64 {
+    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     assert!(next_epoch == ctx.epoch(), EReconfigWindowClosed);
     next_epoch

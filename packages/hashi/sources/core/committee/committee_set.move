@@ -498,7 +498,17 @@ public(package) fun end_reconfig(
 public(package) fun abort_reconfig(self: &mut CommitteeSet, ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     assert!(self.pending_epoch_change.borrow().epoch != ctx.epoch(), EPendingEpochStillCurrent);
-    self.abort_reconfig_inner()
+    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
+        .pending_epoch_change
+        .extract();
+    if (committee_handoff_cert.is_some()) {
+        committee_handoff_cert.destroy_some();
+    } else {
+        committee_handoff_cert.destroy_none();
+    };
+
+    self.remove_committee(next_epoch);
+    next_epoch
 }
 
 /// Form the next committee from a validator -> voting-power map and record
@@ -532,20 +542,6 @@ fun start_reconfig_from_voting_powers(
         });
     self.insert_committee(committee);
     epoch
-}
-
-fun abort_reconfig_inner(self: &mut CommitteeSet): u64 {
-    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
-        .pending_epoch_change
-        .extract();
-    if (committee_handoff_cert.is_some()) {
-        committee_handoff_cert.destroy_some();
-    } else {
-        committee_handoff_cert.destroy_none();
-    };
-
-    self.remove_committee(next_epoch);
-    next_epoch
 }
 
 /// Whether a completed handoff is stored for `from_epoch`, i.e. whether a

@@ -531,6 +531,58 @@ fun test_end_reconfig_after_completion_reports_already_completed() {
 
 #[test]
 #[expected_failure(abort_code = reconfig::EReconfigAlreadyCompleted)]
+/// The benign race stays benign once the next reconfiguration is pending: a
+/// late completion for the target that activated is "already completed",
+/// not a dead target, so the node keeps serving the epoch it is in.
+fun test_end_reconfig_after_completion_reports_already_completed_while_next_pending() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    let (mpc_cert, handoff_cert) = transition_certs(&hashi, 1, vector[1, 2, 3]);
+    let in_window = &test_utils::new_tx_context(VOTER1, 1);
+    reconfig::submit_committee_handoff_for_testing(&mut hashi, handoff_cert, in_window);
+    reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, in_window);
+    assert!(hashi.committee_set().epoch() == 1);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee_for_testing(2));
+
+    let next_window = &test_utils::new_tx_context(VOTER1, 2);
+    reconfig::end_reconfig_for_testing(&mut hashi, vector[1, 2, 3], mpc_cert, next_window);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// Genesis on a fresh network pends epoch 0 while Hashi already sits at
+/// epoch 0, so the pending committee is stored under the current epoch before
+/// it activates. That must read as a completion in progress, not as one that
+/// already happened.
+fun test_end_reconfig_completes_genesis_at_sui_epoch_zero() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = pre_genesis_hashi(ctx);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee_for_testing(0));
+    let mpc_public_key = vector[1, 2, 3];
+    let message = reconfig::reconfig_completion_message_for_testing(0, mpc_public_key);
+    let mpc_cert = test_utils::sign_certificate(
+        0,
+        &cert_message(
+            object::id_address(&hashi),
+            0,
+            hashi::intent::reconfig_completion(),
+            &message,
+        ),
+        3,
+    );
+
+    reconfig::end_reconfig_for_testing(&mut hashi, mpc_public_key, mpc_cert, ctx);
+
+    assert!(hashi.committee_set().epoch() == 0);
+    assert!(!hashi.committee_set().is_reconfiguring());
+    assert!(hashi.committee_set().has_committee(0));
+    assert!(*hashi.committee_set().mpc_public_key() == mpc_public_key);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = reconfig::EReconfigAlreadyCompleted)]
 fun test_submit_committee_handoff_after_completion_reports_already_completed() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = hashi_with_pending_reconfig(ctx);
