@@ -15,6 +15,15 @@ on:
         options:
           - devnet
           - testnet
+      bump_contract_version:
+        description: Bump X and reset Y after a Move contract upgrade (testnet only; does not deploy contracts)
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: hashi-release-${{ inputs.network }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -22,6 +31,7 @@ permissions:
 jobs:
   resolve:
     name: Resolve source commit
+    if: inputs.network == 'devnet'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,17 +47,46 @@ jobs:
         id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+  reserve:
+    name: Reserve testnet release
+    if: inputs.network == 'testnet'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.reservation.outputs.sha }}
+      release_tag: ${{ steps.reservation.outputs.release_tag }}
+    steps:
+      - name: Checkout workflow implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Reserve source and release tag
+        id: reservation
+        env:
+          SOURCE_REF: ${{ inputs.ref || 'main' }}
+          BUMP_CONTRACT_VERSION: ${{ inputs.bump_contract_version }}
+        run: |
+          set -euo pipefail
+          RESERVATION=$(bash "$GITHUB_WORKSPACE/scripts/release/reserve-testnet.sh" \
+            --ref "$SOURCE_REF" \
+            --run-id "$GITHUB_RUN_ID" \
+            --bump-contract-version "$BUMP_CONTRACT_VERSION")
+          jq -r '"sha=\(.sha)", "release_tag=\(.release_tag)"' \
+            <<< "$RESERVATION" >> "$GITHUB_OUTPUT"
+
   deterministic-build:
     if: inputs.network == 'testnet'
-    needs: resolve
+    needs: reserve
     uses: ./.github/workflows/deterministic-build.yml
     with:
       hashi_only: true
-      source_sha: ${{ needs.resolve.outputs.sha }}
+      source_sha: ${{ needs.reserve.outputs.sha }}
 
   publish:
     name: Verify and publish testnet release
-    needs: [resolve, deterministic-build]
+    needs: [reserve, deterministic-build]
     permissions:
       actions: read
       attestations: write
@@ -57,8 +96,8 @@ jobs:
     timeout-minutes: 150
     env:
       IMAGE: mysten/hashi
-      SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
-      RELEASE_TAG: testnet-${{ needs.resolve.outputs.sha }}
+      SOURCE_SHA: ${{ needs.reserve.outputs.sha }}
+      RELEASE_TAG: ${{ needs.reserve.outputs.release_tag }}
     steps:
       - name: Download verified binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
@@ -96,7 +135,7 @@ jobs:
             --ref main \
             -f hashi_commit="$SOURCE_SHA" \
             -f push_to_dockerhub=true \
-            -f additional_tags="$RELEASE_TAG" \
+            -f release_tag="$RELEASE_TAG" \
             -f caller_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
       - name: Wait for Docker image build
@@ -154,7 +193,7 @@ jobs:
 
       - name: Verify published image binary
         env:
-          BINARY_URL: https://storage.googleapis.com/mysten-hashi-binaries/${{ needs.resolve.outputs.sha }}/hashi
+          BINARY_URL: https://storage.googleapis.com/mysten-hashi-binaries/${{ needs.reserve.outputs.sha }}/hashi
         run: |
           set -euo pipefail
           for attempt in $(seq 1 30); do
@@ -228,7 +267,6 @@ jobs:
           | Artifact | Identity |
           | --- | --- |
           | Source commit | [\`${SOURCE_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${SOURCE_SHA}) |
-          | Binary platform | \`linux/amd64\` |
           | Binary SHA-256 | \`${binary_hash}\` |
           | Docker image | \`${IMAGE}:${RELEASE_TAG}\` |
           | Docker digest | \`${image_digest}\` |
@@ -252,61 +290,81 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHORT_SHA=${SOURCE_SHA:0:8}
-          TAG_RESPONSE=$(mktemp)
-          TAG_STATUS=$(curl --silent --show-error \
-            --output "$TAG_RESPONSE" \
-            --write-out '%{http_code}' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}")
-          case "$TAG_STATUS" in
-            200)
-              TAG_COMMIT=$(jq -r .sha "$TAG_RESPONSE")
-              if [ "$TAG_COMMIT" != "$SOURCE_SHA" ]; then
-                echo "Release tag $RELEASE_TAG points to $TAG_COMMIT instead of $SOURCE_SHA"
-                exit 1
-              fi
-              ;;
-            404|422)
-              TAG_COMMIT=
-              ;;
-            *)
-              echo "Failed to inspect release tag $RELEASE_TAG (HTTP $TAG_STATUS)"
-              cat "$TAG_RESPONSE"
-              exit 1
-              ;;
-          esac
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+          VERSION=${RELEASE_TAG#testnet-}
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            if [ -z "$TAG_COMMIT" ]; then
-              echo "Release $RELEASE_TAG exists without a resolvable Git tag"
-              exit 1
-            fi
-            gh release upload "$RELEASE_TAG" \
-              release/hashi-linux-amd64 \
-              release/SHA256SUMS \
-              --clobber
-            gh release edit "$RELEASE_TAG" \
-              --prerelease \
-              --title "Hashi testnet $SHORT_SHA" \
-              --notes-file release/notes.md
-          elif [ -n "$TAG_COMMIT" ]; then
+          # Reservation is the sole tag creator. Require its annotated tag to
+          # still point at the source whose binary was verified above.
+          TAG_REF=$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG")
+          if [ "$(jq -r .object.type <<< "$TAG_REF")" != tag ]; then
+            echo "Release tag $RELEASE_TAG is not an annotated reservation"
+            exit 1
+          fi
+          TAG_OBJECT=$(gh api "repos/$GH_REPO/git/tags/$(jq -r .object.sha <<< "$TAG_REF")")
+          if [ "$(jq -r .object.type <<< "$TAG_OBJECT")" != commit ] ||
+             [ "$(jq -r .object.sha <<< "$TAG_OBJECT")" != "$SOURCE_SHA" ]; then
+            echo "Release tag $RELEASE_TAG does not point to $SOURCE_SHA"
+            exit 1
+          fi
+
+          # Listing includes authenticated drafts; the tag endpoint may not.
+          # Any API failure aborts instead of being mistaken for absence.
+          lookup_release() {
+            gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" |
+              jq --arg tag "$RELEASE_TAG" \
+                '[.[][] | select(.tag_name == $tag)] |
+                 if length <= 1 then .[0]
+                 else error("Duplicate releases for reserved tag") end'
+          }
+          lookup_release > "$TEMP_DIR/release.json"
+          if [ "$(jq -r .id "$TEMP_DIR/release.json")" = null ]; then
             gh release create "$RELEASE_TAG" \
               --verify-tag \
+              --draft \
               --prerelease \
-              --title "Hashi testnet $SHORT_SHA" \
-              --notes-file release/notes.md \
-              release/hashi-linux-amd64 \
-              release/SHA256SUMS
-          else
-            gh release create "$RELEASE_TAG" \
-              --target "$SOURCE_SHA" \
+              --title "Hashi testnet $VERSION" \
+              --notes-file release/notes.md
+            lookup_release > "$TEMP_DIR/release.json"
+          fi
+
+          RELEASE_ID=$(jq -er .id "$TEMP_DIR/release.json")
+          gh api --paginate --slurp \
+            "repos/$GH_REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            > "$TEMP_DIR/assets.json"
+          for ASSET in hashi-linux-amd64 SHA256SUMS; do
+            ASSET_METADATA=$(jq --arg name "$ASSET" \
+              '[.[][] | select(.name == $name)] |
+               if length <= 1 then .[0]
+               else error("Duplicate release asset names") end' \
+              "$TEMP_DIR/assets.json")
+            ASSET_ID=$(jq -r '.id // empty' <<< "$ASSET_METADATA")
+            # GitHub can leave an empty starter after a failed upload. Only
+            # unfinished draft placeholders may be removed, never uploaded bytes.
+            if [ -n "$ASSET_ID" ] &&
+               [ "$(jq -r .draft "$TEMP_DIR/release.json")" = true ] &&
+               jq -e '.state == "starter" and .size == 0' <<< "$ASSET_METADATA" >/dev/null; then
+              gh api --method DELETE "repos/$GH_REPO/releases/assets/$ASSET_ID"
+              ASSET_ID=
+            fi
+            if [ -n "$ASSET_ID" ]; then
+              gh api -H "Accept: application/octet-stream" \
+                "repos/$GH_REPO/releases/assets/$ASSET_ID" > "$TEMP_DIR/$ASSET"
+              if ! cmp --silent "release/$ASSET" "$TEMP_DIR/$ASSET"; then
+                echo "Existing release asset $ASSET differs from the verified bytes; refusing to overwrite"
+                exit 1
+              fi
+            else
+              gh release upload "$RELEASE_TAG" "release/$ASSET"
+            fi
+          done
+
+          if [ "$(jq -r .draft "$TEMP_DIR/release.json")" = true ]; then
+            gh release edit "$RELEASE_TAG" \
+              --draft=false \
               --prerelease \
-              --title "Hashi testnet $SHORT_SHA" \
-              --notes-file release/notes.md \
-              release/hashi-linux-amd64 \
-              release/SHA256SUMS
+              --title "Hashi testnet $VERSION" \
+              --notes-file release/notes.md
           fi
 
   deploy:
