@@ -200,18 +200,6 @@ effective fault-tolerance assumption to shift by at most this many basis
 points relative to the unreduced committee. `0` disables weight reduction,
 so parties keep their full committee weights.
 
-### `mpc_nonce_generation_protocol`
-
-| | |
-|---|---|
-| **Type** | `u64` |
-| **Default** | `0` |
-| **Valid values** | `0` (vanilla), `1` (AVID) |
-
-Selects the protocol the committee uses to generate signing nonces
-(presignatures): `0` is the original protocol, `1` enables AVID-based nonce
-generation.
-
 ## Read-only or genesis-only parameters
 
 ### `bitcoin_chain_id`

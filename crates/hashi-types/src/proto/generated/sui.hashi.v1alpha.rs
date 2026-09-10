@@ -3652,15 +3652,6 @@ pub struct RotationMessages {
     pub messages: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct NonceMessage {
-    /// Which nonce generation round within the epoch.
-    #[prost(uint32, optional, tag = "1")]
-    pub batch_index: ::core::option::Option<u32>,
-    /// BCS-encoded batch_avss::Message.
-    #[prost(message, optional, tag = "2")]
-    pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AvidNonceMessage {
     /// Which nonce generation round within the epoch.
     #[prost(uint32, optional, tag = "1")]
@@ -3709,7 +3700,7 @@ pub struct SendMessagesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3, 4, 5")]
+    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3, 5")]
     pub messages: ::core::option::Option<send_messages_request::Messages>,
 }
 /// Nested message and enum types in `SendMessagesRequest`.
@@ -3722,9 +3713,6 @@ pub mod send_messages_request {
         /// For key rotation: messages keyed by share index.
         #[prost(message, tag = "3")]
         RotationMessages(super::RotationMessages),
-        /// For nonce generation: batch AVSS message with batch index.
-        #[prost(message, tag = "4")]
-        NonceMessage(super::NonceMessage),
         /// For AVID nonce generation.
         #[prost(message, tag = "5")]
         AvidNonceMessage(super::AvidNonceMessage),
@@ -3765,7 +3753,7 @@ pub struct AvidNonceRetrievalMessage {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {
-    #[prost(oneof = "retrieve_messages_response::Messages", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "retrieve_messages_response::Messages", tags = "1, 2, 4")]
     pub messages: ::core::option::Option<retrieve_messages_response::Messages>,
 }
 /// Nested message and enum types in `RetrieveMessagesResponse`.
@@ -3778,9 +3766,6 @@ pub mod retrieve_messages_response {
         /// For key rotation: messages keyed by share index.
         #[prost(message, tag = "2")]
         RotationMessages(super::RotationMessages),
-        /// For nonce generation: batch AVSS message with batch index.
-        #[prost(message, tag = "3")]
-        NonceMessage(super::NonceMessage),
         /// For AVID nonce generation: catch-up commitment and echo.
         #[prost(message, tag = "4")]
         AvidNonceRetrievalMessage(super::AvidNonceRetrievalMessage),
@@ -3810,7 +3795,7 @@ pub struct ComplainRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainResponse {
-    #[prost(oneof = "complain_response::Responses", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "complain_response::Responses", tags = "1, 2, 4")]
     pub responses: ::core::option::Option<complain_response::Responses>,
 }
 /// Nested message and enum types in `ComplainResponse`.
@@ -3823,9 +3808,6 @@ pub mod complain_response {
         /// For key rotation
         #[prost(message, tag = "2")]
         RotationResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
-        /// For vanilla nonce generation
-        #[prost(message, tag = "3")]
-        NonceResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
         /// For AVID nonce generation
         #[prost(message, tag = "4")]
         AvidNonceResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),

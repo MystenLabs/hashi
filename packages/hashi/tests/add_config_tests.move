@@ -181,6 +181,26 @@ fun test_add_same_key_twice_aborts() {
     std::unit_test::destroy(hashi);
 }
 
+#[test]
+#[expected_failure(abort_code = add_config::EInvalidConfigEntry)]
+fun test_add_retired_nonce_protocol_key_to_epoch_config_aborts() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    add_and_execute(
+        &mut hashi,
+        true,
+        b"mpc_nonce_generation_protocol",
+        config_value::new_u64(1),
+        &clock,
+        ctx,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
 /// The retired threshold key can never re-enter the epoch config, not even
 /// as a fresh insert.
 #[test]

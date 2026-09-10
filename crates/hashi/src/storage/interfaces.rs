@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
@@ -48,29 +47,6 @@ pub trait PublicMessagesStore: Send + Sync {
 
     /// List all stored rotation messages for the current epoch.
     fn list_all_rotation_messages(&self) -> Result<Vec<(Address, Messages)>>;
-
-    /// Store a dealer's nonce message at the given epoch.
-    /// If a message already exists for this dealer and batch, it will be overwritten.
-    fn store_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-        message: &batch_avss::Message,
-    ) -> Result<()>;
-
-    /// Retrieve a dealer's nonce message for the given epoch and batch.
-    ///
-    ///  Returns None if no message exists for this dealer.
-    fn get_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> Result<Option<batch_avss::Message>>;
-
-    /// List all nonce messages for the current epoch and given batch.
-    fn list_nonce_messages(&self, batch_index: u32) -> Result<Vec<(Address, batch_avss::Message)>>;
 
     /// Store a dealer's AVID round state at the given epoch and batch.
     /// If state already exists for this dealer and batch, it will be overwritten.

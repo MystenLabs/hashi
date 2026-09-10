@@ -34,7 +34,7 @@ fun committee_at(epoch: u64): committee::Committee {
     committee::new_committee(
         epoch,
         vector[member],
-        hashi::mpc_config::new_for_testing(800, 3333, 0, 0),
+        hashi::mpc_config::new_for_testing(800, 3333, 0),
     )
 }
 

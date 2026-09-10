@@ -7,7 +7,6 @@ use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
-use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
@@ -65,12 +64,6 @@ pub struct Database {
     // value: BCS-serialized RotationMessages (BTreeMap<ShareIndex, avss::Message>)
     rotation_messages: Keyspace,
 
-    // Column Family used to store nonce messages for presignature generation.
-    //
-    // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
-    // value: BCS-serialized batch_avss::Message
-    nonce_messages: Keyspace,
-
     // Column Family used to store per-round AVID receiver state for restart/resume.
     //
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
@@ -101,7 +94,6 @@ const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
 const SIGNING_KEYS_CF_NAME: &str = "signing_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
-const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 const AVID_ROUND_STATES_CF_NAME: &str = "avid_round_states";
 const AVID_DEALER_BUILDERS_CF_NAME: &str = "avid_dealer_builders";
 const AVID_HELD_ECHOES_CF_NAME: &str = "avid_held_echoes";
@@ -196,7 +188,6 @@ impl Database {
             db.keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let rotation_messages =
             db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
-        let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let avid_round_states =
             db.keyspace(AVID_ROUND_STATES_CF_NAME, KeyspaceCreateOptions::default)?;
         let avid_dealer_builders =
@@ -220,7 +211,6 @@ impl Database {
             signing_epoch_index,
             dealer_messages,
             rotation_messages,
-            nonce_messages,
             avid_round_states,
             avid_dealer_builders,
             avid_held_echoes,
@@ -241,7 +231,7 @@ impl Database {
     }
 
     /// Every keyspace, for whole-database maintenance. Add new keyspaces here.
-    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 11] {
+    fn all_keyspaces(&self) -> [(&'static str, &Keyspace); 10] {
         [
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
             (SIGNING_KEYS_CF_NAME, &self.signing_keys),
@@ -249,7 +239,6 @@ impl Database {
             (SIGNING_EPOCH_INDEX_CF_NAME, &self.signing_epoch_index),
             (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
             (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
-            (NONCE_MESSAGES_CF_NAME, &self.nonce_messages),
             (AVID_ROUND_STATES_CF_NAME, &self.avid_round_states),
             (AVID_DEALER_BUILDERS_CF_NAME, &self.avid_dealer_builders),
             (AVID_HELD_ECHOES_CF_NAME, &self.avid_held_echoes),
@@ -259,7 +248,7 @@ impl Database {
 
     /// Bytes of live tables per keyspace; journals and tables awaiting unlink
     /// are not counted.
-    pub fn keyspace_disk_space(&self) -> [(&'static str, u64); 11] {
+    pub fn keyspace_disk_space(&self) -> [(&'static str, u64); 10] {
         self.all_keyspaces()
             .map(|(name, keyspace)| (name, keyspace.disk_space()))
     }
@@ -275,7 +264,7 @@ impl Database {
 
     /// Rewrite every keyspace into a single run, dropping what
     /// `prune_messages_below` tombstoned. Pruning alone frees nothing: a
-    /// tombstone is a few dozen bytes against a nonce message of hundreds of
+    /// tombstone is a few dozen bytes against a message of hundreds of
     /// kilobytes, so leveled compaction never rewrites the bottom level.
     ///
     /// Blocking and slow, and it locks out background compaction for each
@@ -486,62 +475,6 @@ impl Database {
         list_messages_by_prefix(&self.rotation_messages, &epoch.to_be_bytes())
     }
 
-    pub fn store_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-        message: &batch_avss::Message,
-    ) -> Result<()> {
-        let key = [
-            epoch.to_be_bytes().as_slice(),
-            batch_index.to_be_bytes().as_slice(),
-            dealer.as_bytes(),
-        ]
-        .concat();
-        let value = bcs::to_bytes(message).unwrap();
-        self.nonce_messages.insert(key, value)
-    }
-
-    pub fn get_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> Result<Option<batch_avss::Message>> {
-        let key = [
-            epoch.to_be_bytes().as_slice(),
-            batch_index.to_be_bytes().as_slice(),
-            dealer.as_bytes(),
-        ]
-        .concat();
-        let bytes = match self.nonce_messages.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let message = bcs::from_bytes(&bytes).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid nonce message",
-            ))
-        })?;
-        Ok(Some(message))
-    }
-
-    pub fn list_nonce_messages(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-    ) -> Result<Vec<(Address, batch_avss::Message)>> {
-        let prefix = [
-            epoch.to_be_bytes().as_slice(),
-            batch_index.to_be_bytes().as_slice(),
-        ]
-        .concat();
-        list_messages_by_prefix(&self.nonce_messages, &prefix)
-    }
-
     pub fn delete_dealer_message(&self, epoch: u64, dealer: &Address) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         self.dealer_messages.remove(key)
@@ -550,21 +483,6 @@ impl Database {
     pub fn delete_rotation_messages(&self, epoch: u64, dealer: &Address) -> Result<()> {
         let key = [epoch.to_be_bytes().as_slice(), dealer.as_bytes()].concat();
         self.rotation_messages.remove(key)
-    }
-
-    pub fn delete_nonce_message(
-        &self,
-        epoch: u64,
-        batch_index: u32,
-        dealer: &Address,
-    ) -> Result<()> {
-        let key = [
-            epoch.to_be_bytes().as_slice(),
-            batch_index.to_be_bytes().as_slice(),
-            dealer.as_bytes(),
-        ]
-        .concat();
-        self.nonce_messages.remove(key)
     }
 
     pub fn store_avid_round_state(
@@ -738,7 +656,6 @@ impl Database {
             retention_cutoff,
             is_referenced_epoch,
         )?;
-        deleted += prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
         deleted += prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
         deleted += prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
         deleted += prune_keyspace(&self.avid_held_echoes, cutoff_epoch)?;
@@ -964,17 +881,16 @@ pub(crate) mod tests {
     use fastcrypto_tbls::threshold_schnorr::Certificate;
     use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::avss;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::EncryptionPrivateKey;
     use std::collections::BTreeSet;
     use sui_sdk_types::Address;
 
+    use super::AVID_ROUND_STATES_CF_NAME;
     use super::AvidRoundState;
     use super::Database;
     use super::Keyspace;
-    use super::NONCE_MESSAGES_CF_NAME;
     use super::PruningReferences;
     use super::RETENTION_EXTRA_EPOCHS;
 
@@ -1005,19 +921,6 @@ pub(crate) mod tests {
         )
         .unwrap();
         dealer.create_message(&mut rand::thread_rng())
-    }
-
-    pub(crate) fn create_test_nonce_message() -> batch_avss::Message {
-        let nodes = create_test_nodes(5);
-        let dealer = batch_avss::Dealer::new(
-            nodes,
-            0, // party_id
-            3, // threshold
-            b"test-nonce-session".to_vec(),
-            10, // batch_size_per_weight
-        )
-        .unwrap();
-        dealer.create_message(&mut rand::thread_rng()).unwrap()
     }
 
     #[derive(Clone, Debug)]
@@ -1453,80 +1356,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_nonce_messages() {
-        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path()).unwrap();
-
-        let dealer1 = Address::new([1u8; 32]);
-        let dealer2 = Address::new([2u8; 32]);
-        let message1 = create_test_nonce_message();
-        let message2 = create_test_nonce_message();
-
-        // Initially empty
-        let result = db.list_nonce_messages(1, 0).unwrap();
-        assert!(result.is_empty());
-
-        // Store and list
-        db.store_nonce_message(1, 0, &dealer1, &message1).unwrap();
-        let result = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, dealer1);
-        assert_eq!(
-            bcs::to_bytes(&result[0].1).unwrap(),
-            bcs::to_bytes(&message1).unwrap()
-        );
-
-        // Same epoch+batch, different dealer
-        db.store_nonce_message(1, 0, &dealer2, &message2).unwrap();
-        let result = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(result.len(), 2);
-
-        // Different batch_index - should be empty
-        let result = db.list_nonce_messages(1, 1).unwrap();
-        assert!(result.is_empty());
-
-        // Different epoch - should be empty
-        let result = db.list_nonce_messages(2, 0).unwrap();
-        assert!(result.is_empty());
-
-        // Verify persistence across reopen
-        drop(db);
-        let db = Database::open(tmpdir.path()).unwrap();
-        let result = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn test_get_nonce_message() {
-        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path()).unwrap();
-
-        let dealer = Address::new([1u8; 32]);
-        let message = create_test_nonce_message();
-
-        // Not found before storing
-        assert!(db.get_nonce_message(1, 0, &dealer).unwrap().is_none());
-
-        // Store and retrieve
-        db.store_nonce_message(1, 0, &dealer, &message).unwrap();
-        let retrieved = db.get_nonce_message(1, 0, &dealer).unwrap().unwrap();
-        assert_eq!(
-            bcs::to_bytes(&retrieved).unwrap(),
-            bcs::to_bytes(&message).unwrap()
-        );
-
-        // Wrong epoch
-        assert!(db.get_nonce_message(2, 0, &dealer).unwrap().is_none());
-
-        // Wrong batch_index
-        assert!(db.get_nonce_message(1, 1, &dealer).unwrap().is_none());
-
-        // Wrong dealer
-        let other_dealer = Address::new([2u8; 32]);
-        assert!(db.get_nonce_message(1, 0, &other_dealer).unwrap().is_none());
-    }
-
-    #[test]
     fn test_avid_round_states() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
@@ -1649,35 +1478,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_nonce_messages_different_batches() {
-        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path()).unwrap();
-
-        let dealer = Address::new([1u8; 32]);
-        let message1 = create_test_nonce_message();
-        let message2 = create_test_nonce_message();
-
-        // Store in batch 0 and batch 1 of same epoch
-        db.store_nonce_message(1, 0, &dealer, &message1).unwrap();
-        db.store_nonce_message(1, 1, &dealer, &message2).unwrap();
-
-        // Each batch returns only its own messages
-        let batch0 = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(batch0.len(), 1);
-        assert_eq!(
-            bcs::to_bytes(&batch0[0].1).unwrap(),
-            bcs::to_bytes(&message1).unwrap()
-        );
-
-        let batch1 = db.list_nonce_messages(1, 1).unwrap();
-        assert_eq!(batch1.len(), 1);
-        assert_eq!(
-            bcs::to_bytes(&batch1[0].1).unwrap(),
-            bcs::to_bytes(&message2).unwrap()
-        );
-    }
-
-    #[test]
     fn test_delete_dealer_message() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
@@ -1729,52 +1529,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_delete_nonce_message() {
-        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path()).unwrap();
-
-        let dealer1 = Address::new([1u8; 32]);
-        let dealer2 = Address::new([2u8; 32]);
-        let message = create_test_nonce_message();
-
-        db.store_nonce_message(1, 0, &dealer1, &message).unwrap();
-        db.store_nonce_message(1, 0, &dealer2, &message).unwrap();
-        assert_eq!(db.list_nonce_messages(1, 0).unwrap().len(), 2);
-
-        // Delete one
-        db.delete_nonce_message(1, 0, &dealer1).unwrap();
-        let remaining = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].0, dealer2);
-
-        // Delete non-existent is a no-op
-        db.delete_nonce_message(1, 0, &dealer1).unwrap();
-        db.delete_nonce_message(1, 1, &dealer2).unwrap();
-    }
-
-    #[test]
-    fn test_nonce_messages_overwrite() {
-        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(tmpdir.path()).unwrap();
-
-        let dealer = Address::new([1u8; 32]);
-        let message1 = create_test_nonce_message();
-        let message2 = create_test_nonce_message();
-
-        // Store and overwrite same key
-        db.store_nonce_message(1, 0, &dealer, &message1).unwrap();
-        db.store_nonce_message(1, 0, &dealer, &message2).unwrap();
-
-        // Should have exactly one entry (overwritten)
-        let result = db.list_nonce_messages(1, 0).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            bcs::to_bytes(&result[0].1).unwrap(),
-            bcs::to_bytes(&message2).unwrap()
-        );
-    }
-
-    #[test]
     fn test_store_does_not_prune() {
         use std::collections::BTreeMap;
         use std::num::NonZeroU16;
@@ -1786,14 +1540,15 @@ pub(crate) mod tests {
         let dealer_msg = create_test_message();
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
-        let nonce_msg = create_test_nonce_message();
+        let (round_state, _, _) = avid_round_fixture();
         let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
 
         // Store at the "stuck" source epoch.
         db.store_dealer_message(71, &dealer, &dealer_msg).unwrap();
         db.store_rotation_messages(71, &dealer, &rotation_msgs)
             .unwrap();
-        db.store_nonce_message(71, 0, &dealer, &nonce_msg).unwrap();
+        db.store_avid_round_state(71, 0, &dealer, &round_state)
+            .unwrap();
         db.store_encryption_key(71, &enc_key).unwrap();
 
         // Chain advanced 16 epochs while hashi was stuck. Validator stores at the
@@ -1801,7 +1556,8 @@ pub(crate) mod tests {
         db.store_dealer_message(87, &dealer, &dealer_msg).unwrap();
         db.store_rotation_messages(87, &dealer, &rotation_msgs)
             .unwrap();
-        db.store_nonce_message(87, 0, &dealer, &nonce_msg).unwrap();
+        db.store_avid_round_state(87, 0, &dealer, &round_state)
+            .unwrap();
         db.store_encryption_key(87, &enc_key).unwrap();
 
         // The (epoch=71, *) entries must still be present.
@@ -1814,8 +1570,8 @@ pub(crate) mod tests {
             "rotation messages at source epoch must survive a write at a much later epoch"
         );
         assert!(
-            db.get_nonce_message(71, 0, &dealer).unwrap().is_some(),
-            "nonce message at source epoch must survive a write at a much later epoch"
+            db.get_avid_round_state(71, 0, &dealer).unwrap().is_some(),
+            "avid round state at source epoch must survive a write at a much later epoch"
         );
         assert!(
             db.get_encryption_key(71).unwrap().is_some(),
@@ -1835,8 +1591,7 @@ pub(crate) mod tests {
         let dealer_msg = create_test_message();
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
-        let nonce_msg = create_test_nonce_message();
-        let avid_state = create_test_avid_round_state();
+        let (round_state, _, _) = avid_round_fixture();
         // Cutoff far enough above the retention window that key keyspaces
         // also see prunes (i.e., `cutoff - RETENTION_EXTRA_EPOCHS > 1`).
         let cutoff = RETENTION_EXTRA_EPOCHS + 8;
@@ -1848,9 +1603,7 @@ pub(crate) mod tests {
                 .unwrap();
             db.store_rotation_messages(epoch, &dealer, &rotation_msgs)
                 .unwrap();
-            db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
-                .unwrap();
-            db.store_avid_round_state(epoch, 0, &dealer, &avid_state)
+            db.store_avid_round_state(epoch, 0, &dealer, &round_state)
                 .unwrap();
             db.store_encryption_key(epoch, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
                 .unwrap();
@@ -1888,10 +1641,6 @@ pub(crate) mod tests {
         }
         for epoch in 1..cutoff {
             assert!(
-                db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
-                "nonce message at epoch {epoch} should be pruned (flat cutoff)"
-            );
-            assert!(
                 db.get_avid_round_state(epoch, 0, &dealer)
                     .unwrap()
                     .is_none(),
@@ -1926,10 +1675,6 @@ pub(crate) mod tests {
             assert!(
                 db.get_rotation_messages(epoch, &dealer).unwrap().is_some(),
                 "rotation messages at epoch {epoch} should be kept"
-            );
-            assert!(
-                db.get_nonce_message(epoch, 0, &dealer).unwrap().is_some(),
-                "nonce message at epoch {epoch} should be kept"
             );
             assert!(
                 db.get_avid_round_state(epoch, 0, &dealer)
@@ -1967,27 +1712,32 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
 
-        let nonce_msg = create_test_nonce_message();
+        let (round_state, _, _) = avid_round_fixture();
         for batch_index in 0..256 {
             for dealer in 0..16u8 {
-                db.store_nonce_message(1, batch_index, &Address::new([dealer; 32]), &nonce_msg)
-                    .unwrap();
+                db.store_avid_round_state(
+                    1,
+                    batch_index,
+                    &Address::new([dealer; 32]),
+                    &round_state,
+                )
+                .unwrap();
             }
         }
-        db.nonce_messages.rotate_memtable_and_wait().unwrap();
-        let occupied = bytes_on_disk(&db.nonce_messages);
+        db.avid_round_states.rotate_memtable_and_wait().unwrap();
+        let occupied = bytes_on_disk(&db.avid_round_states);
         assert!(occupied > 0, "epoch 1 should be on disk before pruning");
 
         db.prune_messages_below(2, &PruningReferences::default())
             .unwrap();
         assert!(
-            db.get_nonce_message(1, 0, &Address::new([0u8; 32]))
+            db.get_avid_round_state(1, 0, &Address::new([0u8; 32]))
                 .unwrap()
                 .is_none(),
             "pruning must delete the rows",
         );
         assert_eq!(
-            bytes_on_disk(&db.nonce_messages),
+            bytes_on_disk(&db.avid_round_states),
             occupied,
             "pruning alone does not free the disk — this is the bug being fixed",
         );
@@ -1998,23 +1748,19 @@ pub(crate) mod tests {
             "unlink rotation failed: {:?}",
             compaction.unlink_error
         );
-        let nonce = compaction
+        let avid = compaction
             .keyspaces
             .iter()
-            .find(|keyspace| keyspace.name == NONCE_MESSAGES_CF_NAME)
-            .expect("nonce_messages must be compacted");
-        assert!(
-            nonce.error.is_none(),
-            "compaction failed: {:?}",
-            nonce.error
-        );
+            .find(|keyspace| keyspace.name == AVID_ROUND_STATES_CF_NAME)
+            .expect("avid_round_states must be compacted");
+        assert!(avid.error.is_none(), "compaction failed: {:?}", avid.error);
         assert_eq!(
-            nonce.after, 0,
+            avid.after, 0,
             "every row was pruned, so nothing should be live"
         );
 
         assert!(
-            bytes_on_disk(&db.nonce_messages) < occupied / 10,
+            bytes_on_disk(&db.avid_round_states) < occupied / 10,
             "compaction must give back the {occupied} bytes pruning tombstoned",
         );
     }
@@ -2025,28 +1771,28 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
 
-        let nonce_msg = create_test_nonce_message();
+        let (round_state, _, _) = avid_round_fixture();
         for batch_index in 0..64 {
-            db.store_nonce_message(1, batch_index, &Address::new([1u8; 32]), &nonce_msg)
+            db.store_avid_round_state(1, batch_index, &Address::new([1u8; 32]), &round_state)
                 .unwrap();
         }
-        db.nonce_messages.rotate_memtable_and_wait().unwrap();
+        db.avid_round_states.rotate_memtable_and_wait().unwrap();
 
-        let nonce_bytes = |db: &Database| {
+        let avid_bytes = |db: &Database| {
             db.keyspace_disk_space()
                 .into_iter()
-                .find(|(name, _)| *name == NONCE_MESSAGES_CF_NAME)
-                .expect("nonce_messages must be reported")
+                .find(|(name, _)| *name == AVID_ROUND_STATES_CF_NAME)
+                .expect("avid_round_states must be reported")
                 .1
         };
-        assert!(nonce_bytes(&db) > 0, "epoch 1 should be on disk");
+        assert!(avid_bytes(&db) > 0, "epoch 1 should be on disk");
 
         db.prune_messages_below(2, &PruningReferences::default())
             .unwrap();
         let compaction = db.major_compact();
         assert!(compaction.unlink_error.is_none());
         assert_eq!(
-            nonce_bytes(&db),
+            avid_bytes(&db),
             0,
             "every row was pruned and compacted away"
         );
@@ -2060,16 +1806,16 @@ pub(crate) mod tests {
         let db = Database::open(tmpdir.path()).unwrap();
         assert!(!db.is_poisoned());
 
-        let nonce_msg = create_test_nonce_message();
+        let (round_state, _, _) = avid_round_fixture();
         let dealer = Address::new([1u8; 32]);
         for batch_index in 0..16 {
-            db.store_nonce_message(1, batch_index, &dealer, &nonce_msg)
+            db.store_avid_round_state(1, batch_index, &dealer, &round_state)
                 .unwrap();
         }
-        std::fs::remove_dir_all(db.nonce_messages.path().join("tables")).unwrap();
+        std::fs::remove_dir_all(db.avid_round_states.path().join("tables")).unwrap();
         // `rotate_memtable_and_wait` would spin forever: a failed flush never
         // clears the sealed memtable it waits on.
-        assert!(db.nonce_messages.rotate_memtable().unwrap());
+        assert!(db.avid_round_states.rotate_memtable().unwrap());
 
         // The flush worker sets the flag.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -2081,7 +1827,7 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(matches!(
-            db.store_nonce_message(1, 99, &dealer, &nonce_msg),
+            db.store_avid_round_state(1, 99, &dealer, &round_state),
             Err(fjall::Error::Poisoned)
         ));
 
@@ -2556,16 +2302,17 @@ pub(crate) mod tests {
         let dealer_msg = create_test_message();
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
-        let nonce_msg = create_test_nonce_message();
+        let (round_state, _, _) = avid_round_fixture();
 
         // Write at storage epoch 5 (well below any plausible cutoff).
         db.store_dealer_message(5, &dealer, &dealer_msg).unwrap();
         db.store_rotation_messages(5, &dealer, &rotation_msgs)
             .unwrap();
-        db.store_nonce_message(5, 0, &dealer, &nonce_msg).unwrap();
+        db.store_avid_round_state(5, 0, &dealer, &round_state)
+            .unwrap();
 
         // A non-empty protected pubkey set — irrelevant to
-        // dealer/rotation/nonce keyspaces, just exercises the path where
+        // dealer/rotation/avid keyspaces, just exercises the path where
         // committee-aware retention is in play yet must not bleed over into
         // these keyspaces.
         let enc = EncryptionPrivateKey::new(&mut rand::thread_rng());
@@ -2583,8 +2330,8 @@ pub(crate) mod tests {
             "rotation messages at storage epoch 5 should be pruned"
         );
         assert!(
-            db.get_nonce_message(5, 0, &dealer).unwrap().is_none(),
-            "nonce message at storage epoch 5 should be pruned"
+            db.get_avid_round_state(5, 0, &dealer).unwrap().is_none(),
+            "avid round state at storage epoch 5 should be pruned"
         );
     }
 

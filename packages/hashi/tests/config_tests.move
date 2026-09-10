@@ -188,5 +188,4 @@ fun test_mpc_accessors_default_when_absent() {
     assert!(hashi::mpc_config::nonce_accumulation_window_ms(&config) == custom_window);
     assert!(hashi::mpc_config::max_faulty_in_basis_points(&config) == 3333);
     assert!(hashi::mpc_config::weight_reduction_allowed_delta(&config) == 800);
-    assert!(hashi::mpc_config::nonce_generation_protocol(&config) == 0);
 }
