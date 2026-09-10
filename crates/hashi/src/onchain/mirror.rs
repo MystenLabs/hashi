@@ -34,7 +34,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use futures::StreamExt;
 use sui_rpc::Client;
-use sui_rpc::client::ResponseExt;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2 as proto;
@@ -322,10 +321,6 @@ async fn replay_transactions(
             .list_transactions(request)
             .await
             .context("list_transactions failed")?;
-        // The response header carries the server's indexed checkpoint
-        // height at request time — the coverage proof when watermark
-        // checkpoints are unset.
-        let indexed_height = response.checkpoint_height();
         let mut stream = response.into_inner();
 
         let mut end_reason = None;
@@ -345,19 +340,14 @@ async fn replay_transactions(
         let reached = require_mirror(mirror)?.watermark_checkpoint;
         match end_reason {
             Some(QueryEndReason::LedgerTip) => {
-                // LedgerTip means every matching transaction through
-                // the indexed tip was delivered.
+                // LedgerTip is the indexed tip, which may trail execution.
+                // Only replay coverage can establish that we reached target;
+                // the response's checkpoint-height header cannot prove it.
                 if reached >= target {
                     return Ok(());
                 }
-                if let Some(height) = indexed_height
-                    && height >= target
-                {
-                    advance_watermark(state, require_mirror(mirror)?, height);
-                    return Ok(());
-                }
                 // The list index trails the live stream; give it a beat.
-                tracing::debug!(target, ?indexed_height, "replay short of target; retrying");
+                tracing::debug!(target, reached, "replay short of target; retrying");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             // Item or scan limits: resume from the advanced cursor.
