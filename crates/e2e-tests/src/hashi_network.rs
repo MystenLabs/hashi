@@ -772,13 +772,21 @@ pub async fn update_tls_public_key(
     let validator_address_arg = builder.pure(&validator_address);
     let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
 
+    let preimage = hashi_types::committee::tls_proof_of_possession_preimage(
+        hashi_ids.hashi_object_id,
+        validator_address,
+        *tls_key.as_bytes(),
+    );
+    let pop = ed25519_dalek::Signer::sign(&config.tls_private_key()?, &preimage);
+    let tls_pop_arg = builder.pure(&pop.to_bytes().to_vec());
+
     builder.move_call(
         Function::new(
             call_package_id,
             Identifier::from_static("validator"),
             Identifier::from_static("update_tls_public_key"),
         ),
-        vec![hashi_arg, validator_address_arg, tls_key_arg],
+        vec![hashi_arg, validator_address_arg, tls_key_arg, tls_pop_arg],
     );
 
     let response = executor.execute(builder).await?;

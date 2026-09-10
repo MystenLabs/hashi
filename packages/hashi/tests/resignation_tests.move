@@ -159,9 +159,11 @@ fun test_resign_pre_genesis_flags_then_removal_succeeds() {
     assert!(committee_set.has_member(VOTER1));
     assert!(committee_set.is_member_resigned(VOTER1));
 
-    committee_set.remove_inactive_member(VOTER1, true);
+    let mut tls_keys = sui::table::new<vector<u8>, address>(ctx);
+    committee_set.remove_inactive_member(&mut tls_keys, VOTER1, true);
     assert!(!committee_set.has_member(VOTER1));
     assert!(committee_set.has_member(VOTER2));
+    tls_keys.destroy_empty();
     hashi::committee_set::destroy_for_testing(committee_set);
 }
 

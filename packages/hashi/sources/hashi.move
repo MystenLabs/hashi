@@ -22,7 +22,7 @@ use hashi::{
     versioning::{Self, Versioning}
 };
 use std::string::String;
-use sui::{bag::{Self, Bag}, dynamic_field as df};
+use sui::{bag::{Self, Bag}, dynamic_field as df, table::Table};
 
 // ~~~~~~~ Errors ~~~~~~~
 
@@ -226,6 +226,15 @@ public(package) fun bitcoin_mut(self: &mut Hashi): &mut BitcoinState {
     df::borrow_mut(&mut self.id, bitcoin_state::key())
 }
 
+public(package) fun committee_set_and_tls_keys_mut(
+    self: &mut Hashi,
+): (&mut CommitteeSet, &mut Table<vector<u8>, address>) {
+    (
+        &mut self.committee_set,
+        df::borrow_mut(&mut self.id, hashi::committee_set::tls_key_index_key()),
+    )
+}
+
 public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
     &mut self.tob
 }
@@ -304,6 +313,11 @@ fun init(ctx: &mut TxContext) {
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
+    df::add(
+        &mut hashi.id,
+        hashi::committee_set::tls_key_index_key(),
+        sui::table::new<vector<u8>, address>(ctx),
+    );
 
     sui::transfer::share_object(hashi);
 }
@@ -355,6 +369,11 @@ public fun create_for_testing(
         num_consumed_presigs: 0,
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
+    df::add(
+        &mut hashi.id,
+        hashi::committee_set::tls_key_index_key(),
+        sui::table::new<vector<u8>, address>(ctx),
+    );
     hashi
 }
 
