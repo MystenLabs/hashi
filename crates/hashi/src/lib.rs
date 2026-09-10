@@ -347,10 +347,12 @@ impl Hashi {
         write_backup: bool,
     ) -> anyhow::Result<Option<PathBuf>> {
         match crate::backup::cleanup_old_backups(&self.config.backup_dir, jiff::Timestamp::now()) {
-            Ok(()) => tracing::info!(
+            Ok(stats) => tracing::info!(
                 epoch,
                 write_backup,
                 directory = %self.config.backup_dir.display(),
+                removed = stats.removed,
+                failed = stats.failed,
                 "Epoch backup retention sweep completed",
             ),
             Err(error) => tracing::warn!(

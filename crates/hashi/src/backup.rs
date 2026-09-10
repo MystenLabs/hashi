@@ -418,13 +418,20 @@ pub fn encrypted_backup_file_name() -> PathBuf {
     .into()
 }
 
+#[derive(Default)]
+pub(crate) struct CleanupStats {
+    pub(crate) removed: usize,
+    pub(crate) failed: usize,
+}
+
 /// Remove expired archives and abandoned staging entries, always keeping the newest archive.
-pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Result<()> {
+pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Result<CleanupStats> {
     let cutoff = now.checked_sub(BACKUP_RETENTION)?;
     let staging_cutoff: std::time::SystemTime = cutoff.into();
+    let mut stats = CleanupStats::default();
     let entries = match fs::read_dir(output_dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(stats),
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("Failed to read backup directory {}", output_dir.display())
@@ -436,6 +443,7 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                stats.failed += 1;
                 warn!(
                     directory = %output_dir.display(),
                     "Failed to read backup directory entry: {error}"
@@ -466,14 +474,18 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
                         fs::remove_file(&path)
                     };
                     if let Err(error) = removed {
+                        stats.failed += 1;
                         warn!(
                             path = %path.display(),
                             "Failed to remove expired staging entry: {error}"
                         );
+                    } else {
+                        stats.removed += 1;
                     }
                 }
                 Ok(_) => {}
                 Err(error) => {
+                    stats.failed += 1;
                     warn!(
                         path = %path.display(),
                         "Failed to read staging entry metadata: {error}"
@@ -495,6 +507,7 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
+                stats.failed += 1;
                 warn!(
                     path = %path.display(),
                     "Failed to read backup file type: {error}"
@@ -519,13 +532,16 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
             continue;
         }
         if let Err(error) = fs::remove_file(&path) {
+            stats.failed += 1;
             warn!(
                 path = %path.display(),
                 "Failed to remove expired backup: {error}"
             );
+        } else {
+            stats.removed += 1;
         }
     }
-    Ok(())
+    Ok(stats)
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -1221,7 +1237,9 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let missing = tmpdir.path().join("missing");
 
-        cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        let stats = cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.failed, 0);
 
         assert!(!missing.exists());
     }
@@ -1285,7 +1303,9 @@ mod tests {
                 .unwrap();
         }
 
-        cleanup_old_backups(dir, now).unwrap();
+        let stats = cleanup_old_backups(dir, now).unwrap();
+        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.failed, 0);
 
         assert!(!expired.exists());
         for path in [boundary, recent] {
@@ -1447,7 +1467,9 @@ mod tests {
         let link = dir.join("hashi-backup-20260805T000000Z.tar.asc");
         std::os::unix::fs::symlink(&newest, &link).unwrap();
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        let stats = cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        assert_eq!(stats.removed, 3);
+        assert_eq!(stats.failed, 0);
 
         assert_eq!(fs::read(newest).unwrap(), b"newest recovery archive");
         assert!(!staging.exists());

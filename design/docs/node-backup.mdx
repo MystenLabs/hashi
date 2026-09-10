@@ -261,7 +261,9 @@ with write access restricted to the node's user.
 On epoch housekeeping, cleanup deletes archives older than 14 days by filename
 timestamp, except the newest archive. It also runs for nodes with no role, even
 though those nodes do not write a new backup. Each completed sweep logs its epoch,
-directory, and whether a backup was requested. Unrelated files are preserved.
+directory, whether a backup was requested, and `removed`/`failed` counts. Counts are
+per top-level entry; a removed restore directory counts once. Missing directories
+report zero counts. Unrelated files are preserved.
 Individual entry errors do not stop the sweep; cleanup failures do not prevent
 backup attempts. Retention runs before saving and still applies if the save fails.
 Manual backups do not trigger cleanup, but archives placed in `backup-dir` follow
