@@ -16537,6 +16537,52 @@ async fn recovery_drops_certs_the_live_path_would_reject() {
 }
 
 #[test]
+fn send_messages_does_not_persist_a_dkg_dealing_from_outside_the_committee() {
+    let setup = TestSetup::new(5);
+    let mut rng = rand::thread_rng();
+    let mut receiver = setup.create_manager(1);
+    let request = SendMessagesRequest {
+        messages: Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng)),
+    };
+    let outsider = Address::new([0xAB; 32]);
+    assert!(setup.committee().index_of(&outsider).is_none());
+
+    let err = receiver
+        .handle_send_messages_request(outsider, &request)
+        .expect_err("a dealing from outside the committee must be rejected");
+    assert!(
+        format!("{err}").contains("Dealer not in committee"),
+        "{err}"
+    );
+    assert!(
+        receiver
+            .public_messages_store
+            .get_dealer_message(setup.epoch(), &outsider)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!receiver.current_dkg_messages.contains_key(&outsider));
+}
+
+#[test]
+fn try_sign_dkg_message_rejects_a_dealer_outside_the_committee() {
+    let setup = TestSetup::new(5);
+    let mut rng = rand::thread_rng();
+    let mut signer = setup.create_manager(1);
+    let messages = Messages::Dkg(setup.create_manager(0).create_dealer_message(&mut rng));
+    let outsider = Address::new([0xAB; 32]);
+    assert!(setup.committee().index_of(&outsider).is_none());
+
+    let err = signer
+        .try_sign_dkg_message(outsider, &messages)
+        .expect_err("a dealer outside the committee must not get a signature");
+    assert!(
+        format!("{err}").contains("Dealer not in committee"),
+        "{err}"
+    );
+}
+
+#[test]
 fn formation_and_acceptance_quorums_agree() {
     let setup = TestSetup::new(5);
     let mut rng = rand::thread_rng();
