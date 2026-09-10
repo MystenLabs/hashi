@@ -18,6 +18,7 @@ use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::Event;
 use sui_rpc::proto::sui::rpc::v2::ExecutedTransaction;
 use sui_rpc::proto::sui::rpc::v2::GetCheckpointRequest;
+use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::ListTransactionsRequest;
 use sui_rpc::proto::sui::rpc::v2::Ordering;
 use sui_rpc::proto::sui::rpc::v2::QueryEndReason;
@@ -39,6 +40,49 @@ use crate::domain::utc_timestamp;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
 const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
+const MAX_RANGE_ATTEMPTS: u32 = 3;
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+struct TransactionScan {
+    transactions: Vec<ExecutedTransaction>,
+    completed_checkpoint: Option<u64>,
+    end_reason: QueryEndReason,
+}
+
+fn completed_checkpoint_for_scan(
+    start_checkpoint: u64,
+    end_checkpoint: u64,
+    end_reason: QueryEndReason,
+    watermark_checkpoint: Option<u64>,
+) -> anyhow::Result<Option<u64>> {
+    anyhow::ensure!(
+        start_checkpoint < end_checkpoint,
+        "empty Sui transaction checkpoint range"
+    );
+    let completed_checkpoint = match (end_reason, watermark_checkpoint) {
+        (QueryEndReason::CheckpointBound, None) => {
+            anyhow::bail!(
+                "Sui transaction scan reached checkpoint bound {end_checkpoint} without a completion watermark"
+            );
+        }
+        (QueryEndReason::LedgerTip, None) => return Ok(None),
+        (_, Some(completed_checkpoint)) => completed_checkpoint,
+        (end_reason, None) => {
+            anyhow::bail!("unexpected Sui transaction scan end reason {end_reason:?}");
+        }
+    };
+    anyhow::ensure!(
+        completed_checkpoint < end_checkpoint,
+        "Sui transaction scan watermark checkpoint {completed_checkpoint} is outside requested range ending at {end_checkpoint}"
+    );
+    if end_reason == QueryEndReason::CheckpointBound {
+        anyhow::ensure!(
+            completed_checkpoint == end_checkpoint - 1,
+            "Sui transaction scan reached checkpoint bound {end_checkpoint} but only covered checkpoint {completed_checkpoint}"
+        );
+    }
+    Ok((completed_checkpoint >= start_checkpoint).then_some(completed_checkpoint))
+}
 
 pub struct SuiEventsPoller {
     /// Sui v2 gRPC client used for checkpoint and transaction requests.
@@ -84,8 +128,9 @@ impl SuiEventsPoller {
 
     /// Scan through the checkpoint covering `up_to`, or the observed chain head.
     ///
-    /// The timestamp cursor advances only after `ListTransactions` reports that
-    /// the complete requested range was scanned. Transactions provide the
+    /// The timestamp cursor advances only through `watermark.checkpoint`, which
+    /// is the inclusive boundary that `ListTransactions` reports as fully
+    /// covered. Transactions provide the
     /// checkpoint timestamp needed by `DepositConfirmed`, while their nested
     /// events provide the Hashi payloads. The server stream handles its own item
     /// and scan limits with resumable cursors. A partial response caused by an
@@ -113,36 +158,38 @@ impl SuiEventsPoller {
             }
         }
 
-        let (mut end_checkpoint, mut scanned_through_timestamp) = if latest_timestamp < up_to {
-            (latest_sequence.saturating_add(1), latest_timestamp)
+        let mut end_checkpoint = if latest_timestamp < up_to {
+            latest_sequence.saturating_add(1)
         } else {
             let (_, boundary) = self
                 .checkpoint_bracket_from_head(up_to, (latest_sequence, latest_timestamp))
                 .await?
                 .context("Sui does not yet have a checkpoint at the poll end time")?;
-            let timestamp = self.checkpoint_timestamp(boundary).await?;
-            (boundary.saturating_add(1), timestamp)
+            boundary.saturating_add(1)
         };
         if end_checkpoint <= start_checkpoint {
             return Ok(PollOutcome::CursorUnmoved);
         }
 
-        let mut retry_same_range = true;
-        let raw_transactions = loop {
+        let mut range_attempt = 0u32;
+        let scan = loop {
             match self
                 .list_transactions_in_range(start_checkpoint, end_checkpoint)
                 .await
             {
                 Ok(transactions) => break transactions,
-                Err(error) if retry_same_range => {
+                Err(error) if range_attempt + 1 < MAX_RANGE_ATTEMPTS => {
+                    let delay = INITIAL_RETRY_DELAY.saturating_mul(1 << range_attempt);
+                    range_attempt += 1;
                     tracing::warn!(
                         start_checkpoint,
                         end_checkpoint,
+                        range_attempt,
+                        ?delay,
                         ?error,
                         "Sui transaction scan failed; retrying range"
                     );
-                    retry_same_range = false;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    tokio::time::sleep(delay).await;
                 }
                 Err(error) => {
                     let checkpoint_count = end_checkpoint.saturating_sub(start_checkpoint);
@@ -150,30 +197,50 @@ impl SuiEventsPoller {
                         return Err(error).context("Sui transaction scan failed after retries");
                     }
                     end_checkpoint = start_checkpoint + checkpoint_count / 2;
-                    let scanned_through = end_checkpoint
-                        .checked_sub(1)
-                        .context("empty Sui checkpoint range after retry split")?;
-                    scanned_through_timestamp = self.checkpoint_timestamp(scanned_through).await?;
                     tracing::warn!(
                         start_checkpoint,
                         end_checkpoint,
                         ?error,
-                        "Sui transaction scan failed twice; retrying a smaller range"
+                        "Sui transaction scan failed after retries; retrying a smaller range"
                     );
-                    retry_same_range = true;
+                    range_attempt = 0;
                 }
             }
         };
-        let mut events = Vec::with_capacity(raw_transactions.len());
-        for transaction in raw_transactions {
+
+        let Some(completed_checkpoint) = completed_checkpoint_for_scan(
+            start_checkpoint,
+            end_checkpoint,
+            scan.end_reason,
+            scan.completed_checkpoint,
+        )?
+        else {
+            return Ok(PollOutcome::CursorUnmoved);
+        };
+
+        let mut events = Vec::with_capacity(scan.transactions.len());
+        for transaction in scan.transactions {
+            let checkpoint = transaction
+                .checkpoint
+                .context("filtered Sui transaction is missing checkpoint")?;
+            // A LedgerTip response can include transactions from a checkpoint
+            // that its watermark does not yet declare complete. Leave those
+            // transactions for the next poll so the checkpoint is ingested
+            // atomically and cannot be skipped as indexing catches up.
+            if checkpoint > completed_checkpoint {
+                continue;
+            }
             events.extend(self.parse_transaction(transaction)?);
         }
 
-        self.next_checkpoint_to_scan = Some(end_checkpoint);
+        self.next_checkpoint_to_scan = Some(completed_checkpoint.saturating_add(1));
+        let scanned_through_timestamp = self.checkpoint_timestamp(completed_checkpoint).await?;
         self.cursor_seconds = self.cursor_seconds.max(scanned_through_timestamp);
         tracing::info!(
             start_checkpoint,
             end_checkpoint,
+            completed_checkpoint,
+            end_reason = ?scan.end_reason,
             cursor = %utc_timestamp(self.cursor_seconds),
             events = events.len(),
             "completed Sui event range"
@@ -251,7 +318,23 @@ impl SuiEventsPoller {
     }
 
     async fn refresh_chain_head(&mut self) -> anyhow::Result<(u64, UnixSeconds)> {
-        let latest = self.get_checkpoint(GetCheckpointRequest::latest()).await?;
+        let service_info = self
+            .client
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await
+            .context("failed to fetch Sui service info")?
+            .into_inner();
+        let sequence_number = service_info
+            .checkpoint_height
+            .context("Sui service info is missing checkpoint_height")?;
+        let timestamp = service_info
+            .timestamp
+            .context("Sui service info is missing timestamp")?;
+        let timestamp_ms =
+            proto_to_timestamp_ms(timestamp).context("invalid Sui service info timestamp")?;
+        let latest = (sequence_number, timestamp_ms / 1_000);
+        self.checkpoint_timestamps.insert(latest.0, latest.1);
         self.observed_chain_head = Some(latest);
         Ok(latest)
     }
@@ -315,14 +398,15 @@ impl SuiEventsPoller {
         &mut self,
         start_checkpoint: u64,
         end_checkpoint: u64,
-    ) -> anyhow::Result<Vec<ExecutedTransaction>> {
+    ) -> anyhow::Result<TransactionScan> {
         if start_checkpoint >= end_checkpoint {
-            return Ok(Vec::new());
+            anyhow::bail!("empty Sui transaction checkpoint range");
         }
 
         let filter = self.transaction_filter();
         let mut after = None;
         let mut all_transactions = Vec::new();
+        let mut completed_checkpoint = None;
         tracing::info!(
             start_checkpoint,
             end_checkpoint,
@@ -339,6 +423,7 @@ impl SuiEventsPoller {
             let request = ListTransactionsRequest::default()
                 .with_read_mask(FieldMask::from_paths([
                     "timestamp",
+                    "checkpoint",
                     "events.events.event_type",
                     "events.events.contents",
                 ]))
@@ -359,10 +444,24 @@ impl SuiEventsPoller {
 
             while let Some(frame) = stream.next().await {
                 let frame = frame.context("Sui ListTransactions stream failed")?;
-                if let Some(watermark) = &frame.watermark
-                    && let Some(cursor) = watermark.cursor.clone()
-                {
-                    page_cursor = Some(cursor);
+                let watermark = frame
+                    .watermark
+                    .as_ref()
+                    .context("Sui ListTransactions frame is missing watermark")?;
+                page_cursor = Some(
+                    watermark
+                        .cursor
+                        .clone()
+                        .context("Sui ListTransactions watermark is missing cursor")?,
+                );
+                if let Some(checkpoint) = watermark.checkpoint {
+                    if let Some(current) = completed_checkpoint {
+                        anyhow::ensure!(
+                            checkpoint >= current,
+                            "Sui ListTransactions checkpoint watermark regressed from {current} to {checkpoint}"
+                        );
+                    }
+                    completed_checkpoint = Some(checkpoint);
                 }
                 if let Some(transaction) = frame.transaction {
                     all_transactions.push(transaction);
@@ -378,7 +477,11 @@ impl SuiEventsPoller {
             let end_reason = end_reason.context("Sui ListTransactions ended without QueryEnd")?;
             match end_reason {
                 QueryEndReason::CheckpointBound | QueryEndReason::LedgerTip => {
-                    return Ok(all_transactions);
+                    return Ok(TransactionScan {
+                        transactions: all_transactions,
+                        completed_checkpoint,
+                        end_reason,
+                    });
                 }
                 QueryEndReason::ItemLimit | QueryEndReason::ScanLimit => {
                     tracing::info!(
@@ -471,5 +574,43 @@ impl SuiEventsPoller {
             }
             Some(_) | None => None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ledger_tip_only_advances_through_watermark() {
+        let completed =
+            completed_checkpoint_for_scan(100, 111, QueryEndReason::LedgerTip, Some(109)).unwrap();
+
+        assert_eq!(completed, Some(109));
+    }
+
+    #[test]
+    fn ledger_tip_without_newly_completed_checkpoint_does_not_advance() {
+        let completed =
+            completed_checkpoint_for_scan(110, 111, QueryEndReason::LedgerTip, Some(109)).unwrap();
+
+        assert_eq!(completed, None);
+    }
+
+    #[test]
+    fn checkpoint_bound_requires_full_requested_coverage() {
+        assert!(
+            completed_checkpoint_for_scan(100, 111, QueryEndReason::CheckpointBound, None,)
+                .is_err()
+        );
+        assert!(
+            completed_checkpoint_for_scan(100, 111, QueryEndReason::CheckpointBound, Some(109),)
+                .is_err()
+        );
+        assert_eq!(
+            completed_checkpoint_for_scan(100, 111, QueryEndReason::CheckpointBound, Some(110),)
+                .unwrap(),
+            Some(110)
+        );
     }
 }
