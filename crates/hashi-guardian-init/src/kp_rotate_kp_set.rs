@@ -103,7 +103,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     // 2. This KP's share of the dealt set, from the latest attested logs.
     let state = reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    state.encrypted_shares.verify_recipients(&certs_roster)?;
+    state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "share read",

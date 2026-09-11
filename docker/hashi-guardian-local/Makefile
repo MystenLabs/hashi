@@ -34,19 +34,19 @@ up: ## Build + start MinIO, host, withdraw enclave, proxy (no chain needed)
 	$(COMPOSE) up -d --build minio bucket-init host enclave proxy
 
 ceremony: ## Generate KP keys + run the genesis ceremony (every KP confirms; captures the BTC pubkey)
-	$(COMPOSE) --profile ceremony up -d --build --force-recreate ceremony
+	$(COMPOSE) --profile ceremony up -d --build --force-recreate --wait ceremony
 	$(COMPOSE) --profile init run --rm --build init /scripts/ceremony.sh
 	$(COMPOSE) --profile ceremony stop ceremony
 
 rotate-kp-set: ## Re-deal the key to a new KP set on a fresh ceremony guardian (NEW_NUM_SHARES/NEW_THRESHOLD)
-	$(COMPOSE) --profile ceremony up -d --build --force-recreate ceremony
+	$(COMPOSE) --profile ceremony up -d --build --force-recreate --wait ceremony
 	NEW_NUM_SHARES="$(NEW_NUM_SHARES)" NEW_THRESHOLD="$(NEW_THRESHOLD)" \
 	  $(COMPOSE) --profile init run --rm --build -e NEW_NUM_SHARES -e NEW_THRESHOLD \
 	    init /scripts/rotate-kp-set.sh
 	$(COMPOSE) --profile ceremony stop ceremony
 
 reprovision: ## Fresh withdraw guardian, provisioned by the dealt (rotated) KP set; no genesis
-	$(COMPOSE) up -d --force-recreate enclave
+	$(COMPOSE) up -d --force-recreate --wait enclave
 	$(MAKE) provision GENESIS=0
 
 pubkey: ## Print the ceremony BTC master pubkey (hex)

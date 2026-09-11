@@ -21,7 +21,6 @@ use anyhow::ensure;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSignedResponse;
-use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
@@ -29,6 +28,7 @@ use tracing::info;
 
 use crate::ceremony::CeremonyGuardian;
 use crate::config::Config;
+use crate::kp_roster::dealing_order;
 
 /// Run the one-time production guardian key ceremony.
 ///
@@ -63,10 +63,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP certificate roster",
     );
-    let mut certs = cfg.kp_roster.load_certs_roster()?.into_vec();
-    // Only a new ceremony assigns share IDs; existing state retains its mapping.
-    certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
-    let certs_roster = KpCertRoster::new(certs)?;
+    let certs_roster = dealing_order(cfg.kp_roster.load_certs_roster()?.into_vec())?;
     info!(
         phase = "roster load",
         share_count = certs_roster.num_kps(),
@@ -84,7 +81,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    verify against it below.
     let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
     ensure!(
-        guardian.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        guardian.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
         "guardian is not an operator-initialized ceremony enclave"
     );
 

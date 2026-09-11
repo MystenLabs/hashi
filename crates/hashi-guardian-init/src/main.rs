@@ -94,6 +94,12 @@ enum OperatorRotateKpSetCommand {
         #[arg(long = "submission", required = true)]
         submissions: Vec<PathBuf>,
     },
+    /// Resume an interrupted submit: wait for every new KP to confirm.
+    Wait {
+        /// Path to operator YAML config file (with new_kp_roster).
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +184,10 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     let cfg = config::Config::load_yaml(&config)?;
                     operator_rotate_kp_set::submit(cfg, &submissions).await?;
+                }
+                OperatorRotateKpSetCommand::Wait { config } => {
+                    let cfg = config::Config::load_yaml(&config)?;
+                    operator_rotate_kp_set::wait(cfg).await?;
                 }
             },
         },
@@ -325,6 +335,39 @@ mod tests {
             "config.yaml",
         ]);
 
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn operator_rotate_kp_set_wait_takes_no_submissions() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "operator",
+            "rotate-kp-set",
+            "wait",
+            "--config",
+            "config.yaml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Operator {
+                command: OperatorCommand::RotateKpSet {
+                    command: OperatorRotateKpSetCommand::Wait { .. }
+                }
+            }
+        ));
+
+        let result = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "operator",
+            "rotate-kp-set",
+            "wait",
+            "--config",
+            "config.yaml",
+            "--submission",
+            "kp1.rotation",
+        ]);
         assert!(result.is_err());
     }
 

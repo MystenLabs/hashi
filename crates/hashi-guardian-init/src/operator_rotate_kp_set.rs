@@ -4,7 +4,8 @@
 //! `operator rotate-kp-set`: re-deal the ceremony key to a new KP set on a
 //! fresh ceremony-mode guardian. `init` operator-initializes it and pins the
 //! session the current KPs sign for; `submit` batches their submissions into
-//! one `RotateKpSet`, verifies what was dealt and waits for every new KP.
+//! one `RotateKpSet`, verifies what was dealt and waits for every new KP;
+//! `wait` resumes that wait.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::ProvisionerRotateKpSetRequest;
 use hashi_types::guardian::RotateKpSetResponse;
+use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::proto_conversions::batch_provisioner_rotate_kp_set_request_to_pb;
@@ -43,16 +45,11 @@ pub async fn init(cfg: Config) -> Result<()> {
     let new_certs_roster = new_kp_set.load_certs_roster()?;
 
     let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
-    ensure!(
-        guardian.lifecycle == CeremonyStage::OperatorInitialized.into(),
-        "guardian lifecycle is {:?}; a rotation was already submitted to it",
-        guardian.lifecycle
-    );
-    let live = guardian.live_info().await?;
+    require_fresh(&guardian)?;
 
     let state = guardian.reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    state.encrypted_shares.verify_recipients(&certs_roster)?;
+    state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     let threshold = state.secret_sharing_instance.threshold();
     info!(
@@ -68,7 +65,7 @@ pub async fn init(cfg: Config) -> Result<()> {
     println!("  session_id:     {}", guardian.session_id);
     println!(
         "  enc_pubkey:     {}",
-        hex::encode(&live.info.encryption_pubkey)
+        hex::encode(&guardian.info.encryption_pubkey)
     );
     println!("  sharing_seq:    {sharing_seq} -> {}", sharing_seq + 1);
     println!(
@@ -99,93 +96,127 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     let new_params = new_kp_set.params()?;
 
     let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
-    let new_instance = if guardian.lifecycle == CeremonyStage::OperatorInitialized.into() {
-        // The dealt set, as the enclave will read it with the KPs' allowlist.
-        let old = guardian.reader.read_latest_ceremony_state().await?;
-        old.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-        old.encrypted_shares.verify_recipients(&certs_roster)?;
-        let new_sharing_seq = old.secret_sharing_instance.sharing_seq() + 1;
+    require_fresh(&guardian)?;
 
-        let submissions = submission_paths
-            .iter()
-            .map(|path| submission::read(path).map(|signed| (path.display().to_string(), signed)))
-            .collect::<Result<Vec<_>>>()?;
-        let batch = validate_batch(
-            submissions,
-            &old,
-            &Proposal {
-                session_id: &guardian.session_id,
-                pcr_allowlist: &allowlist,
-                new_certs_roster: &new_certs_roster,
-                new_params,
-            },
-        )?;
+    // The dealt set, as the enclave will read it with the KPs' allowlist.
+    let old = guardian.reader.read_latest_ceremony_state().await?;
+    old.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    old.encrypted_shares.verify_recipient_set(&certs_roster)?;
+    let new_sharing_seq = old.secret_sharing_instance.sharing_seq() + 1;
 
-        info!(
-            phase = "rotate_kp_set",
-            submissions = batch.submissions().len(),
-            new_sharing_seq,
-            "calling RotateKpSet",
-        );
-        let response_pb = guardian
-            .client
-            .rotate_kp_set(batch_provisioner_rotate_kp_set_request_to_pb(batch))
-            .await
-            .context("RotateKpSet RPC failed")?
-            .into_inner();
-        let response = GuardianSignedResponse::<RotateKpSetResponse>::try_from(response_pb)
-            .map_err(|e| anyhow!("decode SignedRotateKpSetResponse: {e:?}"))?
-            .verify_into_data(&guardian.signing_pub_key)
-            .map_err(|e| anyhow!("verify RotateKpSetResponse signature: {e}"))?
-            .response;
-        ensure!(
-            response.new_instance.sharing_seq() == new_sharing_seq,
-            "RotateKpSet returned sharing_seq {}, expected {new_sharing_seq}",
-            response.new_instance.sharing_seq()
-        );
-        response
-            .encrypted_shares
-            .verify_recipients(&new_certs_roster)?;
-        info!(
-            phase = "rotate_kp_set",
-            share_count = response.encrypted_shares.share_count(),
-            "every re-encrypted share verified against the new KP certs (without decrypting)",
-        );
+    let submissions = submission_paths
+        .iter()
+        .map(|path| submission::read(path).map(|signed| (path.display().to_string(), signed)))
+        .collect::<Result<Vec<_>>>()?;
+    let batch = validate_batch(
+        submissions,
+        &old,
+        &Proposal {
+            session_id: &guardian.session_id,
+            pcr_allowlist: &allowlist,
+            new_certs_roster: &new_certs_roster,
+            new_params,
+        },
+    )?;
 
-        // The state the new KPs will read, verify and confirm.
-        let live = CeremonyState::new(
-            CeremonyLogMessage::Rotate {
-                old_instance: old.secret_sharing_instance,
-                new_instance: response.new_instance,
-                btc_master_pubkey: old.btc_master_pubkey,
-            },
-            KpShareStateLogMessage::new(new_sharing_seq, 0, response.encrypted_shares),
-        )?;
-        live.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
-        guardian
-            .verify_published(&live, new_kp_set.num_shares, new_kp_set.threshold)
-            .await?;
-        live.secret_sharing_instance
-    } else {
-        // An earlier run's batch was accepted; only the wait remains.
-        info!(
-            phase = "rotate_kp_set",
-            lifecycle = ?guardian.lifecycle,
-            "rotation already submitted to this guardian; verifying its logs",
-        );
-        let logged = guardian
-            .reader
-            .read_latest_ceremony_state_from_current_build()
-            .await?;
-        logged.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
-        logged
-            .encrypted_shares
-            .verify_recipients(&new_certs_roster)?;
-        logged.secret_sharing_instance
-    };
+    info!(
+        phase = "rotate_kp_set",
+        submissions = batch.submissions().len(),
+        new_sharing_seq,
+        "calling RotateKpSet",
+    );
+    let response_pb = guardian
+        .client
+        .rotate_kp_set(batch_provisioner_rotate_kp_set_request_to_pb(batch))
+        .await
+        .context("RotateKpSet RPC failed")?
+        .into_inner();
+    let response = GuardianSignedResponse::<RotateKpSetResponse>::try_from(response_pb)
+        .map_err(|e| anyhow!("decode SignedRotateKpSetResponse: {e:?}"))?
+        .verify_into_data(&guardian.signing_pub_key)
+        .map_err(|e| anyhow!("verify RotateKpSetResponse signature: {e}"))?
+        .response;
+    ensure!(
+        response.new_instance.sharing_seq() == new_sharing_seq,
+        "RotateKpSet returned sharing_seq {}, expected {new_sharing_seq}",
+        response.new_instance.sharing_seq()
+    );
+    // Dealt in the proposal's order, so each share is checked at its position.
+    response
+        .encrypted_shares
+        .verify_recipients(&new_certs_roster)?;
+    info!(
+        phase = "rotate_kp_set",
+        share_count = response.encrypted_shares.share_count(),
+        "every re-encrypted share verified against the new KP certs (without decrypting)",
+    );
+
+    // The state the new KPs will read, verify and confirm.
+    let live = CeremonyState::new(
+        CeremonyLogMessage::Rotate {
+            old_instance: old.secret_sharing_instance,
+            new_instance: response.new_instance,
+            btc_master_pubkey: old.btc_master_pubkey,
+        },
+        KpShareStateLogMessage::new(new_sharing_seq, 0, response.encrypted_shares),
+    )?;
+    live.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
+    guardian
+        .verify_published(&live, new_kp_set.num_shares, new_kp_set.threshold)
+        .await?;
 
     guardian.wait_for_confirmations().await?;
+    report(&live.secret_sharing_instance);
+    Ok(())
+}
 
+/// Resume an interrupted `submit`: the accepted batch is committed in S3, so
+/// only the wait for every new KP's confirmation remains.
+pub async fn wait(cfg: Config) -> Result<()> {
+    cfg.kp_roster.validate()?;
+    let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
+    new_kp_set.validate()?;
+    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let new_certs_roster = new_kp_set.load_certs_roster()?;
+
+    let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
+    ensure!(
+        guardian.info.lifecycle != CeremonyStage::OperatorInitialized.into(),
+        "guardian lifecycle is operator_initialized: nothing has been submitted to it \
+         (operator rotate-kp-set submit)"
+    );
+    let logged = guardian
+        .reader
+        .read_latest_ceremony_state_from_current_build()
+        .await?;
+    logged.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
+    logged
+        .encrypted_shares
+        .verify_recipient_set(&new_certs_roster)?;
+    info!(
+        phase = "rotate_kp_set",
+        lifecycle = ?guardian.info.lifecycle,
+        sharing_seq = logged.secret_sharing_instance.sharing_seq(),
+        "the guardian dealt this config's new_kp_roster; resuming the wait",
+    );
+
+    guardian.wait_for_confirmations().await?;
+    report(&logged.secret_sharing_instance);
+    Ok(())
+}
+
+/// `RotateKpSet` needs a ceremony guardian that has dealt nothing yet.
+fn require_fresh(guardian: &CeremonyGuardian) -> Result<()> {
+    ensure!(
+        guardian.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        "guardian lifecycle is {:?}; expected operator_initialized, a fresh ceremony guardian \
+         that has dealt nothing (operator rotate-kp-set wait resumes a submitted rotation)",
+        guardian.info.lifecycle
+    );
+    Ok(())
+}
+
+fn report(new_instance: &SecretSharingInstance) {
     info!(
         phase = "summary",
         sharing_seq = new_instance.sharing_seq(),
@@ -208,7 +239,6 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
         new_instance.threshold(),
         new_instance.num_shares()
     );
-    Ok(())
 }
 
 /// The pinned session and this config's proposal; every submission must match.
