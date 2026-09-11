@@ -14,6 +14,7 @@ use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClien
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tonic::Code;
 use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 
 pub async fn verified_live_guardian_info(
     client: &mut GuardianServiceClient<Channel>,
@@ -72,7 +73,9 @@ pub async fn verified_ceremony_guardian_info(
 async fn ceremony_guardian_info_pb(
     endpoint: &str,
 ) -> anyhow::Result<(pb::GetGuardianInfoResponse, &'static str)> {
-    let channel = Channel::from_shared(endpoint.to_string())
+    // `Endpoint::new`, not `from_shared`: only the former enables TLS for an
+    // https endpoint (the relay), as every `Client::connect` in this crate does.
+    let channel = Endpoint::new(endpoint.to_string())
         .with_context(|| format!("invalid ceremony guardian endpoint {endpoint}"))?
         .connect()
         .await
