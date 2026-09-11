@@ -709,19 +709,19 @@ impl Database {
         &self,
         cutoff_epoch: u64,
         pruning_references: &PruningReferences,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
         // A key is retained if and only if its public key is referenced by a live committee or pending registration,
         // or it was created within the retention buffer.
         // The primary and its side-index rows are evicted together atomically.
-        prune_pubkey_keyspace(
+        let mut deleted = prune_pubkey_keyspace(
             &self.db,
             &self.encryption_keys,
             &self.encryption_epoch_index,
             &pruning_references.encryption_keys,
             retention_cutoff,
         )?;
-        prune_pubkey_keyspace(
+        deleted += prune_pubkey_keyspace(
             &self.db,
             &self.signing_keys,
             &self.signing_epoch_index,
@@ -730,17 +730,18 @@ impl Database {
         )?;
         let is_referenced_epoch =
             |epoch: u64, _value: &[u8]| pruning_references.committee_epochs.contains(&epoch);
-        prune_keyspace_with(&self.dealer_messages, retention_cutoff, is_referenced_epoch)?;
-        prune_keyspace_with(
+        deleted +=
+            prune_keyspace_with(&self.dealer_messages, retention_cutoff, is_referenced_epoch)?;
+        deleted += prune_keyspace_with(
             &self.rotation_messages,
             retention_cutoff,
             is_referenced_epoch,
         )?;
-        prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
-        prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
-        prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
-        prune_keyspace(&self.avid_held_echoes, cutoff_epoch)?;
-        Ok(())
+        deleted += prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
+        deleted += prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
+        deleted += prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
+        deleted += prune_keyspace(&self.avid_held_echoes, cutoff_epoch)?;
+        Ok(deleted)
     }
 }
 
@@ -816,7 +817,7 @@ fn list_messages_by_prefix<T: DeserializeOwned>(
 }
 
 /// Delete entries from `keyspace` whose leading big-endian u64 epoch is `< cutoff_epoch`.
-fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
+fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<usize> {
     let keys_to_delete: Vec<_> = keyspace
         .iter()
         .filter_map(|guard| {
@@ -826,15 +827,16 @@ fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
             (epoch < cutoff_epoch).then(|| key.to_vec())
         })
         .collect();
+    let deleted = keys_to_delete.len();
     for key in keys_to_delete {
         keyspace.remove(key)?;
     }
-    Ok(())
+    Ok(deleted)
 }
 
 /// Delete entries from `keyspace` whose leading big-endian u64 epoch is
 /// `< cutoff_epoch`, unless `is_referenced(epoch, value)` returns `true`.
-fn prune_keyspace_with<F>(keyspace: &Keyspace, cutoff_epoch: u64, is_referenced: F) -> Result<()>
+fn prune_keyspace_with<F>(keyspace: &Keyspace, cutoff_epoch: u64, is_referenced: F) -> Result<usize>
 where
     F: Fn(u64, &[u8]) -> bool,
 {
@@ -850,10 +852,11 @@ where
             (!is_referenced(epoch, &value)).then(|| key.to_vec())
         })
         .collect();
+    let deleted = keys_to_delete.len();
     for key in keys_to_delete {
         keyspace.remove(key)?;
     }
-    Ok(())
+    Ok(deleted)
 }
 
 fn latest_epoch(side_index: &Keyspace) -> Result<Option<u64>> {
@@ -914,7 +917,7 @@ fn prune_pubkey_keyspace(
     side_index: &Keyspace,
     referenced: &std::collections::HashSet<Vec<u8>>,
     retention_cutoff: u64,
-) -> Result<()> {
+) -> Result<usize> {
     let mut epochs_of: std::collections::HashMap<Vec<u8>, Vec<u64>> =
         std::collections::HashMap::new();
     for guard in side_index.iter() {
@@ -947,7 +950,7 @@ fn prune_pubkey_keyspace(
         }
         batch.commit()?;
     }
-    Ok(())
+    Ok(to_delete.len())
 }
 
 #[cfg(test)]

@@ -40,7 +40,6 @@ const sidebars = {
       items: [
         'node-operator-runbook',
         'node-backup',
-        'key-provisioner-key-creation',
       ],
     },
     {

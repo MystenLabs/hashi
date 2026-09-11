@@ -4092,6 +4092,37 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
 }
 
 #[test]
+fn select_rotation_indices_takes_only_owned_and_dealt() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let (manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    let msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+
+    let dealt: Vec<ShareIndex> = msgs.keys().copied().collect();
+    assert!(dealt.len() >= 3, "fixture must deal at least three indices");
+    let undealt = ShareIndex::new(u16::MAX).unwrap();
+    assert!(!msgs.contains_key(&undealt));
+
+    let owned: Vec<ShareIndex> = dealt[1..].iter().copied().chain([undealt]).collect();
+    assert_eq!(
+        select_rotation_indices(&owned, &msgs, &[]),
+        dealt[1..].to_vec()
+    );
+
+    let scrambled: Vec<ShareIndex> = owned.iter().copied().rev().collect();
+    assert_eq!(
+        select_rotation_indices(&scrambled, &msgs, &[]),
+        dealt[1..].to_vec()
+    );
+
+    let dealer = rotation_setup.setup.address(0);
+    assert_eq!(
+        select_rotation_indices(&owned, &msgs, &[(dealer, dealt[1])]),
+        dealt[2..].to_vec()
+    );
+}
+
+#[test]
 fn test_handle_retrieve_messages_request_db_fallback_rotation() {
     let mut rng = rand::thread_rng();
     let rotation_setup = RotationTestSetup::new();
