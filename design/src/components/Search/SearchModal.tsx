@@ -10,13 +10,15 @@ import {
   Index,
 } from "react-instantsearch";
 import {
-  truncateAtWord,
-  getDeepestHierarchyLabel,
   getHierarchyBreadcrumbs,
   cleanTooltipText,
+  parseHitUrl,
 } from "./utils";
 import ControlledSearchBox from "./ControlledSearchBox";
+import HitSnippet from "./HitSnippet";
 import TabbedResults from "./TabbedResults";
+
+const SNIPPET_MAX_CHARS = 120;
 
 const baseSearchClient = algoliasearch(
   // Shared MystenLabs Algolia app. Hashi-only search-only key (no write ACLs).
@@ -61,7 +63,7 @@ function HitItem({ hit }: { hit: any }) {
 
   return (
     <a
-      href={hit.url}
+      href={parseHitUrl(hit.url)?.href}
       className="modal-result block px-4 py-3 -mx-2 rounded-lg no-underline hover:bg-sui-gray-40 dark:hover:bg-sui-gray-80 transition-colors"
     >
       {breadcrumb.length > 0 && (
@@ -72,12 +74,11 @@ function HitItem({ hit }: { hit: any }) {
       <div className="text-sm font-medium text-gray-900 dark:text-white">
         {title}
       </div>
-      {hit.content && (
-        <p
+      {hit._highlightResult?.content?.value && (
+        <HitSnippet
+          value={hit._highlightResult.content.value}
+          maxChars={SNIPPET_MAX_CHARS}
           className="text-xs text-gray-600 dark:text-sui-gray-45 mt-1 mb-0 line-clamp-2"
-          dangerouslySetInnerHTML={{
-            __html: truncateAtWord(hit._highlightResult.content.value, 120),
-          }}
         />
       )}
     </a>
