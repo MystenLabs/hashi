@@ -454,6 +454,12 @@ pub enum CommitteeCommands {
     /// in place and a fresh reconfiguration can then start from the current
     /// validator set.
     AbortReconfig,
+
+    /// Start a reconfiguration by hand. Permissionless: the chain accepts it
+    /// only while nothing is pending and Hashi's epoch lags Sui's (or at
+    /// genesis, once the launch switch is flipped). Running nodes submit it
+    /// themselves, so this is the fallback for when no node is doing so.
+    StartReconfig,
 }
 
 #[derive(Subcommand)]
@@ -1249,6 +1255,9 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
             }
             CommitteeCommands::AbortReconfig => {
                 commands::committee::abort_reconfig(&config, &tx_opts).await?;
+            }
+            CommitteeCommands::StartReconfig => {
+                commands::committee::start_reconfig(&config, &tx_opts).await?;
             }
         },
         CliCommand::Config { action } => match action {
