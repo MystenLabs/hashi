@@ -80,7 +80,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    verify against it below.
     let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
     ensure!(
-        guardian.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        guardian.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
         "guardian is not an operator-initialized ceremony enclave"
     );
 

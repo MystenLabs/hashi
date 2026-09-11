@@ -16,6 +16,7 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::EnclaveLifecycle;
+use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::PcrAllowlist;
@@ -46,7 +47,8 @@ pub struct CeremonyGuardian {
     pub reader: GuardianReader,
     pub session_id: SessionID,
     pub signing_pub_key: GuardianPubKey,
-    pub lifecycle: EnclaveLifecycle,
+    /// The verified info as of `init`; `live_info` re-reads it.
+    pub info: GuardianInfo,
     allowlist: PcrAllowlist,
 }
 
@@ -141,7 +143,7 @@ impl CeremonyGuardian {
             reader,
             session_id: verified.session_id,
             signing_pub_key: verified.signing_pub_key,
-            lifecycle: verified.info.lifecycle,
+            info: verified.info,
             allowlist,
         })
     }

@@ -8,7 +8,8 @@
 #   3. threshold-many current KPs sign submissions (`key-provisioner rotate-kp-set`),
 #   4. `operator rotate-kp-set submit` -> RotateKpSet, then waits for the new KPs,
 #   5. every new KP runs `key-provisioner ceremony`,
-#   6. the new set becomes the dealt roster; `make reprovision` next.
+#   6. `operator rotate-kp-set wait` (the resume path) on the completed rotation,
+#   7. the new set becomes the dealt roster; `make reprovision` next.
 set -euo pipefail
 . /scripts/lib.sh
 
@@ -51,7 +52,10 @@ done
 
 echo "== operator rotate-kp-set submit (waits for every new KP's confirmation) =="
 render_config "${endpoint}" ""
-hashi-guardian-init operator rotate-kp-set submit --config "${CONFIG}" "${submissions[@]}" \
+# Kept aside: the KP renders below overwrite ${CONFIG}, and `wait` reuses it.
+operator_config="${WORK}/operator-rotate.yaml"
+cp "${CONFIG}" "${operator_config}"
+hashi-guardian-init operator rotate-kp-set submit --config "${operator_config}" "${submissions[@]}" \
   > "${WORK}/operator-rotate.out" 2> "${WORK}/operator-rotate.log" &
 operator=$!
 wait_for_line "${WORK}/operator-rotate.log" "waiting for every key provisioner" 120 "${operator}"
@@ -65,6 +69,9 @@ confirm_kps "${endpoint}" "${KP_CERTS}"
 
 wait "${operator}" || { cat "${WORK}/operator-rotate.log" >&2; exit 1; }
 cat "${WORK}/operator-rotate.out"
+
+echo "== operator rotate-kp-set wait (the resume path, on the completed rotation) =="
+hashi-guardian-init operator rotate-kp-set wait --config "${operator_config}"
 save_roster "${NUM_SHARES}" "${THRESHOLD}" "${KP_CERTS}"
 echo
 echo "KP-set rotation complete: the dealt set is now kp${first}..kp${last} (${THRESHOLD}-of-${NUM_SHARES})."

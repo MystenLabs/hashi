@@ -5,6 +5,7 @@ use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::EnclaveLifecycle;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::VerifiedGuardianInfo;
@@ -45,17 +46,32 @@ pub async fn verified_provisioning_target_info(
 
 /// The ceremony guardian a KP confirms to or signs a rotation for: through
 /// the proxy, the relay's provisioning target (the standby during a KP-set
-/// rotation); a bare guardian answers for itself.
+/// rotation); a bare guardian answers for itself. Whichever answered must be
+/// a ceremony enclave, so an endpoint that hides the relay and answers for
+/// the active guardian is named rather than blamed downstream.
 pub async fn verified_ceremony_guardian_info(
     endpoint: &str,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
-    verify_info_response(ceremony_guardian_info_pb(endpoint).await?, current_build)
+    let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint).await?;
+    let verified = verify_info_response(info_pb, current_build)?;
+    ensure!(
+        matches!(verified.info.lifecycle, EnclaveLifecycle::Ceremony(_)),
+        "{rpc} at {endpoint} answers for a guardian in lifecycle {:?}, not a ceremony \
+         guardian: a proxy must route GuardianRelayService and front the ceremony guardian \
+         as its provisioning target; a bare endpoint must be the ceremony guardian itself",
+        verified.info.lifecycle
+    );
+    Ok(verified)
 }
 
 /// `GetProvisioningTargetInfo` from `endpoint`, or its `GetGuardianInfo` when
-/// it serves no relay (a bare guardian answers `Unimplemented`).
-async fn ceremony_guardian_info_pb(endpoint: &str) -> anyhow::Result<pb::GetGuardianInfoResponse> {
+/// it serves no relay, with the RPC that answered. A bare guardian answers
+/// `Unimplemented`; so does an ingress that hides the relay service (tonic
+/// maps an HTTP 404 to it), which the caller's lifecycle check catches.
+async fn ceremony_guardian_info_pb(
+    endpoint: &str,
+) -> anyhow::Result<(pb::GetGuardianInfoResponse, &'static str)> {
     let channel = Channel::from_shared(endpoint.to_string())
         .with_context(|| format!("invalid ceremony guardian endpoint {endpoint}"))?
         .connect()
@@ -65,14 +81,15 @@ async fn ceremony_guardian_info_pb(endpoint: &str) -> anyhow::Result<pb::GetGuar
         .get_provisioning_target_info(pb::GetProvisioningTargetInfoRequest {})
         .await
     {
-        Ok(response) => Ok(response.into_inner()),
-        Err(status) if status.code() == Code::Unimplemented => {
-            Ok(GuardianServiceClient::new(channel)
+        Ok(response) => Ok((response.into_inner(), "GetProvisioningTargetInfo")),
+        Err(status) if status.code() == Code::Unimplemented => Ok((
+            GuardianServiceClient::new(channel)
                 .get_guardian_info(pb::GetGuardianInfoRequest {})
                 .await
                 .context("GetGuardianInfo RPC failed")?
-                .into_inner())
-        }
+                .into_inner(),
+            "GetGuardianInfo",
+        )),
         Err(status) => Err(status).context("GetProvisioningTargetInfo RPC failed"),
     }
 }
@@ -243,8 +260,9 @@ mod tests {
         )
         .await;
 
-        let info = ceremony_guardian_info_pb(&endpoint).await.unwrap();
+        let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
+        assert_eq!(rpc, "GetProvisioningTargetInfo");
     }
 
     #[tokio::test]
@@ -252,7 +270,8 @@ mod tests {
         let endpoint =
             serve(Server::builder().add_service(GuardianServiceServer::new(Guardian(0xA)))).await;
 
-        let info = ceremony_guardian_info_pb(&endpoint).await.unwrap();
+        let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
         assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xA; 32]);
+        assert_eq!(rpc, "GetGuardianInfo");
     }
 }

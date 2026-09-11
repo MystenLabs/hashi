@@ -70,7 +70,7 @@ impl KpRosterConfig {
 }
 
 /// The KP set a `rotate-kp-set` proposes: sharing params and one cert per
-/// KP, in share order. The proposal carries `kp_roster`'s PCR allowlist.
+/// KP, in any order. The proposal carries `kp_roster`'s PCR allowlist.
 #[derive(Deserialize)]
 pub struct KpSetConfig {
     pub num_shares: usize,
@@ -88,9 +88,18 @@ impl KpSetConfig {
             .map_err(|e| anyhow!("invalid sharing params: {e:?}"))
     }
 
+    /// The roster as the rotation deals it. Every submission must carry the
+    /// same roster, so the order comes from the certs, not the config.
     pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
-        load_kp_certs_roster(&self.kp_pgp_cert_paths)
+        dealing_order(load_kp_certs_roster(&self.kp_pgp_cert_paths)?.into_vec())
     }
+}
+
+/// Certs in the order a new ceremony deals them: share id `i + 1` goes to the
+/// `i`th fingerprint in hex order. Existing signed state keeps its own ids.
+pub fn dealing_order(mut certs: Vec<PgpPublicCert>) -> Result<KpCertRoster> {
+    certs.sort_by_cached_key(|cert| cert.fingerprint().to_hex());
+    KpCertRoster::new(certs).context("invalid KP certificate roster")
 }
 
 fn validate_kp_set(num_shares: usize, threshold: usize, cert_paths: &[PathBuf]) -> Result<()> {

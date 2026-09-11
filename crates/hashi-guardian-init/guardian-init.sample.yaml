@@ -10,6 +10,7 @@
 #   cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml
 #   cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guardian-init.sample.yaml --submission-path /path/to/kp3.rotation
 #   cargo run -p hashi-guardian-init -- operator rotate-kp-set submit --config guardian-init.sample.yaml --submission /path/to/kp1.rotation --submission /path/to/kp3.rotation
+#   cargo run -p hashi-guardian-init -- operator rotate-kp-set wait --config guardian-init.sample.yaml
 
 # gRPC endpoint of the guardian. `operator ceremony` and `operator rotate-kp-set`
 # expect ceremony mode; `operator provision` and `operator activate` expect
@@ -78,7 +79,8 @@ kp_roster:
 
 # The KP set a rotate-kp-set proposes (rotate-kp-set commands only). kp_roster
 # stays the dealt set, and its allowlist must list every build that wrote the
-# logs the ceremony guardian reads.
+# logs the ceremony guardian reads. Cert order is irrelevant: the rotation
+# deals share ids by fingerprint order, like a new ceremony.
 # new_kp_roster:
 #   num_shares: 3
 #   threshold: 2
