@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "object_key": "init/8e6e6767497fe1ae/04-oa-activated.json",
+  "session_id": "8e6e6767497fe1ae",
+  "timestamp_ms": 1784233755218,
+  "message": {
+    "Init": {
+      "OAActivated": {
+        "state_hash": "3fa7baaaef8b02df0839a270d8b00227dcbac5f40ddb8573cea0b97729457ccc",
+        "config_hash": "2898c44410394951d501de899538f489a430746c2a19c7b46781630f65fc348e",
+        "sharing_seq": 0,
+        "committee_epoch": 1162,
+        "limiter_state": {
+          "num_tokens_available": 10000000000,
+          "last_updated_at": 0,
+          "next_seq": 0
+        }
+      }
+    }
+  },
+  "signature": "3b1ce602cd5eba6bb41c9d69677ad665d1cebde6382e030b32067d68feda94e351c0cffe3606377ac453598cd613c406e3aa11a8eda4dd09284e7c1dd0d38d04"
+}

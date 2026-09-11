@@ -1,0 +1,46 @@
+{
+  "schema_version": 2,
+  "object_key": "init/a37c0e391ca0afab/02-oi-guardian-info.json",
+  "session_id": "a37c0e391ca0afab",
+  "timestamp_ms": 1786081777429,
+  "message": {
+    "Init": {
+      "OIGuardianInfo": {
+        "lifecycle": {
+          "withdraw": "uninitialized"
+        },
+        "secret_sharing_instance": {
+          "commitments": {
+            "1": "02573be8f5e5409ed1ace3c54e2a26cb6feb828a35c5e9279a19405c1a97a476cc",
+            "2": "034deba8925b67ae21c11ef5bbef7d9d64de0135e7fb5d1fb95b310d8fdc6fabec",
+            "3": "022a4920cb11b4c1f8486da73401cf7cf1ee4be7feb81416dbdf52cb0177922eda",
+            "4": "0300f559a51843d844767d55b7769cf4b6cb2f252791e0343d43296e3c6b5a9b5b",
+            "5": "029716c26a92d861ba7e13f755cdd7654d8f81412861ac30149be4e0eb92f2f217",
+            "6": "035d17d1ee57e53273580803fbfca8cfa7fe67a8f9f45a70c77ea547eadeafb70e"
+          },
+          "params": {
+            "num_shares": 6,
+            "threshold": 4
+          },
+          "sharing_seq": 0
+        },
+        "bucket_info": {
+          "bucket": "mysten-hashi-guardian-enclave-testnet-3",
+          "region": "us-west-2"
+        },
+        "encryption_pubkey": "f282c063349af4a4e6526ce6683a86ef60dc8e1a8276b93e0ba2947947e60d78",
+        "config_hash": "e958c68ee47f88e35346b5d2c9e7e1ad7742cfe28dbcccf76fc77652a07f7150",
+        "untrusted_git_revision": "63cda27d106e0dcd4af74fc840d49d98942987b9",
+        "enclave_btc_pubkey": null,
+        "limiter_state": null,
+        "limiter_config": {
+          "refill_rate": 11574074,
+          "max_bucket_capacity": 1000000000000
+        },
+        "current_committee_epoch": null,
+        "mpc_master_g": "391d3d8e999367dd9befa4b391fadf5d67025fb30ca7b09b05b9b02ead558f3680"
+      }
+    }
+  },
+  "signature": "0a30c811d0559e9ef3a0a3c2271591fe39df2d045cef7493393f1461a76c80799ac7071417ec981c8fe9a25d459329c854d0fe76c0baaaf749e7dfeadcc1a403"
+}
