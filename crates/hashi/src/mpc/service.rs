@@ -1085,12 +1085,48 @@ impl MpcService {
         )))
     }
 
+    /// Put the `MpcManager` back on the current epoch once the
+    /// reconfiguration that displaced it is dead. `handle_reconfig` installs
+    /// a manager for its target before running the protocol, and every
+    /// give-up exit leaves it there; after an abort that manager is for an
+    /// epoch that will never exist. The current epoch's `SigningManager`
+    /// survived the whole time, which is exactly why `sync_if_stale` rebuilds
+    /// nothing, yet presignature refill and batch repair both run through
+    /// `ensure_manager_epoch` and fail against the dead manager, so the pool
+    /// could not refill until the next `end_reconfig` landed. A fresh manager
+    /// is all they need: the recovery path builds the same one from scratch.
+    fn restore_current_manager(&self, epoch: u64) {
+        let pinned = self
+            .inner
+            .mpc_manager()
+            .map(|manager| manager.read().unwrap().mpc_config.epoch);
+        if !manager_needs_restore(pinned, epoch, self.get_pending_epoch_change()) {
+            return;
+        }
+        let result = if self.inner.onchain_state().is_key_rotation_epoch(epoch) {
+            self.setup_key_rotation(epoch)
+        } else {
+            self.setup_initial_dkg(epoch)
+        };
+        match result {
+            Ok(()) => info!(
+                "sync_if_stale: restored the MpcManager for epoch {epoch}; a reconfiguration \
+                 that did not complete had left it on {pinned:?}"
+            ),
+            Err(e) => error!(
+                "sync_if_stale: failed to restore the MpcManager for epoch {epoch} (left on \
+                 {pinned:?} by a reconfiguration that did not complete): {e}"
+            ),
+        }
+    }
+
     async fn sync_if_stale(&self) {
         if self.is_awaiting_genesis() || !self.inner.is_in_current_committee() {
             return;
         }
         let epoch = self.inner.onchain_state().epoch();
         if self.inner.signing_manager_for(epoch).is_some() {
+            self.restore_current_manager(epoch);
             return;
         }
         let _guard = match self.reconciling.try_lock() {
@@ -2687,6 +2723,14 @@ fn reconfig_window_closed(latest_sui_epoch: u64, target_epoch: u64) -> bool {
     latest_sui_epoch > target_epoch
 }
 
+/// Whether the `MpcManager` must be rebuilt for `current_epoch`: it is on
+/// some other epoch (or missing) and no reconfiguration is pending. While one
+/// is pending the manager belongs to its target, which `handle_reconfig`
+/// owns and replaces itself.
+fn manager_needs_restore(pinned: Option<u64>, current_epoch: u64, pending: Option<u64>) -> bool {
+    pending.is_none() && pinned != Some(current_epoch)
+}
+
 /// Pending on chain and inside its Sui epoch window.
 fn reconfig_target_pending(pending: Option<u64>, latest_sui_epoch: u64, target_epoch: u64) -> bool {
     pending == Some(target_epoch) && !reconfig_window_closed(latest_sui_epoch, target_epoch)
@@ -2961,5 +3005,31 @@ mod reconfig_target_tests {
         assert!(!reconfig_target_pending(Some(6), 7, 6));
         assert!(!reconfig_target_pending(None, 6, 6));
         assert!(!reconfig_target_pending(Some(7), 6, 6));
+    }
+}
+
+#[cfg(test)]
+mod manager_restore_tests {
+    use super::manager_needs_restore;
+
+    #[test]
+    fn a_manager_left_on_a_dead_target_is_restored() {
+        // The rotation to 7 was aborted; the node still serves epoch 6.
+        assert!(manager_needs_restore(Some(7), 6, None));
+        // A missing manager is just as unusable for refill.
+        assert!(manager_needs_restore(None, 6, None));
+    }
+
+    #[test]
+    fn a_manager_on_the_current_epoch_is_left_alone() {
+        assert!(!manager_needs_restore(Some(6), 6, None));
+    }
+
+    #[test]
+    fn nothing_is_touched_while_a_reconfiguration_is_pending() {
+        // The target's manager belongs to handle_reconfig.
+        assert!(!manager_needs_restore(Some(7), 6, Some(7)));
+        // Even one on a stale epoch waits: handle_reconfig replaces it.
+        assert!(!manager_needs_restore(Some(5), 6, Some(7)));
     }
 }
