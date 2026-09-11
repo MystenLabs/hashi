@@ -69,12 +69,15 @@ impl PIInstall {
             ensure_no_serving_committee(enclave).await?;
         }
 
-        let hashi_object_id = enclave.hashi_object_id()?;
         Ok(Self {
             enclave_btc_keypair,
-            genesis_log: genesis_state.map(|state| GenesisLogMessage {
-                committee: state.into_committee(),
-                hashi_object_id,
+            genesis_log: genesis_state.map(|state| {
+                let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
+                GenesisLogMessage {
+                    committee,
+                    hashi_object_id,
+                    mpc_master_g,
+                }
             }),
             completion_log: PIEnclaveFullyInitialized {
                 sharing_seq,
@@ -223,12 +226,13 @@ mod tests {
     async fn setup() -> TestContext {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
-        setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey).await
+        setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey, None).await
     }
 
     async fn setup_with_secret_and_ceremony_pubkey(
         sk: SecretKey,
         ceremony_btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
+        genesis_state: Option<GenesisState>,
     ) -> TestContext {
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
@@ -261,6 +265,9 @@ mod tests {
             .with_s3_logger(logger)
             .with_commitments(share_commitments)
             .with_kp_encrypted_shares(kp_encrypted_shares);
+        if let Some(genesis_state) = genesis_state {
+            init_args = init_args.with_genesis_state(genesis_state);
+        }
         init_args.ceremony_state.btc_master_pubkey = ceremony_btc_pubkey;
         let enclave = Enclave::create_operator_initialized_with(init_args).await;
         TestContext {
@@ -434,6 +441,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn genesis_path_writes_complete_v2_genesis_record() {
+        let genesis_state = GenesisState::mock_for_testing();
+        let expected = genesis_state.clone().into_parts();
+        let sk = SecretKey::random(&mut rand::thread_rng());
+        let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
+        let ctx =
+            setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey, Some(genesis_state))
+                .await;
+
+        ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
+            .await
+            .expect("genesis provisioner init should succeed");
+
+        let captured = ctx.captures.lock().unwrap();
+        let (_, body) = captured
+            .iter()
+            .find(|(key, _)| key == &GenesisLogMessage::object_key())
+            .expect("genesis provisioner init should write the genesis record");
+        let record: LogRecord = serde_json::from_slice(body).unwrap();
+        let VersionedLogMessage::V2(LogMessageV2::Genesis(message)) = record.message() else {
+            panic!("expected V2 genesis record");
+        };
+        assert_eq!(
+            (
+                &message.committee,
+                message.hashi_object_id,
+                message.mpc_master_g
+            ),
+            (&expected.0, expected.1, expected.2)
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_alternate_cert_for_rostered_share() {
         let ctx = setup().await;
         let mut submissions = vec![ctx.signed_submission_with_key(
@@ -496,7 +536,7 @@ mod tests {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let different_sk = SecretKey::random(&mut rand::thread_rng());
         let ceremony_btc_pubkey = k256_sk_to_btc_xonly_pubkey(&different_sk);
-        let ctx = setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey).await;
+        let ctx = setup_with_secret_and_ceremony_pubkey(sk, ceremony_btc_pubkey, None).await;
 
         let err = ctx
             .provision(ctx.request(&ctx.shares[..TEST_T]))

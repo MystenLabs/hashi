@@ -17,10 +17,11 @@ pub struct GenesisLogMessageV1 {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GenesisLogMessageV2 {
     pub committee: crate::move_types::Committee,
-    /// The Hashi shared-object id this guardian was bootstrapped for, for
-    /// audit self-description (the authoritative pin lives in `InitConfig`,
-    /// covered by `config_hash`).
+    /// The Hashi shared-object id this guardian was bootstrapped for.
     pub hashi_object_id: sui_sdk_types::Address,
+    /// DKG-derived MPC master G pinned by the operator and independently
+    /// authorized by KPs during genesis.
+    pub mpc_master_g: crate::bitcoin::HashiMasterG,
 }
 
 /// Writer-facing alias for the current genesis log schema.

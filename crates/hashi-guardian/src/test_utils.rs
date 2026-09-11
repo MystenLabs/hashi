@@ -108,6 +108,8 @@ pub fn decrypt_kp_shares(
 /// Vec. Lets tests assert on what was written. Body is captured via `match_requests`
 /// (same Mutex side-channel trick as `mock_logger_with_layout`).
 pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
+    use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
+    use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
@@ -130,7 +132,15 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
             true
         })
         .then_output(|| PutObjectOutput::builder().build());
-    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
+    let list_v2 =
+        mock!(Client::list_objects_v2).then_output(|| ListObjectsV2Output::builder().build());
+    let list_versions = mock!(Client::list_object_versions)
+        .then_output(|| ListObjectVersionsOutput::builder().build());
+    let client = mock_client!(
+        aws_sdk_s3,
+        RuleMode::MatchAny,
+        &[&put_ok, &list_v2, &list_versions]
+    );
     let logger =
         GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client);
     (logger, captures)

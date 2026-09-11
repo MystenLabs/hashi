@@ -209,8 +209,24 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
                     .genesis_state
                     .map(|state| {
                         let committee = state.committee.ok_or_else(|| missing("committee"))?;
-                        Ok(GenesisState::from_move_committee(
+                        let hashi_object_id = <[u8; 32]>::try_from(state.hashi_object_id.as_ref())
+                            .map(sui_sdk_types::Address::new)
+                            .map_err(|_| {
+                                InvalidInputs("hashi_object_id must be 32 bytes".into())
+                            })?;
+                        let master_g_bytes: [u8; 33] =
+                            state.mpc_master_g.as_ref().try_into().map_err(|_| {
+                                InvalidInputs(format!(
+                                    "mpc_master_g must be 33 bytes (compressed), got {}",
+                                    state.mpc_master_g.len()
+                                ))
+                            })?;
+                        let mpc_master_g = HashiMasterG::from_byte_array(&master_g_bytes)
+                            .map_err(|e| InvalidInputs(format!("invalid mpc_master_g: {e:?}")))?;
+                        Ok(GenesisState::from_parts(
                             crate::move_types::Committee::try_from(committee)?,
+                            hashi_object_id,
+                            mpc_master_g,
                         ))
                     })
                     .transpose()?;
@@ -773,8 +789,13 @@ pub fn operator_init_request_to_pb(
                 pb::WithdrawOperatorInitRequest {
                     s3_credentials: Some(s3_credentials.into()),
                     init_config: Some(init_config_to_pb(init_config)?),
-                    genesis_state: genesis_state.map(|state| pb::GenesisState {
-                        committee: Some(move_committee_to_pb(&state.into_committee())),
+                    genesis_state: genesis_state.map(|state| {
+                        let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
+                        pb::GenesisState {
+                            committee: Some(move_committee_to_pb(&committee)),
+                            hashi_object_id: hashi_object_id.as_bytes().to_vec().into(),
+                            mpc_master_g: mpc_master_g.to_byte_array().to_vec().into(),
+                        }
                     }),
                 },
             ))

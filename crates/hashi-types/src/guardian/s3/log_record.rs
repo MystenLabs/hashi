@@ -423,6 +423,7 @@ mod tests {
     use bitcoin::Network;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash as _;
+    use fastcrypto::groups::GroupElement;
     use std::num::NonZeroU16;
 
     fn heartbeat_session_id() -> SessionID {
@@ -601,6 +602,7 @@ mod tests {
                 LogMessage::Genesis(Box::new(GenesisLogMessage {
                     committee: committee_0,
                     hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+                    mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
                 })),
             ),
         ];
@@ -1213,6 +1215,7 @@ mod tests {
                     config: crate::move_types::Config::default(),
                 },
                 hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+                mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
             })),
             &signing_key,
             1_700_000_000_000,
@@ -1394,6 +1397,7 @@ mod tests {
                     config: crate::move_types::Config::default(),
                 },
                 hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+                mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
             })),
             &signing_key,
             1_700_000_000_000,
