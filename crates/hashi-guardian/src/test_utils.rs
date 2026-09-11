@@ -146,8 +146,8 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
     (logger, captures)
 }
 
-/// Mock S3 logger whose `list_objects_v2(delimiter='/')` and
-/// `list_object_versions` responses are computed from an in-memory key set —
+/// Mock S3 logger whose `list_object_versions` responses, with and without
+/// a delimiter, are computed from an in-memory key set —
 /// useful for testing layered prefix tree-walks. PutObject also succeeds.
 ///
 /// The dynamic responses depend on inspecting the request `prefix`; we capture
@@ -156,10 +156,19 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
 /// is sound under a single-threaded async runtime — each S3 call's predicate
 /// runs immediately before its output factory.
 pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> GuardianS3Client {
+    mock_logger_with_deleted_layout(keys, std::iter::empty())
+}
+
+/// Like `mock_logger_with_layout`, with additional keys whose current versions
+/// are delete markers. Their retained versions still contribute to prefixes.
+pub fn mock_logger_with_deleted_layout(
+    keys: impl IntoIterator<Item = String>,
+    deleted_keys: impl IntoIterator<Item = String>,
+) -> GuardianS3Client {
     use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
-    use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::types::CommonPrefix;
+    use aws_sdk_s3::types::DeleteMarkerEntry;
     use aws_sdk_s3::types::ObjectVersion;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
@@ -170,24 +179,29 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    let keys: Arc<BTreeSet<String>> = Arc::new(keys.into_iter().collect());
+    let deleted_keys: Arc<BTreeSet<String>> = Arc::new(deleted_keys.into_iter().collect());
+    let keys: Arc<BTreeSet<String>> = Arc::new(
+        keys.into_iter()
+            .chain(deleted_keys.iter().cloned())
+            .collect(),
+    );
 
-    let v2_prefix: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let v2_prefix_w = v2_prefix.clone();
-    let v2_prefix_r = v2_prefix.clone();
-    let v2_keys = keys.clone();
-    let list_v2 = mock!(Client::list_objects_v2)
+    let dirs_prefix: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let dirs_prefix_w = dirs_prefix.clone();
+    let dirs_prefix_r = dirs_prefix.clone();
+    let dirs_keys = keys.clone();
+    let list_dirs = mock!(Client::list_object_versions)
         .match_requests(move |req| {
             if req.delimiter() != Some("/") {
                 return false;
             }
-            *v2_prefix_w.lock().unwrap() = req.prefix().map(|s| s.to_string());
+            *dirs_prefix_w.lock().unwrap() = req.prefix().map(|s| s.to_string());
             true
         })
         .then_output(move || {
-            let prefix = v2_prefix_r.lock().unwrap().clone().unwrap_or_default();
+            let prefix = dirs_prefix_r.lock().unwrap().clone().unwrap_or_default();
             let mut children: BTreeSet<String> = BTreeSet::new();
-            for key in v2_keys.iter() {
+            for key in dirs_keys.iter() {
                 let Some(rest) = key.strip_prefix(&prefix) else {
                     continue;
                 };
@@ -201,7 +215,7 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
                 .into_iter()
                 .map(|c| CommonPrefix::builder().prefix(c).build())
                 .collect();
-            ListObjectsV2Output::builder()
+            ListObjectVersionsOutput::builder()
                 .set_common_prefixes(Some(common_prefixes))
                 .build()
         });
@@ -210,8 +224,12 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
     let lv_prefix_w = lv_prefix.clone();
     let lv_prefix_r = lv_prefix.clone();
     let lv_keys = keys.clone();
+    let lv_deleted_keys = deleted_keys.clone();
     let list_versions = mock!(Client::list_object_versions)
         .match_requests(move |req| {
+            if req.delimiter().is_some() {
+                return false;
+            }
             *lv_prefix_w.lock().unwrap() = req.prefix().map(|s| s.to_string());
             true
         })
@@ -220,9 +238,21 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
             let versions: Vec<ObjectVersion> = lv_keys
                 .iter()
                 .filter(|k| k.starts_with(&prefix))
-                .map(|k| ObjectVersion::builder().key(k).is_latest(true).build())
+                .map(|k| {
+                    ObjectVersion::builder()
+                        .key(k)
+                        .is_latest(!lv_deleted_keys.contains(k))
+                        .build()
+                })
                 .collect();
             ListObjectVersionsOutput::builder()
+                .set_delete_markers(Some(
+                    lv_deleted_keys
+                        .iter()
+                        .filter(|k| k.starts_with(&prefix))
+                        .map(|k| DeleteMarkerEntry::builder().key(k).is_latest(true).build())
+                        .collect(),
+                ))
                 .set_versions(Some(versions))
                 .build()
         });
@@ -232,7 +262,7 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
     let client = mock_client!(
         aws_sdk_s3,
         RuleMode::MatchAny,
-        &[&list_v2, &list_versions, &put_ok]
+        &[&list_dirs, &list_versions, &put_ok]
     );
     GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client)
 }
