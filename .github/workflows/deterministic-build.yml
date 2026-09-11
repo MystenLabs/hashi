@@ -20,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-22.04]
+        # Two kernels and two Docker releases. Pinned rather than ubuntu-latest:
+        # when -latest moves to 26.04 the pair would silently become one image.
+        # ubuntu-22.04 is deprecated from 2026-09-17 and gone on 2027-04-17.
+        os: [ubuntu-24.04, ubuntu-26.04]
         image: ${{ fromJSON(inputs.hashi_only && '[{"name":"hashi","dir":"hashi"}]' || '[{"name":"hashi","dir":"hashi"},{"name":"hashi-screener","dir":"hashi-screener"}]') }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -63,26 +66,26 @@ jobs:
       matrix:
         image: ${{ fromJSON(inputs.hashi_only && '["hashi"]' || '["hashi","hashi-screener"]') }}
     steps:
-      - name: Download ubuntu-latest hash
+      - name: Download ubuntu-24.04 hash
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
-          name: ${{ matrix.image }}-ubuntu-latest-sha256
-          path: hash-latest
+          name: ${{ matrix.image }}-ubuntu-24.04-sha256
+          path: hash-2404
 
-      - name: Download ubuntu-22.04 hash
+      - name: Download ubuntu-26.04 hash
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
-          name: ${{ matrix.image }}-ubuntu-22.04-sha256
-          path: hash-22
+          name: ${{ matrix.image }}-ubuntu-26.04-sha256
+          path: hash-2604
 
       - name: Compare hashes
         id: compare
         run: |
-          LATEST=$(awk '{print $1}' "hash-latest/${{ matrix.image }}.sha256")
-          OLDER=$(awk '{print $1}' "hash-22/${{ matrix.image }}.sha256")
-          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
-          echo "older=${OLDER}" >> "$GITHUB_OUTPUT"
-          if [ "${LATEST}" = "${OLDER}" ]; then
+          U2404=$(awk '{print $1}' "hash-2404/${{ matrix.image }}.sha256")
+          U2604=$(awk '{print $1}' "hash-2604/${{ matrix.image }}.sha256")
+          echo "ubuntu2404=${U2404}" >> "$GITHUB_OUTPUT"
+          echo "ubuntu2604=${U2604}" >> "$GITHUB_OUTPUT"
+          if [ "${U2404}" = "${U2604}" ]; then
             echo "match=true" >> "$GITHUB_OUTPUT"
           else
             echo "match=false" >> "$GITHUB_OUTPUT"
@@ -95,8 +98,8 @@ jobs:
             echo ""
             echo "| Runner | SHA-256 |"
             echo "|--------|---------|"
-            echo "| ubuntu-latest | \`${{ steps.compare.outputs.latest }}\` |"
-            echo "| ubuntu-22.04  | \`${{ steps.compare.outputs.older }}\` |"
+            echo "| ubuntu-24.04 | \`${{ steps.compare.outputs.ubuntu2404 }}\` |"
+            echo "| ubuntu-26.04 | \`${{ steps.compare.outputs.ubuntu2604 }}\` |"
             echo ""
             echo "**Result**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }}"
           } >> "$GITHUB_STEP_SUMMARY"
