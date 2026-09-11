@@ -18,7 +18,7 @@
 
         modules = [
           (
-            { pkgs, ... }:
+            { config, pkgs, ... }:
             {
               environment.systemPackages = [
                 pkgs._1password-gui
@@ -29,6 +29,7 @@
                 pkgs.neovim
                 pkgs.openpgp-card-tools
                 pkgs.rustc
+                pkgs.tmux
                 pkgs.yubikey-manager
               ];
 
@@ -99,6 +100,11 @@
               system.keyboard = {
                 enableKeyMapping = true;
                 remapCapsLockToEscape = true;
+              };
+
+              launchd.user.agents.keyboard-mapping = {
+                script = config.system.activationScripts.keyboard.text;
+                serviceConfig.RunAtLoad = true;
               };
             }
           )
