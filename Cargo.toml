@@ -4,10 +4,10 @@ members = ["crates/*"]
 
 [workspace.dependencies]
 # sui sdk crates
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "d71f9d6f788afc6b30baef85a342e0e7867c0019", features = ["serde", "hash"] }
-sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "d71f9d6f788afc6b30baef85a342e0e7867c0019", features = ["ed25519", "secp256k1", "secp256r1", "pem", "bech32"] }
-sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "d71f9d6f788afc6b30baef85a342e0e7867c0019" }
-sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "d71f9d6f788afc6b30baef85a342e0e7867c0019" }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "f9b4465d8e95358b4a0bef225e611797de9b30e7", features = ["serde", "hash"] }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "f9b4465d8e95358b4a0bef225e611797de9b30e7", features = ["ed25519", "secp256k1", "secp256r1", "pem", "bech32"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "f9b4465d8e95358b4a0bef225e611797de9b30e7" }
+sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "f9b4465d8e95358b4a0bef225e611797de9b30e7" }
 
 sui-http = "0.3.1"
 bitcoin = { version = "0.32.8", features =["serde"] }
