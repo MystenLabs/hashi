@@ -207,6 +207,7 @@ pub struct Metrics {
     pub mpc_nonce_decided_set_window_closed_below_floor_total: IntCounter,
     pub mpc_nonce_local_skip_batches_total: IntCounter,
     pub mpc_presig_batch_repair_total: IntCounterVec,
+    pub mpc_nonce_dealer_signer_set_replay_total: IntCounterVec,
     pub mpc_nonce_cutoff_unsettled_total: IntCounter,
     pub mpc_nonce_size_mismatch_total: IntCounter,
     /// Batch index of the most recent nonce batch this node accepted.
@@ -1170,6 +1171,14 @@ impl Metrics {
                 "hashi_mpc_presig_batch_repair_total",
                 "Times this node hit a nonce batch the presig cursor outran, by what it did. \
                  Counts the decision, not whether a dealing round published a cert",
+                &["outcome"],
+                registry,
+            )
+            .unwrap(),
+            mpc_nonce_dealer_signer_set_replay_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_nonce_dealer_signer_set_replay_total",
+                "AVID nonce dealer rounds for a batch a stored round already fixed a signer \
+                 set for, by outcome",
                 &["outcome"],
                 registry,
             )
