@@ -2046,6 +2046,10 @@ pub struct OperatorInitResponse {}
 pub struct GenesisState {
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
+    #[prost(bytes = "bytes", tag = "2")]
+    pub hashi_object_id: ::prost::bytes::Bytes,
+    #[prost(bytes = "bytes", tag = "3")]
+    pub mpc_master_g: ::prost::bytes::Bytes,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3Config {

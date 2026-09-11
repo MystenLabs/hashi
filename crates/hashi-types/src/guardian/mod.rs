@@ -157,6 +157,9 @@ pub struct WithdrawOperatorInitRequest {
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
 /// and that the enclave exposes via `GuardianInfo`.
+// TODO(testnet-wipe): Load the immutable Hashi object id and MPC master G from
+// the verified V2 genesis record, then remove their duplicate operator-supplied
+// fields from InitConfig.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitConfig {
     /// Limiter config.
@@ -182,6 +185,8 @@ pub struct InitConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenesisState {
     committee: crate::move_types::Committee,
+    hashi_object_id: sui_sdk_types::Address,
+    mpc_master_g: HashiMasterG,
 }
 
 /// Live serving state derived during operator activation. Its `digest()` is the
@@ -466,18 +471,38 @@ impl CeremonyConfirmationResponse {
 }
 
 impl GenesisState {
-    pub fn new(committee: HashiCommittee) -> Self {
+    pub fn new(
+        committee: HashiCommittee,
+        hashi_object_id: sui_sdk_types::Address,
+        mpc_master_g: HashiMasterG,
+    ) -> Self {
         Self {
             committee: (&committee).into(),
+            hashi_object_id,
+            mpc_master_g,
         }
     }
 
-    pub fn from_move_committee(committee: crate::move_types::Committee) -> Self {
-        Self { committee }
+    pub fn from_parts(
+        committee: crate::move_types::Committee,
+        hashi_object_id: sui_sdk_types::Address,
+        mpc_master_g: HashiMasterG,
+    ) -> Self {
+        Self {
+            committee,
+            hashi_object_id,
+            mpc_master_g,
+        }
     }
 
-    pub fn into_committee(self) -> crate::move_types::Committee {
-        self.committee
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::move_types::Committee,
+        sui_sdk_types::Address,
+        HashiMasterG,
+    ) {
+        (self.committee, self.hashi_object_id, self.mpc_master_g)
     }
 
     pub fn digest(&self) -> [u8; 32] {

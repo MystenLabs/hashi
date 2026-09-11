@@ -336,7 +336,10 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
             let committee = onchain_state
                 .current_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
-            Some(GenesisState::new(committee).digest())
+            Some(
+                GenesisState::new(committee, cfg.hashi.hashi_ids.hashi_object_id, master_g)
+                    .digest(),
+            )
         }
         (true, Some(committee)) => anyhow::bail!(
             "--do-genesis was supplied, but a serving committee already exists at epoch {}",

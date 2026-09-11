@@ -115,8 +115,9 @@ It:
    configured Bitcoin network.
 5. Requires the observed serving-committee state to agree with the
    `--do-genesis` intent marker. On first deploy, the flag causes it to build an
-   optional `GenesisState` from the current on-chain committee; otherwise a
-   serving committee must already exist.
+   optional `GenesisState` from the current on-chain committee, configured Hashi
+   object id, and MPC master `G`; otherwise a serving committee must already
+   exist.
 6. Calls withdraw-mode `OperatorInit` with guardian S3 config, `InitConfig`, and
    the optional genesis state; the enclave pins all three inputs plus the latest
    complete ceremony and KP-share state.
@@ -130,7 +131,8 @@ cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sa
 ```
 
 On first deploy, add `--do-genesis`. The flag is purely an explicit intent
-marker; the committee still comes from on-chain state and requires threshold KP
+marker; the committee and MPC master `G` still come from on-chain state, while
+the Hashi object id comes from config. All three require threshold KP
 authorization during PI.
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
@@ -159,8 +161,8 @@ re-encrypt it. It:
    its `config_hash` matches the enclave.
 5. Requires the observed serving-committee state to agree with the
    `--do-genesis` intent marker. With the flag, independently derives the
-   current on-chain committee's `genesis_state_hash`; confirms the optional hash
-   matches the enclave.
+   current on-chain committee, configured Hashi object id, and MPC master `G`
+   into `genesis_state_hash`; confirms the optional hash matches the enclave.
 6. Reads this KP's PGP-encrypted share from the latest `kp-shares/{seq}/`
    state, verifies every share's recipient against the roster, then decrypts
    the share selected by `kp_pgp_cert_path` and verifies its commitment

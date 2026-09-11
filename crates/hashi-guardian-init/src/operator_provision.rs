@@ -92,7 +92,11 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
                 epoch = committee.epoch(),
                 "no committee-update/genesis record; pinning on-chain committee for KP authorization during provisioner_init",
             );
-            Some(GenesisState::new(committee))
+            Some(GenesisState::new(
+                committee,
+                cfg.hashi.hashi_ids.hashi_object_id,
+                master_g,
+            ))
         }
         (true, Some(committee)) => anyhow::bail!(
             "--do-genesis was supplied, but a serving committee already exists at epoch {}",

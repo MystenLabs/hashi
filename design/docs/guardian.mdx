@@ -123,7 +123,7 @@ sequenceDiagram
     Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
     Operator->>Operator: Build InitConfig
     Operator->>Operator: Require S3 state to match --do-genesis intent
-    Operator->>Operator: With flag, build GenesisState from onchain state
+    Operator->>Operator: With flag, build GenesisState from committee plus Hashi object id plus master G
     Operator->>Guardian: OperatorInit(S3 config, InitConfig, optional GenesisState)
     Guardian->>S3: Read latest ceremony and KP-share state
     Guardian->>Guardian: Snapshot CeremonyState for this arming
@@ -150,7 +150,7 @@ sequenceDiagram
         Guardian->>Guardian: Decrypt without AAD and verify commitments
         Guardian->>Guardian: Reconstruct BTC key and mark armed standby
         opt first deploy
-            Guardian->>S3: log(genesis committee after threshold KP authorization)
+            Guardian->>S3: log(genesis committee, Hashi object id, and master G)
         end
         Guardian->>S3: log(init fully-initialized)
         Proxy-->>KPs: standby armed
@@ -159,11 +159,12 @@ sequenceDiagram
 
 On first deploy, the operator and every KP pass `--do-genesis`. This is purely an
 explicit intent marker: callers fail if it disagrees with the observed S3
-committee state. The operator pins the current onchain committee as an optional
-`GenesisState` during `OperatorInit`, and each KP independently derives its hash
-and includes it in the normal signed PI submission. Once PI reaches threshold,
-the enclave writes the committee to `genesis/record.json`. Later deploys use
-`None` and do not pass the flag.
+committee state. The operator pins the current onchain committee, configured
+Hashi object id, and MPC master `G` as an optional `GenesisState` during
+`OperatorInit`, and each KP independently derives its hash and includes it in
+the normal signed PI submission. Once PI reaches threshold, the enclave writes
+the committee, Hashi object id, and master `G` to `genesis/record.json`. Later
+deploys use `None` and do not pass the flag.
 
 ## Standby activation flow
 

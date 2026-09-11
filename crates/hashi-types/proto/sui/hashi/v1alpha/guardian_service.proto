@@ -283,6 +283,8 @@ enum S3RetentionEnvironment {
 
 message GenesisState {
   Committee committee = 1;
+  bytes hashi_object_id = 2;
+  bytes mpc_master_g = 3;
 }
 
 message S3Config {
