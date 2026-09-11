@@ -1,7 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_certs;
+#[cfg(any(test, feature = "test-utils"))]
+pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_keypair;
+
+use super::AttestedKpCert;
+#[cfg(any(test, feature = "test-utils"))]
 use super::BatchProvisionerInitRequest;
+#[cfg(any(test, feature = "test-utils"))]
 use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
@@ -15,9 +23,11 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
+#[cfg(any(test, feature = "test-utils"))]
 use super::KpCertRoster;
 use super::KpEncryptedShare;
 use super::KpEncryptedShareRoster;
+#[cfg(any(test, feature = "test-utils"))]
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
@@ -26,12 +36,14 @@ use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
+#[cfg(any(test, feature = "test-utils"))]
 use super::ProvisionerRotateKpSetRequest;
 use super::ResolvedS3Config;
 use super::RotateKpSetResponse;
 use super::S3BucketInfo;
 use super::SecretSharingInstance;
 use super::SessionID;
+#[cfg(any(test, feature = "test-utils"))]
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -40,8 +52,6 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawStage;
 use super::WithdrawalID;
-pub use crate::pgp::test_utils::mock_pgp_certs;
-pub use crate::pgp::test_utils::mock_pgp_certs_armored;
 
 use crate::bitcoin::BTC_LIB;
 use crate::bitcoin::BitcoinAddress;
@@ -56,7 +66,6 @@ use crate::bitcoin::sign_btc_tx;
 use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
-use crate::pgp::PgpPublicCert;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::hashes::Hash as _;
@@ -127,14 +136,16 @@ impl GetGuardianInfoResponse {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
         SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub fn mock_kp_certs_roster(n: usize) -> KpCertRoster {
-    KpCertRoster::new(mock_pgp_certs(n)).unwrap()
+    KpCertRoster::new(mock_attested_kp_certs(n)).unwrap()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -249,18 +260,20 @@ impl ProvisionerInitRequest {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl BatchProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
-        let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        let (cert, _) = mock_attested_kp_keypair();
         BatchProvisionerInitRequest(vec![KpSigned::from_parts(
             ProvisionerInitRequest::mock_for_testing(),
-            crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+            cert,
             "mock-signature".into(),
         )])
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 impl BatchProvisionerRotateKpSetRequest {
     // NOTE: Incorrect encryption and signature are used. This is only for wire round trips.
     pub fn mock_for_testing() -> Self {
@@ -280,11 +293,11 @@ impl BatchProvisionerRotateKpSetRequest {
             TEST_T,
         )
         .unwrap();
-        let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        let (cert, _) = mock_attested_kp_keypair();
         Self::new(vec![
             KpSigned::from_parts(
                 request,
-                crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+                cert,
                 "mock-signature".into(),
             );
             TEST_T
@@ -297,7 +310,7 @@ impl ProvisionerRotateCertRequest {
     pub fn from_encrypted_share_for_testing(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        new_kp_pgp_cert: PgpPublicCert,
+        new_kp_pgp_cert: AttestedKpCert,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self::from_encrypted_share(

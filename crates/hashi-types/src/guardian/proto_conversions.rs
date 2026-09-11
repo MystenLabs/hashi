@@ -5,6 +5,7 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::AttestedKpCert;
 use super::BatchProvisionerInitRequest;
 use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
@@ -115,11 +116,44 @@ fn kp_encrypted_share_roster_from_pb(
     )
 }
 
-fn kp_cert_roster_from_armored(certs: Vec<String>) -> GuardianResult<KpCertRoster> {
+impl TryFrom<pb::AttestedKpCert> for AttestedKpCert {
+    type Error = GuardianError;
+
+    fn try_from(bundle: pb::AttestedKpCert) -> GuardianResult<Self> {
+        let cert = PgpPublicCert::new(bundle.cert).map_err(|e| InvalidInputs(e.to_string()))?;
+        Self::new(
+            cert,
+            bundle.device_pem.into(),
+            bundle.sig_pem.into(),
+            bundle.dec_pem.into(),
+        )
+    }
+}
+
+fn required_attested_kp_cert(
+    bundle: Option<pb::AttestedKpCert>,
+    field: &str,
+) -> GuardianResult<AttestedKpCert> {
+    bundle.ok_or_else(|| missing(field))?.try_into()
+}
+
+impl From<AttestedKpCert> for pb::AttestedKpCert {
+    fn from(bundle: AttestedKpCert) -> Self {
+        let (cert, device_pem, sig_pem, dec_pem) = bundle.into_parts();
+        Self {
+            cert: cert.armored().to_string(),
+            device_pem: device_pem.into(),
+            sig_pem: sig_pem.into(),
+            dec_pem: dec_pem.into(),
+        }
+    }
+}
+
+fn kp_cert_roster_from_pb(certs: Vec<pb::AttestedKpCert>) -> GuardianResult<KpCertRoster> {
     KpCertRoster::new(
         certs
             .into_iter()
-            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .map(AttestedKpCert::try_from)
             .collect::<GuardianResult<Vec<_>>>()?,
     )
 }
@@ -139,7 +173,7 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let certs = kp_cert_roster_from_armored(req.key_provisioner_pgp_certs)?;
+        let certs = kp_cert_roster_from_pb(req.key_provisioner_pgp_certs)?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
@@ -287,9 +321,7 @@ impl TryFrom<pb::SignedProvisionerInitRequest> for KpSigned<ProvisionerInitReque
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
-        if req.signer_cert.is_empty() {
-            return Err(missing("signer_cert"));
-        }
+        let signer_cert = required_attested_kp_cert(req.signer_cert, "signer_cert")?;
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
@@ -310,8 +342,6 @@ impl TryFrom<pb::SignedProvisionerInitRequest> for KpSigned<ProvisionerInitReque
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
         )?;
-        let signer_cert =
-            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
         let request = ProvisionerInitRequest::new(
             req.expected_session_id.into(),
             expected_config_hash,
@@ -328,9 +358,7 @@ impl TryFrom<pb::SignedCeremonyConfirmationRequest> for KpSigned<CeremonyConfirm
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
-        if req.signer_cert.is_empty() {
-            return Err(missing("signer_cert"));
-        }
+        let signer_cert = required_attested_kp_cert(req.signer_cert, "signer_cert")?;
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
@@ -339,8 +367,6 @@ impl TryFrom<pb::SignedCeremonyConfirmationRequest> for KpSigned<CeremonyConfirm
             .ok_or_else(|| missing("ceremony_digest"))?;
         let ceremony_digest = <[u8; 32]>::try_from(ceremony_digest.as_ref())
             .map_err(|_| InvalidInputs("ceremony_digest must be 32 bytes".into()))?;
-        let signer_cert =
-            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
         let request =
             CeremonyConfirmationRequest::new(req.expected_session_id.into(), ceremony_digest);
         Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
@@ -371,27 +397,19 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
     type Error = GuardianError;
 
     fn try_from(req: pb::SignedProvisionerRotateCertRequest) -> Result<Self, Self::Error> {
-        if req.new_kp_pgp_cert.is_empty() {
-            return Err(missing("new_kp_pgp_cert"));
-        }
+        let new_kp_pgp_cert = required_attested_kp_cert(req.new_kp_pgp_cert, "new_kp_pgp_cert")?;
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
-        if req.signer_cert.is_empty() {
-            return Err(missing("signer_cert"));
-        }
+        let signer_cert = required_attested_kp_cert(req.signer_cert, "signer_cert")?;
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
 
-        let new_kp_pgp_cert = PgpPublicCert::new(req.new_kp_pgp_cert)
-            .map_err(|e| InvalidInputs(format!("invalid new_kp_pgp_cert: {e}")))?;
         let encrypted_share = GuardianEncryptedShare::try_from(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
         )?;
-        let signer_cert =
-            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
         let request = ProvisionerRotateCertRequest::from_encrypted_share(
             req.expected_session_id.into(),
             req.expected_cert_seq
@@ -410,9 +428,7 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
         if req.expected_session_id.is_empty() {
             return Err(missing("expected_session_id"));
         }
-        if req.signer_cert.is_empty() {
-            return Err(missing("signer_cert"));
-        }
+        let signer_cert = required_attested_kp_cert(req.signer_cert, "signer_cert")?;
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
@@ -426,9 +442,7 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
             .new_num_shares
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
-        let new_kp_certs_roster = kp_cert_roster_from_armored(req.new_kp_pgp_certs)?;
-        let signer_cert =
-            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
+        let new_kp_certs_roster = kp_cert_roster_from_pb(req.new_kp_pgp_certs)?;
         let request = ProvisionerRotateKpSetRequest::new(
             req.expected_session_id.into(),
             pcr_allowlist,
@@ -742,14 +756,18 @@ pub fn provisioner_rotate_cert_response_signed_to_pb(
 }
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
+    let SetupNewKeyRequest {
+        key_provisioner_certs_roster,
+        params,
+    } = s;
     pb::SetupNewKeyRequest {
-        key_provisioner_pgp_certs: s
-            .kp_certs_roster()
-            .iter()
-            .map(|cert| cert.armored().to_string())
+        key_provisioner_pgp_certs: key_provisioner_certs_roster
+            .into_vec()
+            .into_iter()
+            .map(Into::into)
             .collect(),
-        num_shares: Some(s.num_shares() as u32),
-        threshold: Some(s.threshold() as u32),
+        num_shares: Some(params.num_shares() as u32),
+        threshold: Some(params.threshold() as u32),
     }
 }
 
@@ -815,7 +833,7 @@ impl From<KpSigned<ProvisionerInitRequest>> for pb::SignedProvisionerInitRequest
         Self {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.into(),
-            signer_cert: signer_cert.armored().to_string(),
+            signer_cert: Some(signer_cert.into()),
             kp_signature: signature,
             expected_config_hash: Some(expected_config_hash.to_vec().into()),
             expected_genesis_state_hash: expected_genesis_state_hash
@@ -836,7 +854,7 @@ impl From<KpSigned<CeremonyConfirmationRequest>> for pb::SignedCeremonyConfirmat
         Self {
             expected_session_id: expected_session_id.into(),
             ceremony_digest: Some(ceremony_digest.to_vec().into()),
-            signer_cert: signer_cert.armored().to_string(),
+            signer_cert: Some(signer_cert.into()),
             kp_signature,
         }
     }
@@ -858,10 +876,10 @@ impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotat
         let (expected_session_id, expected_cert_seq, new_kp_pgp_cert, encrypted_share) =
             request.into_parts();
         Self {
-            new_kp_pgp_cert: new_kp_pgp_cert.armored().to_string(),
+            new_kp_pgp_cert: Some(new_kp_pgp_cert.into()),
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.into(),
-            signer_cert: signer_cert.armored().to_string(),
+            signer_cert: Some(signer_cert.into()),
             kp_signature: signature,
             expected_cert_seq: Some(expected_cert_seq),
         }
@@ -936,11 +954,11 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
             new_kp_pgp_certs: new_kp_certs_roster
                 .into_vec()
                 .into_iter()
-                .map(|cert| cert.armored().to_string())
+                .map(Into::into)
                 .collect(),
             new_num_shares: Some(new_params.num_shares() as u32),
             new_threshold: Some(new_params.threshold() as u32),
-            signer_cert: signer_cert.armored().to_string(),
+            signer_cert: Some(signer_cert.into()),
             kp_signature: signature,
         }
     }
@@ -1865,14 +1883,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_new_key_request_round_trip() {
-        let req = SetupNewKeyRequest::mock_for_testing();
-        let pb = setup_new_key_request_to_pb(req.clone());
-        let back = SetupNewKeyRequest::try_from(pb).unwrap();
-        assert_eq!(req, back);
-    }
-
-    #[test]
     fn setup_new_key_response_round_trip() {
         let resp = GuardianSignedResponse::<SetupNewKeyResponse>::mock_for_testing();
         let pb = setup_new_key_response_signed_to_pb(resp.clone());
@@ -1913,38 +1923,20 @@ mod tests {
     }
 
     #[test]
-    fn batch_provisioner_init_request_round_trip() {
-        let req = BatchProvisionerInitRequest::mock_for_testing();
-        let pb = batch_provisioner_init_request_to_pb(req.clone()).unwrap();
-        let back = BatchProvisionerInitRequest::try_from(pb).unwrap();
-        assert_eq!(req, back);
-    }
-
-    #[test]
-    fn batch_provisioner_rotate_kp_set_request_round_trip() {
-        let req = BatchProvisionerRotateKpSetRequest::mock_for_testing();
-        let pb = batch_provisioner_rotate_kp_set_request_to_pb(req.clone());
-        let back = BatchProvisionerRotateKpSetRequest::try_from(pb).unwrap();
-        assert_eq!(req, back);
-    }
-
-    #[test]
-    fn signed_ceremony_confirmation_request_round_trip_and_verifies() {
-        use crate::pgp::test_utils::mock_pgp_keypair;
-        use crate::pgp::test_utils::sign_detached_in_process;
-
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
+    fn confirmation_rejects_missing_signer() {
+        let (cert, secret) = super::super::test_utils::mock_attested_kp_keypair();
         let request = CeremonyConfirmationRequest::new("session-a".into(), [9; 32]);
-        let signature =
-            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
+        let signature = crate::pgp::test_utils::sign_detached_in_process(
+            &secret,
+            &KpSigned::signed_bytes(&request),
+        );
         let signed = KpSigned::from_parts(request, cert, signature);
-
-        let pb = signed_ceremony_confirmation_request_to_pb(signed);
-        let round_trip = KpSigned::<CeremonyConfirmationRequest>::try_from(pb).unwrap();
-        let request = round_trip.verify_signature().unwrap();
-        assert_eq!(request.expected_session_id().as_str(), "session-a");
-        assert_eq!(request.ceremony_digest(), &[9; 32]);
+        let mut pb = signed_ceremony_confirmation_request_to_pb(signed);
+        pb.signer_cert = None;
+        assert!(matches!(
+            KpSigned::<CeremonyConfirmationRequest>::try_from(pb),
+            Err(InvalidInputs(_))
+        ));
     }
 
     #[test]
@@ -1957,186 +1949,42 @@ mod tests {
         );
     }
 
+    // These tests also run with non-enclave-dev. The generated test issuer must
+    // never become trusted by protobuf ingress under any feature configuration.
     #[test]
-    fn signed_provisioner_init_request_round_trip_and_verifies() {
-        use crate::pgp::test_utils::mock_pgp_keypair;
-        use crate::pgp::test_utils::sign_detached_in_process;
-
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let (_, _, _, encrypted_share) = ProvisionerInitRequest::mock_for_testing().into_parts();
-        let expected_config_hash = [9u8; 32];
-        let expected_genesis_state_hash = Some([10u8; 32]);
-        let request = ProvisionerInitRequest::new(
-            "session-a".into(),
-            expected_config_hash,
-            expected_genesis_state_hash,
-            encrypted_share.clone(),
-        );
-        let signature =
-            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
-        let signed = KpSigned::from_parts(request, cert.clone(), signature);
-
-        let pb = pb::SignedProvisionerInitRequest::from(signed);
-        let back = KpSigned::<ProvisionerInitRequest>::try_from(pb.clone()).unwrap();
-        let data = back.verify_signature().unwrap();
-        assert_eq!(data.expected_session_id(), "session-a");
-        assert_eq!(data.expected_config_hash(), &expected_config_hash);
-        assert_eq!(
-            data.expected_genesis_state_hash(),
-            expected_genesis_state_hash
-        );
-        assert_eq!(data.encrypted_share(), &encrypted_share);
-        assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
-
-        let mut tampered = pb.clone();
-        tampered.expected_session_id = "other-session".to_string();
-        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
-        assert!(
-            tampered.verify_signature().is_err(),
-            "signature must bind the expected guardian session"
-        );
-
-        let mut tampered = pb;
-        tampered.expected_config_hash = Some(vec![8u8; 32].into());
-        let tampered = KpSigned::<ProvisionerInitRequest>::try_from(tampered).unwrap();
-        assert!(
-            tampered.verify_signature().is_err(),
-            "signature must bind the expected operator-init config hash"
-        );
+    fn attested_bundle_decoder_rejects_untrusted_issuer() {
+        let (cert, _) = super::super::test_utils::mock_attested_kp_keypair();
+        let bundle: pb::AttestedKpCert = cert.into();
+        assert!(matches!(
+            AttestedKpCert::try_from(bundle),
+            Err(InvalidInputs(_))
+        ));
     }
 
     #[test]
-    fn signed_provisioner_rotate_cert_request_round_trip_and_binds_scalar_fields() {
-        use crate::pgp::test_utils::mock_pgp_keypair;
-        use crate::pgp::test_utils::sign_detached_in_process;
-
-        let (signer_armored, signer_secret) = mock_pgp_keypair();
-        let signer_cert = PgpPublicCert::new(signer_armored).unwrap();
-        let (new_cert_armored, _) = mock_pgp_keypair();
-        let new_cert = PgpPublicCert::new(new_cert_armored).unwrap();
-        let encrypted_share = GuardianEncryptedShare {
-            id: ShareID::new(1).unwrap(),
-            ciphertext: Ciphertext {
-                encapsulated_key: vec![1; 32],
-                aes_ciphertext: vec![2; 32],
-            },
-        };
-        let request = ProvisionerRotateCertRequest::from_encrypted_share(
-            "session-a".into(),
-            7,
-            new_cert,
-            encrypted_share.clone(),
-        );
-        let signature = sign_detached_in_process(&signer_secret, &KpSigned::signed_bytes(&request));
-        let signed = KpSigned::from_parts(request, signer_cert, signature);
-
-        let pb = pb::SignedProvisionerRotateCertRequest::from(signed);
-        let round_trip = KpSigned::<ProvisionerRotateCertRequest>::try_from(pb.clone()).unwrap();
-        let data = round_trip.verify_signature().unwrap();
-        assert_eq!(data.expected_cert_seq(), 7);
-        assert_eq!(data.encrypted_share(), &encrypted_share);
-
-        let assert_signature_invalid = |tampered| {
-            assert!(
-                KpSigned::<ProvisionerRotateCertRequest>::try_from(tampered)
-                    .unwrap()
-                    .verify_signature()
-                    .is_err()
-            );
-        };
-
-        let (other_cert_armored, _) = mock_pgp_keypair();
-        let mut tampered_cert = pb.clone();
-        tampered_cert.new_kp_pgp_cert = other_cert_armored;
-        assert_signature_invalid(tampered_cert);
-
-        let mut tampered_seq = pb.clone();
-        tampered_seq.expected_cert_seq = Some(8);
-        assert_signature_invalid(tampered_seq);
-
-        let mut tampered_share = pb;
-        tampered_share
-            .encrypted_share
-            .as_mut()
-            .unwrap()
-            .ciphertext
-            .as_mut()
-            .unwrap()
-            .aes_ciphertext = Some(vec![3; 32].into());
-        assert_signature_invalid(tampered_share);
+    fn provisioner_init_rejects_missing_signer() {
+        let batch =
+            batch_provisioner_init_request_to_pb(BatchProvisionerInitRequest::mock_for_testing())
+                .unwrap();
+        let mut request = batch.submissions.into_iter().next().unwrap();
+        request.signer_cert = None;
+        assert!(matches!(
+            KpSigned::<ProvisionerInitRequest>::try_from(request),
+            Err(InvalidInputs(_))
+        ));
     }
 
     #[test]
-    fn signed_provisioner_rotate_kp_set_request_round_trip_and_verifies() {
-        use crate::pgp::test_utils::mock_pgp_keypair;
-        use crate::pgp::test_utils::sign_detached_in_process;
-
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![9]), []).unwrap();
-        let new_kp_certs_roster = super::super::test_utils::mock_kp_certs_roster(5);
-        let encrypted_old_share = GuardianEncryptedShare {
-            id: ShareID::new(1).unwrap(),
-            ciphertext: Ciphertext {
-                encapsulated_key: vec![0; 32],
-                aes_ciphertext: vec![1; 32],
-            },
-        };
-        let request = ProvisionerRotateKpSetRequest::new(
-            "session-a".into(),
-            pcr_allowlist.clone(),
-            encrypted_old_share.clone(),
-            new_kp_certs_roster.clone(),
-            5,
-            3,
-        )
-        .unwrap();
-        let signature =
-            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
-        let signed = KpSigned::from_parts(request, cert.clone(), signature);
-
-        let pb = pb::SignedProvisionerRotateKpSetRequest::from(signed);
-        let back = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(pb.clone()).unwrap();
-        let data = back.verify_signature().unwrap();
-        assert_eq!(data.expected_session_id().to_string(), "session-a");
-        assert_eq!(data.pcr_allowlist(), &pcr_allowlist);
-        assert_eq!(data.encrypted_old_share(), &encrypted_old_share);
-        assert_eq!(data.new_kp_certs_roster(), &new_kp_certs_roster);
-        assert_eq!(data.new_params().num_shares(), 5);
-        assert_eq!(data.new_params().threshold(), 3);
-        assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
-
-        let mut tampered = pb.clone();
-        tampered.expected_session_id = "other-session".to_string();
-        let tampered = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(tampered).unwrap();
-        assert!(
-            tampered.verify_signature().is_err(),
-            "signature must bind the expected ceremony session"
+    fn kp_set_rotation_rejects_missing_signer() {
+        let batch = batch_provisioner_rotate_kp_set_request_to_pb(
+            BatchProvisionerRotateKpSetRequest::mock_for_testing(),
         );
-
-        let mut tampered = pb.clone();
-        tampered
-            .pcr_allowlist
-            .as_mut()
-            .unwrap()
-            .current_build
-            .as_mut()
-            .unwrap()
-            .pcr0 = Some(vec![8].into());
-        let tampered = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(tampered).unwrap();
-        assert!(
-            tampered.verify_signature().is_err(),
-            "signature must bind the PCR allowlist"
-        );
-
-        let mut tampered = pb;
-        tampered.new_threshold = Some(2);
-        let tampered = KpSigned::<ProvisionerRotateKpSetRequest>::try_from(tampered).unwrap();
-        assert!(
-            tampered.verify_signature().is_err(),
-            "signature must bind the proposed new sharing parameters"
-        );
+        let mut request = batch.submissions.into_iter().next().unwrap();
+        request.signer_cert = None;
+        assert!(matches!(
+            KpSigned::<ProvisionerRotateKpSetRequest>::try_from(request),
+            Err(InvalidInputs(_))
+        ));
     }
 
     #[test]

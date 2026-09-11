@@ -1903,15 +1903,26 @@ pub struct S3BucketInfo {
     #[prost(string, optional, tag = "2")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Untrusted wire DTO. Converted to a validated domain request in the server.
+/// A KP certificate and its YubiKey device, signing-key, and decryption-key proofs.
+/// All proofs are required and verified against the pinned Yubico trust policy.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AttestedKpCert {
+    #[prost(string, tag = "1")]
+    pub cert: ::prost::alloc::string::String,
+    #[prost(bytes = "bytes", tag = "2")]
+    pub device_pem: ::prost::bytes::Bytes,
+    #[prost(bytes = "bytes", tag = "3")]
+    pub sig_pem: ::prost::bytes::Bytes,
+    #[prost(bytes = "bytes", tag = "4")]
+    pub dec_pem: ::prost::bytes::Bytes,
+}
+/// Untrusted wire DTO. Converted to a validated domain request in the server.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupNewKeyRequest {
-    /// Ordered OpenPGP certificates for key provisioners. Each string is the sole
-    /// armored certificate for one KP/share, and length must equal `num_shares`.
-    #[prost(string, repeated, tag = "1")]
-    pub key_provisioner_pgp_certs: ::prost::alloc::vec::Vec<
-        ::prost::alloc::string::String,
-    >,
+    /// Ordered attested certificates, one per KP/share.
+    /// Length must equal `num_shares`.
+    #[prost(message, repeated, tag = "1")]
+    pub key_provisioner_pgp_certs: ::prost::alloc::vec::Vec<AttestedKpCert>,
     /// Total number of shares to split the new BTC key into.
     #[prost(uint32, optional, tag = "2")]
     pub num_shares: ::core::option::Option<u32>,
@@ -1992,8 +2003,8 @@ pub struct SignedCeremonyConfirmationRequest {
     #[prost(bytes = "bytes", optional, tag = "2")]
     pub ceremony_digest: ::core::option::Option<::prost::bytes::Bytes>,
     /// Complete detached-signature envelope.
-    #[prost(string, tag = "3")]
-    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub signer_cert: ::core::option::Option<AttestedKpCert>,
     #[prost(string, tag = "4")]
     pub kp_signature: ::prost::alloc::string::String,
 }
@@ -2083,9 +2094,9 @@ pub struct SignedProvisionerInitRequest {
     /// The guardian session id the KP pinned before encrypting the share.
     #[prost(string, tag = "2")]
     pub expected_session_id: ::prost::alloc::string::String,
-    /// Armored OpenPGP certificate of the submitting key provisioner.
-    #[prost(string, tag = "3")]
-    pub signer_cert: ::prost::alloc::string::String,
+    /// Attested OpenPGP certificate of the submitting key provisioner.
+    #[prost(message, optional, tag = "3")]
+    pub signer_cert: ::core::option::Option<AttestedKpCert>,
     /// Detached armored OpenPGP signature over the intent-tagged
     /// ProvisionerInitRequest payload.
     #[prost(string, tag = "4")]
@@ -2180,19 +2191,19 @@ pub struct ProvisionerInitResponse {}
 /// sharing instance, commitments, share ids, or threshold.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignedProvisionerRotateCertRequest {
-    /// Armored replacement cert.
-    #[prost(string, tag = "1")]
-    pub new_kp_pgp_cert: ::prost::alloc::string::String,
+    /// Attested replacement certificate.
+    #[prost(message, optional, tag = "1")]
+    pub new_kp_pgp_cert: ::core::option::Option<AttestedKpCert>,
     /// The same plaintext share, HPKE-encrypted to the guardian.
     #[prost(message, optional, tag = "2")]
     pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
     /// The guardian session id the KP pinned before encrypting the share.
     #[prost(string, tag = "3")]
     pub expected_session_id: ::prost::alloc::string::String,
-    /// Armored authorizing KP cert and detached signature over the intent-tagged
+    /// Attested authorizing KP cert and detached signature over the intent-tagged
     /// ProvisionerRotateCertRequest payload.
-    #[prost(string, tag = "4")]
-    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub signer_cert: ::core::option::Option<AttestedKpCert>,
     #[prost(string, tag = "5")]
     pub kp_signature: ::prost::alloc::string::String,
     /// Latest kp-shares cert_seq observed and authorized by the caller.
@@ -2227,17 +2238,17 @@ pub struct SignedProvisionerRotateKpSetRequest {
     /// Builds allowed to authenticate the existing ceremony and KP-share state.
     #[prost(message, optional, tag = "3")]
     pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
-    /// Ordered sole OpenPGP certificates for the proposed new KP set.
-    #[prost(string, repeated, tag = "4")]
-    pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Ordered attested certificates for the proposed new KP set.
+    #[prost(message, repeated, tag = "4")]
+    pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<AttestedKpCert>,
     #[prost(uint32, optional, tag = "5")]
     pub new_num_shares: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "6")]
     pub new_threshold: ::core::option::Option<u32>,
-    /// Armored authorizing current-KP cert and detached signature over the
+    /// Attested authorizing current-KP cert and detached signature over the
     /// intent-tagged ProvisionerRotateKpSetRequest payload.
-    #[prost(string, tag = "7")]
-    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "7")]
+    pub signer_cert: ::core::option::Option<AttestedKpCert>,
     #[prost(string, tag = "8")]
     pub kp_signature: ::prost::alloc::string::String,
 }

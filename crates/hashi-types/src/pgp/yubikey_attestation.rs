@@ -20,6 +20,8 @@
 //! supported; Yubico reports correcting it in 5.7:
 //! <https://github.com/Yubico/yubikey-manager/issues/402>.
 
+use super::AttestedPgpKeys;
+use super::Fingerprint;
 use super::POLICY;
 use super::PgpPublicCert;
 use anyhow::Context;
@@ -72,6 +74,15 @@ pub fn verify_yubikey_attestations(
     sig_pem: &[u8],
     dec_pem: &[u8],
 ) -> Result<()> {
+    verify_yubikey_attestations_and_keys(cert, device_pem, sig_pem, dec_pem).map(|_| ())
+}
+
+pub(crate) fn verify_yubikey_attestations_and_keys(
+    cert: &PgpPublicCert,
+    device_pem: &[u8],
+    sig_pem: &[u8],
+    dec_pem: &[u8],
+) -> Result<AttestedPgpKeys> {
     let device_der = parse_single_certificate_pem(device_pem).context("device attestation")?;
     let sig_der = parse_single_certificate_pem(sig_pem).context("SIG attestation")?;
     let dec_der = parse_single_certificate_pem(dec_pem).context("DEC attestation")?;
@@ -79,13 +90,13 @@ pub fn verify_yubikey_attestations(
     verify_yubikey_attestations_with_issuers(cert, &device_der, &sig_der, &dec_der, &issuers)
 }
 
-fn verify_yubikey_attestations_with_issuers(
+pub(crate) fn verify_yubikey_attestations_with_issuers(
     cert: &PgpPublicCert,
     device_der: &[u8],
     sig_der: &[u8],
     dec_der: &[u8],
     trusted_issuers: &[&[u8]],
-) -> Result<()> {
+) -> Result<AttestedPgpKeys> {
     let device = parse_certificate_der(device_der, "device attestation")?;
     let sig = parse_certificate_der(sig_der, "SIG attestation")?;
     let dec = parse_certificate_der(dec_der, "DEC attestation")?;
@@ -93,15 +104,20 @@ fn verify_yubikey_attestations_with_issuers(
     verify_device_issuer(&device, trusted_issuers)?;
     verify_statement(&sig, &device, SIG_COMMON_NAME)?;
     verify_statement(&dec, &device, DEC_COMMON_NAME)?;
+    let (signing, signing_bytes) = signing_key(&cert.cert)?;
+    let (encryption, encryption_bytes) = encryption_key(&cert.cert)?;
     anyhow::ensure!(
-        statement_key(&sig, &ED25519_OID)? == signing_key(&cert.cert)?,
+        statement_key(&sig, &ED25519_OID)? == signing_bytes,
         "SIG attestation key does not match the OpenPGP signing key"
     );
     anyhow::ensure!(
-        statement_key(&dec, &X25519_OID)? == encryption_key(&cert.cert)?,
+        statement_key(&dec, &X25519_OID)? == encryption_bytes,
         "DEC attestation key does not match the OpenPGP encryption key"
     );
-    Ok(())
+    Ok(AttestedPgpKeys {
+        signing,
+        encryption,
+    })
 }
 
 fn parse_single_certificate_pem(input: &[u8]) -> Result<Vec<u8>> {
@@ -214,7 +230,7 @@ fn statement_key<'a>(
     Ok(key.data.as_ref())
 }
 
-fn signing_key(cert: &openpgp::Cert) -> Result<&[u8]> {
+fn signing_key(cert: &openpgp::Cert) -> Result<(Fingerprint, &[u8])> {
     let mut candidates = cert
         .keys()
         .with_policy(&*POLICY, None)
@@ -235,13 +251,13 @@ fn signing_key(cert: &openpgp::Cert) -> Result<&[u8]> {
             q,
         } => q
             .decode_point(&Curve::Ed25519)
-            .map(|(key, _)| key)
+            .map(|(key, _)| (candidate.key().fingerprint(), key))
             .context("OpenPGP signing key has invalid Ed25519 encoding"),
         _ => anyhow::bail!("OpenPGP signing key does not use legacy Ed25519"),
     }
 }
 
-fn encryption_key(cert: &openpgp::Cert) -> Result<&[u8]> {
+fn encryption_key(cert: &openpgp::Cert) -> Result<(Fingerprint, &[u8])> {
     let mut candidates = cert
         .keys()
         .with_policy(&*POLICY, None)
@@ -263,7 +279,7 @@ fn encryption_key(cert: &openpgp::Cert) -> Result<&[u8]> {
             ..
         } => q
             .decode_point(&Curve::Cv25519)
-            .map(|(key, _)| key)
+            .map(|(key, _)| (candidate.key().fingerprint(), key))
             .context("OpenPGP encryption key has invalid Cv25519 encoding"),
         _ => anyhow::bail!("OpenPGP encryption key does not use legacy Cv25519"),
     }

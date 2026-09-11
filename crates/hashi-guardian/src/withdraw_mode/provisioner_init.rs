@@ -201,12 +201,12 @@ mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
+    use hashi_types::guardian::AttestedKpCert;
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::GuardianError::Unauthenticated;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
     use k256::SecretKey;
 
     const TEST_N: usize = 5;
@@ -216,8 +216,8 @@ mod tests {
         shares: Vec<Share>,
         enclave: Arc<Enclave>,
         captures: crate::test_utils::CapturedPuts,
-        kp_keys: Vec<(PgpPublicCert, String)>,
-        alternate_kp_key: (PgpPublicCert, String),
+        kp_keys: Vec<(AttestedKpCert, String)>,
+        alternate_kp_key: (AttestedKpCert, String),
     }
 
     async fn setup() -> TestContext {
@@ -234,16 +234,9 @@ mod tests {
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
         let share_commitments = ShareCommitments::from_shares(&shares).unwrap();
         let kp_keys = (0..TEST_N)
-            .map(|_| {
-                let (cert, secret) = mock_pgp_keypair();
-                (PgpPublicCert::new(cert).unwrap(), secret)
-            })
+            .map(|_| mock_attested_kp_keypair())
             .collect::<Vec<_>>();
-        let (alternate_cert, alternate_secret) = mock_pgp_keypair();
-        let alternate_kp_key = (
-            PgpPublicCert::new(alternate_cert).unwrap(),
-            alternate_secret,
-        );
+        let alternate_kp_key = mock_attested_kp_keypair();
         let kp_encrypted_shares = KpEncryptedShareRoster::new(
             kp_keys
                 .iter()
@@ -304,7 +297,7 @@ mod tests {
         fn signed_submission_with_key(
             &self,
             share: &Share,
-            signer: &(PgpPublicCert, String),
+            signer: &(AttestedKpCert, String),
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
         ) -> KpSigned<ProvisionerInitRequest> {
@@ -342,7 +335,7 @@ mod tests {
         fn signed_submission_with_key_and_genesis_hash(
             &self,
             share: &Share,
-            signer: &(PgpPublicCert, String),
+            signer: &(AttestedKpCert, String),
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
             expected_genesis_state_hash: Option<[u8; 32]>,

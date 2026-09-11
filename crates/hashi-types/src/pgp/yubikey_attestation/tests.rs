@@ -94,6 +94,7 @@ fn pgp_cert(extra_signing: bool, extra_encryption: bool) -> PgpPublicCert {
         .set_creation_time(UNIX_EPOCH + Duration::from_secs(1_704_067_200))
         .set_validity_period(None)
         .set_primary_key_flags(KeyFlags::empty().set_certification())
+        .add_userid("") // Match provisioning's `oct generate --userid ''`.
         .add_signing_subkey()
         .add_transport_encryption_subkey();
     if extra_signing {
@@ -230,6 +231,7 @@ impl Fixture {
             dec,
             &[self.issuer.der().as_ref()],
         )
+        .map(|_| ())
     }
 }
 
@@ -247,6 +249,24 @@ fn valid_binding_accepts_ecdsa_issuer_and_both_slot_keys() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn attested_kp_cert_rejects_valid_chain_from_untrusted_issuer() {
+    let fixture = Fixture::new(pgp_cert(false, false));
+    fixture.verify().unwrap();
+
+    let error = crate::guardian::AttestedKpCert::new(
+        fixture.cert,
+        pem(fixture.device.der()).into_bytes(),
+        pem(&fixture.statements[0]).into_bytes(),
+        pem(&fixture.statements[1]).into_bytes(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::guardian::GuardianError::InvalidInputs(_)
+    ));
 }
 
 #[test]

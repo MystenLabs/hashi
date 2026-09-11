@@ -254,16 +254,16 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use hashi_types::guardian::crypto::split_secret;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
     use hashi_types::guardian::test_utils::mock_kp_certs_roster;
+    use hashi_types::guardian::AttestedKpCert;
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::GuardianError::Unauthenticated;
     use hashi_types::guardian::LogMessageV2;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
     use k256::SecretKey;
 
     const TEST_N: usize = 5;
@@ -285,8 +285,8 @@ mod tests {
         old_kp_encrypted_shares: KpEncryptedShareRoster,
         btc_master_pubkey: BitcoinPubkey,
         pcr_allowlist: PcrAllowlist,
-        kp_keys: Vec<(PgpPublicCert, String)>,
-        alternate_kp_key: (PgpPublicCert, String),
+        kp_keys: Vec<(AttestedKpCert, String)>,
+        alternate_kp_key: (AttestedKpCert, String),
         captures: CapturedPuts,
         enclave: Arc<Enclave>,
     }
@@ -304,16 +304,9 @@ mod tests {
         )
         .unwrap();
         let kp_keys = (0..TEST_N)
-            .map(|_| {
-                let (cert, secret) = mock_pgp_keypair();
-                (PgpPublicCert::new(cert).unwrap(), secret)
-            })
+            .map(|_| mock_attested_kp_keypair())
             .collect::<Vec<_>>();
-        let (alternate_cert, alternate_secret) = mock_pgp_keypair();
-        let alternate_kp_key = (
-            PgpPublicCert::new(alternate_cert).unwrap(),
-            alternate_secret,
-        );
+        let alternate_kp_key = mock_attested_kp_keypair();
         let old_kp_encrypted_shares = KpEncryptedShareRoster::new(
             kp_keys
                 .iter()
@@ -357,7 +350,7 @@ mod tests {
         fn signed_submission_with_key(
             &self,
             share: &Share,
-            signer: &(PgpPublicCert, String),
+            signer: &(AttestedKpCert, String),
             expected_session_id: SessionID,
             new_kp_certs_roster: &KpCertRoster,
             new_threshold: usize,
