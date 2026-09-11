@@ -104,18 +104,19 @@ pub struct TemporaryInitState {
 }
 
 pub(crate) struct PendingCeremony {
+    proposal: CeremonyProposalLogMessage,
     digest: [u8; 32],
-    encrypted_shares: KpEncryptedShareRoster,
     confirmed_share_ids: RwLock<BTreeSet<ShareID>>,
 }
 
 impl PendingCeremony {
-    fn new(state: CeremonyState) -> Self {
-        Self {
+    fn new(proposal: CeremonyProposalLogMessage) -> GuardianResult<Self> {
+        let state = CeremonyState::from_proposal(proposal.clone())?;
+        Ok(Self {
+            proposal,
             digest: state.digest(),
-            encrypted_shares: state.encrypted_shares,
             confirmed_share_ids: RwLock::new(BTreeSet::new()),
-        }
+        })
     }
 
     pub(crate) fn validate_confirmation(
@@ -129,6 +130,7 @@ impl PendingCeremony {
             ));
         }
         let share = self
+            .proposal
             .encrypted_shares
             .find_by_fingerprint(signer_fingerprint)
             .ok_or_else(|| {
@@ -153,7 +155,10 @@ impl PendingCeremony {
             .write()
             .expect("pending ceremony lock poisoned");
         confirmed.insert(share_id);
-        CeremonyConfirmationResponse::new(confirmed.len(), self.encrypted_shares.share_count())
+        CeremonyConfirmationResponse::new(
+            confirmed.len(),
+            self.proposal.encrypted_shares.share_count(),
+        )
     }
 
     pub(crate) fn status(&self) -> GuardianResult<CeremonyConfirmationResponse> {
@@ -162,7 +167,7 @@ impl PendingCeremony {
                 .read()
                 .expect("pending ceremony lock poisoned")
                 .len(),
-            self.encrypted_shares.share_count(),
+            self.proposal.encrypted_shares.share_count(),
         )
     }
 
@@ -696,6 +701,32 @@ impl Enclave {
         self.write_log(LogMessage::Ceremony(Box::new(state))).await
     }
 
+    pub async fn log_ceremony_proposal(
+        &self,
+        proposal: CeremonyProposalLogMessage,
+    ) -> GuardianResult<()> {
+        self.write_log(LogMessage::CeremonyProposal(Box::new(proposal)))
+            .await
+    }
+
+    /// Publish the pending ceremony to the established authoritative locations.
+    /// The ceremony record is written last and therefore acts as the commit.
+    pub(crate) async fn publish_pending_ceremony(
+        &self,
+        pending: &PendingCeremony,
+    ) -> GuardianResult<()> {
+        let CeremonyProposalLogMessage {
+            ceremony,
+            encrypted_shares,
+        } = pending.proposal.clone();
+        let kp_share_state =
+            KpShareStateLogMessage::new(ceremony.sharing_seq(), 0, encrypted_shares);
+        self.write_log(LogMessage::KpShareState(Box::new(kp_share_state)))
+            .await?;
+        self.write_log(LogMessage::Ceremony(Box::new(ceremony)))
+            .await
+    }
+
     /// Persist the current encrypted KP share state to `kp-shares/` for recovery.
     /// `sharing_seq` pairs it with the matching `ceremony/` instance, while
     /// `cert_seq` versions recipient-cert rotations within that instance.
@@ -715,9 +746,13 @@ impl Enclave {
     // Pending Ceremony State
     // ========================================================================
 
-    pub(crate) fn install_pending_ceremony(&self, state: CeremonyState) -> GuardianResult<()> {
+    pub(crate) fn install_pending_ceremony(
+        &self,
+        proposal: CeremonyProposalLogMessage,
+    ) -> GuardianResult<()> {
+        let pending = PendingCeremony::new(proposal)?;
         self.pending_ceremony
-            .set(PendingCeremony::new(state))
+            .set(pending)
             .map_err(|_| InvalidInputs("Pending ceremony state already set".into()))
     }
 

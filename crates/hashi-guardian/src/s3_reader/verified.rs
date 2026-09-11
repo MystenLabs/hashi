@@ -67,7 +67,10 @@ impl InitCheckpoint {
                 EnclaveMode::Ceremony => Self::OperatorInitialized,
                 EnclaveMode::Withdraw => Self::OperatorActivated,
             },
-            LogType::Heartbeat | LogType::Ceremony | LogType::Genesis => Self::OperatorInitialized,
+            LogType::Heartbeat
+            | LogType::CeremonyCompleted
+            | LogType::CeremonyProposal
+            | LogType::Genesis => Self::OperatorInitialized,
         };
         Ok(required)
     }
@@ -343,7 +346,12 @@ mod tests {
                 InitCheckpoint::required_for(LogType::CommitteeUpdate, mode).unwrap(),
                 OperatorActivated
             );
-            for log_type in [LogType::Heartbeat, LogType::Ceremony, LogType::Genesis] {
+            for log_type in [
+                LogType::Heartbeat,
+                LogType::CeremonyCompleted,
+                LogType::CeremonyProposal,
+                LogType::Genesis,
+            ] {
                 assert_eq!(
                     InitCheckpoint::required_for(log_type, mode).unwrap(),
                     OperatorInitialized

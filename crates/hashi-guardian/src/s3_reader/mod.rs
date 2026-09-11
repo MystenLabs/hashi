@@ -11,6 +11,7 @@ use crate::s3_client::GuardianS3Client;
 use crate::s3_client::ImmutabilityCheck;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::CeremonyLogMessage;
+use hashi_types::guardian::CeremonyProposalLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
@@ -219,6 +220,33 @@ impl GuardianReader {
     ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
         self.read_kp_share_state_log_at_key(&key, true).await
+    }
+
+    /// Read and verify the proposal written by one live ceremony session.
+    pub async fn read_live_ceremony_proposal(
+        &mut self,
+        session_id: &SessionID,
+    ) -> GuardianResult<CeremonyState> {
+        let key = CeremonyProposalLogMessage::object_key(session_id);
+        // A live proposal has just been published, so its short-lived Compliance
+        // lock must still be active.
+        let verified_record = self.read_verified_record(&key).await?;
+        self.allowlist
+            .require_current_build(verified_record.build_pcrs())?;
+        let writing_session_id = verified_record.entry().session_id().clone();
+        let proposal = match verified_record.into_entry().into_message() {
+            V2(LogMessageV2::CeremonyProposal(proposal)) => *proposal,
+            V1(_) | V2(_) => {
+                return Err(InvalidS3Log(format!(
+                    "expected a ceremony proposal log at {key}"
+                )));
+            }
+        };
+        let state = CeremonyState::from_proposal(proposal).map_err(|error| {
+            InvalidS3Log(format!("invalid ceremony proposal at {key}: {error}"))
+        })?;
+        log_verified_read(&key, &writing_session_id);
+        Ok(state)
     }
 
     /// Read and verify one KP-share object under the requested build policy.

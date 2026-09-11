@@ -7,8 +7,8 @@
 //! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
 //! share's recipient matches its expected KP cert and its ciphertext targets
 //! that cert (without decrypting) -> cross-check the
-//! guardian's `ceremony/` audit log and `kp-shares/` recovery log -> wait for
-//! every KP to confirm successful recovery.
+//! guardian's session-scoped `kp-shares/proposed/` record -> wait for every KP
+//! to confirm successful recovery and commit the finalized logs.
 //!
 //! [`OperatorInit`]: hashi_types::guardian::OperatorInitRequest
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
@@ -213,28 +213,26 @@ pub async fn run(cfg: Config) -> Result<()> {
         "all returned PGP-encrypted share ciphertexts verified against expected KP certificates",
     );
 
-    // 9. Cross-check the latest guardian ceremony/ and kp-shares/ logs.
-    //    KPs will fetch the same KP share state during key-provisioner ceremony.
+    // 9. Cross-check this session's proposed ceremony state. KPs will fetch the
+    //    same proposal during key-provisioner ceremony.
     info!(
         phase = "log cross-check",
-        "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
+        "cross-checking this guardian session's ceremony proposal",
     );
-    let logged = reader
-        .read_latest_ceremony_state_from_current_build()
-        .await?;
+    let logged = reader.read_live_ceremony_proposal(&session_id).await?;
     logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         logged == live,
-        "ceremony/ and kp-shares/ logs differ from the SetupNewKeyResponse"
+        "ceremony proposal differs from the SetupNewKeyResponse"
     );
     info!(
         phase = "log cross-check",
-        "ceremony/ and kp-shares/ logs match the SetupNewKeyResponse",
+        "ceremony proposal matches the SetupNewKeyResponse",
     );
 
     info!(
         phase = "KP confirmations",
-        "ceremony state published; waiting for every key provisioner to run key-provisioner ceremony",
+        "ceremony proposal published; waiting for every key provisioner to run key-provisioner ceremony",
     );
     loop {
         let status = match verified_live_guardian_info(&mut client, allowlist.current_build()).await

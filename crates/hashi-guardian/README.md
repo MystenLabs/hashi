@@ -73,6 +73,7 @@ Canonical key layout:
 - `heartbeat/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{counter:020}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand32}.json`
+- `kp-shares/proposed/{session_id}.json`
 - `ceremony/{sharing_seq:020}-{session_id}.json`
 - `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session_id}.json`
 - `genesis/record.json`
@@ -84,7 +85,7 @@ Where:
 - `session_id` is the first 16 hex chars of the enclave ephemeral signing pubkey (lowercase). Acts as a short per-session tag in keys; full pubkey verification still happens via the signed log payload (`SessionID::HEX_LEN` in `hashi-types`).
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `seq` (in `withdraw/`) is the zero-padded limiter sequence number consumed by the withdrawal.
-- `sharing_seq` (in `ceremony/`) is a zero-padded rotation counter — `setup_new_key` writes `0`; each `rotate_kp_set` appends `prev+1`.
+- `sharing_seq` (in `ceremony/`) is a zero-padded rotation counter — completed setup publishes `0`; each completed KP-set rotation appends `prev+1`.
 - `cert_seq` (in `kp-shares/`) is a zero-padded recipient-cert state counter within one `sharing_seq`. Setup/rotation write `0`; future individual KP cert rotations append higher values.
 - `new_epoch` / `proposed_epoch` (in `committee-update/`) are the zero-padded committee epoch numbers — `new_epoch` is the just-applied epoch for successes; `proposed_epoch` is the requested epoch for failures. Hashi reconfig is sparse, so neither is guaranteed to be `from_epoch + 1`.
 - `rand32` is a random 32-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
@@ -94,8 +95,9 @@ Where:
 - `init` logs are grouped per session and numerically ordered by lifecycle step.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
-- `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage` — `NewKey { instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `Rotate { old_instance, new_instance }` written by `rotate_kp_set` (each rotation, `sharing_seq=prev+1`). A rotation records the `old_instance` it consumed so the chain is auditable from the log alone (each entry's `old_instance` should match the prior entry's instance). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry encrypted shares or a separate recipient roster.
-- `kp-shares` logs carry the current encrypted KP share state for a `sharing_seq`. Written by `setup_new_key` (`sharing_seq=0, cert_seq=0`) and each `rotate_kp_set` (`cert_seq=0` for the new instance). Each share id has one recipient fingerprint and one PGP-encrypted ciphertext. An individual certificate rotation can append a higher `cert_seq` entry under the same `sharing_seq`; readers take the lexicographically last entry under `kp-shares/{sharing_seq:020}/`. Integrity is the enclave signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
+- `kp-shares/proposed` contains one session-addressed ceremony proposal with the ceremony metadata and initial encrypted KP shares. Ceremony participants read this record before confirmation. Proposals use the short object-lock policy and are not authoritative serving state.
+- `ceremony` logs are flat (not date-partitioned) and contain only completed ceremonies. After every KP confirms a proposal, the guardian writes its initial finalized `kp-shares` state and then its `CeremonyLogMessage`; the ceremony write is the commit record. `NewKey { instance }` represents genesis (`sharing_seq=0`) and `Rotate { old_instance, new_instance }` advances `sharing_seq` by one. A rotation records the `old_instance` it consumed so the chain is auditable from the log alone. Readers select the lexicographically last ceremony as the current authoritative instance.
+- Finalized `kp-shares` logs carry the current encrypted KP share state for a completed `sharing_seq`. Setup and KP-set rotation publish `cert_seq=0` during ceremony completion; individual KP cert rotations append higher `cert_seq` entries. Each share id has one recipient fingerprint and one PGP-encrypted ciphertext. Readers take the lexicographically last entry under `kp-shares/{sharing_seq:020}/`. Integrity is the enclave signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
 - `genesis` is a fixed singleton record carrying the first-deploy committee, Hashi object id, and MPC master `G` after KP-authorized PI reaches threshold, before any `committee-update/` success exists. Deployed V1 records contain only the committee.
 - `committee-update` logs are flat (not date-partitioned). Successes are epoch-sorted; failures lead with `failure-` so all successes sort first — the lex-last non-`failure-` key is the latest successfully-applied epoch.
 
@@ -103,6 +105,6 @@ Where:
 
 - `init/{session_id}-...` keeps init logs session-addressable.
 - `heartbeat/...` and `withdraw/...` date partitions support efficient hour-based polling.
-- `ceremony/` and `committee-update/` are flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly. `kp-shares/` is nested by `sharing_seq` because readers want the latest cert state within one current sharing instance. `genesis/record.json` is fixed because there is at most one bootstrap record.
+- `ceremony/` and `committee-update/` are flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly. `kp-shares/proposed/` is session-addressed because a live ceremony has exactly one proposal. Finalized `kp-shares/` is nested by `sharing_seq` because readers want the latest cert state within one current sharing instance. `genesis/record.json` is fixed because there is at most one bootstrap record.
 - Zero-padding (`{seq:020}` in `withdraw/`, `{sharing_seq:020}` in `ceremony/`, `{cert_seq:020}` in `kp-shares/`, `{new_epoch:020}` in `committee-update/`) makes lexicographic order over the keys equal seq/epoch order. The signed log payload embeds the same value, so a fetched object's filename and content can be cross-checked.
 - Prefixes (`init`, `heartbeat`, `withdraw`, `ceremony`, `kp-shares`, `genesis`, `committee-update`) allow independent S3 deletion policies.

@@ -4,6 +4,7 @@
 //! Combined ceremony and KP share state derived from guardian log messages.
 
 use super::s3::log::CeremonyLogMessage;
+use super::s3::log::CeremonyProposalLogMessage;
 use super::s3::log::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::GuardianError;
@@ -51,6 +52,22 @@ impl CeremonyState {
             btc_master_pubkey,
             kp_share_state.cert_seq,
             kp_share_state.encrypted_shares,
+        )
+    }
+
+    /// Validate and combine a live ceremony proposal into the state confirmed
+    /// by ceremony participants.
+    pub fn from_proposal(proposal: CeremonyProposalLogMessage) -> GuardianResult<Self> {
+        let CeremonyProposalLogMessage {
+            ceremony,
+            encrypted_shares,
+        } = proposal;
+        let (secret_sharing_instance, btc_master_pubkey) = ceremony.into_instance_and_pubkey();
+        Self::from_parts(
+            secret_sharing_instance,
+            btc_master_pubkey,
+            0,
+            encrypted_shares,
         )
     }
 

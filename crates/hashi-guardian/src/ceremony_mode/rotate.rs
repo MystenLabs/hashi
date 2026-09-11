@@ -218,30 +218,21 @@ async fn finalize_rotation(
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
-    info!(
-        "Persisting rotation sharing_seq={new_sharing_seq} cert_seq=0 to kp-shares/ + ceremony/."
-    );
-    enclave
-        .log_kp_share_state(new_sharing_seq, 0, encrypted_shares.clone())
-        .await?;
-
     let ceremony_log = CeremonyLogMessage::Rotate {
         old_instance: old_instance.clone(),
         new_instance: new_instance.clone(),
         btc_master_pubkey,
     };
-    enclave.log_ceremony(ceremony_log.clone()).await?;
+    let proposal = CeremonyProposalLogMessage::new(ceremony_log, encrypted_shares.clone());
+    info!("Persisting rotation proposal to kp-shares/proposed/.");
+    enclave.log_ceremony_proposal(proposal.clone()).await?;
 
     info!("Rotation complete; awaiting every new key provisioner's confirmation.");
     let response = RotateKpSetResponse {
         encrypted_shares,
         new_instance,
     };
-    let pending_state = CeremonyState::new(
-        ceremony_log,
-        KpShareStateLogMessage::new(new_sharing_seq, 0, response.encrypted_shares.clone()),
-    )?;
-    enclave.install_pending_ceremony(pending_state)?;
+    enclave.install_pending_ceremony(proposal)?;
     Ok(enclave.sign(response))
 }
 
@@ -431,9 +422,8 @@ mod tests {
             .response
     }
 
-    /// Assert the rotation returned `new_n` PGP-armored shares and produced
-    /// exactly one `ceremony/` log at `sharing_seq = 1` carrying the instance
-    /// only (no ciphertexts).
+    /// Assert the rotation returned `new_n` PGP-armored shares and produced one
+    /// session-scoped proposal without publishing finalized ceremony state.
     fn assert_rotation_output(
         captures: &CapturedPuts,
         response: &RotateKpSetResponse,
@@ -453,32 +443,23 @@ mod tests {
         }
 
         let captured = captures.lock().unwrap();
-        let ceremony_logs: Vec<_> = captured
-            .iter()
-            .filter(|(k, _)| k.starts_with("ceremony/"))
-            .collect();
-        assert_eq!(ceremony_logs.len(), 1, "expected one ceremony/ log");
-        let (key, body) = ceremony_logs[0];
+        assert!(!captured.iter().any(|(key, _)| key.starts_with("ceremony/")));
+        assert_eq!(captured.len(), 1, "expected only the ceremony proposal");
+        let (key, body) = &captured[0];
         assert!(
-            key.starts_with("ceremony/00000000000000000001-"),
-            "expected sharing_seq=1, got key {key}"
+            key.starts_with("kp-shares/proposed/"),
+            "expected a proposed KP-share key, got {key}"
         );
-        assert!(
-            !std::str::from_utf8(body)
-                .unwrap()
-                .contains("BEGIN PGP MESSAGE"),
-            "ceremony log must not contain ciphertexts"
-        );
-
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::Ceremony(ceremony)) = record.message() else {
-            panic!("expected V2 Ceremony variant");
+        let VersionedLogMessage::V2(LogMessageV2::CeremonyProposal(proposal)) = record.message()
+        else {
+            panic!("expected V2 CeremonyProposal variant");
         };
         let CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
             btc_master_pubkey,
-        } = ceremony.as_ref()
+        } = &proposal.ceremony
         else {
             panic!("expected Rotate variant");
         };
@@ -505,28 +486,8 @@ mod tests {
             "threshold decrypted rotation shares should reconstruct the original key"
         );
 
-        // The new shares are persisted to kp-shares/ keyed by the new sharing_seq
-        // and initial cert_seq=0.
-        let shares_logs: Vec<_> = captured
-            .iter()
-            .filter(|(k, _)| k.starts_with("kp-shares/"))
-            .collect();
-        assert_eq!(shares_logs.len(), 1, "expected one kp-shares/ log");
-        let (shares_key, shares_body) = shares_logs[0];
-        assert!(
-            shares_key.starts_with("kp-shares/00000000000000000001/00000000000000000000-"),
-            "expected sharing_seq=1 cert_seq=0, got key {shares_key}"
-        );
-        let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::KpShareState(shares)) = shares_record.message()
-        else {
-            panic!("expected V2 KpShareState variant");
-        };
-        let shares = shares.as_ref();
-        assert_eq!(shares.sharing_seq, 1);
-        assert_eq!(shares.cert_seq, 0);
-        assert_eq!(shares.encrypted_shares, *response_shares);
-        assert_eq!(shares.encrypted_shares.share_count(), new_n);
+        assert_eq!(proposal.encrypted_shares, *response_shares);
+        assert_eq!(proposal.encrypted_shares.share_count(), new_n);
     }
 
     #[tokio::test]
@@ -574,11 +535,8 @@ mod tests {
         assert!(matches!(err, LifecycleMismatch { .. }));
 
         let captured = ctx.captures.lock().unwrap();
-        let count = captured
-            .iter()
-            .filter(|(k, _)| k.starts_with("ceremony/"))
-            .count();
-        assert_eq!(count, 1, "rotation must finalize exactly once");
+        assert_eq!(captured.len(), 1, "rotation must create one proposal");
+        assert!(captured[0].0.starts_with("kp-shares/proposed/"));
     }
 
     #[tokio::test]
