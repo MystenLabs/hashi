@@ -18,7 +18,7 @@
 
         modules = [
           (
-            { pkgs, ... }:
+            { config, pkgs, ... }:
             {
               environment.systemPackages = [
                 pkgs._1password-gui
@@ -29,6 +29,7 @@
                 pkgs.neovim
                 pkgs.openpgp-card-tools
                 pkgs.rustc
+                pkgs.tmux
                 pkgs.yubikey-manager
               ];
 
@@ -46,16 +47,38 @@
               system.stateVersion = 7;
 
               system.activationScripts.postActivation.text = ''
+                # Install Ghostty preferences
                 /usr/bin/install -d -o kp -m 0755 "/Users/kp/Library/Application Support/com.mitchellh.ghostty"
-                /usr/bin/install -o kp -m 0644 ${
-                  pkgs.writeText "ghostty-config" ''
-                    auto-update = off
-                    theme = Dimidium
-                    font-size = 16
-                    maximize = true
-                    quit-after-last-window-closed = true
-                  ''
-                } "/Users/kp/Library/Application Support/com.mitchellh.ghostty/config.ghostty"
+                /usr/bin/install -o kp -m 0644 ${pkgs.writeText "ghostty-config" ''
+                  auto-update = off
+                  theme = Dimidium
+                  font-size = 16
+                  maximize = true
+                  quit-after-last-window-closed = true
+                ''} "/Users/kp/Library/Application Support/com.mitchellh.ghostty/config.ghostty"
+
+                # Install neovim settings
+                /usr/bin/install -d -o kp -m 0755 "/Users/kp/.config/nvim"
+                /usr/bin/install -o kp -m 0644 ${pkgs.writeText "nvim-init.lua" ''
+                  vim.opt.number = true
+                  vim.opt.cursorline = true
+                  vim.opt.scrolloff = 10
+                  vim.opt.sidescrolloff = 10
+                  vim.opt.ignorecase = true
+                  vim.opt.smartcase = true
+                  vim.opt.inccommand = "split"
+                  vim.opt.list = true
+                  vim.opt.listchars = { tab = "» ", trail = "·", nbsp = "␣" }
+                  vim.opt.expandtab = true
+                  vim.opt.tabstop = 4
+                  vim.opt.shiftwidth = 4
+                  vim.opt.clipboard = "unnamedplus"
+                  vim.opt.swapfile = false
+                  vim.opt.backup = false
+                  vim.opt.writebackup = false
+                  vim.opt.undofile = false
+                  vim.opt.shadafile = "NONE"
+                ''} "/Users/kp/.config/nvim/init.lua"
               '';
 
               system.defaults = {
@@ -99,6 +122,11 @@
               system.keyboard = {
                 enableKeyMapping = true;
                 remapCapsLockToEscape = true;
+              };
+
+              launchd.user.agents.keyboard-mapping = {
+                script = config.system.activationScripts.keyboard.text;
+                serviceConfig.RunAtLoad = true;
               };
             }
           )
