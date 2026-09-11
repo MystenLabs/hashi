@@ -919,7 +919,7 @@ fn to_fastcrypto_digest(h: &MessagesHash) -> fastcrypto::hash::Digest<32> {
     fastcrypto::hash::Digest::new(*<MessagesHash as AsRef<[u8; 32]>>::as_ref(h))
 }
 
-fn resolve_signers<T: hashi_types::intent::IntentMessage>(
+pub(crate) fn resolve_signers<T: hashi_types::intent::IntentMessage>(
     dealer_cert: &SignedMessage<T>,
     committee: &Committee,
 ) -> MpcResult<BTreeSet<PartyId>> {
@@ -1064,6 +1064,7 @@ pub(crate) struct AvidDealerFlowData {
     pub(crate) total_reduced_weight: u32,
     /// `W − f` in reduced weight.
     pub(crate) vote_quorum_weight: u32,
+    pub(crate) replay_signers: Option<BTreeSet<PartyId>>,
 }
 
 pub(crate) struct RotationComplainContext {

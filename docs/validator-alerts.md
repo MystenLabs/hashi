@@ -37,6 +37,8 @@ Dashboard-worthy but **not** alerts:
   upgrade progress is counted before the on-chain upgrade flips `active`.
 - `hashi_mpc_presig_batch_repair_total` — a nonce batch the allocation cursor
   outran, and what this node did about it, by `outcome`.
+- `hashi_mpc_nonce_dealer_signer_set_replay_total` — repeat dealer rounds for a
+  batch an earlier round already fixed a signer set for, by `outcome`.
 - `hashi_is_leader` — leadership rotates; useful context when reading other
   metrics, meaningless to alert on.
 - `hashi_db_keyspace_disk_bytes` — live table bytes per keyspace. Each one

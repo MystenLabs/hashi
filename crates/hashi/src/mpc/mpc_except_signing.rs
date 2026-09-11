@@ -105,6 +105,7 @@ use hashi_types::committee::ReducedWeight;
 use hashi_types::committee::SignedMessage;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -1498,8 +1499,11 @@ impl MpcManager {
         collect_dealer_signatures(
             &mut aggregator,
             requests,
-            dealer_data.required_reduced_weight,
-            Duration::ZERO,
+            DealerStopRule {
+                threshold: dealer_data.required_reduced_weight,
+                grace: Duration::ZERO,
+                required: None,
+            },
             p2p_channel,
             MPC_LABEL_DKG,
             metrics,
@@ -1794,8 +1798,11 @@ impl MpcManager {
         collect_dealer_signatures(
             &mut aggregator,
             requests,
-            dealer_data.required_reduced_weight,
-            Duration::ZERO,
+            DealerStopRule {
+                threshold: dealer_data.required_reduced_weight,
+                grace: Duration::ZERO,
+                required: None,
+            },
             p2p_channel,
             MPC_LABEL_KEY_ROTATION,
             metrics,
@@ -2718,11 +2725,17 @@ impl MpcManager {
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<AvidDealerFlowData> {
         let epoch = self.mpc_config.epoch;
-        let builder = match self
+        let stored_builder = self
             .public_messages_store
             .get_avid_dealer_builder(epoch, batch_index)
-            .map_err(|e| MpcError::StorageError(e.to_string()))?
-        {
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        let held = self.try_get_avid_held_echoes(batch_index, &self.address)?;
+        if stored_builder.is_none() && held.is_some() {
+            return Err(MpcError::ProtocolFailed(format!(
+                "batch {batch_index} has stored AVID echoes but no builder to reproduce them"
+            )));
+        }
+        let builder = match stored_builder {
             Some(builder) => builder,
             None => {
                 let builder = self.create_avid_nonce_dealer_builder(batch_index, rng)?;
@@ -2756,6 +2769,14 @@ impl MpcManager {
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
         let vote_quorum_weight =
             Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
+        let replay_signers = held.map(|(stored_vote, _)| {
+            let pending = stored_vote.vote.recipients;
+            self.mpc_config
+                .nodes
+                .node_ids_iter()
+                .filter(|id| !pending.contains(id))
+                .collect()
+        });
         Ok(AvidDealerFlowData {
             builder,
             confirm_target,
@@ -2766,6 +2787,7 @@ impl MpcManager {
             nodes: self.mpc_config.nodes.clone(),
             total_reduced_weight,
             vote_quorum_weight,
+            replay_signers,
         })
     }
 
@@ -2817,11 +2839,36 @@ impl MpcManager {
             )
         };
         let decided_weight = dealer_data.vote_quorum_weight.max(min_confirm_weight);
-        collect_dealer_signatures(
+        let replay_allowed = dealer_data
+            .replay_signers
+            .as_ref()
+            .map(|expected| {
+                expected
+                    .iter()
+                    .map(|id| {
+                        dealer_data
+                            .committee
+                            .members()
+                            .get(*id as usize)
+                            .map(|member| member.validator_address())
+                            .ok_or_else(|| {
+                                MpcError::ProtocolFailed(format!(
+                                    "stored AVID round for batch {batch_index} names party \
+                                     {id}, which is not in this epoch's committee"
+                                ))
+                            })
+                    })
+                    .collect::<MpcResult<BTreeSet<Address>>>()
+            })
+            .transpose()?;
+        let replay_signatures = collect_dealer_signatures(
             &mut aggregator,
             requests,
-            decided_weight,
-            BATCH_AVSS_VOTES_GRACE,
+            DealerStopRule {
+                threshold: decided_weight,
+                grace: BATCH_AVSS_VOTES_GRACE,
+                required: replay_allowed.as_ref(),
+            },
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
             metrics,
@@ -2830,6 +2877,12 @@ impl MpcManager {
         drop(_timer);
         let confirmed = aggregator.reduced_weight() as u32;
         if confirmed >= dealer_data.total_reduced_weight {
+            if dealer_data.replay_signers.is_some() {
+                metrics
+                    .mpc_nonce_dealer_signer_set_replay_total
+                    .with_label_values(&["unneeded"])
+                    .inc();
+            }
             let cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -2848,6 +2901,12 @@ impl MpcManager {
                 .mpc_dealer_cert_shortfall_total
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .inc();
+            if dealer_data.replay_signers.is_some() {
+                metrics
+                    .mpc_nonce_dealer_signer_set_replay_total
+                    .with_label_values(&["abandoned"])
+                    .inc();
+            }
             return Err(MpcError::NotEnoughApprovals {
                 needed: decided_weight as usize,
                 got: confirmed as usize,
@@ -2857,9 +2916,49 @@ impl MpcManager {
             "AVID nonce round entered the pessimistic path: dealer {address:?}, \
              batch_index={batch_index}, confirmed weight {confirmed}, pending weight {pending}"
         );
-        let confirm_cert = aggregator
-            .finish()
-            .expect("signatures should always be valid");
+        let confirm_cert = match dealer_data.replay_signers.as_ref() {
+            Some(expected) => {
+                let mut replay = BlsSignatureAggregator::new_reduced(
+                    dealer_data.hashi_id,
+                    &dealer_data.committee,
+                    dealer_data.confirm_target.clone(),
+                    &dealer_data.nodes,
+                )
+                .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
+                replay
+                    .add_signature(dealer_data.my_signature.clone())
+                    .expect("own signature must always verify");
+                for (addr, signature) in replay_signatures {
+                    if let Err(e) = replay.add_signature_from(addr, signature) {
+                        tracing::info!("Could not replay the signature of {:?}: {}", addr, e);
+                    }
+                }
+                let cert = replay.finish().expect("signatures should always be valid");
+                let signers = crate::mpc::types::resolve_signers(&cert, &dealer_data.committee)?;
+                if &signers != expected {
+                    metrics
+                        .mpc_nonce_dealer_signer_set_replay_total
+                        .with_label_values(&["incomplete"])
+                        .inc();
+                    let missing: Vec<_> = expected.difference(&signers).collect();
+                    return Err(MpcError::ProtocolFailed(format!(
+                        "AVID nonce round for batch {batch_index} reproduced {} of the {} \
+                         signers the stored round fixed, missing {missing:?}; not dealing a \
+                         divergent dispersal",
+                        signers.len(),
+                        expected.len(),
+                    )));
+                }
+                metrics
+                    .mpc_nonce_dealer_signer_set_replay_total
+                    .with_label_values(&["reused"])
+                    .inc();
+                cert
+            }
+            None => aggregator
+                .finish()
+                .expect("signatures should always be valid"),
+        };
         let _timer = metrics
             .mpc_dealer_crypto_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -2921,8 +3020,11 @@ impl MpcManager {
         collect_dealer_signatures(
             &mut vote_aggregator,
             requests,
-            dealer_data.vote_quorum_weight,
-            Duration::ZERO,
+            DealerStopRule {
+                threshold: dealer_data.vote_quorum_weight,
+                grace: Duration::ZERO,
+                required: None,
+            },
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
             metrics,
@@ -6069,15 +6171,32 @@ fn verify_complaint_response_from_signer(
     }
 }
 
+struct DealerStopRule<'a> {
+    threshold: u32,
+    grace: Duration,
+    /// Peers whose signatures the round must reproduce.
+    required: Option<&'a BTreeSet<Address>>,
+}
+
 async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::IntentMessage + Clone>(
     aggregator: &mut BlsSignatureAggregator<'_, M, ReducedWeight<'_>>,
     requests: Vec<(Address, Arc<SendMessagesRequest>)>,
-    stop_threshold: u32,
-    grace: Duration,
+    stop: DealerStopRule<'_>,
     p2p_channel: &P,
     protocol: &'static str,
     metrics: &Metrics,
-) {
+) -> Vec<(Address, BLS12381Signature)> {
+    let mut awaited: BTreeSet<Address> = stop
+        .required
+        .map(|required| {
+            requests
+                .iter()
+                .map(|(addr, _)| *addr)
+                .filter(|addr| required.contains(addr))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut accepted = Vec::new();
     let mut in_flight: FuturesUnordered<_> = requests
         .into_iter()
         .map(|(addr, request)| async move {
@@ -6087,8 +6206,9 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
         })
         .collect();
     let ceiling = tokio::time::Instant::now() + DEALER_COLLECTION_CEILING;
-    let mut grace_deadline = (u32::from(aggregator.reduced_weight()) >= stop_threshold)
-        .then(|| tokio::time::Instant::now() + grace);
+    let mut grace_deadline = (u32::from(aggregator.reduced_weight()) >= stop.threshold
+        && awaited.is_empty())
+    .then(|| tokio::time::Instant::now() + stop.grace);
     let stop_reason = loop {
         let deadline = grace_deadline.map_or(ceiling, |grace| grace.min(ceiling));
         let next = match tokio::time::timeout_at(deadline, in_flight.next()).await {
@@ -6104,16 +6224,27 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
         let Some((addr, result)) = next else {
             break "drained";
         };
+        awaited.remove(&addr);
         match result {
             Ok(response) => {
-                if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
-                    tracing::info!("Invalid signature from {:?} ({protocol}): {}", addr, e);
+                let keep = stop
+                    .required
+                    .is_some_and(|required| required.contains(&addr))
+                    .then(|| response.signature.clone());
+                match aggregator.add_signature_from(addr, response.signature) {
+                    Ok(()) => accepted.extend(keep.map(|signature| (addr, signature))),
+                    Err(e) => {
+                        tracing::info!("Invalid signature from {:?} ({protocol}): {}", addr, e)
+                    }
                 }
             }
             Err(e) => tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e),
         }
-        if grace_deadline.is_none() && u32::from(aggregator.reduced_weight()) >= stop_threshold {
-            grace_deadline = Some(tokio::time::Instant::now() + grace);
+        if grace_deadline.is_none()
+            && u32::from(aggregator.reduced_weight()) >= stop.threshold
+            && awaited.is_empty()
+        {
+            grace_deadline = Some(tokio::time::Instant::now() + stop.grace);
         }
     };
     metrics
@@ -6121,12 +6252,13 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
         .with_label_values(&[protocol, stop_reason])
         .inc();
     let collected = u32::from(aggregator.reduced_weight());
-    if collected >= stop_threshold {
+    if collected >= stop.threshold {
         metrics
             .mpc_dealer_collected_margin_weight
             .with_label_values(&[protocol])
-            .observe(f64::from(collected - stop_threshold));
+            .observe(f64::from(collected - stop.threshold));
     }
+    accepted
 }
 
 fn fan_out_complaints<'a, P: P2PChannel + 'a>(
