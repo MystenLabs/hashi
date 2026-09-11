@@ -797,6 +797,8 @@ Register or update your validator onchain. Initial registration must be signed b
 hashi committee list [--epoch <N>]     # List committee members (default: current epoch)
 hashi committee view <address>         # View details for a specific validator
 hashi committee epoch                  # Show current epoch info
+hashi committee abort-reconfig         # Tear down a reconfiguration that overran its Sui epoch (section 9.3)
+hashi committee start-reconfig         # Start a reconfiguration by hand (section 9.3)
 ```
 
 ### 6.5 Config
@@ -1090,6 +1092,14 @@ hashi committee abort-reconfig
 ```
 
 The chain accepts the abort only while a reconfiguration is pending **and** its target epoch is no longer Sui's current epoch; the command checks both up front and refuses otherwise. While the pending epoch is still current, the reconfiguration is inside its window and must be left to complete. After the abort, the previous committee resumes and any running node that observes it starts the replacement reconfiguration right away.
+
+The replacement can be started by hand as well, for when no node is running to submit it or `hashi_epoch` stays behind `hashi_sui_epoch` with `hashi_reconfig_in_progress` at `0`:
+
+```bash
+hashi committee start-reconfig
+```
+
+The chain accepts it only while nothing is pending and Hashi's epoch lags Sui's; the command checks both up front and refuses otherwise. Every running node then drives the new reconfiguration as usual.
 
 ---
 

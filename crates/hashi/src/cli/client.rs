@@ -1275,6 +1275,36 @@ impl HashiClient {
         Ok(builder)
     }
 
+    /// Build a `reconfig::start_reconfig` transaction — the permissionless
+    /// formation of the next committee from Sui's current validator set.
+    /// Same input shape as `build_remove_inactive_member_transaction`: the
+    /// Hashi object mutable, the genesis-created system state object read
+    /// only at its fixed initial shared version.
+    pub fn build_start_reconfig_transaction(&self) -> anyhow::Result<TransactionBuilder> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .with_version(self.hashi_initial_shared_version)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let sui_system_arg = builder.object(
+            ObjectInput::new(crate::sui_tx_executor::SUI_SYSTEM_STATE_OBJECT_ID)
+                .with_version(1)
+                .as_shared()
+                .with_mutable(false),
+        );
+        builder.move_call(
+            Function::new(
+                self.latest_package_id()?,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("start_reconfig"),
+            ),
+            vec![hashi_arg, sui_system_arg],
+        );
+        Ok(builder)
+    }
+
     fn build_validator_lifecycle_transaction(
         &self,
         function: &'static str,

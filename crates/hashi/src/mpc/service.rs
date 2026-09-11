@@ -220,6 +220,19 @@ impl MpcService {
                     self.drive_reconfig(epoch).await;
                     continue;
                 }
+                // A replacement reconfiguration is due whenever Hashi lags
+                // Sui with nothing pending, whether or not this node can
+                // rebuild its SigningManager for the lagging epoch. Submit
+                // from inside the loop: a committee node that cannot rebuild
+                // would otherwise never reach the submission below, and a
+                // fleet of such nodes would never recover.
+                self.try_submit_start_reconfig(
+                    self.inner.onchain_state().latest_checkpoint_epoch(),
+                )
+                .await;
+                if self.get_pending_epoch_change().is_some() {
+                    continue;
+                }
                 self.sync_if_stale().await;
                 let epoch = self.inner.onchain_state().epoch();
                 if self.inner.signing_manager_for(epoch).is_some() {
