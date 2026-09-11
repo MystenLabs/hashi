@@ -44,7 +44,15 @@ pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
 const BACKUP_FILE_NAME_SUFFIX_FORMAT: &str = "-%Y%m%dT%H%M%SZ.tar.asc";
 const BACKUP_STAGING_FILE_NAME_PREFIX: &str = ".hashi-backup-";
 pub(crate) const RESTORE_STAGING_DIR_NAME_PREFIX: &str = ".hashi-restore-";
+/// How old an archive may get while a newer one exists.
 const BACKUP_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(14 * 24);
+/// How old the newest archive may get before it is deleted too.
+const LAST_ARCHIVE_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(30 * 24);
+const _: () = assert!(
+    LAST_ARCHIVE_RETENTION.as_secs() > BACKUP_RETENTION.as_secs(),
+    "LAST_ARCHIVE_RETENTION must exceed BACKUP_RETENTION, or the newest archive would expire \
+     while older ones outlive it"
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupArchiveFormat {
@@ -424,8 +432,12 @@ pub(crate) struct CleanupStats {
     pub(crate) failed: usize,
 }
 
-/// Remove expired archives and abandoned staging entries, always keeping the newest archive.
-pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Result<CleanupStats> {
+/// Remove expired archives and abandoned staging entries.
+pub(crate) fn cleanup_old_backups(
+    output_dir: &Path,
+    now: jiff::Timestamp,
+    save_may_follow: bool,
+) -> Result<CleanupStats> {
     let cutoff = now.checked_sub(BACKUP_RETENTION)?;
     let staging_cutoff: std::time::SystemTime = cutoff.into();
     let mut stats = CleanupStats::default();
@@ -503,6 +515,9 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
         else {
             continue;
         };
+        if created_at.timestamp() > now {
+            continue;
+        }
         let path = entry.path();
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
@@ -519,7 +534,6 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
             continue;
         }
         let candidate = (created_at.timestamp(), path);
-        // Only delete an archive once another valid regular archive is known to be newer.
         let (created_at, path) = match newest.as_mut() {
             Some(newest) if candidate.0 > newest.0 => std::mem::replace(newest, candidate),
             Some(_) => candidate,
@@ -531,17 +545,33 @@ pub(crate) fn cleanup_old_backups(output_dir: &Path, now: jiff::Timestamp) -> Re
         if created_at >= cutoff {
             continue;
         }
-        if let Err(error) = fs::remove_file(&path) {
+        remove_expired_backup(&mut stats, &path);
+    }
+    if let Some((created_at, path)) = newest
+        && !save_may_follow
+        && created_at < now.checked_sub(LAST_ARCHIVE_RETENTION)?
+        && remove_expired_backup(&mut stats, &path)
+    {
+        warn!(path = %path.display(), "Expired the newest backup archive");
+    }
+    Ok(stats)
+}
+
+fn remove_expired_backup(stats: &mut CleanupStats, path: &Path) -> bool {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            stats.removed += 1;
+            true
+        }
+        Err(error) => {
             stats.failed += 1;
             warn!(
                 path = %path.display(),
                 "Failed to remove expired backup: {error}"
             );
-        } else {
-            stats.removed += 1;
+            false
         }
     }
-    Ok(stats)
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -1237,7 +1267,8 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let missing = tmpdir.path().join("missing");
 
-        let stats = cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        let stats =
+            cleanup_old_backups(&missing, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
         assert_eq!(stats.removed, 0);
         assert_eq!(stats.failed, 0);
 
@@ -1264,7 +1295,7 @@ mod tests {
             .checked_add(jiff::SignedDuration::from_hours(24))
             .unwrap();
 
-        cleanup_old_backups(tmpdir.path(), sweep_time).unwrap();
+        cleanup_old_backups(tmpdir.path(), sweep_time, false).unwrap();
 
         assert!(!older.exists());
         assert_eq!(fs::read(generated).unwrap(), b"generated recovery archive");
@@ -1303,7 +1334,7 @@ mod tests {
                 .unwrap();
         }
 
-        let stats = cleanup_old_backups(dir, now).unwrap();
+        let stats = cleanup_old_backups(dir, now, false).unwrap();
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.failed, 0);
 
@@ -1345,7 +1376,7 @@ mod tests {
             File::open(path).unwrap().set_times(times).unwrap();
         }
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
 
         assert!(!staging.exists());
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -1379,7 +1410,7 @@ mod tests {
                 .unwrap();
         }
 
-        cleanup_old_backups(dir, now).unwrap();
+        cleanup_old_backups(dir, now, false).unwrap();
 
         assert!(!expired.exists());
         assert_eq!(fs::read(boundary).unwrap(), b"staged data");
@@ -1401,7 +1432,7 @@ mod tests {
         let link = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}symlink"));
         std::os::unix::fs::symlink(&nested_file, &link).unwrap();
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
 
         assert_eq!(fs::read(nested_file).unwrap(), b"nested data");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -1424,7 +1455,7 @@ mod tests {
             fs::write(dir.join(name), b"keep").unwrap();
         }
 
-        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
 
         assert!(!expired.exists());
         for name in preserved {
@@ -1433,10 +1464,10 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_old_backups_preserves_newest_expired_regular_archive() {
+    fn cleanup_old_backups_preserves_newest_expired_archive_inside_the_floor_bound() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = tmpdir.path();
-        let newest = dir.join("hashi-backup-20260803T000000Z.tar.asc");
+        let newest = dir.join("hashi-backup-20260820T000000Z.tar.asc");
         fs::write(&newest, b"newest recovery archive").unwrap();
         let staging = dir.join(format!("{BACKUP_STAGING_FILE_NAME_PREFIX}abandoned"));
         fs::write(&staging, b"not a recovery archive").unwrap();
@@ -1467,7 +1498,8 @@ mod tests {
         let link = dir.join("hashi-backup-20260805T000000Z.tar.asc");
         std::os::unix::fs::symlink(&newest, &link).unwrap();
 
-        let stats = cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        let stats =
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
         assert_eq!(stats.removed, 3);
         assert_eq!(stats.failed, 0);
 
@@ -1481,6 +1513,88 @@ mod tests {
         }
         assert_eq!(fs::read(nested_archive).unwrap(), b"nested");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn cleanup_old_backups_keeps_the_last_archive_inside_the_floor_bound() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let last = dir.join("hashi-backup-20260820T000000Z.tar.asc");
+        fs::write(&last, b"last").unwrap();
+
+        let stats =
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(fs::read(&last).unwrap(), b"last");
+    }
+
+    #[test]
+    fn cleanup_old_backups_keeps_the_last_archive_exactly_on_the_floor_bound() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let on_bound = dir.join("hashi-backup-20260809T120000Z.tar.asc");
+        let past_bound = dir.join("hashi-backup-20260809T115959Z.tar.asc");
+        fs::write(&on_bound, b"on").unwrap();
+        fs::write(&past_bound, b"past").unwrap();
+
+        let stats =
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+
+        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(fs::read(&on_bound).unwrap(), b"on");
+        assert!(!past_bound.exists());
+    }
+
+    #[test]
+    fn cleanup_old_backups_spares_the_last_archive_when_a_save_may_follow() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let last = dir.join("hashi-backup-20260803T000000Z.tar.asc");
+        fs::write(&last, b"last").unwrap();
+
+        let stats =
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), true).unwrap();
+
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(fs::read(&last).unwrap(), b"last");
+    }
+
+    #[test]
+    fn cleanup_old_backups_ignores_future_dated_archives_when_choosing_the_newest() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let future = dir.join("hashi-backup-20270101T000000Z.tar.asc");
+        let real = dir.join("hashi-backup-20260820T000000Z.tar.asc");
+        let older = dir.join("hashi-backup-20260801T000000Z.tar.asc");
+        fs::write(&future, b"future").unwrap();
+        fs::write(&real, b"real").unwrap();
+        fs::write(&older, b"older").unwrap();
+
+        let stats =
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+
+        assert_eq!(stats.removed, 1);
+        assert_eq!(fs::read(&real).unwrap(), b"real");
+        assert!(!older.exists());
+    }
+
+    #[test]
+    fn cleanup_old_backups_expires_the_last_archive_past_the_floor_bound() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = tmpdir.path();
+        let last = dir.join("hashi-backup-20260809T115959Z.tar.asc");
+        fs::write(&last, b"last").unwrap();
+
+        let stats =
+            cleanup_old_backups(dir, "2026-09-08T12:00:00Z".parse().unwrap(), false).unwrap();
+
+        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.failed, 0);
+        assert!(!last.exists());
     }
 
     #[test]
@@ -1762,7 +1876,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![recovery.clone()],
         );
-        cleanup_old_backups(out.path(), "2026-09-08T12:00:00Z".parse().unwrap()).unwrap();
+        cleanup_old_backups(out.path(), "2026-09-08T12:00:00Z".parse().unwrap(), true).unwrap();
         assert_eq!(fs::read(recovery).unwrap(), b"last recovery archive");
     }
 
