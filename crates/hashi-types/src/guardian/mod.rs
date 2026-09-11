@@ -99,8 +99,6 @@ pub struct GuardianInfo {
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
-    // TODO(SEC-525): Include the Bitcoin network in signed GuardianInfo so
-    // readers with a trusted expected network can validate it.
     /// Encryption key. Used by KPs to encrypt their shares.
     #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
@@ -291,8 +289,10 @@ pub struct CeremonyOperatorInitRequest {
     pub s3_config: ResolvedS3Config,
 }
 
-/// TODO: Replace the operator-authored setup request with a batch of new-KP-signed
-/// approvals binding the session, roster, sharing params, and S3 policy.
+/// New KPs authorize the session, roster, and sharing parameters by confirming
+/// the live proposal digest before completed ceremony state is published.
+/// TODO(SEC-525): Bind the ceremony's Bitcoin network and S3 retention
+/// environment into the proposal digest that every KP confirms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     /// One ordered KP certificate per secret share.

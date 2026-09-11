@@ -12,7 +12,7 @@ use tracing::info;
 /// Set up a new BTC key. Flow:
 ///     1. KPs send their OpenPGP certificates to the operator
 ///     2. Operator calls setup_new_key
-///     3. KPs fetch commitments from `ceremony/` and ciphertexts from `kp-shares/`
+///     3. KPs fetch the proposed ceremony state from `kp-shares/proposed/`
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
@@ -59,24 +59,22 @@ pub async fn setup_new_key(
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
-    info!("Persisting setup sharing_seq=0 cert_seq=0 to kp-shares/ + ceremony/.");
-    enclave
-        .log_kp_share_state(0, 0, encrypted_shares.clone())
-        .await?;
-
-    enclave
-        .log_ceremony(CeremonyLogMessage::NewKey {
+    let proposal = CeremonyProposalLogMessage::new(
+        CeremonyLogMessage::NewKey {
             instance: ss_instance.clone(),
             btc_master_pubkey,
-        })
-        .await?;
+        },
+        encrypted_shares.clone(),
+    );
+    info!("Persisting setup proposal to kp-shares/proposed/.");
+    enclave.log_ceremony_proposal(proposal.clone()).await?;
 
     let response = SetupNewKeyResponse {
         encrypted_shares,
         secret_sharing_instance: ss_instance,
         btc_master_pubkey,
     };
-    enclave.install_pending_ceremony(CeremonyState::from(response.clone()))?;
+    enclave.install_pending_ceremony(proposal)?;
     let response = enclave.sign(response);
 
     enclave
@@ -145,29 +143,24 @@ mod tests {
             "threshold decrypted setup shares should reconstruct the ceremony key"
         );
 
-        // The ceremony log records the instance only — no ciphertexts.
+        // Only the session-scoped proposal is visible before KP confirmation.
         let captured = captures.lock().unwrap();
-        let ceremony_logs: Vec<_> = captured
-            .iter()
-            .filter(|(k, _)| k.starts_with("ceremony/"))
-            .collect();
-        assert_eq!(ceremony_logs.len(), 1, "expected one ceremony/ log");
-        let (_key, body) = ceremony_logs[0];
-        assert!(
-            !std::str::from_utf8(body)
-                .unwrap()
-                .contains("BEGIN PGP MESSAGE"),
-            "ceremony log must not contain ciphertexts"
+        assert!(!captured.iter().any(|(key, _)| key.starts_with("ceremony/")));
+        assert_eq!(captured.len(), 1, "expected only the ceremony proposal");
+        let (key, body) = &captured[0];
+        assert_eq!(
+            key,
+            &format!("kp-shares/proposed/{}.json", enclave.s3_session_id())
         );
-
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::Ceremony(ceremony)) = record.message() else {
-            panic!("expected V2 Ceremony variant");
+        let VersionedLogMessage::V2(LogMessageV2::CeremonyProposal(proposal)) = record.message()
+        else {
+            panic!("expected V2 CeremonyProposal variant");
         };
         let CeremonyLogMessage::NewKey {
             instance,
             btc_master_pubkey,
-        } = ceremony.as_ref()
+        } = &proposal.ceremony
         else {
             panic!("expected NewKey variant");
         };
@@ -175,37 +168,10 @@ mod tests {
         assert_eq!(instance.sharing_seq(), 0);
         assert_eq!(instance.num_shares(), TEST_N);
         assert_eq!(instance.threshold(), TEST_T);
-        // The ceremony log records the same BTC master pubkey as the response.
         assert_eq!(*btc_master_pubkey, validated_resp.btc_master_pubkey);
-
-        // The encrypted shares are persisted to kp-shares/ keyed by sharing_seq
-        // and cert_seq, and carry the ciphertexts the ceremony log omits.
-        let shares_logs: Vec<_> = captured
-            .iter()
-            .filter(|(k, _)| k.starts_with("kp-shares/"))
-            .collect();
-        assert_eq!(shares_logs.len(), 1, "expected one kp-shares/ log");
-        let (shares_key, shares_body) = shares_logs[0];
-        assert_eq!(
-            *shares_key,
-            format!(
-                "kp-shares/{:020}/{:020}-{}.json",
-                0,
-                0,
-                enclave.s3_session_id()
-            )
-        );
-        let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::KpShareState(shares)) = shares_record.message()
-        else {
-            panic!("expected V2 KpShareState variant");
-        };
-        let shares = shares.as_ref();
-        assert_eq!(shares.sharing_seq, 0);
-        assert_eq!(shares.cert_seq, 0);
-        assert_eq!(shares.encrypted_shares, validated_resp.encrypted_shares);
-        assert_eq!(shares.encrypted_shares.share_count(), TEST_N);
-        assert!(std::str::from_utf8(shares_body)
+        assert_eq!(proposal.encrypted_shares, validated_resp.encrypted_shares);
+        assert_eq!(proposal.encrypted_shares.share_count(), TEST_N);
+        assert!(std::str::from_utf8(body)
             .unwrap()
             .contains("BEGIN PGP MESSAGE"));
     }

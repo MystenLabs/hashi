@@ -64,23 +64,42 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     // The selected cert identifies this KP's roster entry.
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
     let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
+    let kp_fingerprint = kp_cert.fingerprint();
     certs_roster
-        .cert_for_fingerprint(&kp_cert.fingerprint())
+        .cert_for_fingerprint(&kp_fingerprint)
         .with_context(|| {
             format!(
                 "this KP's cert (fingerprint {}) is not among the configured \
                  kp_roster.kp_pgp_cert_paths",
-                kp_cert.fingerprint()
+                kp_fingerprint
             )
         })?;
     info!(
         phase = "setup",
-        fingerprint = %kp_cert.fingerprint(),
+        fingerprint = %kp_fingerprint,
         "identified this KP's configured certificate",
     );
 
-    // 1. Discover and verify the latest ceremony from the immutable log
-    //    (attestation-verified once via the reader's session-key cache).
+    // 1. Verify and pin the live guardian session, then read that session's
+    //    signed ceremony proposal as the source of provisional ceremony state.
+    info!(
+        phase = "confirmation",
+        endpoint = %cfg.guardian_endpoint,
+        "connecting to live ceremony guardian",
+    );
+    let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
+        .await
+        .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
+    let verified =
+        verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
+            .await?;
+    ensure!(
+        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
+            || verified.info.lifecycle == CeremonyStage::Completed.into(),
+        "guardian is not accepting key provisioner ceremony confirmations"
+    );
+    let session_id = verified.session_id;
+
     info!(
         phase = "s3 connect",
         bucket = guardian_s3.bucket_name(),
@@ -95,11 +114,9 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     info!(
         phase = "ceremony scrape",
-        "scraping latest ceremony/ + kp-shares/ logs (attestation-anchored)",
+        "scraping this guardian session's ceremony proposal (attestation-anchored)",
     );
-    let state = reader
-        .read_latest_ceremony_state_from_current_build()
-        .await?;
+    let state = reader.read_live_ceremony_proposal(&session_id).await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "ceremony scrape",
@@ -120,7 +137,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     info!(
         phase = "roster verify",
-        "ceremony/ and kp-shares/ logs verified against expected params and KP certs",
+        "ceremony proposal verified against expected params and KP certs",
     );
 
     // 3. Decrypt and commitment-check this KP's ciphertext.
@@ -162,24 +179,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // 5. Submit a signed confirmation only after the verified recovery artifact
     //    is safely stored locally.
-    info!(
-        phase = "confirmation",
-        endpoint = %cfg.guardian_endpoint,
-        "connecting to live ceremony guardian",
-    );
-    let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
-        .await
-        .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
-    let verified =
-        verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
-            .await?;
-    ensure!(
-        verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
-            || verified.info.lifecycle == CeremonyStage::Completed.into(),
-        "guardian is not accepting key provisioner ceremony confirmations"
-    );
-    let kp_fingerprint = kp_cert.fingerprint();
-    let confirmation = CeremonyConfirmationRequest::new(verified.session_id, state.digest());
+    let confirmation = CeremonyConfirmationRequest::new(session_id, state.digest());
     let signed = KpSigned::sign(confirmation, kp_cert, None)
         .map_err(anyhow::Error::msg)
         .context("sign ceremony confirmation with the KP key")?;

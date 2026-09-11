@@ -45,6 +45,7 @@ pub async fn confirm_ceremony(
     );
 
     if status.completed && lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into() {
+        enclave.publish_pending_ceremony(pending).await?;
         enclave
             .advance_lifecycle_into(CeremonyStage::Completed.into())
             .expect("all KP confirmations should complete the ceremony lifecycle");
@@ -60,6 +61,7 @@ mod tests {
     use crate::ceremony_mode::setup::setup_new_key;
     use crate::mock_logger_capturing;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
+    use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
@@ -77,11 +79,12 @@ mod tests {
         ceremony_digest: [u8; 32],
         roster: KpCertRoster,
         secret_keys: MockKpSecretKeys,
+        captures: CapturedPuts,
     }
 
     async fn setup_context() -> TestContext {
         let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
-        let (logger, _) = mock_logger_capturing();
+        let (logger, captures) = mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_ceremony(logger);
         let response = setup_new_key(
             enclave.clone(),
@@ -97,6 +100,7 @@ mod tests {
             ceremony_digest: CeremonyState::from(response).digest(),
             roster,
             secret_keys,
+            captures,
         }
     }
 
@@ -136,6 +140,7 @@ mod tests {
             context.enclave.lifecycle(),
             CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
         );
+        assert_eq!(context.captures.lock().unwrap().len(), 1);
 
         let first = context.signed_confirmation(0);
         let status = confirm_ceremony(context.enclave.clone(), first.clone())
@@ -158,6 +163,15 @@ mod tests {
             assert_eq!(status.completed, index + 1 == TEST_N);
         }
         assert_eq!(context.enclave.lifecycle(), CeremonyStage::Completed.into());
+        {
+            let captured = context.captures.lock().unwrap();
+            assert_eq!(captured.len(), 3);
+            assert!(captured[0].0.starts_with("kp-shares/proposed/"));
+            assert!(captured[1]
+                .0
+                .starts_with("kp-shares/00000000000000000000/00000000000000000000-"));
+            assert!(captured[2].0.starts_with("ceremony/00000000000000000000-"));
+        }
         let repeated = confirm_ceremony(
             context.enclave.clone(),
             context.signed_confirmation(TEST_N - 1),
@@ -165,6 +179,7 @@ mod tests {
         .await
         .unwrap();
         assert!(repeated.completed);
+        assert_eq!(context.captures.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]
