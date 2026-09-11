@@ -9,6 +9,10 @@ on:
         type: boolean
         required: false
         default: false
+      source_sha:
+        description: Source commit to build (defaults to the workflow commit)
+        type: string
+        required: false
   workflow_dispatch:
   schedule: [cron: "20 3 * * *"]
 
@@ -26,10 +30,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Build ${{ matrix.image.name }} image
         env:
-          GIT_REVISION: ${{ github.sha }}
+          GIT_REVISION: ${{ inputs.source_sha || github.sha }}
           IMAGE_NAME: ${{ matrix.image.name }}
         run: bash docker/${{ matrix.image.dir }}/build.sh --no-cache
 
