@@ -18,7 +18,7 @@ use std::path::Path;
 use tracing::info;
 
 use crate::config::Config;
-use crate::guardian_info::verified_live_guardian_info;
+use crate::guardian_info::verified_ceremony_guardian_info;
 use crate::kp_roster::decrypt_kp_share;
 use crate::kp_roster::load_kp_cert;
 
@@ -28,6 +28,8 @@ use crate::kp_roster::load_kp_cert;
 /// The share state is anchored to the guardian's S3 attestation log. The live
 /// confirmation endpoint is independently attestation-verified and
 /// authoritatively matches the signed ceremony digest against its pending state.
+/// Through the proxy, the ceremony guardian is the provisioning target: the
+/// standby during a KP-set rotation, else the active guardian.
 ///
 /// Security: the ceremony state containing the encrypted shares is saved to the
 /// requested path. Each ciphertext is piped into `gpg --decrypt` over stdin and
@@ -167,12 +169,14 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         endpoint = %cfg.guardian_endpoint,
         "connecting to live ceremony guardian",
     );
+    let verified = verified_ceremony_guardian_info(
+        &cfg.guardian_endpoint,
+        cfg.kp_roster.pcr_allowlist.current_build(),
+    )
+    .await?;
     let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
         .await
         .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
-    let verified =
-        verified_live_guardian_info(&mut client, cfg.kp_roster.pcr_allowlist.current_build())
-            .await?;
     ensure!(
         verified.info.lifecycle == CeremonyStage::AwaitingKeyProvisionerConfirmations.into()
             || verified.info.lifecycle == CeremonyStage::Completed.into(),

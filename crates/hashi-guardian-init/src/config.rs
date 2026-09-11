@@ -14,6 +14,7 @@ use hashi_types::guardian::UnresolvedS3Config;
 use serde::Deserialize;
 
 use crate::kp_roster::KpRosterConfig;
+use crate::kp_roster::KpSetConfig;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -22,6 +23,9 @@ pub struct Config {
     #[serde(deserialize_with = "deserialize_network")]
     pub bitcoin_network: Network,
     pub kp_roster: KpRosterConfig,
+    /// The KP set a `rotate-kp-set` proposes; `kp_roster` stays the dealt set.
+    /// Required by the rotate-kp-set commands only.
+    pub new_kp_roster: Option<KpSetConfig>,
     pub limiter_config: LimiterConfig,
     /// Relay endpoint the KP's encrypted share is submitted to.
     pub relay_endpoint: String,
@@ -44,6 +48,12 @@ impl Config {
     pub fn require_kp_pgp_cert_path(&self, command: &str) -> anyhow::Result<&Path> {
         self.kp_pgp_cert_path.as_deref().ok_or_else(|| {
             anyhow::anyhow!("{command} requires kp_pgp_cert_path in guardian init config")
+        })
+    }
+
+    pub fn require_new_kp_roster(&self, command: &str) -> anyhow::Result<&KpSetConfig> {
+        self.new_kp_roster.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("{command} requires new_kp_roster in guardian init config")
         })
     }
 }

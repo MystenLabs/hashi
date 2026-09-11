@@ -56,35 +56,65 @@ pub struct KpRosterConfig {
 
 impl KpRosterConfig {
     pub fn validate(&self) -> Result<()> {
-        SecretSharingParams::new(self.num_shares, self.threshold)
-            .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
-
-        let cert_path_count = self.kp_pgp_cert_paths.len();
-        anyhow::ensure!(
-            self.num_shares == cert_path_count,
-            "num_shares ({}) must equal the number of KP cert paths ({cert_path_count})",
-            self.num_shares
-        );
-        Ok(())
+        validate_kp_set(self.num_shares, self.threshold, &self.kp_pgp_cert_paths)
     }
 
     pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
-        let certs = self
-            .kp_pgp_cert_paths
-            .iter()
-            .enumerate()
-            .map(|(idx, cert_path)| {
-                load_cert(cert_path)
-                    .with_context(|| format!("invalid KP cert at roster position {}", idx + 1))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        KpCertRoster::new(certs).context("invalid KP certificate roster")
+        load_kp_certs_roster(&self.kp_pgp_cert_paths)
     }
 
     /// The PCR allowlist decoded from `current_build` + `prev_builds`.
     pub fn pcr_allowlist(&self) -> PcrAllowlist {
         self.pcr_allowlist.clone()
     }
+}
+
+/// The KP set a `rotate-kp-set` proposes: sharing params and one cert per
+/// KP, in share order. The proposal carries `kp_roster`'s PCR allowlist.
+#[derive(Deserialize)]
+pub struct KpSetConfig {
+    pub num_shares: usize,
+    pub threshold: usize,
+    pub kp_pgp_cert_paths: Vec<PathBuf>,
+}
+
+impl KpSetConfig {
+    pub fn validate(&self) -> Result<()> {
+        validate_kp_set(self.num_shares, self.threshold, &self.kp_pgp_cert_paths)
+    }
+
+    pub fn params(&self) -> Result<SecretSharingParams> {
+        SecretSharingParams::new(self.num_shares, self.threshold)
+            .map_err(|e| anyhow!("invalid sharing params: {e:?}"))
+    }
+
+    pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
+        load_kp_certs_roster(&self.kp_pgp_cert_paths)
+    }
+}
+
+fn validate_kp_set(num_shares: usize, threshold: usize, cert_paths: &[PathBuf]) -> Result<()> {
+    SecretSharingParams::new(num_shares, threshold)
+        .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
+
+    let cert_path_count = cert_paths.len();
+    anyhow::ensure!(
+        num_shares == cert_path_count,
+        "num_shares ({num_shares}) must equal the number of KP cert paths ({cert_path_count})"
+    );
+    Ok(())
+}
+
+fn load_kp_certs_roster(cert_paths: &[PathBuf]) -> Result<KpCertRoster> {
+    let certs = cert_paths
+        .iter()
+        .enumerate()
+        .map(|(idx, cert_path)| {
+            load_cert(cert_path)
+                .with_context(|| format!("invalid KP cert at roster position {}", idx + 1))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    KpCertRoster::new(certs).context("invalid KP certificate roster")
 }
 
 fn load_cert(path: &PathBuf) -> Result<PgpPublicCert> {
