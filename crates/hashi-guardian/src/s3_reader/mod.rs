@@ -299,10 +299,7 @@ impl GuardianReader {
         if let Some(committee) = self.read_latest_committee_update().await? {
             return Ok(Some(committee));
         }
-        Ok(self
-            .read_genesis_log()
-            .await?
-            .map(|genesis| genesis.committee))
+        self.read_genesis_committee().await
     }
 
     /// Read and verify the successfully applied committee with the highest
@@ -344,7 +341,7 @@ impl GuardianReader {
 
     /// Read and verify the fixed KP-authorized bootstrap record, or return
     /// `None` if `genesis/record.json` has not been written.
-    async fn read_genesis_log(&mut self) -> GuardianResult<Option<GenesisLogMessage>> {
+    async fn read_genesis_committee(&mut self) -> GuardianResult<Option<Committee>> {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
@@ -360,14 +357,15 @@ impl GuardianReader {
         }
         let verified_record = self.read_verified_record(&key).await?;
         let session_id = verified_record.entry().session_id().clone();
-        let msg = match verified_record.into_entry().into_message() {
-            V1(LogMessageV1::Genesis(msg)) | V2(LogMessageV2::Genesis(msg)) => msg,
+        let committee = match verified_record.into_entry().into_message() {
+            V1(LogMessageV1::Genesis(msg)) => msg.committee,
+            V2(LogMessageV2::Genesis(msg)) => msg.committee,
             V1(_) | V2(_) => {
                 return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
             }
         };
         log_verified_read(&key, &session_id);
-        Ok(Some(*msg))
+        Ok(Some(committee))
     }
 }
 

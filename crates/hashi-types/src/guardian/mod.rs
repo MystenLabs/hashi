@@ -124,6 +124,7 @@ pub struct GuardianInfo {
     /// The Hashi shared-object id this guardian serves (set after
     /// operator_init). Certificates verified by this enclave must be bound
     /// to it; operators/KPs match it against their expected deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hashi_object_id: Option<sui_sdk_types::Address>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.

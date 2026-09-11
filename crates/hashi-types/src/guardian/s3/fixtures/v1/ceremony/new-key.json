@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "object_key": "ceremony/00000000000000000000-916c711a5e81c2b0.json",
+  "session_id": "916c711a5e81c2b0",
+  "timestamp_ms": 1784219535911,
+  "message": {
+    "Ceremony": {
+      "NewKey": {
+        "instance": {
+          "commitments": {
+            "1": "02573be8f5e5409ed1ace3c54e2a26cb6feb828a35c5e9279a19405c1a97a476cc",
+            "2": "034deba8925b67ae21c11ef5bbef7d9d64de0135e7fb5d1fb95b310d8fdc6fabec",
+            "3": "022a4920cb11b4c1f8486da73401cf7cf1ee4be7feb81416dbdf52cb0177922eda",
+            "4": "0300f559a51843d844767d55b7769cf4b6cb2f252791e0343d43296e3c6b5a9b5b",
+            "5": "029716c26a92d861ba7e13f755cdd7654d8f81412861ac30149be4e0eb92f2f217",
+            "6": "035d17d1ee57e53273580803fbfca8cfa7fe67a8f9f45a70c77ea547eadeafb70e"
+          },
+          "params": {
+            "num_shares": 6,
+            "threshold": 4
+          },
+          "sharing_seq": 0
+        },
+        "btc_master_pubkey": "41c404498b384691bda6804fb491142b1d6d0867fc617c498d58337b02498995"
+      }
+    }
+  },
+  "signature": "52115aacf26ade01e103801dc752eceecc88f19e9a55daa76efc351fcce326da311aaaff40f67bd487fcb3b1bcafea600eed80c5ec835d3f74126b3051a1d00a"
+}

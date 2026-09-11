@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "object_key": "init/8e6e6767497fe1ae/03-pi-enclave-fully-initialized.json",
+  "session_id": "8e6e6767497fe1ae",
+  "timestamp_ms": 1784233684521,
+  "message": {
+    "Init": {
+      "PIEnclaveFullyInitialized": {
+        "sharing_seq": 0,
+        "share_ids": [
+          1,
+          3,
+          4,
+          6
+        ],
+        "enclave_btc_pubkey": "41c404498b384691bda6804fb491142b1d6d0867fc617c498d58337b02498995"
+      }
+    }
+  },
+  "signature": "4b210a1101a0121381762d2e45e9fae75d6743c68f762f5f5fdaedc612066726c65ac83694096c3ea5bd0a0e4dff29c504656cb4cfaecdc6596d1eede82d2c06"
+}

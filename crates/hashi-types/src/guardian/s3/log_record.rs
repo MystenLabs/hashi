@@ -641,13 +641,13 @@ mod tests {
 
     #[test]
     fn deployed_v1_kp_share_state_verifies_and_is_retained() {
-        let fixture = r#"{"schema_version":1,"object_key":"kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json","session_id":"916c711a5e81c2b0","timestamp_ms":1784219535816,"message":{"KpShareState":{"sharing_seq":0,"cert_seq":0,"encrypted_shares":[{"id":1,"recipient_fingerprint":"010AFFD5514AE454CA0D56DAA40FE24388998D2A","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DT5hsKqzbvdwSAQdACnLThsK4Jq+u0g98VJzmYXrG05xLKgM1ki4FSGrOljkw\ndnHArbGaerEC8lBXZPVNhxMB8rOAfvgqxOUtt7SIMmjGIZMy7tzwfbM1YL45wgac\n0lkBE7TsICEPN/B/EwheDv/Ooid3NTDsoIsUGGuqtzUPCVYJTGPR+LWVY+F2xZxb\nHaLZO65VgrA3pcnyLsUy8iN3giOrIxmiZy/GjQBUwkeSCbVuopTZ2mpxPg==\n=7m3k\n-----END PGP MESSAGE-----\n"},{"id":2,"recipient_fingerprint":"69A798B4CD1FE3F7C827381BC56DF2575EC846C3","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DIHt6s8jZpqASAQdALWbHtxu0R/ANnNighIV7VtFgkIX3CGJzfW51GkSJkBQw\n7Ec2Y2wBmo4sDM2VGmxqK5ADvGVSYgLvIlByRdRV2NaJ1xkjHUoA39PDTqCvwCOK\n0lkBOZPrJPrBInDax3ceQwDkC/rkJrQXT8oVWGxNjxp244q66jhMdOBZSEc8T/oZ\noAdjEccCcDLYt+S+bEVZeuNhZowDSx14soiALI16hrzbDqJq04e7K9W0uQ==\n=tfbb\n-----END PGP MESSAGE-----\n"},{"id":3,"recipient_fingerprint":"8D798722C24B2A15C15036A1DEFA2C01C4350A31","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DZcZnV1kFupoSAQdA4X4hRbapAgL8eAouMEM0aRE4frVwmQZVHsXB6aOOxgkw\nsc2w0UU8bLzgt3aCe4HqBA9/v3jlKqK4STYVRFzG6o8fa+tb2qX94g6bCcIE07x4\n0lkBeTRYLlUlg7Jl2s7X9d9Ns60O8A2DQKwSYtQZV1pEwX44UQPz8Od/C9nIPeLP\nQEIA1BYRghu0ePQaqsfKohRXUunOrgVpYSCNFoupOKoVTl0qFgeDz5dw7Q==\n=giUp\n-----END PGP MESSAGE-----\n"},{"id":4,"recipient_fingerprint":"5551B442C80AB4D9CF3C95B90DA471909B35BFE9","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DJ51dk/19HSASAQdAgq4QrNM43HykXcLxDfRtHHRtd4BdVJBirC2esDoXEjkw\nF7YLVWrMoXUtwOxFqXGkoUhEhfPAzdLG3WyuZQDnOdPBl0r/2qxmlmZIjFFBGXVc\n0lkBLfdxmJ8BOQYcaiEhBODpY7o2xO13agT28X6Uyv3rc5qw5km1WDw5+AlTLKZj\nw7aathIK+Qof15Tj7VxzSzRmo/pIf/Plcz9JoBNOYPgz/ewuzsPzDQ9+Qw==\n=iAGD\n-----END PGP MESSAGE-----\n"},{"id":5,"recipient_fingerprint":"354807E1940BFC2763D15EBB8E7048E384EBBC7A","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4D6mDrwWj9BrASAQdAazktC+Jd2EMtE8Gav7ROlkVmL+Ty1duA3RttbKQ5eAEw\nbKIxkq1Jp9J4ZqcvjfxcBzVOfZPQwdhxXxDv2pOUG7ioZuDTRlGNNbsiyodvmlgy\n0lkB8eaGI0/LBZ++1vbGsZ/uQ7phGVFkPdcZzXm0pyD1poDKhTTyiHpAgDub2yph\nAAWsEIYzjLQWJvuOw0JXzwu1HBy+z5QTY4nK+wKrh6ojcLKjjyRVehhtTw==\n=m9Mm\n-----END PGP MESSAGE-----\n"},{"id":6,"recipient_fingerprint":"CB27C30ABAAC7EEDE92E71C6017C4627E937F5B0","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DuqwfDzk48aQSAQdAoJevGCVjo+1pD/WVPkWza4qGxBU9tsXbqE/kaSynsGYw\nskjzNOD5oY+/S0CMeH+6xspbLUZ9uZFy98fWOKMi9nbftH1nWXtKRdCNweaaCAPu\n0lkBR4DxLFCydQKfFzENlKRl9qc4m5NkVnjWaGR+cgK1U2UAPf/p82eRggyf6Obp\nNcdOnAfu0aLB70FESJEHtDFj36QCyC0SwTdtZwXUfCOo0AykDph9rTYVpA==\n=DQ4F\n-----END PGP MESSAGE-----\n"}]}},"signature":"2895193893f1feaea65fb6b441c011815c937df33cde136e4721f4173db86c1fe44a2095a6f8753fecbdaa5c99b744a22368f41ab8ca01edff99fafb6710a304"}"#;
+        let fixture = include_str!("fixtures/v1/kp-share-state/kp-share-state.json").trim_end();
         let record: LogRecord = serde_json::from_str(fixture).unwrap();
         assert!(matches!(
             record.message(),
             VersionedLogMessage::V1(LogMessageV1::KpShareState(..))
         ));
-        assert_eq!(serde_json::to_string(&record).unwrap(), fixture);
+        assert_eq!(serde_json::to_string_pretty(&record).unwrap(), fixture);
         let signing_pubkey =
             hex::decode("916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca")
                 .unwrap();
@@ -676,6 +676,234 @@ mod tests {
                 .armored_ciphertext
                 .starts_with("-----BEGIN PGP MESSAGE-----")
         );
+    }
+
+    struct DeployedLogFixture {
+        name: &'static str,
+        json: &'static str,
+        schema_version: u64,
+        shape: &'static str,
+        signing_pubkey: Option<&'static str>,
+    }
+
+    const V1_SIGNING_PUBKEY: &str =
+        "8e6e6767497fe1aec80e94405aab18c8cbd97cc57cc5709cdcced90ca90d74ee";
+    const V1_CEREMONY_SIGNING_PUBKEY: &str =
+        "916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca";
+    const V2_SIGNING_PUBKEY: &str =
+        "a37c0e391ca0afabb4decccf301ea8e233c5936f843d785ae3c4e37e650e1d5e";
+
+    fn init_shape(message: &InitLogMessage) -> &'static str {
+        match message {
+            InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
+            InitLogMessage::OIGuardianInfo(..) => "init/oi-guardian-info",
+            InitLogMessage::PIEnclaveFullyInitialized { .. } => "init/pi-enclave-fully-initialized",
+            InitLogMessage::OAActivated { .. } => "init/oa-activated",
+        }
+    }
+
+    fn withdrawal_shape(message: &WithdrawalLogMessage) -> &'static str {
+        match message {
+            WithdrawalLogMessage::Success { .. } => "withdrawal/success",
+            WithdrawalLogMessage::Failure { .. } => "withdrawal/failure",
+        }
+    }
+
+    fn ceremony_shape(message: &CeremonyLogMessage) -> &'static str {
+        match message {
+            CeremonyLogMessage::NewKey { .. } => "ceremony/new-key",
+            CeremonyLogMessage::Rotate { .. } => "ceremony/rotate",
+        }
+    }
+
+    fn committee_update_shape(message: &CommitteeUpdateLogMessage) -> &'static str {
+        match message {
+            CommitteeUpdateLogMessage::Success { .. } => "committee-update/success",
+            CommitteeUpdateLogMessage::Failure { .. } => "committee-update/failure",
+        }
+    }
+
+    fn v1_shape(message: &LogMessageV1) -> &'static str {
+        match message {
+            LogMessageV1::Heartbeat(..) => "heartbeat",
+            LogMessageV1::Init(message) => init_shape(message),
+            LogMessageV1::Withdrawal(message) => withdrawal_shape(message),
+            LogMessageV1::Ceremony(message) => ceremony_shape(message),
+            LogMessageV1::KpShareState(..) => "kp-share-state",
+            LogMessageV1::CommitteeUpdate(message) => committee_update_shape(message),
+            LogMessageV1::Genesis(..) => "genesis",
+        }
+    }
+
+    fn v2_shape(message: &LogMessageV2) -> &'static str {
+        match message {
+            LogMessageV2::Heartbeat(..) => "heartbeat",
+            LogMessageV2::Init(message) => init_shape(message),
+            LogMessageV2::Withdrawal(message) => withdrawal_shape(message),
+            LogMessageV2::Ceremony(message) => ceremony_shape(message),
+            LogMessageV2::KpShareState(..) => "kp-share-state",
+            LogMessageV2::CommitteeUpdate(message) => committee_update_shape(message),
+            LogMessageV2::Genesis(..) => "genesis",
+        }
+    }
+
+    fn deployed_log_shape(message: &VersionedLogMessage) -> &'static str {
+        match message {
+            VersionedLogMessage::V1(message) => v1_shape(message),
+            VersionedLogMessage::V2(message) => v2_shape(message),
+        }
+    }
+
+    #[test]
+    fn deployed_log_fixtures_remain_compatible() {
+        let fixtures = [
+            DeployedLogFixture {
+                name: "V1 heartbeat",
+                json: include_str!("fixtures/v1/heartbeat/heartbeat.json"),
+                schema_version: 1,
+                shape: "heartbeat",
+                signing_pubkey: Some(V1_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 init OI attestation",
+                json: include_str!("fixtures/v1/init/oi-attestation-unsigned.json"),
+                schema_version: 1,
+                shape: "init/oi-attestation-unsigned",
+                signing_pubkey: None,
+            },
+            DeployedLogFixture {
+                name: "V1 init OI GuardianInfo",
+                json: include_str!("fixtures/v1/init/oi-guardian-info.json"),
+                schema_version: 1,
+                shape: "init/oi-guardian-info",
+                signing_pubkey: Some(V1_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 init PI complete",
+                json: include_str!("fixtures/v1/init/pi-enclave-fully-initialized.json"),
+                schema_version: 1,
+                shape: "init/pi-enclave-fully-initialized",
+                signing_pubkey: Some(V1_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 init OA activated",
+                json: include_str!("fixtures/v1/init/oa-activated.json"),
+                schema_version: 1,
+                shape: "init/oa-activated",
+                signing_pubkey: Some(V1_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 withdrawal success",
+                json: include_str!("fixtures/v1/withdrawal/success.json"),
+                schema_version: 1,
+                shape: "withdrawal/success",
+                signing_pubkey: Some(V1_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 ceremony new key",
+                json: include_str!("fixtures/v1/ceremony/new-key.json"),
+                schema_version: 1,
+                shape: "ceremony/new-key",
+                signing_pubkey: Some(V1_CEREMONY_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 KP share state",
+                json: include_str!("fixtures/v1/kp-share-state/kp-share-state.json"),
+                schema_version: 1,
+                shape: "kp-share-state",
+                signing_pubkey: Some(V1_CEREMONY_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V1 genesis",
+                json: include_str!("fixtures/v1/genesis/genesis.json"),
+                schema_version: 1,
+                shape: "genesis",
+                signing_pubkey: Some(V1_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V2 heartbeat",
+                json: include_str!("fixtures/v2/heartbeat/heartbeat.json"),
+                schema_version: 2,
+                shape: "heartbeat",
+                signing_pubkey: Some(V2_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V2 init OI attestation",
+                json: include_str!("fixtures/v2/init/oi-attestation-unsigned.json"),
+                schema_version: 2,
+                shape: "init/oi-attestation-unsigned",
+                signing_pubkey: None,
+            },
+            DeployedLogFixture {
+                name: "V2 init OI GuardianInfo",
+                json: include_str!("fixtures/v2/init/oi-guardian-info.json"),
+                schema_version: 2,
+                shape: "init/oi-guardian-info",
+                signing_pubkey: Some(V2_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V2 init PI complete",
+                json: include_str!("fixtures/v2/init/pi-enclave-fully-initialized.json"),
+                schema_version: 2,
+                shape: "init/pi-enclave-fully-initialized",
+                signing_pubkey: Some(V2_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V2 init OA activated",
+                json: include_str!("fixtures/v2/init/oa-activated.json"),
+                schema_version: 2,
+                shape: "init/oa-activated",
+                signing_pubkey: Some(V2_SIGNING_PUBKEY),
+            },
+            DeployedLogFixture {
+                name: "V2 withdrawal success",
+                json: include_str!("fixtures/v2/withdrawal/success.json"),
+                schema_version: 2,
+                shape: "withdrawal/success",
+                signing_pubkey: Some(V2_SIGNING_PUBKEY),
+            },
+        ];
+
+        for fixture in fixtures {
+            let json = fixture.json.trim_end();
+            let record: LogRecord = serde_json::from_str(json)
+                .unwrap_or_else(|error| panic!("{} did not deserialize: {error}", fixture.name));
+            assert_eq!(
+                record.data().schema_version(),
+                fixture.schema_version,
+                "{} has the wrong schema version",
+                fixture.name
+            );
+            assert_eq!(
+                deployed_log_shape(record.message()),
+                fixture.shape,
+                "{} has the wrong message shape",
+                fixture.name
+            );
+            let reserialized = serde_json::to_string_pretty(&record).unwrap();
+            if json.starts_with("{\n") {
+                assert_eq!(
+                    reserialized, json,
+                    "{} did not reserialize canonically",
+                    fixture.name
+                );
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&reserialized).unwrap(),
+                    serde_json::from_str::<Value>(json).unwrap(),
+                    "{} did not round-trip",
+                    fixture.name
+                );
+            }
+
+            let signing_pubkey = fixture.signing_pubkey.map(|hex_pubkey| {
+                let bytes = hex::decode(hex_pubkey).unwrap();
+                GuardianPubKey::try_from(bytes.as_slice()).unwrap()
+            });
+            record
+                .validate(signing_pubkey.as_ref())
+                .unwrap_or_else(|error| panic!("{} did not validate: {error}", fixture.name));
+        }
     }
 
     #[test]

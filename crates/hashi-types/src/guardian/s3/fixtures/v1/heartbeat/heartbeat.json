@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "object_key": "heartbeat/2026/08/10/06/8e6e6767497fe1ae-00000000000000035127.json",
+  "session_id": "8e6e6767497fe1ae",
+  "timestamp_ms": 1786344492458,
+  "message": {
+    "Heartbeat": {
+      "seq": 35127
+    }
+  },
+  "signature": "90c51ad3f78a8f3bfd6c923db510f93c134d807d727ad6df088ecfe2653862c44bbb0cd543d72b02529f485bac67ff664174d4b8f67c3c7c762b2c107c41b50d"
+}

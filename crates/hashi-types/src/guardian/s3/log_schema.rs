@@ -8,7 +8,8 @@ use super::config::S3ObjectLockPolicy;
 use super::log_layout::ObjectKeyPattern;
 use super::log_messages::CeremonyLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
-use super::log_messages::GenesisLogMessage;
+use super::log_messages::GenesisLogMessageV1;
+use super::log_messages::GenesisLogMessageV2;
 use super::log_messages::HeartbeatLogMessage;
 use super::log_messages::InitLogMessage;
 use super::log_messages::KpShareStateLogMessage;
@@ -56,9 +57,9 @@ impl Serialize for VersionedLogMessage {
 
 /// Schema-version-1 log messages.
 ///
-/// V1 and V2 intentionally have the same message shape: the signed sibling
-/// `schema_version` distinguishes records, while separate types force readers
-/// to handle each deployed version explicitly.
+/// Separate V1 and V2 types force readers to handle each deployed version
+/// explicitly. Most variants share their payload types; genesis retains its
+/// deployed V1 committee-only payload while V2 also binds the Hashi object id.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
@@ -67,7 +68,7 @@ pub enum LogMessageV1 {
     Ceremony(Box<CeremonyLogMessage>),
     KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
-    Genesis(Box<GenesisLogMessage>),
+    Genesis(Box<GenesisLogMessageV1>),
 }
 
 /// Schema-version-2 log messages emitted by the guardian enclave.
@@ -82,7 +83,7 @@ pub enum LogMessageV2 {
     Ceremony(Box<CeremonyLogMessage>),
     KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
-    Genesis(Box<GenesisLogMessage>),
+    Genesis(Box<GenesisLogMessageV2>),
 }
 
 /// Writer-facing alias for the log-message schema emitted by guardians.
