@@ -5,6 +5,7 @@ use super::BatchProvisionerInitRequest;
 use super::BatchProvisionerRotateKpSetRequest;
 use super::BuildPcrs;
 use super::Ciphertext;
+use super::GenesisState;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
@@ -228,10 +229,22 @@ impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
         let s3_config = ResolvedS3Config::mock_for_testing();
+        let config = InitConfig::mock_for_testing(None);
         OperatorInitRequest::new_withdraw_mode(
             s3_config.credentials,
-            InitConfig::mock_for_testing(None),
-            None,
+            config,
+            Some(GenesisState::mock_for_testing()),
+        )
+    }
+}
+
+impl GenesisState {
+    pub fn mock_for_testing() -> Self {
+        let config = InitConfig::mock_for_testing(None);
+        Self::new(
+            mock_committee_with_one_member(0),
+            config.hashi_object_id(),
+            config.hashi_btc_master_pubkey(),
         )
     }
 }
