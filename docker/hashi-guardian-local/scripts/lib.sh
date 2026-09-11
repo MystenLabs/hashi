@@ -125,6 +125,18 @@ wait_for_line() { # FILE PATTERN TIMEOUT PID
   return 1
 }
 
+# Start an operator ceremony command in the background, stdout to OUT and
+# tracing to LOG, and block until it logs that the ceremony state is published
+# and it is waiting for the KPs; `operator` holds its pid. That INFO line is
+# the gate, so the crate's info events are enabled whatever RUST_LOG says.
+start_operator() { # OUT LOG command...
+  local out="$1" log="$2"
+  shift 2
+  RUST_LOG="${RUST_LOG:-info},hashi_guardian_init=info" "$@" > "${out}" 2> "${log}" &
+  operator=$!
+  wait_for_line "${log}" "waiting for every key provisioner" 120 "${operator}"
+}
+
 # Every KP in "$2" verifies, decrypts, saves and confirms its share to the
 # ceremony guardian at $1 (the operator is waiting for exactly these).
 confirm_kps() { # ENDPOINT "cert paths"

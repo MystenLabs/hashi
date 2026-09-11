@@ -57,6 +57,20 @@ impl CeremonyGuardian {
     /// already ran, and pin the session: the live and the S3 `init/`
     /// attestations must carry the same signing key.
     pub async fn init(cfg: &Config, guardian_s3: &ResolvedS3Config) -> Result<Self> {
+        Self::connect(cfg, guardian_s3, true).await
+    }
+
+    /// Connect to a guardian `init` already operator-initialized and pin its
+    /// session; a command that resumes one never runs `OperatorInit`.
+    pub async fn resume(cfg: &Config, guardian_s3: &ResolvedS3Config) -> Result<Self> {
+        Self::connect(cfg, guardian_s3, false).await
+    }
+
+    async fn connect(
+        cfg: &Config,
+        guardian_s3: &ResolvedS3Config,
+        operator_init: bool,
+    ) -> Result<Self> {
         let allowlist = cfg.kp_roster.pcr_allowlist();
         info!(
             phase = "connect",
@@ -69,6 +83,10 @@ impl CeremonyGuardian {
         let preflight = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
         match preflight.info.lifecycle {
             lifecycle if lifecycle == CeremonyStage::Uninitialized.into() => {
+                ensure!(
+                    operator_init,
+                    "guardian is uninitialized: run operator rotate-kp-set init first"
+                );
                 info!(
                     phase = "operator_init",
                     bucket = guardian_s3.bucket_name(),

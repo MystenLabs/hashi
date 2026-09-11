@@ -55,10 +55,8 @@ render_config "${endpoint}" ""
 # Kept aside: the KP renders below overwrite ${CONFIG}, and `wait` reuses it.
 operator_config="${WORK}/operator-rotate.yaml"
 cp "${CONFIG}" "${operator_config}"
-hashi-guardian-init operator rotate-kp-set submit --config "${operator_config}" "${submissions[@]}" \
-  > "${WORK}/operator-rotate.out" 2> "${WORK}/operator-rotate.log" &
-operator=$!
-wait_for_line "${WORK}/operator-rotate.log" "waiting for every key provisioner" 120 "${operator}"
+start_operator "${WORK}/operator-rotate.out" "${WORK}/operator-rotate.log" \
+  hashi-guardian-init operator rotate-kp-set submit --config "${operator_config}" "${submissions[@]}"
 
 echo "== key-provisioner ceremony x ${NEW_NUM_SHARES} (new set) =="
 NUM_SHARES="${NEW_NUM_SHARES}"

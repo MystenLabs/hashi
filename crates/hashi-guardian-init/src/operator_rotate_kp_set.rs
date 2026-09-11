@@ -95,7 +95,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     let new_certs_roster = new_kp_set.load_certs_roster()?;
     let new_params = new_kp_set.params()?;
 
-    let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
+    let mut guardian = CeremonyGuardian::resume(&cfg, &guardian_s3).await?;
     require_fresh(&guardian)?;
 
     // The dealt set, as the enclave will read it with the KPs' allowlist.
@@ -179,16 +179,25 @@ pub async fn wait(cfg: Config) -> Result<()> {
     let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
 
-    let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
+    let mut guardian = CeremonyGuardian::resume(&cfg, &guardian_s3).await?;
     ensure!(
         guardian.info.lifecycle != CeremonyStage::OperatorInitialized.into(),
         "guardian lifecycle is operator_initialized: nothing has been submitted to it \
          (operator rotate-kp-set submit)"
     );
-    let logged = guardian
+    // The latest logs must be the pinned guardian's own deal, or this would
+    // report another ceremony guardian's lifecycle for them.
+    let (logged, dealer) = guardian
         .reader
-        .read_latest_ceremony_state_from_current_build()
+        .read_latest_ceremony_state_with_dealer()
         .await?;
+    ensure!(
+        dealer == guardian.session_id,
+        "the latest ceremony (sharing_seq {}) was dealt by guardian session {dealer}, not by \
+         the pinned session {}: guardian_endpoint must be the guardian that dealt it",
+        logged.secret_sharing_instance.sharing_seq(),
+        guardian.session_id
+    );
     logged.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
     logged
         .encrypted_shares

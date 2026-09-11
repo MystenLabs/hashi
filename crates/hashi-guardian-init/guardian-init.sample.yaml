@@ -67,7 +67,8 @@ kp_roster:
     - /path/to/kp4.asc
     - /path/to/kp5.asc
 
-  # Expected enclave build: git revision + PCR0 (hex).
+  # Expected enclave build: git revision + PCR0 (hex). A ceremony enclave reports
+  # `<git_revision>-ceremony`: its own entry beside the same-commit withdraw build.
   current_build:
     git_revision: "0000000000000000000000000000000000000000"
     pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"

@@ -34,10 +34,8 @@ render_config "${endpoint}" ""
 
 echo "== operator ceremony (waits for every KP's confirmation) =="
 # stdout carries GUARDIAN_BTC_PUBKEY=...; tracing goes to stderr.
-hashi-guardian-init operator ceremony --config "${CONFIG}" \
-  > "${WORK}/operator-ceremony.out" 2> "${WORK}/operator-ceremony.log" &
-operator=$!
-wait_for_line "${WORK}/operator-ceremony.log" "waiting for every key provisioner" 120 "${operator}"
+start_operator "${WORK}/operator-ceremony.out" "${WORK}/operator-ceremony.log" \
+  hashi-guardian-init operator ceremony --config "${CONFIG}"
 
 echo "== key-provisioner ceremony x ${NUM_SHARES} =="
 confirm_kps "${endpoint}" "${KP_CERTS}"
