@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FILE_DESCRIPTOR_SET"],"enum":["TransactionType"],"mod":["screener_service_client","screener_service_server"],"struct":["ApproveRequest","ApproveResponse"]};

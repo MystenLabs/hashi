@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["update_committee","update_committee_chain"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["resolve_s3_config"],"struct":["GuardianS3Client"]};

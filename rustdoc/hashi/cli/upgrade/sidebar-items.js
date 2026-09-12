@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_execute_proposal_transaction","build_upgrade_execution_transaction","build_upgrade_package","extract_new_package_id_from_response","extract_proposal_id_from_response","read_package_version"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TEST_HASHI_OBJECT_ID"],"fn":["mock_kp_certs_roster"]};

@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["hashi",[["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.CliGlobalOpts.html\" title=\"struct hashi::cli::CliGlobalOpts\">CliGlobalOpts</a>",0],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.LaunchOpts.html\" title=\"struct hashi::cli::LaunchOpts\">LaunchOpts</a>",0],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.MetadataArgs.html\" title=\"struct hashi::cli::MetadataArgs\">MetadataArgs</a>",0],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.PublishOpts.html\" title=\"struct hashi::cli::PublishOpts\">PublishOpts</a>",0],["impl Args for <a class=\"struct\" href=\"hashi/cli/struct.RegisterOpts.html\" title=\"struct hashi::cli::RegisterOpts\">RegisterOpts</a>",0]]],["hashi_guardian_init",[["impl Args for <a class=\"struct\" href=\"hashi_guardian_init/fetch_info/struct.Args.html\" title=\"struct hashi_guardian_init::fetch_info::Args\">Args</a>",0],["impl Args for <a class=\"struct\" href=\"hashi_guardian_init/struct.Cli.html\" title=\"struct hashi_guardian_init::Cli\">Cli</a>",0]]],["hashi_localnet",[["impl Args for <a class=\"struct\" href=\"hashi_localnet/struct.Cli.html\" title=\"struct hashi_localnet::Cli\">Cli</a>",0],["impl Args for <a class=\"struct\" href=\"hashi_localnet/struct.LocalnetOpts.html\" title=\"struct hashi_localnet::LocalnetOpts\">LocalnetOpts</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[720,322,298]}

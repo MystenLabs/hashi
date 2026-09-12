@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["init","report","require_fresh","submit","validate_batch","wait"],"struct":["Proposal"]};
