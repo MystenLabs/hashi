@@ -14,6 +14,8 @@ default: out/nitro.eif
 out:
 	mkdir -p out
 
+# The EIF's inputs. .github/workflows/guardian-enclave.yml gates PRs on the
+# same list; a path added here must be added there too.
 out/nitro.eif: $(shell git ls-files ../../Cargo.toml ../../Cargo.lock ../../crates/hashi-guardian ../../crates/hashi-types .) | out
 	docker build \
 		--pull \

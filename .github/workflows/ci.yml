@@ -112,6 +112,11 @@ jobs:
       - name: clippy
         run: make clippy
 
+      # --all-features above compiles the mock-attestation arm of the guardian
+      # crates; the EIF and a real rotation build the other one.
+      - name: clippy (real attestation arm)
+        run: make clippy-enclave
+
       - run: make buf-lint
       - run: make proto
 
