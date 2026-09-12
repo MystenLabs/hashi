@@ -146,14 +146,15 @@ impl GuardianReader {
         Ok(session_info.clone())
     }
 
-    /// Read and verify the latest ceremony, or return `None` if none exists.
+    /// Read and verify the latest ceremony, with the session that wrote it,
+    /// or return `None` if none exists.
     ///
     /// Ceremony keys begin with a zero-padded `sharing_seq`, so the
     /// lexicographically greatest key identifies the latest ceremony.
     async fn read_latest_ceremony_log(
         &mut self,
         require_current: bool,
-    ) -> GuardianResult<Option<CeremonyLogMessage>> {
+    ) -> GuardianResult<Option<(CeremonyLogMessage, SessionID)>> {
         let keys = self
             .s3
             .list_keys(&CeremonyLogMessage::object_key_dir(), true)
@@ -174,7 +175,7 @@ impl GuardianReader {
             }
         };
         log_verified_read(&key, &session_id);
-        Ok(Some(*msg))
+        Ok(Some((*msg, session_id)))
     }
 
     /// Read and verify the latest encrypted KP-share state for `sharing_seq`.
@@ -254,6 +255,7 @@ impl GuardianReader {
     pub async fn read_latest_ceremony_state(&mut self) -> GuardianResult<CeremonyState> {
         self.read_latest_ceremony_state_with_build_requirement(false)
             .await
+            .map(|(state, _dealer)| state)
     }
 
     /// Read the latest ceremony together with the latest KP-share state for its
@@ -263,6 +265,16 @@ impl GuardianReader {
     ) -> GuardianResult<CeremonyState> {
         self.read_latest_ceremony_state_with_build_requirement(true)
             .await
+            .map(|(state, _dealer)| state)
+    }
+
+    /// Like [`Self::read_latest_ceremony_state_from_current_build`], with the
+    /// session that dealt the ceremony: the writer of its `ceremony/` record.
+    pub async fn read_latest_ceremony_state_with_dealer(
+        &mut self,
+    ) -> GuardianResult<(CeremonyState, SessionID)> {
+        self.read_latest_ceremony_state_with_build_requirement(true)
+            .await
     }
 
     /// Once a ceremony is present, its matching KP-share state must also exist
@@ -270,8 +282,8 @@ impl GuardianReader {
     async fn read_latest_ceremony_state_with_build_requirement(
         &mut self,
         require_current: bool,
-    ) -> GuardianResult<CeremonyState> {
-        let ceremony = self
+    ) -> GuardianResult<(CeremonyState, SessionID)> {
+        let (ceremony, dealer) = self
             .read_latest_ceremony_log(require_current)
             .await?
             .ok_or_else(|| {
@@ -286,8 +298,9 @@ impl GuardianReader {
                     "no kp-shares log found for latest ceremony sharing_seq {sharing_seq}"
                 ))
             })?;
-        Ok(CeremonyState::new(ceremony, kp_share_state)
-            .expect("ceremony and KP share state must have a consistent shape"))
+        let state = CeremonyState::new(ceremony, kp_share_state)
+            .expect("ceremony and KP share state must have a consistent shape");
+        Ok((state, dealer))
     }
 
     /// Read the latest serving committee.

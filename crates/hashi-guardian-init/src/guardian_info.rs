@@ -5,13 +5,16 @@ use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::EnclaveLifecycle;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_relay_service_client::GuardianRelayServiceClient;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
+use tonic::Code;
 use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 
 pub async fn verified_live_guardian_info(
     client: &mut GuardianServiceClient<Channel>,
@@ -40,6 +43,58 @@ pub async fn verified_provisioning_target_info(
         .context("GetProvisioningTargetInfo RPC failed")?
         .into_inner();
     verify_info_response(info_pb, current_build)
+}
+
+/// The ceremony guardian a KP confirms to or signs a rotation for: through
+/// the proxy, the relay's provisioning target (the standby during a KP-set
+/// rotation); a bare guardian answers for itself. Whichever answered must be
+/// a ceremony enclave, so an endpoint that hides the relay and answers for
+/// the active guardian is named rather than blamed downstream.
+pub async fn verified_ceremony_guardian_info(
+    endpoint: &str,
+    current_build: &BuildPcrs,
+) -> anyhow::Result<VerifiedGuardianInfo> {
+    let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint).await?;
+    let verified = verify_info_response(info_pb, current_build)?;
+    ensure!(
+        matches!(verified.info.lifecycle, EnclaveLifecycle::Ceremony(_)),
+        "{rpc} at {endpoint} answers for a guardian in lifecycle {:?}, not a ceremony \
+         guardian: a proxy must route GuardianRelayService and front the ceremony guardian \
+         as its provisioning target; a bare endpoint must be the ceremony guardian itself",
+        verified.info.lifecycle
+    );
+    Ok(verified)
+}
+
+/// `GetProvisioningTargetInfo` from `endpoint`, or its `GetGuardianInfo` when
+/// it serves no relay, with the RPC that answered. A bare guardian answers
+/// `Unimplemented`; so does an ingress that hides the relay service (tonic
+/// maps an HTTP 404 to it), which the caller's lifecycle check catches.
+async fn ceremony_guardian_info_pb(
+    endpoint: &str,
+) -> anyhow::Result<(pb::GetGuardianInfoResponse, &'static str)> {
+    // `Endpoint::new`, not `from_shared`: only the former enables TLS for an
+    // https endpoint (the relay), as every `Client::connect` in this crate does.
+    let channel = Endpoint::new(endpoint.to_string())
+        .with_context(|| format!("invalid ceremony guardian endpoint {endpoint}"))?
+        .connect()
+        .await
+        .with_context(|| format!("connect to ceremony guardian at {endpoint}"))?;
+    match GuardianRelayServiceClient::new(channel.clone())
+        .get_provisioning_target_info(pb::GetProvisioningTargetInfoRequest {})
+        .await
+    {
+        Ok(response) => Ok((response.into_inner(), "GetProvisioningTargetInfo")),
+        Err(status) if status.code() == Code::Unimplemented => Ok((
+            GuardianServiceClient::new(channel)
+                .get_guardian_info(pb::GetGuardianInfoRequest {})
+                .await
+                .context("GetGuardianInfo RPC failed")?
+                .into_inner(),
+            "GetGuardianInfo",
+        )),
+        Err(status) => Err(status).context("GetProvisioningTargetInfo RPC failed"),
+    }
 }
 
 fn verify_info_response(
@@ -73,4 +128,153 @@ pub fn ensure_oi_info_matches_post_init(
         "S3 OI GuardianInfo differs from live post-OperatorInit GuardianInfo"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hashi_types::proto::guardian_relay_service_server::GuardianRelayService;
+    use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
+    use hashi_types::proto::guardian_service_server::GuardianService;
+    use hashi_types::proto::guardian_service_server::GuardianServiceServer;
+    use tonic::Request;
+    use tonic::Response;
+    use tonic::Status;
+    use tonic::transport::Server;
+    use tonic::transport::server::Router;
+    use tonic::transport::server::TcpIncoming;
+
+    fn tagged(tag: u8) -> pb::GetGuardianInfoResponse {
+        pb::GetGuardianInfoResponse {
+            signing_pub_key: Some(vec![tag; 32].into()),
+            ..Default::default()
+        }
+    }
+
+    /// A guardian whose `GetGuardianInfo` carries `[tag; 32]`.
+    #[derive(Clone)]
+    struct Guardian(u8);
+
+    #[tonic::async_trait]
+    impl GuardianService for Guardian {
+        async fn get_guardian_info(
+            &self,
+            _: Request<pb::GetGuardianInfoRequest>,
+        ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
+            Ok(Response::new(tagged(self.0)))
+        }
+        async fn setup_new_key(
+            &self,
+            _: Request<pb::SetupNewKeyRequest>,
+        ) -> Result<Response<pb::SignedSetupNewKeyResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn confirm_ceremony(
+            &self,
+            _: Request<pb::SignedCeremonyConfirmationRequest>,
+        ) -> Result<Response<pb::CeremonyConfirmationResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn rotate_kp_set(
+            &self,
+            _: Request<pb::BatchProvisionerRotateKpSetRequest>,
+        ) -> Result<Response<pb::SignedRotateKpSetResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn operator_init(
+            &self,
+            _: Request<pb::OperatorInitRequest>,
+        ) -> Result<Response<pb::OperatorInitResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn provisioner_init(
+            &self,
+            _: Request<pb::BatchProvisionerInitRequest>,
+        ) -> Result<Response<pb::ProvisionerInitResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn provisioner_rotate_cert(
+            &self,
+            _: Request<pb::SignedProvisionerRotateCertRequest>,
+        ) -> Result<Response<pb::SignedProvisionerRotateCertResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn operator_activate(
+            &self,
+            _: Request<pb::OperatorActivateRequest>,
+        ) -> Result<Response<pb::OperatorActivateResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn standard_withdrawal(
+            &self,
+            _: Request<pb::SignedStandardWithdrawalRequest>,
+        ) -> Result<Response<pb::SignedStandardWithdrawalResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn update_committee(
+            &self,
+            _: Request<pb::SignedCommitteeTransition>,
+        ) -> Result<Response<pb::UpdateCommitteeResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+        async fn update_committee_chain(
+            &self,
+            _: Request<pb::UpdateCommitteeChainRequest>,
+        ) -> Result<Response<pb::UpdateCommitteeResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+    }
+
+    /// A proxy's relay surface, fronting a guardian whose info carries `[tag; 32]`.
+    #[derive(Clone)]
+    struct Relay(u8);
+
+    #[tonic::async_trait]
+    impl GuardianRelayService for Relay {
+        async fn get_provisioning_target_info(
+            &self,
+            _: Request<pb::GetProvisioningTargetInfoRequest>,
+        ) -> Result<Response<pb::GetGuardianInfoResponse>, Status> {
+            Ok(Response::new(tagged(self.0)))
+        }
+        async fn single_provisioner_init(
+            &self,
+            _: Request<pb::SignedProvisionerInitRequest>,
+        ) -> Result<Response<pb::SingleProvisionerInitResponse>, Status> {
+            unimplemented!("not exercised")
+        }
+    }
+
+    async fn serve(router: Router) -> String {
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = incoming.local_addr().unwrap();
+        tokio::spawn(router.serve_with_incoming(incoming));
+        format!("http://{addr}")
+    }
+
+    /// Through the proxy, the relay answers for the guardian KPs are
+    /// provisioning, not for the active guardian its node-facing surface fronts.
+    #[tokio::test]
+    async fn a_proxy_answers_with_its_provisioning_target() {
+        let endpoint = serve(
+            Server::builder()
+                .add_service(GuardianServiceServer::new(Guardian(0xA)))
+                .add_service(GuardianRelayServiceServer::new(Relay(0xB))),
+        )
+        .await;
+
+        let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
+        assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
+        assert_eq!(rpc, "GetProvisioningTargetInfo");
+    }
+
+    #[tokio::test]
+    async fn a_bare_guardian_answers_for_itself() {
+        let endpoint =
+            serve(Server::builder().add_service(GuardianServiceServer::new(Guardian(0xA)))).await;
+
+        let (info, rpc) = ceremony_guardian_info_pb(&endpoint).await.unwrap();
+        assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xA; 32]);
+        assert_eq!(rpc, "GetGuardianInfo");
+    }
 }
