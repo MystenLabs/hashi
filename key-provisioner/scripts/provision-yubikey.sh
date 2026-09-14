@@ -87,8 +87,12 @@ run_or_die "GnuPG could not start the agent. No YubiKey changes were made." \
 say "Guardian key provisioner YubiKey setup"
 printf '%s\n' \
   "This script changes the OpenPGP PINs, generates new keys on one YubiKey," \
-  "requires a physical touch for signing and decryption, and tests both operations."
+  "exports public attestation artifacts, requires a physical touch for signing and decryption," \
+  "and tests both operations." \
+  "Supported provisioning requires YubiKey firmware 5.7 or later and the original" \
+  "factory Yubico OpenPGP ATT private key and certificate. Never import or replace ATT."
 warn "Generating keys overwrites any keys already in the OpenPGP slots. Overwritten keys cannot be recovered."
+warn "Creating attestations overwrites the SIG and DEC cardholder certificate slots, not their private keys."
 warn "Unplug every YubiKey except the new device you are setting up."
 pause "After only the target YubiKey is connected, press Enter to inspect it. "
 
@@ -122,6 +126,7 @@ fi
 
 CARD="${cards[0]}"
 printf '\nConnected YubiKey: %s\nOpenPGP card identifier: %s\n' "${yubikeys[0]}" "$CARD"
+printf '%s\n' "Before continuing, confirm firmware 5.7+ and that the factory Yubico ATT key and certificate are intact."
 pause "Confirm this is the labeled device you intend to provision, then press Enter. "
 
 # Replace the factory PINs before creating keys. The User PIN authorizes normal
@@ -200,13 +205,20 @@ while true; do
     continue
   fi
 
-  OUTPUT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-pubkey.asc"
-  FINGERPRINT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-fingerprint.txt"
-  PLAINTEXT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.txt"
-  CIPHERTEXT_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.txt.asc"
-  DECRYPTED_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.decrypted.txt"
-  SIGNATURE_FILE="${OUTPUT_DIR%/}/$USER_ID-guardian-kp-test.sig.asc"
-  output_paths=("$OUTPUT_FILE" "$FINGERPRINT_FILE" "$PLAINTEXT_FILE" "$CIPHERTEXT_FILE" "$DECRYPTED_FILE" "$SIGNATURE_FILE")
+  OUTPUT_FILE="${OUTPUT_DIR%/}/$USER_ID-kp-pubkey.asc"
+  FINGERPRINT_FILE="${OUTPUT_DIR%/}/$USER_ID-kp-fingerprint.txt"
+  ATTESTATION_DEVICE_FILE="${OUTPUT_FILE%.asc}.attestation-device.pem"
+  ATTESTATION_SIG_FILE="${OUTPUT_FILE%.asc}.attestation-sig.pem"
+  ATTESTATION_DEC_FILE="${OUTPUT_FILE%.asc}.attestation-dec.pem"
+  PLAINTEXT_FILE="${OUTPUT_DIR%/}/$USER_ID-kp-test.txt"
+  CIPHERTEXT_FILE="${OUTPUT_DIR%/}/$USER_ID-kp-test.txt.asc"
+  DECRYPTED_FILE="${OUTPUT_DIR%/}/$USER_ID-kp-test.decrypted.txt"
+  SIGNATURE_FILE="${OUTPUT_DIR%/}/$USER_ID-kp-test.sig.asc"
+  output_paths=(
+    "$OUTPUT_FILE" "$FINGERPRINT_FILE"
+    "$ATTESTATION_DEVICE_FILE" "$ATTESTATION_SIG_FILE" "$ATTESTATION_DEC_FILE"
+    "$PLAINTEXT_FILE" "$CIPHERTEXT_FILE" "$DECRYPTED_FILE" "$SIGNATURE_FILE"
+  )
   output_collision=false
   for output_path in "${output_paths[@]}"; do
     if [[ -e "$output_path" || -L "$output_path" ]]; then
@@ -223,12 +235,14 @@ done
 # an empty value supports GPG import without adding a named certificate identity.
 printf '\nThe script will now generate signing, decryption, and authentication keys on:\n  %s\n' "$CARD"
 printf 'The armored public certificate will be written to:\n  %s\n' "$OUTPUT_FILE"
+printf 'The PEM attestation artifacts will be written to:\n  %s\n  %s\n  %s\n' \
+  "$ATTESTATION_DEVICE_FILE" "$ATTESTATION_SIG_FILE" "$ATTESTATION_DEC_FILE"
 warn "This key generation step cannot be undone."
 pause
 printf 'Tap your YubiKey whenever its indicator flashes during key generation and certificate signing.\n'
 run_or_die "Key generation failed. Inspect the card status before attempting any recovery." \
   oct admin --card "$CARD" generate --userid '' --output "$OUTPUT_FILE" curve25519
-[[ -s "$OUTPUT_FILE" ]] || die "oct reported success but did not create a non-empty public certificate."
+[[ -s "$OUTPUT_FILE" ]] || die "oct reported success but did not create a non-empty public certificate. Inspect the card; do not rerun key generation to recover missing public artifacts."
 
 # Require a new touch for every signing and decryption operation, then read both
 # policies back so a failed or ignored configuration cannot pass silently.
@@ -252,6 +266,25 @@ fi
 printf '\nSigning key:\n%s\n\nDecryption key:\n%s\n' "$signature_key_info" "$decryption_key_info"
 [[ "$signature_key_info" == *"Touch policy: On"* ]] || die "The signing-key touch policy is not On."
 [[ "$decryption_key_info" == *"Touch policy: On"* ]] || die "The decryption-key touch policy is not On."
+
+# Keep the factory ATT identity intact: export its certificate, then attest only
+# the on-card signing and decryption keys. All three outputs are public PEM.
+# Capture attestations only after configuring and checking the intended touch policies.
+say "Export device certificate and create signing and decryption attestations"
+printf '%s\n' \
+  "Follow YubiKey Manager's PIN prompts and touch the YubiKey when requested." \
+  "The existing factory ATT certificate is exported; ATT is never replaced." \
+  "SIG and DEC attestations overwrite their cardholder certificates, not private keys."
+run_or_die "Exporting the factory ATT certificate failed. Inspect the card and recover the public artifacts with ykman; do not rerun key generation." \
+  ykman openpgp certificates export --format PEM att "$ATTESTATION_DEVICE_FILE"
+[[ -s "$ATTESTATION_DEVICE_FILE" ]] || die "ykman reported success but the device certificate is empty or missing. Recover the public artifacts with ykman; do not rerun key generation."
+run_or_die "Creating the SIG attestation failed. Inspect the card and recover the public artifacts with ykman; do not rerun key generation." \
+  ykman openpgp keys attest --format PEM sig "$ATTESTATION_SIG_FILE"
+[[ -s "$ATTESTATION_SIG_FILE" ]] || die "ykman reported success but the SIG attestation is empty or missing. Recover the public artifacts with ykman; do not rerun key generation."
+run_or_die "Creating the DEC attestation failed. Inspect the card and recover the public artifacts with ykman; do not rerun key generation." \
+  ykman openpgp keys attest --format PEM dec "$ATTESTATION_DEC_FILE"
+[[ -s "$ATTESTATION_DEC_FILE" ]] || die "ykman reported success but the DEC attestation is empty or missing. Recover the public artifacts with ykman; do not rerun key generation."
+printf '%s\n' "These non-empty output checks are not cryptographic attestation verification."
 
 # The first fpr record belongs to the primary key and identifies the certificate
 # independently of its user ID or output filename.
@@ -322,11 +355,16 @@ printf 'Signature creation and verification succeeded.\n'
 
 say "Setup complete"
 printf 'Public certificate: %s\n' "$OUTPUT_FILE"
+printf 'Device signer certificate (PEM): %s\n' "$ATTESTATION_DEVICE_FILE"
+printf 'SIG attestation (PEM): %s\n' "$ATTESTATION_SIG_FILE"
+printf 'DEC attestation (PEM): %s\n' "$ATTESTATION_DEC_FILE"
 printf 'Primary-key fingerprint: %s\n' "$FINGERPRINT"
 printf 'Fingerprint file: %s\n' "$FINGERPRINT_FILE"
 printf '%s\n' \
-  "Give only this public certificate and fingerprint to the guardian operator." \
+  "Give these five public files to the guardian operator." \
+  "Keep all three PEM sidecars with the armored public certificate for later attestation verification." \
+  "This script does not cryptographically verify attestations; guardian/CLI enforcement is not wired in." \
   "Do not send either PIN or any local GnuPG data." \
-  "The public certificate and fingerprint file are retained in the selected output directory." \
+  "The public certificate, fingerprint file, and attestation PEMs are retained in the selected output directory." \
   "The public certificate remains in your GnuPG keyring; the four test files will now be deleted."
 printf '\nYubiKey provisioning completed successfully! Public key outputted to %s\n' "$OUTPUT_FILE"

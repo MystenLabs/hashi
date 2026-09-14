@@ -119,15 +119,15 @@ guardian share to that certificate. Later, the KP touches the YubiKey to decrypt
 the share and touches it again to sign provisioning requests.
 
 Generate dedicated keys for guardian provisioning. Do not reuse a personal key
-or a node-backup key. The private keys remain on the YubiKey; only the armored
-public certificate is shared with the guardian operator.
+or a node-backup key. The private keys remain on the YubiKey.
 
 ### Provision the YubiKey
 
 Obtain a new [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/) device and label it so its physical identity can
 be matched to its public certificate and storage record.
+Use firmware **5.7 or later** and keep the factory OpenPGP ATT key and certificate intact.
 
-Use a setup machine with a physical USB port. Install [`oct`](https://codeberg.org/openpgp-card/openpgp-card-tools), [`gpg`](https://gnupg.org/), and [`ykman`](https://docs.yubico.com/software/yubikey/tools/ykman/), then
+Use a setup machine with a physical USB port. Install [`oct`](https://codeberg.org/openpgp-card/openpgp-card-tools), [`gpg`](https://gnupg.org/), [`jq`](https://jqlang.org/), and [`ykman`](https://docs.yubico.com/software/yubikey/tools/ykman/), then
 disconnect every YubiKey except the device being provisioned.
 
 From the repository root, run the interactive provisioning script:
@@ -140,21 +140,35 @@ Follow its prompts. The script changes the factory PINs, checks the OpenPGP
 key slots, generates the keys, automatically enables touch for signing and
 decryption, and tests both operations. Empty slots need no confirmation; existing
 keys trigger an irreversible-overwrite warning requiring `y` or `yes`.
-When setup completes, it prints the public certificate path and primary-key
-fingerprint to provide to the operator.
 
 The user ID only names output files; keys are selected by fingerprint. Choose
-an output directory (default `.`). For user ID `jdoe`, the script retains
-`jdoe-guardian-kp-pubkey.asc` and `jdoe-guardian-kp-fingerprint.txt` (fingerprint
-only). Test files are deleted on exit; the public certificate remains imported
-in your GnuPG keyring.
+an output directory (default `.`). For user ID `jdoe`, the script retains these
+five public files in that directory and prints the primary-key fingerprint:
 
-### Provide the public certificate to the operator
+```text
+jdoe-kp-pubkey.asc
+jdoe-kp-fingerprint.txt
+jdoe-kp-pubkey.attestation-device.pem
+jdoe-kp-pubkey.attestation-sig.pem
+jdoe-kp-pubkey.attestation-dec.pem
+```
 
-Send only the `.asc` public certificate and its fingerprint to the guardian
-operator. Do not send either PIN.
+The text file contains only the fingerprint. The PEMs contain the factory device
+signer certificate and the SIG/DEC attestation statements. The four temporary
+test files are deleted on exit; the public certificate remains imported in your
+normal GnuPG keyring (or the caller's `GNUPGHOME`, if set).
 
-The operator configures exactly one certificate path per KP, in any order:
+### Provide the public artifacts to the operator
+
+Send all five files to the guardian operator, including for replacement
+certificates. Keep the PEMs beside their `.asc` file. Do not send either PIN or
+local GnuPG private-key material.
+
+The script checks that the exported files are nonempty but does not verify the
+attestations. Neither the CLI nor the guardian currently loads or enforces these
+YubiKey attestations; retain them for later verification.
+
+The operator configures exactly one `.asc` certificate path per KP, in any order:
 
 ```yaml
 kp_roster:
