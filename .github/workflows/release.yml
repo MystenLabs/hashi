@@ -319,16 +319,18 @@ jobs:
           }
           lookup_release > "$TEMP_DIR/release.json"
           if [ "$(jq -r .id "$TEMP_DIR/release.json")" = null ]; then
-            gh release create "$RELEASE_TAG" \
-              --verify-tag \
-              --draft \
-              --prerelease \
-              --title "Hashi testnet $VERSION" \
-              --notes-file release/notes.md
-            lookup_release > "$TEMP_DIR/release.json"
+            # Use the creation response: listing may not show a new draft yet.
+            gh api --method POST "repos/$GH_REPO/releases" \
+              -f tag_name="$RELEASE_TAG" \
+              -F draft=true \
+              -F prerelease=true \
+              -f name="Hashi testnet $VERSION" \
+              -F body=@release/notes.md \
+              > "$TEMP_DIR/release.json"
           fi
 
           RELEASE_ID=$(jq -er .id "$TEMP_DIR/release.json")
+          UPLOAD_URL=$(jq -er '.upload_url | split("{")[0]' "$TEMP_DIR/release.json")
           gh api --paginate --slurp \
             "repos/$GH_REPO/releases/$RELEASE_ID/assets?per_page=100" \
             > "$TEMP_DIR/assets.json"
@@ -355,16 +357,18 @@ jobs:
                 exit 1
               fi
             else
-              gh release upload "$RELEASE_TAG" "release/$ASSET"
+              gh api --method POST "$UPLOAD_URL?name=$ASSET" \
+                -H "Content-Type: application/octet-stream" \
+                --input "release/$ASSET" --silent
             fi
           done
 
           if [ "$(jq -r .draft "$TEMP_DIR/release.json")" = true ]; then
-            gh release edit "$RELEASE_TAG" \
-              --draft=false \
-              --prerelease \
-              --title "Hashi testnet $VERSION" \
-              --notes-file release/notes.md
+            gh api --method PATCH "repos/$GH_REPO/releases/$RELEASE_ID" \
+              -F draft=false \
+              -F prerelease=true \
+              -f name="Hashi testnet $VERSION" \
+              -F body=@release/notes.md --silent
           fi
 
   deploy:
