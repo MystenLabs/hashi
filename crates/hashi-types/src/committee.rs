@@ -732,6 +732,10 @@ impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T, ReducedWeight<'
     pub fn reduced_weight(&self) -> u16 {
         self.domain.signed
     }
+
+    pub fn has_reduced_weight(&self, weight: u32) -> bool {
+        u32::from(self.domain.signed) >= weight
+    }
 }
 
 impl<'a, T: IntentMessage + Clone, W: WeightDomain> BlsSignatureAggregator<'a, T, W> {
