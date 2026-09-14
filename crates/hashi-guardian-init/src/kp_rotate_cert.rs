@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_guardian_init::load_attested_kp_cert;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpSigned;
@@ -23,7 +24,6 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::decrypt_kp_share;
-use crate::kp_roster::load_kp_cert;
 
 pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
@@ -31,8 +31,9 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     let allowlist = cfg.kp_roster.pcr_allowlist();
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
 
-    let signing_cert = load_kp_cert(cfg.require_kp_pgp_cert_path("key-provisioner rotate-cert")?)?;
-    let new_cert = load_kp_cert(&new_kp_pgp_cert_path).with_context(|| {
+    let signing_cert =
+        load_attested_kp_cert(cfg.require_kp_pgp_cert_path("key-provisioner rotate-cert")?)?;
+    let new_cert = load_attested_kp_cert(&new_kp_pgp_cert_path).with_context(|| {
         format!(
             "load replacement KP cert at {}",
             new_kp_pgp_cert_path.display()

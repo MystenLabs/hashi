@@ -321,6 +321,7 @@ fn validate_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::guardian::AttestedKpCert;
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
@@ -331,9 +332,8 @@ mod tests {
     use hashi_types::guardian::ShareID;
     use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
     use hashi_types::guardian::crypto::split_secret;
+    use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
     use hashi_types::guardian::test_utils::mock_kp_certs_roster;
-    use hashi_types::pgp::PgpPublicCert;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
 
     const OLD_N: usize = 3;
@@ -342,7 +342,7 @@ mod tests {
     struct Fixture {
         old: CeremonyState,
         /// The dealt KPs' (cert, secret), share id `index + 1`.
-        kps: Vec<(PgpPublicCert, String)>,
+        kps: Vec<(AttestedKpCert, String)>,
         session_id: SessionID,
         pcr_allowlist: PcrAllowlist,
         new_certs_roster: KpCertRoster,
@@ -355,10 +355,7 @@ mod tests {
             let params = SecretSharingParams::new(OLD_N, OLD_T).unwrap();
             let shares = split_secret(&sk, &params, &mut rand::thread_rng());
             let kps = (0..OLD_N)
-                .map(|_| {
-                    let (cert, secret) = mock_pgp_keypair();
-                    (PgpPublicCert::new(cert).unwrap(), secret)
-                })
+                .map(|_| mock_attested_kp_keypair())
                 .collect::<Vec<_>>();
             let encrypted_shares = KpEncryptedShareRoster::new(
                 kps.iter()
@@ -506,10 +503,10 @@ mod tests {
     #[test]
     fn rejects_a_signer_outside_the_dealt_set() {
         let f = Fixture::new();
-        let (cert, secret) = mock_pgp_keypair();
+        let (cert, secret) = mock_attested_kp_keypair();
         let request = f.request(1);
         let signature = sign_detached_in_process(&secret, &KpSigned::signed_bytes(&request));
-        let stranger = KpSigned::from_parts(request, PgpPublicCert::new(cert).unwrap(), signature);
+        let stranger = KpSigned::from_parts(request, cert, signature);
         let err = validate_batch(
             vec![("stranger".into(), stranger), f.submission(1)],
             &f.old,

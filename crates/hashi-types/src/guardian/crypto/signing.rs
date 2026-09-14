@@ -8,6 +8,7 @@
 //! Both serialize a payload together with its signing intent so a signature for
 //! one payload type cannot be replayed as another.
 
+use crate::guardian::AttestedKpCert;
 use crate::guardian::CeremonyConfirmationRequest;
 use crate::guardian::CryptoVerificationError;
 use crate::guardian::CryptoVerificationResult;
@@ -25,9 +26,8 @@ use crate::guardian::SetupNewKeyResponse;
 use crate::guardian::StandardWithdrawalResponse;
 use crate::guardian::UnixMillis;
 use crate::pgp::Fingerprint;
-use crate::pgp::PgpPublicCert;
-use crate::pgp::sign_detached_via_gpg;
-use crate::pgp::verify_detached_signature;
+use crate::pgp::sign_detached_via_gpg_for_key;
+use crate::pgp::verify_detached_signature_for_key;
 use ed25519_consensus::Signature as GuardianSignature;
 use ed25519_consensus::SigningKey;
 use ed25519_consensus::VerificationKey;
@@ -88,7 +88,7 @@ pub trait KpSigningIntent: Serialize + SessionBoundRequest {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KpSigned<T> {
     data: T,
-    pub signer_cert: PgpPublicCert,
+    pub signer_cert: AttestedKpCert,
     pub signature: String,
 }
 
@@ -231,7 +231,7 @@ impl<T> GuardianSigned<T> {
 }
 
 impl<T: KpSigningIntent> KpSigned<T> {
-    pub fn from_parts(data: T, signer_cert: PgpPublicCert, signature: String) -> Self {
+    pub fn from_parts(data: T, signer_cert: AttestedKpCert, signature: String) -> Self {
         Self {
             data,
             signer_cert,
@@ -240,17 +240,27 @@ impl<T: KpSigningIntent> KpSigned<T> {
     }
 
     /// Sign a KP payload by invoking `gpg --detach-sign` for the
-    /// signer certificate's fingerprint. Includes the KP intent in the signed
+    /// signer's attested signing-key fingerprint. Includes the KP intent in the signed
     /// bytes; payload types carry any request-specific replay-binding fields.
     pub fn sign(
         data: T,
-        signer_cert: PgpPublicCert,
+        signer_cert: AttestedKpCert,
         gpg_home: Option<&Path>,
     ) -> GuardianResult<Self> {
         let signing_payload = Self::signed_bytes(&data);
-        let signature =
-            sign_detached_via_gpg(&signing_payload, &signer_cert.fingerprint(), gpg_home)
-                .map_err(|e| InternalError(format!("KP signing failed: {e}")))?;
+        let signature = sign_detached_via_gpg_for_key(
+            &signing_payload,
+            signer_cert.signing_fingerprint(),
+            gpg_home,
+        )
+        .map_err(|e| InternalError(format!("KP signing failed: {e}")))?;
+        verify_detached_signature_for_key(
+            &signing_payload,
+            &signature,
+            signer_cert.cert(),
+            signer_cert.signing_fingerprint(),
+        )
+        .map_err(|e| InternalError(format!("KP signing produced an invalid signature: {e}")))?;
         Ok(Self {
             data,
             signer_cert,
@@ -269,7 +279,13 @@ impl<T: KpSigningIntent> KpSigned<T> {
     /// Checks the intent byte to ensure the signature is for this request type.
     pub fn verify_signature(&self) -> CryptoVerificationResult<&T> {
         let msg_bytes = Self::signed_bytes(&self.data);
-        verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert).map_err(|e| {
+        verify_detached_signature_for_key(
+            &msg_bytes,
+            &self.signature,
+            self.signer_cert.cert(),
+            self.signer_cert.signing_fingerprint(),
+        )
+        .map_err(|e| {
             CryptoVerificationError::new(format!("KP signature verification failed: {e}"))
         })?;
         Ok(&self.data)
@@ -281,7 +297,7 @@ impl<T: KpSigningIntent> KpSigned<T> {
         Ok(self.data)
     }
 
-    pub(crate) fn into_parts(self) -> (T, PgpPublicCert, String) {
+    pub(crate) fn into_parts(self) -> (T, AttestedKpCert, String) {
         (self.data, self.signer_cert, self.signature)
     }
 
