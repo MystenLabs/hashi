@@ -6210,8 +6210,9 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
         .then(|| tokio::time::Instant::now() + stop.grace);
     let stop_reason = loop {
         let deadline = grace_deadline.map_or(ceiling, |grace| grace.min(ceiling));
-        let next = match tokio::time::timeout_at(deadline, in_flight.next()).await {
-            Ok(next) => next,
+        let (addr, result) = match tokio::time::timeout_at(deadline, in_flight.next()).await {
+            Ok(Some(next)) => next,
+            Ok(None) => break "drained",
             Err(_) => {
                 break if deadline == ceiling {
                     "ceiling"
@@ -6219,9 +6220,6 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
                     "grace"
                 };
             }
-        };
-        let Some((addr, result)) = next else {
-            break "drained";
         };
         awaited.remove(&addr);
         match result {
