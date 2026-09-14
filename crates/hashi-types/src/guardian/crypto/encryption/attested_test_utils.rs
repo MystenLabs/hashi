@@ -21,9 +21,10 @@ use sequoia_openpgp::Cert;
 use sequoia_openpgp::crypto::mpi;
 use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::policy::StandardPolicy;
+use sequoia_openpgp::types::Curve;
 use x509_parser::parse_x509_certificate;
 
-struct RawPublicKey(Vec<u8>);
+struct RawPublicKey(Vec<u8>, &'static SignatureAlgorithm);
 
 impl PublicKeyData for RawPublicKey {
     fn der_bytes(&self) -> &[u8] {
@@ -31,7 +32,7 @@ impl PublicKeyData for RawPublicKey {
     }
 
     fn algorithm(&self) -> &SignatureAlgorithm {
-        &PKCS_ED25519
+        self.1
     }
 }
 
@@ -58,8 +59,27 @@ fn pem(der: &[u8]) -> Vec<u8> {
 /// This helper only generates its own inputs: it cannot bless caller-supplied
 /// certificates, attestations, keys, or trust roots.
 pub fn mock_attested_kp_keypair() -> (AttestedKpCert, String) {
-    let (public, secret) = crate::pgp::test_utils::mock_pgp_keypair();
-    (attest_generated_cert(public), secret)
+    use sequoia_openpgp::cert::CertBuilder;
+    use sequoia_openpgp::cert::CipherSuite;
+    use sequoia_openpgp::serialize::Serialize;
+    use sequoia_openpgp::types::Features;
+
+    let (cert, _) = CertBuilder::general_purpose(["backup@example.com"])
+        .set_profile(sequoia_openpgp::Profile::RFC4880)
+        .unwrap()
+        .set_cipher_suite(CipherSuite::P256)
+        .set_features(Features::empty().set_seipdv1())
+        .unwrap()
+        .generate()
+        .unwrap();
+    let mut public = Vec::new();
+    cert.armored().export(&mut public).unwrap();
+    let mut secret = Vec::new();
+    cert.as_tsk().armored().serialize(&mut secret).unwrap();
+    (
+        attest_generated_cert(String::from_utf8(public).unwrap()),
+        String::from_utf8(secret).unwrap(),
+    )
 }
 
 /// Keep the expired software key in the same certificate as the attested keys.
@@ -125,10 +145,36 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
         } else {
             candidates.for_transport_encryption().next().unwrap()
         };
-        let bytes = match key.key().mpis() {
-            mpi::PublicKey::EdDSA { curve, q } | mpi::PublicKey::ECDH { curve, q, .. } => {
-                q.decode_point(curve).unwrap().0.to_vec()
+        let (bytes, algorithm, x25519) = match key.key().mpis() {
+            mpi::PublicKey::ECDSA {
+                curve: Curve::NistP256,
+                q,
             }
+            | mpi::PublicKey::ECDH {
+                curve: Curve::NistP256,
+                q,
+                ..
+            } => {
+                q.decode_point(&Curve::NistP256).unwrap();
+                (q.value().to_vec(), &PKCS_ECDSA_P256_SHA256, false)
+            }
+            mpi::PublicKey::EdDSA {
+                curve: Curve::Ed25519,
+                q,
+            } => (
+                q.decode_point(&Curve::Ed25519).unwrap().0.to_vec(),
+                &PKCS_ED25519,
+                false,
+            ),
+            mpi::PublicKey::ECDH {
+                curve: Curve::Cv25519,
+                q,
+                ..
+            } => (
+                q.decode_point(&Curve::Cv25519).unwrap().0.to_vec(),
+                &PKCS_ED25519,
+                true,
+            ),
             other => panic!("unexpected fixture key: {other:?}"),
         };
         let mut statement_params = params(if signing {
@@ -143,11 +189,11 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
                 vec![2, 1, 1], // Canonical ASN.1 INTEGER: generated on device.
             ));
         let mut der = statement_params
-            .signed_by(&RawPublicKey(bytes), &device, &device_key)
+            .signed_by(&RawPublicKey(bytes, algorithm), &device, &device_key)
             .unwrap()
             .der()
             .to_vec();
-        if !signing {
+        if x25519 {
             // rcgen lacks X25519 SPKI. Change only the Ed25519 SPKI OID,
             // then sign the resulting TBS with the actual device key.
             let (_, parsed) = parse_x509_certificate(&der).unwrap();
