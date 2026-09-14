@@ -384,7 +384,11 @@ impl Hashi {
         epoch: u64,
         write_backup: bool,
     ) -> anyhow::Result<Option<PathBuf>> {
-        match crate::backup::cleanup_old_backups(&self.config.backup_dir, jiff::Timestamp::now()) {
+        match crate::backup::cleanup_old_backups(
+            &self.config.backup_dir,
+            jiff::Timestamp::now(),
+            write_backup && self.config_path.is_some(),
+        ) {
             Ok(stats) => tracing::info!(
                 epoch,
                 write_backup,
@@ -1654,6 +1658,69 @@ mod test {
         );
     }
 
+    fn archive_name_days_ago(days: i64) -> String {
+        jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_hours(days * 24))
+            .unwrap()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .strftime("hashi-backup-%Y%m%dT%H%M%SZ.tar.asc")
+            .to_string()
+    }
+
+    #[test]
+    fn automatic_backup_expires_the_last_archive_when_no_save_can_follow() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let backup_dir = tmpdir.path().join("backups");
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().join("db"));
+        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_dir = backup_dir.clone();
+        let hashi = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            None,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let stale = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&stale, b"stale archive").unwrap();
+
+        assert_eq!(
+            hashi.maintain_backups_after_epoch_change(6, true).unwrap(),
+            None
+        );
+
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn automatic_backup_spares_the_last_archive_when_the_save_that_follows_fails() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let backup_dir = tmpdir.path().join("backups");
+        let config_path = tmpdir.path().join("config.toml");
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().join("db"));
+        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_dir = backup_dir.clone();
+        config.save(&config_path).unwrap();
+        let hashi = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            Some(config_path.clone()),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let stale = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&stale, b"stale archive").unwrap();
+        std::fs::remove_file(&config_path).unwrap();
+
+        assert!(hashi.maintain_backups_after_epoch_change(6, true).is_err());
+
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale archive");
+    }
+
     #[test]
     fn automatic_backup_expires_archives_without_losing_recovery_after_failed_save() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
@@ -1676,9 +1743,9 @@ mod test {
         )
         .unwrap();
         std::fs::create_dir_all(&backup_dir).unwrap();
-        let expired = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        let expired = backup_dir.join(archive_name_days_ago(20));
         std::fs::write(&expired, b"old archive").unwrap();
-        let older = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
+        let older = backup_dir.join(archive_name_days_ago(25));
         std::fs::write(&older, b"older archive").unwrap();
         std::fs::remove_file(&config_path).unwrap();
 
@@ -1693,7 +1760,6 @@ mod test {
             .expect("backup should run");
 
         assert!(output.is_file());
-        // The pre-save sweep keeps the previous recovery archive even after a successful save.
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
 
         std::fs::remove_file(config_path).unwrap();
@@ -1703,7 +1769,7 @@ mod test {
     }
 
     #[test]
-    fn automatic_backup_cleanup_only_preserves_recovery_without_writing() {
+    fn automatic_backup_cleanup_expires_the_last_archive_once_it_is_stale() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let config_path = tmpdir.path().join("config.toml");
         let backup_dir = tmpdir.path().join("backups");
@@ -1731,12 +1797,12 @@ mod test {
         );
 
         assert!(!older.exists());
-        assert_eq!(std::fs::read(&newest).unwrap(), b"last recovery archive");
+        assert!(!newest.exists());
         let remaining = std::fs::read_dir(&backup_dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
-        assert_eq!(remaining, vec![newest]);
+        assert!(remaining.is_empty(), "{remaining:?}");
     }
 
     #[test]

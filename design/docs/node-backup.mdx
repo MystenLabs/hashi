@@ -258,14 +258,16 @@ backup-dir = "/var/lib/hashi/backups"
 Use a persistent, node-specific backup directory outside the database directory,
 with write access restricted to the node's user.
 
-On epoch housekeeping, cleanup deletes archives older than 14 days by filename
-timestamp, except the newest archive. It also runs for nodes with no role, even
-though those nodes do not write a new backup. Each completed sweep logs its epoch,
-directory, whether a backup was requested, and `removed`/`failed` counts. Counts are
-per top-level entry; a removed restore directory counts once. Missing directories
-report zero counts. Unrelated files are preserved.
-Individual entry errors do not stop the sweep; cleanup failures do not prevent
-backup attempts. Retention runs before saving and still applies if the save fails.
+On epoch housekeeping, before the save, cleanup deletes archives older than 14 days by
+filename timestamp. The newest is kept while the node is still attempting saves; a node
+with no role attempts none, so its last archive expires at 30 days. A powered-off node
+sweeps nothing, so delete a decommissioned host's archives yourself, and copy them
+elsewhere before restarting a long-offline node.
+
+Each sweep logs its epoch, directory, whether a backup was requested, and `removed`/`failed`
+counts; expiring the newest archive also warns. Unrelated files are preserved, entry errors
+do not stop the sweep, and a cleanup failure does not prevent the backup attempt.
+
 Manual backups do not trigger cleanup, but archives placed in `backup-dir` follow
 the same policy. Keep longer-term copies elsewhere.
 
