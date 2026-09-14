@@ -305,3 +305,81 @@ impl<T: KpSigningIntent> KpSigned<T> {
         self.signer_cert.fingerprint()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guardian::crypto::encryption::attested_test_utils::mock_attested_kp_keypair_with_expired_signer;
+    use sequoia_openpgp::policy::StandardPolicy;
+    use sequoia_openpgp::serialize::stream::Armorer;
+    use sequoia_openpgp::serialize::stream::Message;
+    use sequoia_openpgp::serialize::stream::Signer;
+    use std::io::Write;
+    use std::time::SystemTime;
+
+    #[test]
+    fn kp_signed_rejects_backdated_signature_from_unattested_expired_subkey() {
+        let (attested, secret, signature_time) = mock_attested_kp_keypair_with_expired_signer();
+        let policy = StandardPolicy::new();
+        let old_key = secret
+            .keys()
+            .secret()
+            .with_policy(&policy, None)
+            .for_signing()
+            .find(|key| key.alive().is_err())
+            .expect("fixture must retain an expired signing key");
+        let old_fingerprint = old_key.key().fingerprint();
+        assert_ne!(&old_fingerprint, attested.signing_fingerprint());
+        assert_eq!(secret.fingerprint(), attested.fingerprint());
+
+        // This is a freshly constructed request for the current session, not a
+        // replay of an old payload. An old software key can backdate its signature.
+        let request = CeremonyConfirmationRequest::new("current-session".into(), [42; 32]);
+        let payload = KpSigned::signed_bytes(&request);
+        let sign = |fingerprint: &Fingerprint, time: SystemTime| {
+            let keypair = secret
+                .keys()
+                .secret()
+                .find(|key| key.key().fingerprint() == *fingerprint)
+                .unwrap()
+                .key()
+                .clone()
+                .into_keypair()
+                .unwrap();
+            let mut signature = Vec::new();
+            let message = Armorer::new(Message::new(&mut signature))
+                .kind(sequoia_openpgp::armor::Kind::Signature)
+                .build()
+                .unwrap();
+            let mut signer = Signer::new(message, keypair)
+                .unwrap()
+                .creation_time(time)
+                .detached()
+                .build()
+                .unwrap();
+            signer.write_all(&payload).unwrap();
+            signer.finalize().unwrap();
+            String::from_utf8(signature).unwrap()
+        };
+        let old_signature = sign(&old_fingerprint, signature_time);
+
+        // Use the production verifier at its normal CURRENT verification time.
+        // Sequoia checks subkey validity at signature creation time. This proves
+        // rejection below is attested-key pinning, not expiration or bad crypto.
+        verify_detached_signature_for_key(
+            &payload,
+            &old_signature,
+            attested.cert(),
+            &old_fingerprint,
+        )
+        .expect("the historical key's backdated signature must remain valid OpenPGP");
+        let forged = KpSigned::from_parts(request.clone(), attested.clone(), old_signature);
+        assert!(forged.verify_signature().is_err());
+        // Consuming extraction is also a public authentication boundary.
+        assert!(forged.verify_into_data().is_err());
+
+        let signature = sign(attested.signing_fingerprint(), SystemTime::now());
+        let valid = KpSigned::from_parts(request.clone(), attested, signature);
+        assert_eq!(valid.verify_into_data().unwrap(), request);
+    }
+}

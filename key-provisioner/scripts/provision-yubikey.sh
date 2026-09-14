@@ -362,8 +362,9 @@ printf 'Primary-key fingerprint: %s\n' "$FINGERPRINT"
 printf 'Fingerprint file: %s\n' "$FINGERPRINT_FILE"
 printf '%s\n' \
   "Give these five public files to the guardian operator." \
-  "Keep all three PEM sidecars with the armored public certificate for later attestation verification." \
-  "This script does not cryptographically verify attestations; guardian/CLI enforcement is not wired in." \
+  "Keep matching PEM sidecars beside every .asc on each host running certificate-loading commands." \
+  "The script checks attestation outputs are nonempty; the CLI and guardian verify the proofs." \
+  "For attestation policy and replacement bundles, see key-provisioner/provision.md." \
   "Do not send either PIN or any local GnuPG data." \
   "The public certificate, fingerprint file, and attestation PEMs are retained in the selected output directory." \
   "The public certificate remains in your GnuPG keyring; the four test files will now be deleted."
