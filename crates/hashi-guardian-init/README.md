@@ -354,10 +354,13 @@ the old key). Any `t` of the remaining KPs replace the whole set instead:
    to `prev_builds`. Then replace the standby slot with a withdraw-mode
    guardian: `operator provision` (no `--do-genesis`) and
    `key-provisioner provision` by the new KPs run while the old guardian still
-   serves. Stop the old guardian, then `operator activate`: it needs every
-   other session in the bucket quiet for 10 minutes since its last heartbeat
-   and retries until then. Switch traffic to the new guardian; withdrawals
-   pause between the stop and the activation.
+   serves. Switch traffic to the new guardian first, while that can still be
+   undone: the proxy keeps serving already-signed withdrawals from its cache,
+   and new ones get retriable errors until activation. Then stop the old
+   guardian, which can't be undone (a restarted guardian is a new session
+   that must be provisioned again), and run `operator activate`: it needs
+   every other session in the bucket quiet for 10 minutes since its last
+   heartbeat and retries until then.
 
 The rotation does not revoke the old shares: `kp-shares/{old seq}/` stays
 readable by the old certs, so `t` old keys could still reconstruct the key
