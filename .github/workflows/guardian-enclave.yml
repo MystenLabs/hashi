@@ -237,9 +237,13 @@ jobs:
             echo "detect did not succeed ($DETECT_RESULT): cannot tell whether an EIF input changed, failing closed"
             exit 1
           fi
-          if [ "$EIF_CHANGED" != true ]; then
+          if [ "$EIF_CHANGED" = false ]; then
             echo "No EIF input changed; nothing to build." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+          if [ "$EIF_CHANGED" != true ]; then
+            echo "detect's eif output is '$EIF_CHANGED', not true or false: failing closed"
+            exit 1
           fi
           if [ "$BUILD_RESULT" != success ]; then
             echo "An EIF input changed and the build did not succeed ($BUILD_RESULT)"
