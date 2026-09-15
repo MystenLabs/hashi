@@ -10,6 +10,8 @@ use std::time::Duration;
 use anyhow::anyhow;
 use sui_sdk_types::Address;
 
+use crate::btc_monitor::config::Network;
+use crate::config::Config;
 use crate::onchain::types::DepositRequest;
 
 const TRM_API_URL: &str = "https://api.trmlabs.com";
@@ -72,7 +74,25 @@ impl DepositScreening {
 }
 
 impl TrmClient {
-    pub fn new(api_key: String) -> anyhow::Result<Self> {
+    /// Returns `None`, so screening is skipped, without an API key or off
+    /// mainnet. TRM only screens mainnet, and startup pairs Bitcoin mainnet
+    /// only with Sui mainnet.
+    pub fn from_config(config: &Config) -> anyhow::Result<Option<Self>> {
+        match (config.trm_api_key(), config.bitcoin_network()) {
+            (Some(api_key), Network::Bitcoin) => Self::new(api_key.to_owned()).map(Some),
+            (None, Network::Bitcoin) => {
+                tracing::warn!("No TRM API key configured; AML screening is disabled");
+                Ok(None)
+            }
+            (Some(_), _) => {
+                tracing::warn!("TRM only screens mainnet; AML screening is disabled");
+                Ok(None)
+            }
+            (None, _) => Ok(None),
+        }
+    }
+
+    fn new(api_key: String) -> anyhow::Result<Self> {
         Self::with_base_url(api_key, TRM_API_URL)
     }
 
@@ -378,6 +398,8 @@ mod tests {
     use sui_sdk_types::Digest;
 
     use super::*;
+    use crate::constants::BITCOIN_MAINNET_CHAIN_ID;
+    use crate::constants::BITCOIN_TESTNET4_CHAIN_ID;
     use crate::onchain::types::Utxo;
     use crate::onchain::types::UtxoId;
 
@@ -511,6 +533,23 @@ mod tests {
 
     fn deposit(recipient: Option<Address>) -> DepositScreening {
         DepositScreening::new(&deposit_request(recipient), BTC_DEPOSIT_ADDRESS.to_owned())
+    }
+
+    #[test]
+    fn screening_needs_an_api_key_and_mainnet() {
+        let mut config = Config::new_for_testing();
+        config.bitcoin_chain_id = Some(BITCOIN_MAINNET_CHAIN_ID.to_owned());
+        assert!(TrmClient::from_config(&config).unwrap().is_none());
+
+        config.trm_api_key = Some(API_KEY.to_owned());
+        assert!(TrmClient::from_config(&config).unwrap().is_some());
+
+        // Startup accepts the chain id in either hex case.
+        config.bitcoin_chain_id = Some(BITCOIN_MAINNET_CHAIN_ID.to_uppercase());
+        assert!(TrmClient::from_config(&config).unwrap().is_some());
+
+        config.bitcoin_chain_id = Some(BITCOIN_TESTNET4_CHAIN_ID.to_owned());
+        assert!(TrmClient::from_config(&config).unwrap().is_none());
     }
 
     #[tokio::test]

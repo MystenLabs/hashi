@@ -823,25 +823,14 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
-        let trm_client = match self.config.trm_api_key() {
-            None => {
-                tracing::warn!("No TRM API key configured; AML screening will be skipped");
-                None
-            }
-            Some(_) if self.config.bitcoin_chain_id() != constants::BITCOIN_MAINNET_CHAIN_ID => {
-                tracing::warn!("TRM only screens mainnet; AML screening will be skipped");
-                None
-            }
-            Some(api_key) => Some(trm::TrmClient::new(api_key.to_owned())?),
-        };
-        self.trm_client
-            .set(trm_client)
-            .map_err(|_| anyhow!("TRM client already initialized"))?;
-
         // Verify Sui RPC is on the expected chain before loading any state,
         // then that the chain pair is one the protocol deploys.
         self.verify_sui_chain_id().await?;
         self.verify_chain_pairing()?;
+
+        self.trm_client
+            .set(trm::TrmClient::from_config(&self.config)?)
+            .map_err(|_| anyhow!("TRM client already initialized"))?;
 
         // Initialize on-chain state first so we can read guardian config from it.
         let onchain_service = self.initialize_onchain_state().await?;
