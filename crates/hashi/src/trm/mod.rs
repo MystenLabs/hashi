@@ -5,6 +5,7 @@
 //! operator's own API key.
 
 use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -28,6 +29,11 @@ const SCREENING_TIMEOUT: Duration = Duration::from_secs(20);
 const TRANSFER_WAIT: Duration = Duration::from_secs(10);
 const TRANSFER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// TRM allows each account 10 requests per second per endpoint. Spacing
+/// requests further apart makes a burst wait for its turn instead of failing
+/// with 429.
+const REQUEST_INTERVAL: Duration = Duration::from_millis(125);
+
 /// TRM's "High" risk score level. Scores at or above it reject.
 const HIGH_RISK_SCORE_LEVEL: u8 = 10;
 
@@ -35,6 +41,9 @@ pub struct TrmClient {
     http: reqwest::Client,
     base_url: reqwest::Url,
     api_key: String,
+    transfer_submissions: Pacer,
+    transfer_reads: Pacer,
+    address_screenings: Pacer,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -112,6 +121,9 @@ impl TrmClient {
             http,
             base_url: reqwest::Url::parse(base_url)?,
             api_key,
+            transfer_submissions: Pacer::new(),
+            transfer_reads: Pacer::new(),
+            address_screenings: Pacer::new(),
         })
     }
 
@@ -120,15 +132,19 @@ impl TrmClient {
     /// screening result.
     pub async fn screen_deposit(&self, deposit: &DepositScreening) -> Result<Verdict, TrmError> {
         let started = Instant::now();
-        with_deadline(async {
-            let transfer = self.submit_deposit_transfer(deposit).await?;
+        let deadline = started + SCREENING_TIMEOUT;
+        with_deadline(deadline, async {
+            let transfer = self.submit_deposit_transfer(deposit, deadline).await?;
             if let Some(recipient) = deposit.recipient {
                 let recipient = recipient.to_string();
                 let verdict = self
-                    .screen_addresses(&[AddressQuery {
-                        address: &recipient,
-                        chain: SUI_CHAIN,
-                    }])
+                    .screen_addresses(
+                        &[AddressQuery {
+                            address: &recipient,
+                            chain: SUI_CHAIN,
+                        }],
+                        deadline,
+                    )
                     .await?;
                 if verdict != Verdict::Approved {
                     return Ok(verdict);
@@ -136,7 +152,7 @@ impl TrmClient {
             }
             let uuid = transfer.uuid.as_str();
             poll_transfer(
-                || async move { self.get_transfer(uuid).await?.verdict() },
+                || async move { self.get_transfer(uuid, deadline).await?.verdict() },
                 started + TRANSFER_WAIT,
             )
             .await
@@ -152,22 +168,30 @@ impl TrmClient {
         sender: Address,
     ) -> Result<Verdict, TrmError> {
         let sender = sender.to_string();
-        with_deadline(self.screen_addresses(&[
-            AddressQuery {
-                address: bitcoin_address,
-                chain: BITCOIN_CHAIN,
-            },
-            AddressQuery {
-                address: &sender,
-                chain: SUI_CHAIN,
-            },
-        ]))
+        let deadline = Instant::now() + SCREENING_TIMEOUT;
+        with_deadline(
+            deadline,
+            self.screen_addresses(
+                &[
+                    AddressQuery {
+                        address: bitcoin_address,
+                        chain: BITCOIN_CHAIN,
+                    },
+                    AddressQuery {
+                        address: &sender,
+                        chain: SUI_CHAIN,
+                    },
+                ],
+                deadline,
+            ),
+        )
         .await
     }
 
     async fn submit_deposit_transfer(
         &self,
         deposit: &DepositScreening,
+        deadline: Instant,
     ) -> Result<Transfer, TrmError> {
         let submission = TransferSubmission {
             account_external_id: deposit.recipient.unwrap_or(deposit.sender).to_string(),
@@ -186,20 +210,36 @@ impl TrmClient {
             transfer_type: "CRYPTO_DEPOSIT",
         };
         let url = self.url(&["public", "v2", "tm", "transfers"]);
-        self.send(self.http.post(url).json(&submission)).await
+        self.send(
+            &self.transfer_submissions,
+            self.http.post(url).json(&submission),
+            deadline,
+        )
+        .await
     }
 
-    async fn get_transfer(&self, uuid: &str) -> Result<Transfer, TrmError> {
+    async fn get_transfer(&self, uuid: &str, deadline: Instant) -> Result<Transfer, TrmError> {
         let mut url = self.url(&["public", "v2", "tm", "transfers"]);
         url.path_segments_mut()
             .expect("TRM base URL is an http(s) URL")
             .push(uuid);
-        self.send(self.http.get(url)).await
+        self.send(&self.transfer_reads, self.http.get(url), deadline)
+            .await
     }
 
-    async fn screen_addresses(&self, queries: &[AddressQuery<'_>]) -> Result<Verdict, TrmError> {
+    async fn screen_addresses(
+        &self,
+        queries: &[AddressQuery<'_>],
+        deadline: Instant,
+    ) -> Result<Verdict, TrmError> {
         let url = self.url(&["public", "v2", "screening", "addresses"]);
-        let results: Vec<AddressScreening> = self.send(self.http.post(url).json(queries)).await?;
+        let results: Vec<AddressScreening> = self
+            .send(
+                &self.address_screenings,
+                self.http.post(url).json(queries),
+                deadline,
+            )
+            .await?;
         if results.len() != queries.len() {
             return Err(TrmError::Permanent(anyhow!(
                 "TRM returned {} screening results for {} addresses",
@@ -229,8 +269,11 @@ impl TrmClient {
 
     async fn send<T: serde::de::DeserializeOwned>(
         &self,
+        pacer: &Pacer,
         request: reqwest::RequestBuilder,
+        deadline: Instant,
     ) -> Result<T, TrmError> {
+        pacer.wait_turn(deadline).await?;
         let response = request
             .basic_auth(&self.api_key, Some(&self.api_key))
             .header(reqwest::header::ACCEPT, "application/json")
@@ -245,6 +288,9 @@ impl TrmClient {
             })?;
         let status = response.status();
         if !status.is_success() {
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                pacer.hold_until(Instant::now() + retry_after(response.headers()));
+            }
             let body = response.text().await.unwrap_or_default();
             let error = anyhow!(
                 "TRM returned {status}: {}",
@@ -372,10 +418,48 @@ impl Transfer {
     }
 }
 
+/// Spaces the requests to one TRM endpoint `REQUEST_INTERVAL` apart.
+struct Pacer {
+    next_turn: Mutex<Instant>,
+}
+
+impl Pacer {
+    fn new() -> Self {
+        Self {
+            next_turn: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Waits for the endpoint's next free turn. Refuses, without taking the
+    /// turn, when it would start after `deadline`.
+    async fn wait_turn(&self, deadline: Instant) -> Result<(), TrmError> {
+        let turn = {
+            let mut next_turn = self.next_turn.lock().unwrap();
+            let turn = (*next_turn).max(Instant::now());
+            if turn > deadline {
+                return Err(TrmError::Transient(anyhow!(
+                    "TRM requests are queued past the screening deadline"
+                )));
+            }
+            *next_turn = turn + REQUEST_INTERVAL;
+            turn
+        };
+        tokio::time::sleep_until(turn).await;
+        Ok(())
+    }
+
+    /// Holds back every later turn until `until`.
+    fn hold_until(&self, until: Instant) {
+        let mut next_turn = self.next_turn.lock().unwrap();
+        *next_turn = (*next_turn).max(until);
+    }
+}
+
 async fn with_deadline(
+    deadline: Instant,
     screening: impl Future<Output = Result<Verdict, TrmError>>,
 ) -> Result<Verdict, TrmError> {
-    tokio::time::timeout(SCREENING_TIMEOUT, screening)
+    tokio::time::timeout_at(deadline, screening)
         .await
         .unwrap_or_else(|_| {
             Err(TrmError::Transient(anyhow!(
@@ -400,6 +484,16 @@ where
     }
 }
 
+/// How long TRM asks us to wait after a 429, capped so a bad header can't
+/// stall screening.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Duration {
+    let seconds = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok()?.trim().parse().ok())
+        .unwrap_or(1);
+    Duration::from_secs(seconds.min(60))
+}
+
 fn btc_amount(sats: u64) -> String {
     format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
 }
@@ -420,9 +514,11 @@ mod tests {
 
     use axum::extract::State;
     use axum::http::HeaderMap;
+    use axum::http::HeaderValue;
     use axum::http::Method;
     use axum::http::StatusCode;
     use axum::http::Uri;
+    use axum::response::IntoResponse;
     use base64ct::Encoding as _;
     use serde_json::Value;
     use serde_json::json;
@@ -469,9 +565,9 @@ mod tests {
         uri: Uri,
         headers: HeaderMap,
         body: String,
-    ) -> (StatusCode, String) {
+    ) -> axum::response::Response {
         if !authorized(&headers) {
-            return (StatusCode::UNAUTHORIZED, String::new());
+            return StatusCode::UNAUTHORIZED.into_response();
         }
         let mut mock = mock.lock().unwrap();
         mock.requests.push((
@@ -482,7 +578,14 @@ mod tests {
             .responses
             .pop_front()
             .unwrap_or((StatusCode::NOT_IMPLEMENTED, json!("unexpected request")));
-        (status, response.to_string())
+        let mut reply = (status, response.to_string()).into_response();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            reply.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_static("2"),
+            );
+        }
+        reply
     }
 
     fn authorized(headers: &HeaderMap) -> bool {
@@ -835,6 +938,66 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, TrmError::Transient(e) if e.to_string().contains("timed out")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requests_to_an_endpoint_take_turns() {
+        let pacer = &Pacer::new();
+        let started = Instant::now();
+        let turn = || async move {
+            pacer.wait_turn(started + SCREENING_TIMEOUT).await.unwrap();
+            started.elapsed()
+        };
+
+        let turns = tokio::join!(turn(), turn(), turn());
+
+        assert_eq!(
+            turns,
+            (Duration::ZERO, REQUEST_INTERVAL, 2 * REQUEST_INTERVAL)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_after_the_deadline_is_refused_without_taking_it() {
+        let pacer = Pacer::new();
+        let started = Instant::now();
+
+        pacer.wait_turn(started).await.unwrap();
+        let refused = pacer.wait_turn(started).await;
+        pacer.wait_turn(started + SCREENING_TIMEOUT).await.unwrap();
+
+        assert!(matches!(refused, Err(TrmError::Transient(_))));
+        assert_eq!(started.elapsed(), REQUEST_INTERVAL);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_endpoint_holds_its_turns_for_retry_after() {
+        let (client, _) = mock_trm([(StatusCode::TOO_MANY_REQUESTS, json!({}))]).await;
+
+        client
+            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
+            .await
+            .unwrap_err();
+
+        let next_turn = *client.address_screenings.next_turn.lock().unwrap();
+        assert!(next_turn > Instant::now() + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn retry_after_is_read_in_seconds_and_capped() {
+        let headers = |value: &'static str| {
+            reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::RETRY_AFTER,
+                reqwest::header::HeaderValue::from_static(value),
+            )])
+        };
+
+        assert_eq!(retry_after(&headers("3")), Duration::from_secs(3));
+        assert_eq!(retry_after(&headers("86400")), Duration::from_secs(60));
+        assert_eq!(
+            retry_after(&reqwest::header::HeaderMap::new()),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
