@@ -29,7 +29,7 @@ const SCREENING_TIMEOUT: Duration = Duration::from_secs(20);
 const TRANSFER_WAIT: Duration = Duration::from_secs(10);
 const TRANSFER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// TRM allows each account 10 requests per second per endpoint. Spacing
+/// TRM allows each organization 10 requests per second per endpoint. Spacing
 /// requests further apart makes a burst wait for its turn instead of failing
 /// with 429.
 const REQUEST_INTERVAL: Duration = Duration::from_millis(125);
@@ -150,6 +150,7 @@ impl TrmClient {
                     return Ok(verdict);
                 }
             }
+            // The POST reports PROCESSING even for a transfer TRM has already screened.
             let uuid = transfer.uuid.as_str();
             poll_transfer(
                 || async move { self.get_transfer(uuid, deadline).await?.verdict() },
