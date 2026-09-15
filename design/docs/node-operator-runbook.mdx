@@ -479,9 +479,6 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Optional Integrations ─────────────────────────────────────────────
 
-# Screener gRPC endpoint for AML/sanctions checking (when unset, screening is skipped)
-# screener-endpoint = "https://screener.example.com"
-
 # Guardian gRPC endpoint (when unset, the guardian integration is bypassed)
 # guardian-endpoint = "https://hashi-guardian.example.com"
 
@@ -1336,10 +1333,6 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 ## 12. Coming soon
 
 The following capabilities are planned but not yet available.
-
-### Screener setup
-
-> **Coming soon:** Guidance on AML/sanctions screening. The `screener-endpoint` config field points to a gRPC screener service; when unset, screening is skipped. Setup instructions to follow.
 
 ### Metrics push service
 

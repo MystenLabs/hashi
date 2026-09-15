@@ -45,42 +45,10 @@ impl Hashi {
         Ok(())
     }
 
-    /// Run AML/Sanctions checks for the deposit request.
-    /// If no screener client is configured, checks are skipped.
-    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn screen_deposit(
         &self,
-        deposit_request: &DepositRequest,
+        _deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
-        let Some(screener) = self.screener_client() else {
-            tracing::debug!("AML checks skipped: no screener configured");
-            return Ok(());
-        };
-
-        // bitcoin
-        let source_tx_hash = deposit_request.utxo.id.txid.to_string();
-        let bitcoin_chain_id = self.config.bitcoin_chain_id().to_string();
-
-        // sui
-        let destination_address = deposit_request.id.to_string();
-        let sui_chain_id = self.config.sui_chain_id().to_string();
-
-        let approved = screener
-            .approve_deposit(
-                &source_tx_hash,
-                &destination_address,
-                &bitcoin_chain_id,
-                &sui_chain_id,
-            )
-            .await
-            .map_err(|e| UnapprovedDepositError::AmlServiceError(anyhow!(e)))?;
-
-        if !approved {
-            return Err(UnapprovedDepositError::AmlRejected(anyhow!(
-                "AML checks failed for source tx {source_tx_hash}, destination {destination_address}, bitcoin chain {bitcoin_chain_id}, sui chain {sui_chain_id}"
-            )));
-        }
-
         Ok(())
     }
 
@@ -434,7 +402,7 @@ pub enum UnapprovedDepositError {
     #[error("Bitcoin deposit is not yet confirmed: {0}")]
     BitcoinNotConfirmed(#[source] anyhow::Error),
 
-    #[error("Screener service error: {0}")]
+    #[error("AML service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
     #[error("Invalid on-chain deposit request: {0}")]

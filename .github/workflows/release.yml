@@ -81,7 +81,6 @@ jobs:
     needs: reserve
     uses: ./.github/workflows/deterministic-build.yml
     with:
-      hashi_only: true
       source_sha: ${{ needs.reserve.outputs.sha }}
 
   publish:

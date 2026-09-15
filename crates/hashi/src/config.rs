@@ -115,11 +115,6 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_batch_size_per_weight: Option<u16>,
 
-    /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
-    /// When not set, AML screening is skipped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub screener_endpoint: Option<String>,
-
     /// URL of the `hashi-guardian` gRPC endpoint. When not set, the guardian
     /// integration is bypassed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -427,10 +422,6 @@ impl Config {
         self.test_weight_divisor.unwrap_or(1)
     }
 
-    pub fn screener_endpoint(&self) -> Option<&str> {
-        self.screener_endpoint.as_deref()
-    }
-
     pub fn guardian_endpoint(&self) -> Option<&str> {
         self.guardian_endpoint.as_deref()
     }
@@ -517,7 +508,6 @@ impl Config {
             force_run_as_leader: None,
             test_weight_divisor: None,
             test_batch_size_per_weight: None,
-            screener_endpoint: None,
             guardian_endpoint: None,
             grpc_max_decoding_message_size: None,
             grpc_per_peer_inflight_limit: None,

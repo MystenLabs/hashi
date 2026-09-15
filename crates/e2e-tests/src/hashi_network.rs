@@ -285,8 +285,6 @@ pub struct HashiNetwork {
     /// The severable Sui RPC proxy in front of the node selected via
     /// `with_sui_rpc_proxy_for_node`, if any.
     sui_rpc_proxy: Option<crate::tcp_proxy::TcpProxy>,
-    /// Keeps the mock screener gRPC server alive for the lifetime of the test network.
-    _screener_service: Service,
 }
 
 impl HashiNetwork {
@@ -512,11 +510,6 @@ impl HashiNetworkBuilder {
         upgrade_cap_id: Address,
         guardian: hashi::publish::GuardianConfig,
     ) -> Result<HashiNetwork> {
-        // Start a mock screener server for integration tests
-        let (screener_addr, screener_service) =
-            hashi_screener::test_utils::start_mock_screener_server().await;
-        let screener_endpoint = format!("http://{}", screener_addr);
-
         let bitcoin_rpc = bitcoin.rpc_url().to_owned();
         let sui_rpc = sui.rpc_url.clone();
         // Interpose the severable proxy for the selected node before the
@@ -583,7 +576,6 @@ impl HashiNetworkBuilder {
             config.bitcoin_trusted_peers = Some(vec![bitcoin.p2p_address()]);
             config.bitcoin_chain_id = Some(hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string());
             config.sui_chain_id = service_info.chain_id.clone();
-            config.screener_endpoint = Some(screener_endpoint.clone());
             let node_name = validator_address.to_string();
             config.backup_dir = dir.join("backups").join(&node_name);
             config.db = Some(dir.join(node_name));
@@ -631,7 +623,6 @@ impl HashiNetworkBuilder {
             guardian,
             nodes,
             sui_rpc_proxy,
-            _screener_service: screener_service,
         };
 
         // Unlock genesis, then wait for the initial committee to appear
