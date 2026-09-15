@@ -37,6 +37,7 @@ pub mod storage;
 pub mod sui_rpc_client;
 pub mod sui_tx_executor;
 pub mod tls;
+pub mod trm;
 pub mod utxo_pool;
 pub mod withdrawals;
 
@@ -65,6 +66,7 @@ pub struct Hashi {
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
+    trm_client: OnceLock<Option<trm::TrmClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
@@ -99,6 +101,7 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            trm_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -132,6 +135,7 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
+            trm_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -243,6 +247,10 @@ impl Hashi {
 
     pub fn mpc_handle(&self) -> Option<&mpc::MpcHandle> {
         self.mpc_handle.get()
+    }
+
+    pub fn trm_client(&self) -> Option<&trm::TrmClient> {
+        self.trm_client.get().and_then(|opt| opt.as_ref())
     }
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
@@ -819,6 +827,14 @@ impl Hashi {
         // then that the chain pair is one the protocol deploys.
         self.verify_sui_chain_id().await?;
         self.verify_chain_pairing()?;
+
+        let trm_client = trm::TrmClient::from_config(&self.config)?;
+        self.metrics
+            .trm_enabled
+            .set(i64::from(trm_client.is_some()));
+        self.trm_client
+            .set(trm_client)
+            .map_err(|_| anyhow!("TRM client already initialized"))?;
 
         // Initialize on-chain state first so we can read guardian config from it.
         let onchain_service = self.initialize_onchain_state().await?;

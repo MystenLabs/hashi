@@ -5,8 +5,10 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
 use crate::btc_monitor::monitor::DepositConfirmation;
 use crate::leader::RetryPolicy;
+use crate::metrics;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::trm;
 use anyhow::Context;
 use anyhow::anyhow;
 use bitcoin::ScriptBuf;
@@ -45,11 +47,37 @@ impl Hashi {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn screen_deposit(
         &self,
-        _deposit_request: &DepositRequest,
+        deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
-        Ok(())
+        let Some(trm) = self.trm_client() else {
+            return Ok(());
+        };
+        let deposit_address = self
+            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
+            .map_err(UnapprovedDepositError::AmlServiceError)?;
+        let screening = trm::DepositScreening::new(deposit_request, deposit_address.to_string());
+        let started = std::time::Instant::now();
+        let result = trm.screen_deposit(&screening).await;
+        self.metrics.record_trm_screening(
+            metrics::TRM_FLOW_DEPOSIT,
+            &result,
+            started.elapsed().as_secs_f64(),
+        );
+        match result {
+            Ok(trm::Verdict::Approved) => Ok(()),
+            Ok(trm::Verdict::Pending) => Err(UnapprovedDepositError::AmlServiceError(anyhow!(
+                "TRM is still screening deposit transaction {}",
+                deposit_request.utxo.id.txid
+            ))),
+            Ok(trm::Verdict::Rejected(reason)) => {
+                Err(UnapprovedDepositError::AmlRejected(anyhow!(reason)))
+            }
+            Err(trm::TrmError::Transient(e)) => Err(UnapprovedDepositError::AmlServiceError(e)),
+            Err(trm::TrmError::Permanent(e)) => Err(UnapprovedDepositError::AmlRejected(e)),
+        }
     }
 
     /// Validate that the deposit request exists on Sui
