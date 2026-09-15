@@ -8,6 +8,7 @@ use std::time::Duration;
 const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const THIRTY_DAYS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const NINETY_DAYS: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+const SIX_MONTHS: Duration = Duration::from_secs(182 * 24 * 60 * 60);
 const TEN_YEARS: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -87,9 +88,8 @@ pub const MAINNET_S3_OBJECT_LOCK_POLICY: S3ObjectLockPolicy = S3ObjectLockPolicy
     short_lived: THIRTY_DAYS,
 };
 
-/// Testnet is a durable deployment and uses the mainnet retention policy.
 pub const TESTNET_S3_OBJECT_LOCK_POLICY: S3ObjectLockPolicy = S3ObjectLockPolicy {
-    long_lived: TEN_YEARS,
+    long_lived: SIX_MONTHS,
     short_lived: THIRTY_DAYS,
 };
 
