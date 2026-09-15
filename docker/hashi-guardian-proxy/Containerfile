@@ -2,9 +2,8 @@
 
 # The out-of-enclave guardian proxy (wid cache, restricted forwarding,
 # provisioning relay, /info), deployed as an ECS Fargate task in front of the
-# enclave host. Same stage layout as docker/hashi-screener/Containerfile. The
-# enclave itself is built by docker/hashi-guardian/Containerfile into an EIF,
-# not an OCI image.
+# enclave host. The enclave itself is built by
+# docker/hashi-guardian/Containerfile into an EIF, not an OCI image.
 
 FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
 FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox

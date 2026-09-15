@@ -1598,46 +1598,10 @@ impl Hashi {
         }
     }
 
-    /// Run AML/Sanctions checks for a withdrawal request.
-    /// If no screener client is configured, checks are skipped.
-    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id))]
     pub(crate) async fn screen_withdrawal(
         &self,
-        request: &WithdrawalRequest,
+        _request: &WithdrawalRequest,
     ) -> Result<(), WithdrawalApprovalError> {
-        let Some(screener) = self.screener_client() else {
-            tracing::debug!("AML checks skipped: no screener configured");
-            return Ok(());
-        };
-
-        // Source: Sui tx digest (base58 string)
-        let source_tx_hash = request.sui_tx_digest.to_string();
-
-        // Destination: Bitcoin address (raw witness bytes -> bech32 string)
-        let destination_address = hashi_bitcoin::address_string_from_witness_program(
-            &request.bitcoin_address,
-            self.config.bitcoin_network(),
-        )
-        .map_err(WithdrawalApprovalError::NeverRetry)?;
-
-        let approved = screener
-            .approve_withdrawal(
-                &source_tx_hash,
-                &destination_address,
-                self.config.sui_chain_id(),
-                self.config.bitcoin_chain_id(),
-            )
-            .await
-            .map_err(|e| WithdrawalApprovalError::AmlServiceError(anyhow!(e)))?;
-
-        if !approved {
-            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
-                "AML checks failed for withdrawal request {:?} to {}",
-                request.id,
-                destination_address,
-            )));
-        }
-
         Ok(())
     }
 }
@@ -1682,7 +1646,7 @@ impl RetryPolicy for WithdrawalApprovalErrorKind {
 
 #[derive(Debug, Error)]
 pub enum WithdrawalApprovalError {
-    #[error("Screener service error: {0}")]
+    #[error("AML service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
     #[error("Never retry: {0}")]

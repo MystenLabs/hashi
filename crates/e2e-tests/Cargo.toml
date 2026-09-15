@@ -9,7 +9,6 @@ hashi-guardian = { path = "../hashi-guardian", features = [
     "test-utils",
     "non-enclave-dev",
 ] }
-hashi-screener = { path = "../hashi-screener", features = ["test-utils"] }
 hashi-types = { path = "../hashi-types" }
 
 sui-futures.workspace = true

@@ -65,7 +65,6 @@ pub struct Hashi {
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
-    screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
@@ -100,7 +99,6 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
-            screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -134,7 +132,6 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
-            screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -246,10 +243,6 @@ impl Hashi {
 
     pub fn mpc_handle(&self) -> Option<&mpc::MpcHandle> {
         self.mpc_handle.get()
-    }
-
-    pub fn screener_client(&self) -> Option<&grpc::screener_client::ScreenerClient> {
-        self.screener_client.get().and_then(|opt| opt.as_ref())
     }
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
@@ -822,34 +815,6 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
-        let screener = if let Some(endpoint) = self.config.screener_endpoint() {
-            match grpc::screener_client::ScreenerClient::new(endpoint) {
-                Ok(client) => {
-                    tracing::info!("Screener client configured for {}", client.endpoint());
-                    Some(client)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to configure screener client for {}: {}",
-                        endpoint,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            tracing::warn!("No screener endpoint configured; AML screening will be skipped");
-            None
-        };
-
-        self.metrics
-            .screener_enabled
-            .set(if screener.is_some() { 1 } else { 0 });
-
-        self.screener_client
-            .set(screener)
-            .map_err(|_| anyhow!("Screener client already initialized"))?;
-
         // Verify Sui RPC is on the expected chain before loading any state,
         // then that the chain pair is one the protocol deploys.
         self.verify_sui_chain_id().await?;

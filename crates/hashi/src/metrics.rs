@@ -34,8 +34,6 @@ pub struct Metrics {
     pub(crate) mpc_bytes_sent_total: IntCounterVec,
     pub(crate) mpc_bytes_received_total: IntCounterVec,
 
-    pub screener_enabled: IntGauge,
-
     // Guardian / local-limiter metrics
     pub guardian_enabled: IntGauge,
     pub guardian_limiter_initialized: IntGauge,
@@ -437,12 +435,6 @@ impl Metrics {
                 "hashi_mpc_bytes_received_total",
                 "Total bytes received in MPC RPC bodies, labeled by MPC protocol",
                 &["protocol"],
-                registry,
-            )
-            .unwrap(),
-            screener_enabled: register_int_gauge_with_registry!(
-                "hashi_screener_enabled",
-                "Whether AML screening is enabled (1) or disabled (0)",
                 registry,
             )
             .unwrap(),
