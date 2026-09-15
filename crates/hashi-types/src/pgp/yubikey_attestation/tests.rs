@@ -3,6 +3,7 @@
 
 use super::super::POLICY;
 use super::super::PgpPublicCert;
+use super::TRUSTED_ISSUERS;
 use super::parse_single_certificate_pem;
 use super::verify_yubikey_attestations;
 use super::verify_yubikey_attestations_with_issuers;
@@ -558,4 +559,38 @@ fn pem_parser_accepts_one_certificate_but_not_ambiguous_boundaries() {
     ] {
         assert!(parse_single_certificate_pem(invalid.as_bytes()).is_err());
     }
+}
+
+#[test]
+fn dev_attestations_are_trusted_only_by_non_enclave_dev_builds() {
+    for suite in [CipherSuite::Cv25519, CipherSuite::P256] {
+        let cert = pgp_cert_with_suite(suite, false, false);
+        let pems = crate::guardian::test_utils::dev_kp_attestations(&cert).unwrap();
+        let [device, sig, dec] = pems
+            .each_ref()
+            .map(|pem| parse_single_certificate_pem(pem).unwrap());
+        verify_yubikey_attestations_with_issuers(&cert, &device, &sig, &dec, &[device.as_slice()])
+            .unwrap();
+        let yubico = TRUSTED_ISSUERS.each_ref().map(Vec::as_slice);
+        assert!(
+            verify_yubikey_attestations_with_issuers(&cert, &device, &sig, &dec, &yubico).is_err()
+        );
+        let [device, sig, dec] = &pems;
+        assert_eq!(
+            verify_yubikey_attestations(&cert, device, sig, dec).is_ok(),
+            cfg!(feature = "non-enclave-dev"),
+        );
+    }
+}
+
+#[test]
+fn dev_attestations_reject_unsupported_keys() {
+    let (p384, _) = CertBuilder::general_purpose(["p384@example.com"])
+        .set_cipher_suite(CipherSuite::P384)
+        .generate()
+        .unwrap();
+    let mut public = Vec::new();
+    p384.armored().export(&mut public).unwrap();
+    let cert = PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap();
+    assert!(crate::guardian::test_utils::dev_kp_attestations(&cert).is_err());
 }

@@ -3,10 +3,12 @@
 
 use super::AttestedKpCert;
 use crate::pgp::PgpPublicCert;
+use anyhow::Context;
 use base64ct::Base64;
 use base64ct::Encoding;
 use ed25519_consensus::SigningKey;
 use rcgen::BasicConstraints;
+use rcgen::Certificate;
 use rcgen::CertificateParams;
 use rcgen::CustomExtension;
 use rcgen::DistinguishedName;
@@ -115,25 +117,50 @@ pub(in crate::guardian::crypto) fn mock_attested_kp_keypair_with_expired_signer(
 }
 
 fn attest_generated_cert(public: String) -> AttestedKpCert {
-    let pgp_cert = Cert::from_bytes(public.as_bytes()).unwrap();
     let cert = PgpPublicCert::new(public).unwrap();
-
     let issuer_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let mut issuer_params = params("test pinned issuer");
     issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let issuer = issuer_params.self_signed(&issuer_key).unwrap();
+    let [device, sig, dec] = attest(&cert, Some((&issuer, &issuer_key))).unwrap();
+    let keys = crate::pgp::verify_yubikey_attestations_with_issuers(
+        &cert,
+        &device,
+        &sig,
+        &dec,
+        &[issuer.der().as_ref()],
+    )
+    .expect("generated KP fixture must pass all attestation checks");
+    AttestedKpCert {
+        cert,
+        device_pem: pem(&device),
+        sig_pem: pem(&sig),
+        dec_pem: pem(&dec),
+        keys,
+    }
+}
+
+/// Sign a device certificate, by `issuer` or else by the device itself, and the
+/// device's SIG and DEC statements for `cert`'s signing and encryption keys.
+fn attest(
+    cert: &PgpPublicCert,
+    issuer: Option<(&Certificate, &KeyPair)>,
+) -> anyhow::Result<[Vec<u8>; 3]> {
+    let pgp_cert = Cert::from_bytes(cert.armored().as_bytes())?;
     let signing_key = SigningKey::new(rand::thread_rng());
     let mut pkcs8 = vec![
         0x30, 0x2e, 2, 1, 0, 0x30, 5, 6, 3, 0x2b, 0x65, 0x70, 4, 0x22, 4, 0x20,
     ];
     pkcs8.extend_from_slice(&signing_key.to_bytes());
-    let device_key = KeyPair::try_from(pkcs8).unwrap();
-    let device = params("test attestation device")
-        .signed_by(&device_key, &issuer, &issuer_key)
-        .unwrap();
+    let device_key = KeyPair::try_from(pkcs8)?;
+    let device_params = params("test attestation device");
+    let device = match issuer {
+        Some((issuer, issuer_key)) => device_params.signed_by(&device_key, issuer, issuer_key)?,
+        None => device_params.self_signed(&device_key)?,
+    };
 
     let policy = StandardPolicy::new();
-    let statements = [true, false].map(|signing| {
+    let [sig, dec] = [true, false].map(|signing| -> anyhow::Result<Vec<u8>> {
         let candidates = pgp_cert
             .keys()
             .with_policy(&policy, None)
@@ -141,9 +168,15 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
             .alive()
             .revoked(false);
         let key = if signing {
-            candidates.for_signing().next().unwrap()
+            candidates
+                .for_signing()
+                .next()
+                .context("OpenPGP certificate has no usable signing key")?
         } else {
-            candidates.for_transport_encryption().next().unwrap()
+            candidates
+                .for_transport_encryption()
+                .next()
+                .context("OpenPGP certificate has no usable encryption key")?
         };
         let (bytes, algorithm, x25519) = match key.key().mpis() {
             mpi::PublicKey::ECDSA {
@@ -155,14 +188,14 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
                 q,
                 ..
             } => {
-                q.decode_point(&Curve::NistP256).unwrap();
+                q.decode_point(&Curve::NistP256)?;
                 (q.value().to_vec(), &PKCS_ECDSA_P256_SHA256, false)
             }
             mpi::PublicKey::EdDSA {
                 curve: Curve::Ed25519,
                 q,
             } => (
-                q.decode_point(&Curve::Ed25519).unwrap().0.to_vec(),
+                q.decode_point(&Curve::Ed25519)?.0.to_vec(),
                 &PKCS_ED25519,
                 false,
             ),
@@ -171,11 +204,14 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
                 q,
                 ..
             } => (
-                q.decode_point(&Curve::Cv25519).unwrap().0.to_vec(),
+                q.decode_point(&Curve::Cv25519)?.0.to_vec(),
                 &PKCS_ED25519,
                 true,
             ),
-            other => panic!("unexpected fixture key: {other:?}"),
+            _ => anyhow::bail!(
+                "OpenPGP key {} is not NIST P-256, Ed25519 or Cv25519",
+                key.key().fingerprint()
+            ),
         };
         let mut statement_params = params(if signing {
             "YubiKey OPGP Attestation SIG"
@@ -189,41 +225,33 @@ fn attest_generated_cert(public: String) -> AttestedKpCert {
                 vec![2, 1, 1], // Canonical ASN.1 INTEGER: generated on device.
             ));
         let mut der = statement_params
-            .signed_by(&RawPublicKey(bytes, algorithm), &device, &device_key)
-            .unwrap()
+            .signed_by(&RawPublicKey(bytes, algorithm), &device, &device_key)?
             .der()
             .to_vec();
         if x25519 {
             // rcgen lacks X25519 SPKI. Change only the Ed25519 SPKI OID,
             // then sign the resulting TBS with the actual device key.
-            let (_, parsed) = parse_x509_certificate(&der).unwrap();
+            let (_, parsed) = parse_x509_certificate(&der)?;
             let spki_offset = parsed.public_key().raw.as_ptr() as usize - der.as_ptr() as usize;
             der[spki_offset + 8] = 110; // id-X25519
-            let (_, parsed) = parse_x509_certificate(&der).unwrap();
+            let (_, parsed) = parse_x509_certificate(&der)?;
             let signature = signing_key.sign(parsed.tbs_certificate.as_ref());
             let signature_offset = der.len() - 64;
             der[signature_offset..].copy_from_slice(&signature.to_bytes());
         }
-        der
+        Ok(der)
     });
-    let keys = crate::pgp::verify_yubikey_attestations_with_issuers(
-        &cert,
-        device.der(),
-        &statements[0],
-        &statements[1],
-        &[issuer.der().as_ref()],
-    )
-    .expect("generated KP fixture must pass all attestation checks");
-    AttestedKpCert {
-        cert,
-        device_pem: pem(device.der()),
-        sig_pem: pem(&statements[0]),
-        dec_pem: pem(&statements[1]),
-        keys,
-    }
+    Ok([device.der().to_vec(), sig?, dec?])
 }
 
 /// Generate distinct KP bundles checked under a test-only authority.
 pub fn mock_attested_kp_certs(count: usize) -> Vec<AttestedKpCert> {
     (0..count).map(|_| mock_attested_kp_keypair().0).collect()
+}
+
+/// The device, SIG and DEC attestation PEMs a YubiKey would export for `cert`,
+/// from a software device that signs its own certificate. Only
+/// `non-enclave-dev` builds trust such a device.
+pub fn dev_kp_attestations(cert: &PgpPublicCert) -> anyhow::Result<[Vec<u8>; 3]> {
+    Ok(attest(cert, None)?.map(|der| pem(&der)))
 }

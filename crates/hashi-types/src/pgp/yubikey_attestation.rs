@@ -89,6 +89,9 @@ pub(crate) fn verify_yubikey_attestations_and_keys(
     let sig_der = parse_single_certificate_pem(sig_pem).context("SIG attestation")?;
     let dec_der = parse_single_certificate_pem(dec_pem).context("DEC attestation")?;
     let issuers = TRUSTED_ISSUERS.each_ref().map(Vec::as_slice);
+    // Dev KPs have no YubiKey: their software device signs its own certificate.
+    #[cfg(feature = "non-enclave-dev")]
+    let issuers: Vec<&[u8]> = issuers.into_iter().chain([device_der.as_slice()]).collect();
     verify_yubikey_attestations_with_issuers(cert, &device_der, &sig_der, &dec_der, &issuers)
 }
 

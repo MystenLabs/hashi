@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[cfg(any(test, feature = "test-utils"))]
+pub use super::crypto::encryption::attested_test_utils::dev_kp_attestations;
+#[cfg(any(test, feature = "test-utils"))]
 pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_certs;
 #[cfg(any(test, feature = "test-utils"))]
 pub use super::crypto::encryption::attested_test_utils::mock_attested_kp_keypair;

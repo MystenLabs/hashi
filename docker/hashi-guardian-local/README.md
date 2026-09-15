@@ -3,8 +3,9 @@
 A Mac-local replica of the guardian's AWS Nitro topology (each `vsock` hop becomes
 a TCP hop between containers), wired to a native `hashi-localnet` for the on-chain
 side, so the full ceremony → provision → withdrawal flow runs locally — no devnet.
-The guardian runs `--features non-enclave-dev` (mock attestation), so this
-exercises the real ceremony/relay/provision/activation path, not PCR attestation.
+The guardian runs `--features non-enclave-dev` (mock attestation, software-attested
+KP keys), so this exercises the real ceremony/relay/provision/activation path, not
+PCR attestation or YubiKey provenance.
 
 ```mermaid
 flowchart LR

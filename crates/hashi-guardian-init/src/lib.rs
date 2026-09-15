@@ -7,6 +7,7 @@ use anyhow::ensure;
 use hashi_types::guardian::AttestedKpCert;
 use hashi_types::pgp::PgpPublicCert;
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Load and verify a KP certificate and its sibling YubiKey attestation files.
 ///
@@ -15,20 +16,8 @@ use std::path::Path;
 /// `jdoe-kp-pubkey.attestation-dec.pem`, as emitted by the provisioning script.
 /// All three artifacts are required and checked against the pinned Yubico issuers.
 pub fn load_attested_kp_cert(path: &Path) -> Result<AttestedKpCert> {
-    ensure!(
-        path.extension().is_some_and(|extension| extension == "asc"),
-        "KP cert path must have an .asc extension: {}",
-        path.display()
-    );
-    let cert = PgpPublicCert::new(
-        std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read PGP cert at {}", path.display()))?,
-    )
-    .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
-
-    let device_path = path.with_extension("attestation-device.pem");
-    let sig_path = path.with_extension("attestation-sig.pem");
-    let dec_path = path.with_extension("attestation-dec.pem");
+    let cert = read_kp_cert(path)?;
+    let [device_path, sig_path, dec_path] = attestation_paths(path);
     let device_pem = std::fs::read(&device_path)
         .with_context(|| format!("failed to read attestation at {}", device_path.display()))?;
     let sig_pem = std::fs::read(&sig_path)
@@ -47,12 +36,62 @@ pub fn load_attested_kp_cert(path: &Path) -> Result<AttestedKpCert> {
     })
 }
 
+/// Write the attestation files [`load_attested_kp_cert`] reads for the dev KP
+/// certificate at `path`, from a software device in place of a YubiKey.
+#[cfg(feature = "non-enclave-dev")]
+pub fn write_dev_attestations(path: &Path) -> Result<()> {
+    let cert = read_kp_cert(path)?;
+    let pems = hashi_types::guardian::test_utils::dev_kp_attestations(&cert)
+        .with_context(|| format!("failed to attest PGP cert at {}", path.display()))?;
+    for (attestation_path, pem) in attestation_paths(path).iter().zip(pems) {
+        std::fs::write(attestation_path, pem).with_context(|| {
+            format!(
+                "failed to write attestation at {}",
+                attestation_path.display()
+            )
+        })?;
+    }
+    load_attested_kp_cert(path).map(|_| ())
+}
+
+fn read_kp_cert(path: &Path) -> Result<PgpPublicCert> {
+    ensure!(
+        path.extension().is_some_and(|extension| extension == "asc"),
+        "KP cert path must have an .asc extension: {}",
+        path.display()
+    );
+    PgpPublicCert::new(
+        std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read PGP cert at {}", path.display()))?,
+    )
+    .with_context(|| format!("invalid PGP cert at {}", path.display()))
+}
+
+fn attestation_paths(path: &Path) -> [PathBuf; 3] {
+    [
+        "attestation-device.pem",
+        "attestation-sig.pem",
+        "attestation-dec.pem",
+    ]
+    .map(|extension| path.with_extension(extension))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use hashi_types::guardian::GuardianError;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::io::ErrorKind;
+
+    #[cfg(feature = "non-enclave-dev")]
+    #[test]
+    fn dev_attestations_load_beside_their_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp1.asc");
+        std::fs::write(&path, mock_pgp_keypair().0).unwrap();
+        write_dev_attestations(&path).unwrap();
+        load_attested_kp_cert(&path).unwrap();
+    }
 
     #[test]
     fn missing_certificate_reports_its_path() {

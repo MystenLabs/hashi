@@ -43,8 +43,9 @@ kp_cert_paths() { # FIRST LAST -> "path path ..."
 }
 
 # Mint test KP PGP keypairs kpFIRST..kpLAST in one shared GNUPGHOME (a test
-# rig; real KPs each hold their own yubikey). gpg picks the right secret key
-# from this home when a KP command decrypts or signs.
+# rig; real KPs each hold their own yubikey), with a yubikey's default
+# Ed25519/X25519 profile and software attestations in place of its PEMs. gpg
+# picks the right secret key from this home when a KP command decrypts or signs.
 gen_kp_keys() { # FIRST LAST
   mkdir -p "${GNUPGHOME}" "${CERTS_DIR}"
   chmod 700 "${GNUPGHOME}"
@@ -52,9 +53,12 @@ gen_kp_keys() { # FIRST LAST
   for i in $(seq "$1" "$2"); do
     [ -s "${CERTS_DIR}/kp${i}.asc" ] && continue
     gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
-      "hashi-local-kp${i} <kp${i}@localhost>" default default never >/dev/null 2>&1
+      "hashi-local-kp${i} <kp${i}@localhost>" ed25519 sign never >/dev/null 2>&1
     fpr="$(gpg --list-keys --with-colons "kp${i}@localhost" | awk -F: '/^fpr:/{print $10; exit}')"
+    gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key \
+      "${fpr}" cv25519 encr never >/dev/null 2>&1
     gpg --armor --export "${fpr}" > "${CERTS_DIR}/kp${i}.asc"
+    hashi-guardian-init tools dev-attest --kp-pgp-cert-path "${CERTS_DIR}/kp${i}.asc"
   done
   echo "KP certs kp$1..kp$2 in ${CERTS_DIR}."
 }
