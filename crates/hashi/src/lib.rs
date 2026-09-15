@@ -828,8 +828,12 @@ impl Hashi {
         self.verify_sui_chain_id().await?;
         self.verify_chain_pairing()?;
 
+        let trm_client = trm::TrmClient::from_config(&self.config)?;
+        self.metrics
+            .trm_enabled
+            .set(i64::from(trm_client.is_some()));
         self.trm_client
-            .set(trm::TrmClient::from_config(&self.config)?)
+            .set(trm_client)
             .map_err(|_| anyhow!("TRM client already initialized"))?;
 
         // Initialize on-chain state first so we can read guardian config from it.

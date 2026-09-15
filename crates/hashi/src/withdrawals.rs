@@ -26,6 +26,7 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::leader::RetryPolicy;
+use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -1612,10 +1613,16 @@ impl Hashi {
             self.config.bitcoin_network(),
         )
         .map_err(WithdrawalApprovalError::NeverRetry)?;
-        match trm
+        let started = std::time::Instant::now();
+        let result = trm
             .screen_withdrawal(&bitcoin_address, request.sender)
-            .await
-        {
+            .await;
+        self.metrics.record_trm_screening(
+            metrics::TRM_FLOW_WITHDRAWAL,
+            &result,
+            started.elapsed().as_secs_f64(),
+        );
+        match result {
             Ok(trm::Verdict::Approved) => Ok(()),
             Ok(trm::Verdict::Pending) => Err(WithdrawalApprovalError::AmlServiceError(anyhow!(
                 "TRM has not finished screening withdrawal request {}",

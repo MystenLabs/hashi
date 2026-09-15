@@ -5,6 +5,7 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
 use crate::btc_monitor::monitor::DepositConfirmation;
 use crate::leader::RetryPolicy;
+use crate::metrics;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::trm;
@@ -58,7 +59,14 @@ impl Hashi {
             .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
             .map_err(UnapprovedDepositError::AmlServiceError)?;
         let screening = trm::DepositScreening::new(deposit_request, deposit_address.to_string());
-        match trm.screen_deposit(&screening).await {
+        let started = std::time::Instant::now();
+        let result = trm.screen_deposit(&screening).await;
+        self.metrics.record_trm_screening(
+            metrics::TRM_FLOW_DEPOSIT,
+            &result,
+            started.elapsed().as_secs_f64(),
+        );
+        match result {
             Ok(trm::Verdict::Approved) => Ok(()),
             Ok(trm::Verdict::Pending) => Err(UnapprovedDepositError::AmlServiceError(anyhow!(
                 "TRM is still screening deposit transaction {}",
