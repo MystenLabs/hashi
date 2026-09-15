@@ -384,16 +384,17 @@ fn timestamp(ms: u64) -> Result<String, TrmError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use axum::extract::Path;
     use axum::extract::State;
     use axum::http::HeaderMap;
+    use axum::http::Method;
     use axum::http::StatusCode;
-    use axum::routing::get;
-    use axum::routing::post;
+    use axum::http::Uri;
     use base64ct::Encoding as _;
+    use serde_json::Value;
     use serde_json::json;
     use sui_sdk_types::Digest;
 
@@ -405,34 +406,23 @@ mod tests {
 
     const API_KEY: &str = "test-key";
     const TRANSFER_UUID: &str = "00000000-0000-4000-8000-0000000000aa";
-    const BTC_DEPOSIT_ADDRESS: &str =
-        "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
+    const BITCOIN_ADDRESS: &str = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
 
-    const ADDRESS_CLEAN: &str = include_str!("testdata/addresses_no_indicators.json");
-    const ADDRESS_OWNERSHIP_HIGH: &str = include_str!("testdata/addresses_ownership_high.json");
-    const ADDRESS_COUNTERPARTY_SEVERE: &str =
-        include_str!("testdata/addresses_counterparty_severe.json");
-    const TRANSFER_PROCESSING: &str = include_str!("testdata/transfer_processing.json");
-    const TRANSFER_SUCCEEDED: &str = include_str!("testdata/transfer_succeeded.json");
-
+    /// Answers requests with scripted responses, in order, and records them.
     struct MockTrm {
-        addresses: (StatusCode, String),
-        transfer: String,
-        requests: Vec<(String, serde_json::Value)>,
+        responses: VecDeque<(StatusCode, Value)>,
+        requests: Vec<(String, Value)>,
     }
 
     type Mock = Arc<Mutex<MockTrm>>;
 
-    async fn start_mock(addresses: (StatusCode, &str), transfer: &str) -> (TrmClient, Mock) {
+    async fn mock_trm<const N: usize>(responses: [(StatusCode, Value); N]) -> (TrmClient, Mock) {
         let mock = Arc::new(Mutex::new(MockTrm {
-            addresses: (addresses.0, addresses.1.to_owned()),
-            transfer: transfer.to_owned(),
+            responses: responses.into(),
             requests: Vec::new(),
         }));
         let app = axum::Router::new()
-            .route("/public/v2/screening/addresses", post(screen_addresses))
-            .route("/public/v2/tm/transfers", post(submit_transfer))
-            .route("/public/v2/tm/transfers/{uuid}", get(get_transfer))
+            .fallback(respond)
             .with_state(mock.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -441,6 +431,28 @@ mod tests {
             TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap(),
             mock,
         )
+    }
+
+    async fn respond(
+        State(mock): State<Mock>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: String,
+    ) -> (StatusCode, String) {
+        if !authorized(&headers) {
+            return (StatusCode::UNAUTHORIZED, String::new());
+        }
+        let mut mock = mock.lock().unwrap();
+        mock.requests.push((
+            format!("{method} {}", uri.path()),
+            serde_json::from_str(&body).unwrap_or(Value::Null),
+        ));
+        let (status, response) = mock
+            .responses
+            .pop_front()
+            .unwrap_or((StatusCode::NOT_IMPLEMENTED, json!("unexpected request")));
+        (status, response.to_string())
     }
 
     fn authorized(headers: &HeaderMap) -> bool {
@@ -452,66 +464,32 @@ mod tests {
             .is_some_and(|decoded| decoded == format!("{API_KEY}:{API_KEY}").as_bytes())
     }
 
-    async fn screen_addresses(
-        State(mock): State<Mock>,
-        headers: HeaderMap,
-        body: String,
-    ) -> (StatusCode, String) {
-        if !authorized(&headers) {
-            return (StatusCode::UNAUTHORIZED, String::new());
-        }
-        let mut mock = mock.lock().unwrap();
-        mock.requests
-            .push(("addresses".to_owned(), serde_json::from_str(&body).unwrap()));
-        mock.addresses.clone()
+    fn address_screening(address: &str, chain: &str, indicators: Value) -> Value {
+        json!({
+            "addressSubmitted": address,
+            "chain": chain,
+            "addressRiskIndicators": indicators,
+        })
     }
 
-    async fn submit_transfer(
-        State(mock): State<Mock>,
-        headers: HeaderMap,
-        body: String,
-    ) -> (StatusCode, String) {
-        if !authorized(&headers) {
-            return (StatusCode::UNAUTHORIZED, String::new());
-        }
-        mock.lock()
-            .unwrap()
-            .requests
-            .push(("transfers".to_owned(), serde_json::from_str(&body).unwrap()));
-        (StatusCode::CREATED, TRANSFER_PROCESSING.to_owned())
+    fn indicator(risk_type: &str, risk_score_level: u8) -> Value {
+        json!({
+            "category": "Sanctions",
+            "categoryId": "69",
+            "categoryRiskScoreLevel": risk_score_level,
+            "riskType": risk_type,
+        })
     }
 
-    async fn get_transfer(
-        State(mock): State<Mock>,
-        headers: HeaderMap,
-        Path(uuid): Path<String>,
-    ) -> (StatusCode, String) {
-        if !authorized(&headers) {
-            return (StatusCode::UNAUTHORIZED, String::new());
-        }
-        let mut mock = mock.lock().unwrap();
-        mock.requests
-            .push((format!("transfers/{uuid}"), serde_json::Value::Null));
-        (StatusCode::OK, mock.transfer.clone())
+    fn transfer(screen_status: &str, risk_score_level: Option<u8>) -> Value {
+        json!({
+            "uuid": TRANSFER_UUID,
+            "screenStatus": screen_status,
+            "riskScoreLevel": risk_score_level,
+        })
     }
 
-    fn batch(fixtures: &[&str]) -> String {
-        let results: Vec<serde_json::Value> = fixtures
-            .iter()
-            .flat_map(|fixture| serde_json::from_str::<Vec<serde_json::Value>>(fixture).unwrap())
-            .collect();
-        serde_json::to_string(&results).unwrap()
-    }
-
-    fn transfer_with(fields: serde_json::Value) -> String {
-        let mut transfer: serde_json::Value = serde_json::from_str(TRANSFER_SUCCEEDED).unwrap();
-        for (key, value) in fields.as_object().unwrap() {
-            transfer[key] = value.clone();
-        }
-        transfer.to_string()
-    }
-
-    fn deposit_request(recipient: Option<Address>) -> DepositRequest {
+    fn deposit_request(derivation_path: Option<Address>) -> DepositRequest {
         DepositRequest {
             id: Address::new([2; 32]),
             sender: Address::new([3; 32]),
@@ -523,16 +501,12 @@ mod tests {
                     vout: 0,
                 },
                 amount: 12_345,
-                derivation_path: recipient,
+                derivation_path,
             },
             approval_cert: None,
             approved_timestamp_ms: None,
             confirmed_timestamp_ms: None,
         }
-    }
-
-    fn deposit(recipient: Option<Address>) -> DepositScreening {
-        DepositScreening::new(&deposit_request(recipient), BTC_DEPOSIT_ADDRESS.to_owned())
     }
 
     #[test]
@@ -553,242 +527,210 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deposit_is_approved_when_trm_finishes_without_alerts() {
-        let recipient = Address::new([1; 32]);
-        let (client, mock) =
-            start_mock((StatusCode::CREATED, ADDRESS_CLEAN), TRANSFER_SUCCEEDED).await;
-
-        let verdict = client
-            .screen_deposit(&deposit(Some(recipient)))
-            .await
-            .unwrap();
-
-        assert_eq!(verdict, Verdict::Approved);
-        let requests = mock.lock().unwrap().requests.clone();
-        assert_eq!(
-            requests,
-            vec![
-                (
-                    "transfers".to_owned(),
-                    json!({
-                        "accountExternalId": recipient.to_string(),
-                        "asset": "btc",
-                        "assetAmount": "0.00012345",
-                        "chain": "bitcoin",
-                        "destinationAddress": BTC_DEPOSIT_ADDRESS,
-                        "externalId": format!("hashi-deposit-{}", Address::new([2; 32])),
-                        "fiatCurrency": "USD",
-                        "fiatValue": "0",
-                        "onchainReference": deposit_request(None).utxo.id.txid.to_string(),
-                        "timestamp": "2026-09-15T09:21:52.688Z",
-                        "transferType": "CRYPTO_DEPOSIT",
-                    }),
-                ),
-                (
-                    "addresses".to_owned(),
-                    json!([{ "address": recipient.to_string(), "chain": "sui" }]),
-                ),
-                (
-                    format!("transfers/{TRANSFER_UUID}"),
-                    serde_json::Value::Null
-                ),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn deposit_screens_the_mint_recipient_not_the_request_object() {
+    async fn deposit_screens_the_bitcoin_transfer_and_the_mint_recipient() {
         let request = deposit_request(Some(Address::new([1; 32])));
-        let (client, mock) =
-            start_mock((StatusCode::CREATED, ADDRESS_CLEAN), TRANSFER_SUCCEEDED).await;
-
-        client
-            .screen_deposit(&DepositScreening::new(
-                &request,
-                BTC_DEPOSIT_ADDRESS.to_owned(),
-            ))
-            .await
-            .unwrap();
-
-        let requests = mock.lock().unwrap().requests.clone();
-        let screened = requests[1].1[0]["address"].as_str().unwrap();
-        assert_eq!(screened, request.utxo.derivation_path.unwrap().to_string());
-        assert_ne!(screened, request.id.to_string());
-    }
-
-    #[tokio::test]
-    async fn deposit_is_pending_while_trm_is_processing() {
-        let (client, _) =
-            start_mock((StatusCode::CREATED, ADDRESS_CLEAN), TRANSFER_PROCESSING).await;
-
-        let verdict = client
-            .screen_deposit(&deposit(Some(Address::new([1; 32]))))
-            .await
-            .unwrap();
-
-        assert_eq!(verdict, Verdict::Pending);
-    }
-
-    #[tokio::test]
-    async fn deposit_is_rejected_when_the_transfer_raises_a_high_alert() {
-        let transfer =
-            transfer_with(json!({ "riskScoreLevel": 10, "riskScoreLevelLabel": "High" }));
-        let (client, _) = start_mock((StatusCode::CREATED, ADDRESS_CLEAN), &transfer).await;
-
-        let verdict = client
-            .screen_deposit(&deposit(Some(Address::new([1; 32]))))
-            .await
-            .unwrap();
-
-        assert!(
-            matches!(verdict, Verdict::Rejected(reason) if reason.contains("risk score level 10"))
-        );
-    }
-
-    #[tokio::test]
-    async fn deposit_is_rejected_when_trm_cannot_screen_the_transfer() {
-        let transfer = transfer_with(json!({
-            "screenStatus": "FAILED",
-            "screenStatusFailedReason": "INVALID_DESTINATION_ADDRESS",
-        }));
-        let (client, _) = start_mock((StatusCode::CREATED, ADDRESS_CLEAN), &transfer).await;
-
-        let verdict = client
-            .screen_deposit(&deposit(Some(Address::new([1; 32]))))
-            .await
-            .unwrap();
-
-        assert!(
-            matches!(verdict, Verdict::Rejected(reason) if reason.contains("INVALID_DESTINATION_ADDRESS"))
-        );
-    }
-
-    #[tokio::test]
-    async fn deposit_is_rejected_when_the_recipient_is_attributed_high_risk() {
-        let (client, mock) = start_mock(
-            (StatusCode::CREATED, ADDRESS_OWNERSHIP_HIGH),
-            TRANSFER_SUCCEEDED,
-        )
+        let recipient = request.utxo.derivation_path.unwrap().to_string();
+        let (client, mock) = mock_trm([
+            (StatusCode::CREATED, transfer("PROCESSING", None)),
+            (
+                StatusCode::CREATED,
+                json!([address_screening(&recipient, "sui", json!([]))]),
+            ),
+            (StatusCode::OK, transfer("SUCCEEDED", Some(0))),
+        ])
         .await;
 
         let verdict = client
-            .screen_deposit(&deposit(Some(Address::new([1; 32]))))
-            .await
-            .unwrap();
-
-        assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains("Scam (61)")));
-        assert_eq!(mock.lock().unwrap().requests.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn deposit_without_a_recipient_skips_address_screening() {
-        let (client, mock) =
-            start_mock((StatusCode::CREATED, ADDRESS_CLEAN), TRANSFER_SUCCEEDED).await;
-
-        let verdict = client.screen_deposit(&deposit(None)).await.unwrap();
-
-        assert_eq!(verdict, Verdict::Approved);
-        let requests = mock.lock().unwrap().requests.clone();
-        let paths: Vec<&str> = requests.iter().map(|(path, _)| path.as_str()).collect();
-        assert_eq!(paths, ["transfers", &format!("transfers/{TRANSFER_UUID}")]);
-        assert_eq!(
-            requests[0].1["accountExternalId"],
-            Address::new([3; 32]).to_string()
-        );
-    }
-
-    #[tokio::test]
-    async fn withdrawal_screens_the_destination_and_the_requester() {
-        let sender = Address::new([1; 32]);
-        let addresses = batch(&[ADDRESS_COUNTERPARTY_SEVERE, ADDRESS_CLEAN]);
-        let (client, mock) =
-            start_mock((StatusCode::CREATED, &addresses), TRANSFER_SUCCEEDED).await;
-
-        let verdict = client
-            .screen_withdrawal(BTC_DEPOSIT_ADDRESS, sender)
+            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
             .await
             .unwrap();
 
         assert_eq!(verdict, Verdict::Approved);
         assert_eq!(
             mock.lock().unwrap().requests,
-            vec![(
-                "addresses".to_owned(),
+            [
+                (
+                    "POST /public/v2/tm/transfers".to_owned(),
+                    json!({
+                        "accountExternalId": recipient,
+                        "asset": "btc",
+                        "assetAmount": "0.00012345",
+                        "chain": "bitcoin",
+                        "destinationAddress": BITCOIN_ADDRESS,
+                        "externalId": format!("hashi-deposit-{}", request.id),
+                        "fiatCurrency": "USD",
+                        "fiatValue": "0",
+                        "onchainReference": request.utxo.id.txid.to_string(),
+                        "timestamp": "2026-09-15T09:21:52.688Z",
+                        "transferType": "CRYPTO_DEPOSIT",
+                    }),
+                ),
+                (
+                    "POST /public/v2/screening/addresses".to_owned(),
+                    json!([{ "address": recipient, "chain": "sui" }]),
+                ),
+                (
+                    format!("GET /public/v2/tm/transfers/{TRANSFER_UUID}"),
+                    Value::Null,
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn deposit_is_rejected_when_the_recipient_is_high_risk() {
+        let request = deposit_request(Some(Address::new([1; 32])));
+        let recipient = request.utxo.derivation_path.unwrap().to_string();
+        let (client, _) = mock_trm([
+            (StatusCode::CREATED, transfer("PROCESSING", None)),
+            (
+                StatusCode::CREATED,
+                json!([address_screening(
+                    &recipient,
+                    "sui",
+                    json!([indicator("OWNERSHIP", 15)])
+                )]),
+            ),
+        ])
+        .await;
+
+        let verdict = client
+            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .await
+            .unwrap();
+
+        assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(&recipient)));
+    }
+
+    #[tokio::test]
+    async fn deposit_without_a_recipient_skips_address_screening() {
+        let request = deposit_request(None);
+        let (client, mock) = mock_trm([
+            (StatusCode::CREATED, transfer("PROCESSING", None)),
+            (StatusCode::OK, transfer("SUCCEEDED", Some(0))),
+        ])
+        .await;
+
+        let verdict = client
+            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .await
+            .unwrap();
+
+        assert_eq!(verdict, Verdict::Approved);
+        assert_eq!(
+            mock.lock().unwrap().requests[0].1["accountExternalId"],
+            request.sender.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawal_screens_the_destination_and_the_requester() {
+        let requester = Address::new([1; 32]);
+        let (client, mock) = mock_trm([(
+            StatusCode::CREATED,
+            json!([
+                address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                address_screening(
+                    &requester.to_string(),
+                    "sui",
+                    json!([indicator("OWNERSHIP", 10)])
+                ),
+            ]),
+        )])
+        .await;
+
+        let verdict = client
+            .screen_withdrawal(BITCOIN_ADDRESS, requester)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(verdict, Verdict::Rejected(reason) if reason.contains(&requester.to_string()))
+        );
+        assert_eq!(
+            mock.lock().unwrap().requests,
+            [(
+                "POST /public/v2/screening/addresses".to_owned(),
                 json!([
-                    { "address": BTC_DEPOSIT_ADDRESS, "chain": "bitcoin" },
-                    { "address": sender.to_string(), "chain": "sui" },
+                    { "address": BITCOIN_ADDRESS, "chain": "bitcoin" },
+                    { "address": requester.to_string(), "chain": "sui" },
                 ]),
             )]
         );
     }
 
-    #[tokio::test]
-    async fn withdrawal_is_rejected_when_the_destination_is_attributed_high_risk() {
-        let addresses = batch(&[ADDRESS_OWNERSHIP_HIGH, ADDRESS_CLEAN]);
-        let (client, _) = start_mock((StatusCode::CREATED, &addresses), TRANSFER_SUCCEEDED).await;
+    #[test]
+    fn only_high_risk_ownership_rejects_an_address() {
+        let rejects = |indicators| {
+            serde_json::from_value::<AddressScreening>(address_screening(
+                BITCOIN_ADDRESS,
+                "bitcoin",
+                indicators,
+            ))
+            .unwrap()
+            .rejection()
+            .is_some()
+        };
 
-        let verdict = client
-            .screen_withdrawal(BTC_DEPOSIT_ADDRESS, Address::new([1; 32]))
-            .await
-            .unwrap();
+        assert!(!rejects(json!([])));
+        assert!(rejects(json!([indicator("OWNERSHIP", 10)])));
+        assert!(!rejects(json!([indicator("OWNERSHIP", 5)])));
+        assert!(!rejects(json!([
+            indicator("COUNTERPARTY", 15),
+            indicator("INDIRECT", 15)
+        ])));
+    }
 
-        assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains("bitcoin address")));
+    #[test]
+    fn transfer_verdict_follows_the_screen_status_and_alert_level() {
+        let verdict = |value| serde_json::from_value::<Transfer>(value).unwrap().verdict();
+
+        assert_eq!(verdict(transfer("PROCESSING", None)), Verdict::Pending);
+        assert_eq!(verdict(transfer("SUCCEEDED", Some(5))), Verdict::Approved);
+        assert!(matches!(
+            verdict(transfer("SUCCEEDED", Some(10))),
+            Verdict::Rejected(_)
+        ));
+        assert!(matches!(
+            verdict(transfer("FAILED", None)),
+            Verdict::Rejected(_)
+        ));
     }
 
     #[tokio::test]
     async fn only_rate_limits_and_server_errors_are_transient() {
-        for (status, transient) in [
-            (StatusCode::TOO_MANY_REQUESTS, true),
-            (StatusCode::BAD_GATEWAY, true),
-            (StatusCode::BAD_REQUEST, false),
-            (StatusCode::FORBIDDEN, false),
+        for (status, body, transient) in [
+            (StatusCode::TOO_MANY_REQUESTS, json!({}), true),
+            (StatusCode::SERVICE_UNAVAILABLE, json!({}), true),
+            (StatusCode::BAD_REQUEST, json!({}), false),
+            (StatusCode::UNAUTHORIZED, json!({}), false),
+            (StatusCode::CREATED, json!({ "results": [] }), false),
+            (StatusCode::CREATED, json!([]), false),
         ] {
-            let (client, _) = start_mock((status, "{}"), TRANSFER_SUCCEEDED).await;
+            let (client, _) = mock_trm([(status, body.clone())]).await;
 
             let error = client
-                .screen_withdrawal(BTC_DEPOSIT_ADDRESS, Address::new([1; 32]))
+                .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
                 .await
                 .unwrap_err();
 
             assert_eq!(
                 matches!(error, TrmError::Transient(_)),
                 transient,
-                "{status}"
+                "{status} {body}"
             );
         }
     }
 
-    #[tokio::test]
-    async fn a_rejected_api_key_is_permanent() {
-        let (client, _) =
-            start_mock((StatusCode::CREATED, ADDRESS_CLEAN), TRANSFER_SUCCEEDED).await;
-        let client =
-            TrmClient::with_base_url("wrong-key".to_owned(), client.base_url.as_str()).unwrap();
-
-        let error = client
-            .screen_withdrawal(BTC_DEPOSIT_ADDRESS, Address::new([1; 32]))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, TrmError::Permanent(e) if e.to_string().contains("401")));
-    }
-
     #[tokio::test(start_paused = true)]
     async fn a_slow_trm_times_out_as_transient() {
-        let app = axum::Router::new().route(
-            "/public/v2/screening/addresses",
-            post(|| async {
-                tokio::time::sleep(Duration::from_secs(600)).await;
-                (StatusCode::CREATED, "[]")
-            }),
-        );
+        // Connections wait in the listener's backlog and never get a response.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap();
 
         let error = client
-            .screen_withdrawal(BTC_DEPOSIT_ADDRESS, Address::new([1; 32]))
+            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
             .await
             .unwrap_err();
 
@@ -801,5 +743,66 @@ mod tests {
         assert_eq!(btc_amount(1), "0.00000001");
         assert_eq!(btc_amount(123_456_789), "1.23456789");
         assert_eq!(btc_amount(2_100_000_000_000_000), "21000000.00000000");
+    }
+
+    /// Calls the live TRM API:
+    ///
+    /// ```text
+    /// TRM_API_KEY=<key> cargo nextest run -p hashi --run-ignored only trm::tests::live
+    /// ```
+    fn live_client() -> TrmClient {
+        TrmClient::new(std::env::var("TRM_API_KEY").expect("TRM_API_KEY")).unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "calls the live TRM API: set TRM_API_KEY"]
+    async fn live_withdrawal_screening() {
+        let client = live_client();
+        let requester = Address::new([1; 32]);
+
+        // On OFAC's SDN list.
+        let sanctioned = "149w62rY42aZBox8fGcmqNsXUzSStKeq8C";
+        let verdict = client
+            .screen_withdrawal(sanctioned, requester)
+            .await
+            .unwrap();
+        assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(sanctioned)));
+
+        // The genesis block address: attributed to mining, with severe
+        // counterparty exposure from dust sent to it.
+        let verdict = client
+            .screen_withdrawal("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", requester)
+            .await
+            .unwrap();
+        assert_eq!(verdict, Verdict::Approved);
+    }
+
+    #[tokio::test]
+    #[ignore = "calls the live TRM API: set TRM_API_KEY"]
+    async fn live_deposit_screening() {
+        let client = live_client();
+        // A mainnet payment to a taproot address, like a hashi deposit.
+        let mut request = deposit_request(Some(Address::new([1; 32])));
+        request.utxo.id.txid = "2698d1571ba5b03f5866c80e1906a4237c9fdd03c15a8dea8d5856cbcb26b4a9"
+            .parse()
+            .unwrap();
+        request.utxo.amount = 6_376_139;
+        request.created_timestamp_ms = 1_789_464_853_000;
+        let deposit = DepositScreening::new(
+            &request,
+            "bc1p7q7ds3239y334zus72d5m3gkf83mfcu8j8zrk49hws7yrf7k4vhqjqjauy".to_owned(),
+        );
+
+        let verdict = tokio::time::timeout(Duration::from_secs(300), async {
+            loop {
+                match client.screen_deposit(&deposit).await.unwrap() {
+                    Verdict::Pending => tokio::time::sleep(Duration::from_secs(10)).await,
+                    verdict => break verdict,
+                }
+            }
+        })
+        .await
+        .expect("TRM is still screening the transfer");
+        assert_eq!(verdict, Verdict::Approved);
     }
 }
