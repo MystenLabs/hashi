@@ -136,9 +136,10 @@ before it is considered final. This guards against chain reorganizations where
 a confirmed transaction could be reversed. If the transaction is never
 confirmed or is invalidated by a reorg, the deposit is ignored.
 
-After confirmation, each committee member independently screens the deposit
-(see [Handling Sanctioned Addresses](sanctions.mdx)). A member that rejects
-the deposit does not vote to approve it.
+After confirmation, each committee member independently screens the deposit's
+Bitcoin transaction and Sui recipient with its own TRM Labs account (see
+[Handling Sanctioned Addresses](sanctions.mdx)). A member that rejects the
+deposit does not vote to approve it.
 
 After a node determines that a deposit request is both confirmed on Bitcoin
 and passes its own screening checks, it communicates with the other members
