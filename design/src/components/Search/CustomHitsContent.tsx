@@ -14,10 +14,6 @@ import {
 
 const SNIPPET_MAX_CHARS = 250;
 
-const linkStyle =
-  "text-sm text-blue-700 dark:text-sui-blue-light hover:text-sui-blue-dark dark:hover:text-white font-medium underline";
-
-/** Where to send someone whose search came up empty, per index. */
 const elsewhere = new Map<string, React.ReactNode>([
   [
     "Hashi Docs",
@@ -90,7 +86,6 @@ export default function CustomHitsContent({ name }) {
     );
   }
 
-  // Keyed by a crawled field, so a Map rather than an object literal.
   const grouped = new Map<string, typeof items>();
   for (const hit of items) {
     const group = grouped.get(hit.url_without_anchor);
@@ -126,7 +121,9 @@ export default function CustomHitsContent({ name }) {
                 const sectionTitle =
                   hitCrumbs.length > 0
                     ? hitCrumbs[hitCrumbs.length - 1]
-                    : cleanTooltipText(getDeepestHierarchyLabel(hit.hierarchy));
+                    : cleanTooltipText(
+                        getDeepestHierarchyLabel(hit.hierarchy),
+                      );
 
                 const target = parseHitUrl(hit.url);
                 const internalPath =
@@ -139,7 +136,7 @@ export default function CustomHitsContent({ name }) {
                     {internalPath ? (
                       <button
                         onClick={() => history.push(internalPath)}
-                        className={`${linkStyle} text-left bg-transparent border-0 pl-0 cursor-pointer`}
+                        className="text-sm text-blue-700 dark:text-sui-blue-light hover:text-sui-blue-dark dark:hover:text-white font-medium underline text-left bg-transparent border-0 pl-0 cursor-pointer"
                       >
                         {sectionTitle}
                       </button>
@@ -148,7 +145,7 @@ export default function CustomHitsContent({ name }) {
                         href={target?.href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className={linkStyle}
+                        className="text-sm text-blue-700 dark:text-sui-blue-light hover:text-sui-blue-dark dark:hover:text-white font-medium underline"
                       >
                         {sectionTitle}
                       </a>

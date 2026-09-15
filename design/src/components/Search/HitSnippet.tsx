@@ -4,13 +4,6 @@
 import React from "react";
 import { getSnippetParts } from "./utils";
 
-/**
- * The excerpt shown under a search hit, with the query matches marked.
- *
- * The excerpt is crawled content, so it is rendered as React children: the
- * browser never parses it as HTML. This is the whole reason the component
- * exists instead of a string handed to `dangerouslySetInnerHTML`.
- */
 export default function HitSnippet({
   value,
   maxChars,
