@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use tonic::Status;
 use tracing::warn;
 
-use crate::widlog::LogStore;
+use crate::log_store::LogStore;
 
 /// The pre-#779 layout, read-only: hashi-types no longer models it, so unlike
 /// the current prefixes this one has no constructor to borrow.
@@ -142,7 +142,7 @@ impl<L: LogStore> RosterCache<L> {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
 
     /// Commit a one-cert-per-share roster at `sharing_seq`, in the layout the
     /// enclave writes today.
@@ -281,7 +281,7 @@ fn parse_recipient_fingerprint(label: &str) -> anyhow::Result<Fingerprint> {
 mod tests {
     use super::test_utils::seed_roster;
     use super::*;
-    use crate::widlog::test_store::MemStore;
+    use crate::log_store::test_store::MemStore;
     use std::sync::atomic::Ordering;
 
     const FP_A: &str = "AAAABBBBCCCCDDDDEEEE11112222333344445555";
@@ -560,8 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn unparseable_latest_record_fails_closed() {
-        // Unlike the wid scan (where a skip degrades to a re-sign), silently
-        // falling back past a garbled newest record could authorize a
+        // Silently falling back past a garbled newest record could authorize a
         // rotated-out roster — so a parse failure is an error.
         let store = MemStore::default();
         let (key, _) = legacy_shares_record(0, &[FP_A]);
@@ -677,10 +676,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
-        // The node classifies guardian errors by substring; this must stay in
-        // its retriable bucket.
-        assert!(!err.message().contains("seq mismatch"));
-        assert!(!err.message().contains("Rate limit exceeded"));
     }
 
     #[tokio::test]

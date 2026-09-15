@@ -5,14 +5,12 @@
 //! a stable, hardenable surface:
 //!
 //! - [`forward`] forwards the node-facing `GuardianService` RPCs to the
-//!   enclave (rejecting operator/ceremony RPCs), and [`cache`] wraps it so
-//!   `StandardWithdrawal` responses are idempotent by `wid` — an in-process LRU
-//!   in front of the guardian's own S3 withdrawal log ([`widlog`]) as the
-//!   durable, read-only tier.
+//!   enclave, rejecting operator/ceremony RPCs. `StandardWithdrawal` passes
+//!   through unchanged: the enclave itself replays a retried withdrawal.
 //! - [`relay`] serves `GuardianRelayService`: key provisioners submit one share
 //!   each — authenticated against the ceremony's committed roster read from the
-//!   S3 share log ([`roster`]) — and the relay batches a threshold-many into
-//!   the guardian's `ProvisionerInit`.
+//!   S3 share log ([`roster`], over [`log_store`]) — and the relay batches a
+//!   threshold-many into the guardian's `ProvisionerInit`.
 //! - [`info`] serves a read-only HTTP `/info` + `/health` JSON surface (a
 //!   curated limiter/identity view, with CORS) so browser / `fetch` clients can
 //!   read limiter status the gRPC surface only exposes to nodes — on the same
@@ -21,17 +19,13 @@
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).
 
-pub mod cache;
 pub mod config;
 pub mod forward;
 pub mod info;
-pub mod metrics;
+pub mod log_store;
 pub mod relay;
-pub mod remote_write;
 pub mod roster;
-pub mod widlog;
 
-pub use cache::CachingGuardianGrpc;
 pub use config::Config;
 pub use forward::Forwarding;
 pub use relay::Relay;
