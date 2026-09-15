@@ -76,9 +76,9 @@ public fun request_withdrawal(
 
 The protocol enforces a minimum withdrawal amount to guarantee that every
 request can produce a valid Bitcoin transaction even under worst-case fee
-conditions. This minimum covers the flat protocol fee, the worst-case miner
-fee (which pays for both the user's transaction weight and opportunistic UTXO
-pool consolidation), and the dust threshold for the user's output. See
+conditions. This minimum covers the worst-case miner fee (which pays for
+both the user's transaction weight and opportunistic UTXO pool
+consolidation) and the dust threshold for the user's output. See
 [Fees](fees.mdx) for the full breakdown.
 
 The full `hBTC` amount is stored with the request and placed in a queue with a
@@ -150,7 +150,7 @@ The leader then constructs an unsigned Bitcoin transaction:
 3. **Fee calculation**: the miner fee is estimated through `estimatesmartfee`,
    capped at a high fee rate threshold. Each user's share of the miner fee
    is deducted from their output. Validators independently verify that the
-   fee is within acceptable bounds (at least `1 sat/vB`, at most 3x their
+   fee is within acceptable bounds (at least `1 sat/vB`, at most 5x their
    own estimate).
 
 The resulting unsigned transaction and its txid are committed onchain by
