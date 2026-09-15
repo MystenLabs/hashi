@@ -828,6 +828,9 @@ pub fn select_coins(
                 && u.status.unconfirmed_ancestor_weight()
                     + builder.weight_with_candidate(u, total_requested)
                     <= params.max_ancestor_package_weight
+                // Likewise unaffordable: that transaction cannot also pay its
+                // ancestors' CPFP deficit within the per-request fee cap.
+                && builder.candidate_fits_fee_budget(u, total_requested)
         })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
@@ -1020,6 +1023,31 @@ impl<'a> TransactionBuilder<'a> {
             candidate.spend_path.input_weight(),
             candidate.amount > total_requested,
         )
+    }
+
+    /// Whether the lower-bound transaction spending a pending `candidate` passes
+    /// the fee checks once it pays that candidate's CPFP deficit.
+    fn candidate_fits_fee_budget(&self, candidate: &UtxoCandidate, total_requested: u64) -> bool {
+        if matches!(candidate.status, UtxoStatus::Confirmed) {
+            return true;
+        }
+        TransactionBuilder {
+            fee_rate: self.fee_rate,
+            params: self.params,
+            inputs: vec![candidate],
+            outputs: self
+                .outputs
+                .iter()
+                .map(|o| PendingOutput {
+                    request: o.request,
+                    net_amount: 0,
+                })
+                .collect(),
+            raw_change: Some(candidate.amount.saturating_sub(total_requested)),
+            final_change: None,
+        }
+        .check_fees()
+        .is_ok()
     }
 
     fn weight_for(&self, input_count: usize, input_weight: Weight, has_change: bool) -> Weight {
