@@ -45,7 +45,7 @@ clippy: ## run cargo clippy
 	cargo clippy --workspace --all-features --all-targets
 
 .PHONY: clippy-enclave
-clippy-enclave: ## clippy the guardian crates with default features: the real-attestation arm, which --all-features never compiles
+clippy-enclave: ## clippy the guardian crates' real attestation path, which --all-features skips
 	cargo clippy -p hashi-guardian -p hashi-guardian-init -p hashi-types
 
 .PHONY: doc

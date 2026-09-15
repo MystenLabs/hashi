@@ -1,50 +1,32 @@
 name: Guardian Enclave Build
 
-# Builds the guardian EIF on two runner images and fails unless their PCRs
-# agree. PCR0 is a hash of the built image, and the build takes BUCKET_NAME,
-# AWS_REGION and CEREMONY_MODE as inputs — they are substituted into run.sh,
-# which goes in the ramdisk the measurement covers. So a PCR0 only means
-# something next to the deployment it was built for.
+# Measures the guardian EIF for a deployment when dispatched. Pull requests and
+# pushes to main build it with canonical inputs, as a reproducibility gate.
 #
-# Three ways in, one pipeline (detect → build → verify):
+# PCR0 is a hash of the built image, and the build takes BUCKET_NAME, AWS_REGION
+# and CEREMONY_MODE as inputs — they are substituted into run.sh, which goes in
+# the ramdisk the measurement covers. So a PCR0 only means something next to the
+# deployment it was built for: pass the same values that stack's enclave hosts
+# build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml in
+# sui-operations, rendered into user-data by enclave.go), and dispatch this on
+# the commit the hosts pin.
 #
-#   workflow_dispatch — a MEASUREMENT. Pass the same values that stack's enclave
-#     hosts build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml
-#     in sui-operations, rendered into user-data by enclave.go), and dispatch on
-#     the commit the hosts pin. This is the ONLY sanctioned source for the
-#     eif-pcr0 / eif-pcr0-b / ceremony-pcr0 config values and for the rotate
-#     workflow's hashi_pcr0 input. Reading a measurement off the host being
-#     verified would make the check circular: it would confirm the host runs
-#     whatever it runs.
-#
-#   pull_request — a REPRODUCIBILITY GATE on the enclave's build inputs, with
-#     canonical test values. Its PCR0 is not a deployment measurement; the only
-#     question is whether two builders agree. Every enclave host rebuilds the EIF
-#     from source, so a change that stops reproducing must not merge — the last
-#     one that did was found at a testnet rotation. It runs on EVERY PR: detect
-#     says whether an EIF input changed, the build runs only then, and verify
-#     always reports — green in seconds otherwise. That is what lets it be a
-#     required status check ("EIF reproducibility gate" in branch protection).
-#     A trigger-level `paths:` filter would instead leave the check Pending on
-#     every other PR and block them.
-#
-#   push to main — the same gate on the merge result. A PR passes on its own
-#     merge ref and main can move under it before it lands (the resolve check
-#     runs on push for the same reason), and the commit a stack pins as
-#     hashi-commit is a main commit: this leaves it a result on record. Nothing
-#     notifies on failure; look the commit's run up before pinning it.
+# This is the ONLY sanctioned source for the eif-pcr0 / eif-pcr0-b /
+# ceremony-pcr0 config values and for the rotate workflow's hashi_pcr0 input.
+# Reading a measurement off the host being verified would make the check
+# circular: it would confirm the host runs whatever it runs.
 #
 # Both runners must agree, or the build is not reproducible and no measurement
-# from it can be trusted. No build caching, ever: a cached kernel or cargo
-# stage shared by the two runners would have them compare the same bytes, and
-# the check would test nothing.
+# from it can be trusted. Never cache the build: a stage shared by the two
+# runners would have them compare the same bytes.
 
 on:
+  # No paths filter: a required check that never reports would block the PR.
   pull_request:
+  # Hosts build main commits, and main can move under a PR after its run.
   push:
     branches: [main]
-    # The same list detect greps for below; move them together. Not
-    # rust-toolchain.toml: the build never copies it, stagex pins rustc.
+    # Same list as detect's grep below.
     paths:
       - docker/hashi-guardian/**
       - crates/hashi-guardian/**
@@ -82,19 +64,14 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same PR supersedes the build in flight; dispatch and
-# main-push runs never share a group.
+# Only a PR's runs cancel each other; every dispatch and main push finishes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  # Always runs. On a PR it diffs GitHub's merge of the PR against the base it
-  # would land on; a push or dispatch always builds. The list is what the
-  # Containerfile copies in (root manifest, root lock, the two crates) plus the
-  # Containerfile's own directory and this file — the same set the Makefile's
-  # out/nitro.eif prerequisites name. A miss here fails silently: the gate
-  # stays green on a change it never built.
+  # Matches out/nitro.eif's prerequisites in docker/hashi-guardian/Makefile; a
+  # missing path leaves the gate green on a change it never built.
   detect:
     name: Detect EIF input changes
     runs-on: ubuntu-latest
@@ -124,8 +101,6 @@ jobs:
     needs: [detect]
     if: needs.detect.outputs.eif == 'true'
     strategy:
-      # A leg that fails alone leaves the other's PCRs for triage, and
-      # "re-run failed jobs" then rebuilds only the one that broke.
       fail-fast: false
       matrix:
         # Two kernels and two Docker releases. Pinned rather than ubuntu-latest:
@@ -133,9 +108,6 @@ jobs:
         os: [ubuntu-24.04, ubuntu-26.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    # Dispatch inputs are empty on pull_request and push; these are the gate's
-    # canonical values (the bucket is the Makefile's default, the region every
-    # deployed stack's).
     env:
       BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
       AWS_REGION: ${{ inputs.aws_region || 'us-west-2' }}
@@ -215,12 +187,8 @@ jobs:
           name: nitro-pcrs-${{ matrix.os }}
           path: docker/hashi-guardian/out/nitro.pcrs
 
-  # THE STATUS CHECK. Reports on every run that was not cancelled: green when
-  # no EIF input changed, otherwise only when both builds succeeded and their
-  # PCRs agree. Fails closed when detect did not succeed — its output is then
-  # unset, which would otherwise read as "nothing changed". Require this job,
-  # never build: a job skipped because its dependency failed reports Success,
-  # so a required build would not block a broken one.
+  # Require this job, not build: a job skipped because its dependency failed
+  # reports Success.
   verify:
     name: EIF reproducibility gate
     needs: [detect, build]
