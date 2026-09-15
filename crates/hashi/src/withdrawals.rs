@@ -1629,13 +1629,23 @@ impl Hashi {
                 request.id
             ))),
             Ok(trm::Verdict::Rejected(reason)) => {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "TRM rejected withdrawal request: {reason}"
+                );
                 Err(WithdrawalApprovalError::NeverRetry(anyhow!(
                     "AML screening rejected withdrawal request {}: {reason}",
                     request.id
                 )))
             }
             Err(trm::TrmError::Transient(e)) => Err(WithdrawalApprovalError::AmlServiceError(e)),
-            Err(trm::TrmError::Permanent(e)) => Err(WithdrawalApprovalError::NeverRetry(e)),
+            Err(trm::TrmError::Permanent(e)) => {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "TRM could not screen withdrawal request: {e:#}"
+                );
+                Err(WithdrawalApprovalError::NeverRetry(e))
+            }
         }
     }
 }

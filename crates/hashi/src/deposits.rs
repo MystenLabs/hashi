@@ -73,10 +73,20 @@ impl Hashi {
                 deposit_request.utxo.id.txid
             ))),
             Ok(trm::Verdict::Rejected(reason)) => {
+                tracing::warn!(
+                    deposit_id = %deposit_request.id,
+                    "TRM rejected deposit: {reason}"
+                );
                 Err(UnapprovedDepositError::AmlRejected(anyhow!(reason)))
             }
             Err(trm::TrmError::Transient(e)) => Err(UnapprovedDepositError::AmlServiceError(e)),
-            Err(trm::TrmError::Permanent(e)) => Err(UnapprovedDepositError::AmlRejected(e)),
+            Err(trm::TrmError::Permanent(e)) => {
+                tracing::warn!(
+                    deposit_id = %deposit_request.id,
+                    "TRM could not screen deposit: {e:#}"
+                );
+                Err(UnapprovedDepositError::AmlRejected(e))
+            }
         }
     }
 
