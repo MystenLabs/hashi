@@ -272,9 +272,8 @@ pub struct CoinSelectionParams {
     /// Maximum miner fee in satoshis that may be deducted from any single
     /// request's amount. The batch is rejected if `total_fee / N` would exceed
     /// this value for the selected set of N requests. Sourced from
-    /// [`crate::onchain::types::Config::worst_case_network_fee`], which is
-    /// derived from `high_fee_rate_threshold` and the worst-case transaction
-    /// shape.
+    /// [`crate::onchain::types::Config::worst_case_network_fee`] (the on-chain
+    /// withdrawal minimum less dust), which is the only bound on the fee rate.
     pub max_fee_per_request: u64,
 
     /// Absolute minimum fee rate (floor). The actual fee rate passed to
@@ -537,11 +536,8 @@ pub enum CoinSelectionError {
 
     /// The final per-request fee share exceeds `params.max_fee_per_request`.
     ///
-    /// This is a safety check performed after all inputs and outputs are
-    /// finalised (step 5). It should not occur when parameters are
-    /// well-formed (i.e. `fee_rate` has been clamped to `params.high_fee_rate_threshold`
-    /// before calling [`select_coins`] and `params.max_fee_per_request` was
-    /// derived from `params.high_fee_rate_threshold`).
+    /// Expected while the fee rate or a CPFP deficit is more than the batch
+    /// can absorb; the leader retries until fees fall or more requests share them.
     #[error(
         "per-request deduction {fee_per_request} sat exceeds the configured cap \
          {max_fee_per_request} sat (total deduction {total_deduction} sat across \
