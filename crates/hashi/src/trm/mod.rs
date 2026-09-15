@@ -240,11 +240,15 @@ impl TrmClient {
                 deadline,
             )
             .await?;
-        if results.len() != queries.len() {
+        if let Some(missing) = queries.iter().find(|query| {
+            !results
+                .iter()
+                .any(|result| result.address_submitted == query.address)
+        }) {
             return Err(TrmError::Permanent(anyhow!(
-                "TRM returned {} screening results for {} addresses",
-                results.len(),
-                queries.len()
+                "TRM returned no screening result for {} address {}",
+                missing.chain,
+                missing.address
             )));
         }
         let rejections: Vec<String> = results
@@ -909,6 +913,14 @@ mod tests {
             (StatusCode::UNAUTHORIZED, json!({}), false),
             (StatusCode::CREATED, json!({ "results": [] }), false),
             (StatusCode::CREATED, json!([]), false),
+            (
+                StatusCode::CREATED,
+                json!([
+                    address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                    address_screening(BITCOIN_ADDRESS, "bitcoin", json!([])),
+                ]),
+                false,
+            ),
         ] {
             let (client, _) = mock_trm([(status, body.clone())]).await;
 
