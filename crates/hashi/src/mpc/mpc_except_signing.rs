@@ -1510,7 +1510,7 @@ impl MpcManager {
         )
         .await;
         drop(_timer);
-        if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
+        if aggregator.reduced_weight_reached(dealer_data.required_reduced_weight) {
             let dkg_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -1809,7 +1809,7 @@ impl MpcManager {
         )
         .await;
         drop(_timer);
-        if u32::from(aggregator.reduced_weight()) >= dealer_data.required_reduced_weight {
+        if aggregator.reduced_weight_reached(dealer_data.required_reduced_weight) {
             let rotation_cert = aggregator
                 .finish()
                 .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
@@ -3031,7 +3031,7 @@ impl MpcManager {
         )
         .await;
         drop(_timer);
-        if (vote_aggregator.reduced_weight() as u32) >= dealer_data.vote_quorum_weight {
+        if vote_aggregator.reduced_weight_reached(dealer_data.vote_quorum_weight) {
             tracing::info!(
                 "AVID nonce Vote quorum reached: dealer {address:?}, batch_index={batch_index}, \
                  weight {} >= {}",
@@ -6206,13 +6206,14 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
         })
         .collect();
     let ceiling = tokio::time::Instant::now() + DEALER_COLLECTION_CEILING;
-    let mut grace_deadline = (u32::from(aggregator.reduced_weight()) >= stop.threshold
+    let mut grace_deadline = (aggregator.reduced_weight_reached(stop.threshold)
         && awaited.is_empty())
     .then(|| tokio::time::Instant::now() + stop.grace);
     let stop_reason = loop {
         let deadline = grace_deadline.map_or(ceiling, |grace| grace.min(ceiling));
-        let next = match tokio::time::timeout_at(deadline, in_flight.next()).await {
-            Ok(next) => next,
+        let (addr, result) = match tokio::time::timeout_at(deadline, in_flight.next()).await {
+            Ok(Some(next)) => next,
+            Ok(None) => break "drained",
             Err(_) => {
                 break if deadline == ceiling {
                     "ceiling"
@@ -6220,9 +6221,6 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
                     "grace"
                 };
             }
-        };
-        let Some((addr, result)) = next else {
-            break "drained";
         };
         awaited.remove(&addr);
         match result {
@@ -6241,7 +6239,7 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
             Err(e) => tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e),
         }
         if grace_deadline.is_none()
-            && u32::from(aggregator.reduced_weight()) >= stop.threshold
+            && aggregator.reduced_weight_reached(stop.threshold)
             && awaited.is_empty()
         {
             grace_deadline = Some(tokio::time::Instant::now() + stop.grace);
