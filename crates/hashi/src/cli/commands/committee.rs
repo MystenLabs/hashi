@@ -228,6 +228,86 @@ pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<(
     Ok(())
 }
 
+/// Refuse a `start_reconfig` the chain would reject, mirroring the asserts in
+/// `committee_set::start_reconfig_from_voting_powers` in order: a
+/// reconfiguration is already pending, a committee already exists for Sui's
+/// current epoch, or Hashi is already on Sui's epoch (genesis at epoch 0 is
+/// the one case the chain lets through with equal epochs). The launch switch
+/// is not mirrored: a genesis start the chain refuses for that reason fails
+/// with `EGenesisNotAuthorized`, and `hashi launch --status` shows why.
+pub fn refuse_unstartable_reconfig(
+    pending_epoch: Option<u64>,
+    hashi_epoch: u64,
+    sui_epoch: u64,
+    committee_exists_for_sui_epoch: bool,
+) -> Result<()> {
+    if let Some(pending_epoch) = pending_epoch {
+        anyhow::bail!(
+            "a reconfiguration to epoch {pending_epoch} is already in progress; if it has \
+             overrun its Sui epoch, abort it first with `hashi committee abort-reconfig`"
+        );
+    }
+    anyhow::ensure!(
+        !committee_exists_for_sui_epoch,
+        "a committee already exists for Sui's current epoch ({sui_epoch}); the next \
+         reconfiguration can only start once Sui's epoch moves on"
+    );
+    anyhow::ensure!(
+        hashi_epoch == 0 || hashi_epoch != sui_epoch,
+        "Hashi is already on Sui's current epoch ({sui_epoch}); there is nothing to start \
+         until Sui's epoch moves on"
+    );
+    anyhow::ensure!(
+        hashi_epoch <= sui_epoch,
+        "Hashi's epoch ({hashi_epoch}) is ahead of the fullnode's Sui epoch ({sui_epoch}); \
+         the fullnode is behind, retry against one that has caught up"
+    );
+    Ok(())
+}
+
+/// Start a reconfiguration by hand (`reconfig::start_reconfig`).
+/// Permissionless: any funded signer may send it. Running nodes submit it
+/// themselves whenever Hashi lags Sui with nothing pending, so this is the
+/// fallback for when no node is doing so.
+pub async fn start_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
+    let mut client = HashiClient::new(config).await?;
+    let sui_epoch = client.fetch_sui_epoch().await?;
+    let hashi_epoch = client.fetch_epoch();
+    let (pending_epoch, committee_exists_for_sui_epoch) = {
+        let state = client.onchain_state().state();
+        let committees = &state.hashi().committees;
+        (
+            committees.pending_epoch_change(),
+            committees.committees().contains_key(&sui_epoch),
+        )
+    };
+    refuse_unstartable_reconfig(
+        pending_epoch,
+        hashi_epoch,
+        sui_epoch,
+        committee_exists_for_sui_epoch,
+    )?;
+
+    print_detail(&format!("\n{}", "Starting a reconfiguration:".bold()));
+    print_detail(&format!("  Current Hashi epoch: {hashi_epoch}"));
+    print_detail(&format!("  Current Sui epoch:   {sui_epoch}"));
+    print_detail(&format!(
+        "  Effect: a committee for epoch {sui_epoch} is formed from Sui's current validator \
+         set and every running node drives DKG or key rotation for it. It must complete \
+         within Sui epoch {sui_epoch}, or it can only be aborted.",
+    ));
+
+    if !prompt_continue("start a reconfiguration", tx_opts).await? {
+        print_warning("Aborted.");
+        return Ok(());
+    }
+
+    let tx = client.build_start_reconfig_transaction()?;
+    print_info("Transaction: reconfig::start_reconfig");
+    execute_or_simulate(&mut client, tx, tx_opts).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "committee_tests.rs"]
 mod tests;
