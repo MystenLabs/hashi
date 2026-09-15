@@ -73,6 +73,7 @@ flowchart TD
 
     subgraph Committee["Hashi Protocol Committee"]
         MEMBERS["Committee Members<br/>(Sui Validators)"]
+        SCREEN["AML screening<br/>(each member's TRM Labs account)"]
         SIGN["Aggregate BLS Signatures"]
         CERT["CommitteeSignature<br/>{ epoch, signature, signers_bitmap }"]
         VERIFY["verify_certificate()<br/>threshold check"]
@@ -101,7 +102,8 @@ flowchart TD
     BTC_UTXO -->|"User creates request<br/>with UTXO info"| DR
     DR -->|"deposit()"| DRQ
     DRQ -.->|"Observe request"| MEMBERS
-    MEMBERS -->|"Sign deposit request"| SIGN
+    MEMBERS -->|"Screen BTC tx<br/>& Sui recipient"| SCREEN
+    SCREEN -->|"Sign deposit request"| SIGN
     SIGN -->|"Quorum reached"| CERT
     CERT -->|"approve_deposit()"| VERIFY
     VERIFY -->|"Valid certificate"| APPROVED
@@ -123,16 +125,16 @@ flowchart TD
 
 ### Deposit flow summary
 
-| Step | Action                                     | Model Transformation                                                                  |
-| ---- | ------------------------------------------ | ------------------------------------------------------------------------------------- |
-| 1    | User sends BTC to bridge address           | Bitcoin UTXO created                                                                  |
-| 2    | User calls `deposit()`                     | `DepositRequest` → `DepositRequestQueue`                                              |
-| 3    | Committee members observe and sign request | BLS signatures aggregated → `CommitteeSignature`                                      |
-| 4    | Leader calls `approve_deposit()` with cert | `verify_certificate()` → request stores `approval_cert` and `approval_timestamp_ms`   |
-| 5    | Time-delay window elapses                  | `bitcoin_deposit_time_delay_ms` (allows committee rotation if approval is fraudulent) |
-| 6    | Anyone calls `confirm_deposit()`           | Re-`verify_certificate()` → `CertifiedMessage<DepositRequest>`                        |
-| 7    | Certified request processed                | `DepositRequest` → `Utxo` in `UtxoPool`                                               |
-| 8    | Treasury mints tokens                      | `Utxo.amount` → `Balance<BTC>` to user                                                |
+| Step | Action                                              | Model Transformation                                                                  |
+| ---- | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| 1    | User sends BTC to bridge address                    | Bitcoin UTXO created                                                                  |
+| 2    | User calls `deposit()`                              | `DepositRequest` → `DepositRequestQueue`                                              |
+| 3    | Committee members observe, screen, and sign request | Each member screens with TRM Labs; BLS signatures aggregated → `CommitteeSignature`   |
+| 4    | Leader calls `approve_deposit()` with cert          | `verify_certificate()` → request stores `approval_cert` and `approval_timestamp_ms`   |
+| 5    | Time-delay window elapses                           | `bitcoin_deposit_time_delay_ms` (allows committee rotation if approval is fraudulent) |
+| 6    | Anyone calls `confirm_deposit()`                    | Re-`verify_certificate()` → `CertifiedMessage<DepositRequest>`                        |
+| 7    | Certified request processed                         | `DepositRequest` → `Utxo` in `UtxoPool`                                               |
+| 8    | Treasury mints tokens                               | `Utxo.amount` → `Balance<BTC>` to user                                                |
 
 ---
 
@@ -171,6 +173,7 @@ flowchart TD
 
     subgraph Committee["Hashi Protocol Committee"]
         MEMBERS2["Committee Members<br/>(Sui Validators)"]
+        SCREEN2["AML screening<br/>(each member's TRM Labs account)"]
         VOTE["Vote to process withdrawal<br/>& select UTXOs"]
         VAL["validate_consume()<br/>per-node read-only<br/>seq + capacity check"]
         MPC["MPC Signing Protocol"]
@@ -193,7 +196,8 @@ flowchart TD
     BAL -->|"User deposits<br/>Balance&lt;BTC&gt;"| WR
     WR -->|"request_withdrawal()"| WRQ
     WRQ -.->|"Observe & approve<br/>request"| MEMBERS2
-    MEMBERS2 --> VOTE
+    MEMBERS2 -->|"Screen BTC destination<br/>& Sui requester"| SCREEN2
+    SCREEN2 --> VOTE
     VOTE -.->|"Select UTXOs<br/>(off-chain)"| UTXO_POOL
     VOTE --> BURN
     BURN -->|"Balance&lt;BTC&gt; burned"| PW
@@ -254,20 +258,20 @@ failures. On startup, each node bootstraps its `LocalLimiter` once through
 
 ### Withdrawal flow summary
 
-| Step | Action                                       | Model Transformation                                                        |
-| ---- | -------------------------------------------- | --------------------------------------------------------------------------- |
-| 1    | User requests withdrawal                     | `Balance<BTC>` → `WithdrawalRequest` → `WithdrawalRequestQueue.requests`    |
-| 2    | Committee approves request                   | `WithdrawalRequest` status → `Approved`                                     |
-| 3    | Leader commits withdrawal tx                 | `Balance<BTC>` burned, `WithdrawalTransaction` created in `.withdrawal_txns`|
-| 4    | Per-node limiter validation gates MPC        | Each node's `LocalLimiter::validate_consume(seq, ts, amt)` (read-only)      |
-| 5    | MPC protocol signs Bitcoin transaction       | Committee collectively signs via MPC using selected UTXOs                   |
-| 6    | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)` — input to the guardian RPC    |
-| 7    | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(wid, seq)` → `EnclaveSig`  |
-| 8    | Leader stores witness signatures onchain     | `sign_withdrawal()` → `WithdrawalTransaction` updated with signatures       |
-| 9    | Each node advances its `LocalLimiter`        | Watcher observes `WithdrawalSigned` → `apply_consume(seq, ts, amt)`    |
-| 10   | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from onchain data, broadcast to Bitcoin             |
-| 11   | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                         |
-| 12   | Leader confirms withdrawal                   | `WithdrawalTransaction` moved to `.confirmed_txns`, UTXOs marked spent      |
+| Step | Action                                       | Model Transformation                                                         |
+| ---- | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1    | User requests withdrawal                     | `Balance<BTC>` → `WithdrawalRequest` → `WithdrawalRequestQueue.requests`     |
+| 2    | Committee screens and approves request       | Each member screens with TRM Labs; `WithdrawalRequest` status → `Approved`   |
+| 3    | Leader commits withdrawal tx                 | `Balance<BTC>` burned, `WithdrawalTransaction` created in `.withdrawal_txns` |
+| 4    | Per-node limiter validation gates MPC        | Each node's `LocalLimiter::validate_consume(seq, ts, amt)` (read-only)       |
+| 5    | MPC protocol signs Bitcoin transaction       | Committee collectively signs via MPC using selected UTXOs                    |
+| 6    | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)` — input to the guardian RPC     |
+| 7    | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(wid, seq)` → `EnclaveSig`   |
+| 8    | Leader stores witness signatures onchain     | `sign_withdrawal()` → `WithdrawalTransaction` updated with signatures        |
+| 9    | Each node advances its `LocalLimiter`        | Watcher observes `WithdrawalSigned` → `apply_consume(seq, ts, amt)`          |
+| 10   | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from onchain data, broadcast to Bitcoin              |
+| 11   | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                          |
+| 12   | Leader confirms withdrawal                   | `WithdrawalTransaction` moved to `.confirmed_txns`, UTXOs marked spent       |
 
 ---
 
