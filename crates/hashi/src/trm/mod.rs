@@ -126,7 +126,7 @@ impl TrmClient {
                     return Ok(verdict);
                 }
             }
-            Ok(self.get_transfer(&transfer.uuid).await?.verdict())
+            self.get_transfer(&transfer.uuid).await?.verdict()
         })
         .await
     }
@@ -335,25 +335,26 @@ impl AddressScreening {
 }
 
 impl Transfer {
-    fn verdict(&self) -> Verdict {
+    fn verdict(&self) -> Result<Verdict, TrmError> {
         let link = self.trm_app_url.as_deref().unwrap_or("no TRM link");
         match self.screen_status.as_deref() {
-            Some("PROCESSING") => Verdict::Pending,
-            Some("SUCCEEDED") => match self.risk_score_level {
+            Some("PROCESSING") => Ok(Verdict::Pending),
+            Some("SUCCEEDED") => Ok(match self.risk_score_level {
                 Some(level) if level >= HIGH_RISK_SCORE_LEVEL => Verdict::Rejected(format!(
                     "TRM transfer {} raised an alert at risk score level {level} ({link})",
                     self.uuid
                 )),
                 _ => Verdict::Approved,
-            },
-            status => Verdict::Rejected(format!(
+            }),
+            // TRM never rescreens a transfer under the same externalId.
+            status => Err(TrmError::Permanent(anyhow!(
                 "TRM could not screen transfer {} (status {}, reason {}) ({link})",
                 self.uuid,
                 status.unwrap_or("null"),
                 self.screen_status_failed_reason
                     .as_deref()
                     .unwrap_or("none"),
-            )),
+            ))),
         }
     }
 }
@@ -685,15 +686,25 @@ mod tests {
     fn transfer_verdict_follows_the_screen_status_and_alert_level() {
         let verdict = |value| serde_json::from_value::<Transfer>(value).unwrap().verdict();
 
-        assert_eq!(verdict(transfer("PROCESSING", None)), Verdict::Pending);
-        assert_eq!(verdict(transfer("SUCCEEDED", Some(5))), Verdict::Approved);
+        assert_eq!(
+            verdict(transfer("PROCESSING", None)).unwrap(),
+            Verdict::Pending
+        );
+        assert_eq!(
+            verdict(transfer("SUCCEEDED", Some(5))).unwrap(),
+            Verdict::Approved
+        );
         assert!(matches!(
             verdict(transfer("SUCCEEDED", Some(10))),
-            Verdict::Rejected(_)
+            Ok(Verdict::Rejected(_))
         ));
         assert!(matches!(
             verdict(transfer("FAILED", None)),
-            Verdict::Rejected(_)
+            Err(TrmError::Permanent(_))
+        ));
+        assert!(matches!(
+            verdict(json!({ "uuid": TRANSFER_UUID, "screenStatus": null })),
+            Err(TrmError::Permanent(_))
         ));
     }
 
