@@ -102,7 +102,7 @@ flowchart TD
     BTC_UTXO -->|"User creates request<br/>with UTXO info"| DR
     DR -->|"deposit()"| DRQ
     DRQ -.->|"Observe request"| MEMBERS
-    MEMBERS -->|"Screen BTC tx<br/>& Sui recipient"| SCREEN
+    MEMBERS -->|"Wait for BTC confirmations,<br/>then screen BTC tx & Sui recipient"| SCREEN
     SCREEN -->|"Sign deposit request"| SIGN
     SIGN -->|"Quorum reached"| CERT
     CERT -->|"approve_deposit()"| VERIFY
@@ -125,16 +125,17 @@ flowchart TD
 
 ### Deposit flow summary
 
-| Step | Action                                              | Model Transformation                                                                  |
-| ---- | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| 1    | User sends BTC to bridge address                    | Bitcoin UTXO created                                                                  |
-| 2    | User calls `deposit()`                              | `DepositRequest` → `DepositRequestQueue`                                              |
-| 3    | Committee members observe, screen, and sign request | Each member screens with TRM Labs; BLS signatures aggregated → `CommitteeSignature`   |
-| 4    | Leader calls `approve_deposit()` with cert          | `verify_certificate()` → request stores `approval_cert` and `approval_timestamp_ms`   |
-| 5    | Time-delay window elapses                           | `bitcoin_deposit_time_delay_ms` (allows committee rotation if approval is fraudulent) |
-| 6    | Anyone calls `confirm_deposit()`                    | Re-`verify_certificate()` → `CertifiedMessage<DepositRequest>`                        |
-| 7    | Certified request processed                         | `DepositRequest` → `Utxo` in `UtxoPool`                                               |
-| 8    | Treasury mints tokens                               | `Utxo.amount` → `Balance<BTC>` to user                                                |
+| Step | Action                                           | Model Transformation                                                                  |
+| ---- | ------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| 1    | User sends BTC to bridge address                 | Bitcoin UTXO created                                                                  |
+| 2    | User calls `deposit()`                           | `DepositRequest` → `DepositRequestQueue`                                              |
+| 3    | Committee members wait for Bitcoin confirmations | `bitcoin_confirmation_threshold` blocks on the deposit transaction                    |
+| 4    | Committee members screen and sign request        | Each member screens with TRM Labs; BLS signatures aggregated → `CommitteeSignature`   |
+| 5    | Leader calls `approve_deposit()` with cert       | `verify_certificate()` → request stores `approval_cert` and `approval_timestamp_ms`   |
+| 6    | Time-delay window elapses                        | `bitcoin_deposit_time_delay_ms` (allows committee rotation if approval is fraudulent) |
+| 7    | Anyone calls `confirm_deposit()`                 | Re-`verify_certificate()` → `CertifiedMessage<DepositRequest>`                        |
+| 8    | Certified request processed                      | `DepositRequest` → `Utxo` in `UtxoPool`                                               |
+| 9    | Treasury mints tokens                            | `Utxo.amount` → `Balance<BTC>` to user                                                |
 
 ---
 
