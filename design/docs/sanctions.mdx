@@ -73,10 +73,12 @@ A node does not vote for a deposit or withdrawal when:
   account.
 - TRM cannot screen the transfer, or rejects the request.
 
-Transaction Monitoring is asynchronous. A node declines a deposit until TRM
-finishes screening its transfer, usually within a minute, and the leader
-retries on the next Bitcoin block. Timeouts, rate limits and TRM server errors
-are also retried, and the node does not vote in the meantime.
+Transaction Monitoring is asynchronous. A node waits up to 10 seconds for TRM
+to finish screening a deposit's transfer; if TRM is still processing it, the
+node declines the deposit for now and the leader retries on the next Bitcoin
+block. Timeouts, rate limits and TRM server errors are also retried, and the
+node does not vote in the meantime. TRM can still alert on a transfer after
+the committee approves the deposit; hashi does not revisit an approval.
 
 ## When sanctions checks apply
 
