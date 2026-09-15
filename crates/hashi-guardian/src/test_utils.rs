@@ -451,9 +451,12 @@ pub fn activate_enclave_for_testing(
     limiter_config: LimiterConfig,
     limiter_state: LimiterState,
 ) -> GuardianResult<()> {
-    let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
+    let withdrawals = crate::enclave::WithdrawalState {
+        limiter: RateLimiter::new(limiter_config, limiter_state)?,
+        last_signed: None,
+    };
 
-    enclave.state.init(committee, rate_limiter)?;
+    enclave.state.init(committee, withdrawals)?;
     enclave.clear_temporary_init_state();
     enclave.advance_lifecycle_into(WithdrawStage::Activated.into())?;
     Ok(())
