@@ -1192,6 +1192,7 @@ impl Monitor {
                 self.rpc_workers.spawn(Self::get_recent_fee_rate(
                     self.bitcoind_rpc.clone(),
                     self.metrics.clone(),
+                    self.config.network,
                     conf_target,
                     caller,
                 ));
@@ -1248,6 +1249,7 @@ impl Monitor {
     async fn get_recent_fee_rate(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         metrics: Arc<Metrics>,
+        network: bitcoin::Network,
         conf_target: u16,
         caller: Caller<FeeRate>,
     ) {
@@ -1272,7 +1274,7 @@ impl Monitor {
         };
         let result = rpc_result
             .map_err(anyhow::Error::from)
-            .and_then(|estimate| fee_rate_from_estimate(&estimate, conf_target))
+            .and_then(|estimate| fee_rate_from_estimate(&estimate, network, conf_target))
             .inspect(|fee_rate| {
                 metrics
                     .btc_fee_rate_sat_per_kvb
@@ -1738,9 +1740,17 @@ fn get_tx_out_best_block(response: &serde_json::Value) -> Result<bitcoin::BlockH
 /// truncates to whole sat/vB, which turns a 0.93 sat/vB estimate into zero.
 fn fee_rate_from_estimate(
     estimate: &corepc_client::types::v29::EstimateSmartFee,
+    network: bitcoin::Network,
     conf_target: u16,
 ) -> Result<FeeRate> {
     let Some(btc_per_kvb) = estimate.fee_rate else {
+        // Only regtest has no fee market to estimate. Anywhere else a guess would
+        // price a withdrawal that can never be replaced.
+        anyhow::ensure!(
+            network == bitcoin::Network::Regtest,
+            "bitcoind has no fee estimate for a {conf_target}-block target: {}",
+            estimate.errors.as_deref().unwrap_or_default().join("; ")
+        );
         warn!(
             conf_target,
             fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
@@ -2204,13 +2214,34 @@ mod tests {
                 errors: None,
                 blocks: 3,
             };
-            let fee_rate = fee_rate_from_estimate(&estimate, 3).unwrap();
+            let fee_rate = fee_rate_from_estimate(&estimate, bitcoin::Network::Bitcoin, 3).unwrap();
             assert_eq!(
                 fee_rate.to_sat_per_kwu(),
                 sat_per_kwu,
                 "{btc_per_kvb} BTC/kvB"
             );
         }
+    }
+
+    #[test]
+    fn fee_rate_from_estimate_refuses_a_missing_estimate_outside_regtest() {
+        let estimate = corepc_client::types::v29::EstimateSmartFee {
+            fee_rate: None,
+            errors: Some(vec!["Insufficient data or no feerate found".to_string()]),
+            blocks: 0,
+        };
+        for network in [
+            bitcoin::Network::Bitcoin,
+            bitcoin::Network::Testnet4,
+            bitcoin::Network::Signet,
+        ] {
+            let error = fee_rate_from_estimate(&estimate, network, 3).unwrap_err();
+            assert!(error.to_string().contains("Insufficient data"), "{error}");
+        }
+        assert_eq!(
+            fee_rate_from_estimate(&estimate, bitcoin::Network::Regtest, 3).unwrap(),
+            FeeRate::from_sat_per_vb_unchecked(1)
+        );
     }
 
     #[test]
