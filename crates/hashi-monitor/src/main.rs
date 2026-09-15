@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
+use hashi_monitor::audit::continuous::ContinuousAuditWindow;
 use hashi_monitor::domain::parse_utc_timestamp;
 use hashi_monitor::metrics::MonitorMetrics;
 use hashi_types::guardian::time::now_timestamp_secs;
@@ -43,8 +44,10 @@ enum Command {
         config: PathBuf,
 
         /// Start of guardian audit period as UTC, for example 2026-08-04T19:00:00Z.
+        /// Defaults to the earliest time whose checks can still be pending, so a
+        /// restart resumes open checks; violations anchored earlier are not re-reported.
         #[arg(long, value_parser = parse_utc_timestamp)]
-        start: u64,
+        start: Option<u64>,
 
         /// Address serving Prometheus metrics at `/metrics`.
         #[arg(long, default_value = "0.0.0.0:9184")]
@@ -74,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
             metrics_listen_addr,
         } => {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
+            let start = start.unwrap_or_else(|| {
+                ContinuousAuditWindow::default_start(&cfg, now_timestamp_secs())
+            });
             let metrics = Arc::new(MonitorMetrics::new());
             // Alerting reads this port, so a monitor that cannot serve it is
             // unobservable. Bind before auditing anything and fail if it can't.
