@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HASHI_MPC_RECOVERY_DELAY_SECONDS"],"fn":["mpc_recovery_delay_sequence","taproot_2of2_witness_artifacts","taproot_address","taproot_mpc_recovery_witness_artifacts","taproot_script_spend_sighashes"]};

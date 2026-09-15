@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en" dir="ltr" class="docs-wrapper plugin-docs plugin-id-default docs-version-current docs-doc-page docs-doc-id-move-upgrades" data-has-hydrated="false">
+<head>
+<meta charset="UTF-8">
+<meta name="generator" content="Docusaurus v3.9.2">
+<title data-rh="true">Move Package Upgrades | Hashi</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://mystenlabs.github.io/hashi/pr-preview/pr-1086/move-upgrades/"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Move Package Upgrades | Hashi"><meta data-rh="true" name="description" content="How Hashi classifies Move upgrades as exclusive or non-exclusive, rolls out validator binaries, and retires old package versions safely."><meta data-rh="true" property="og:description" content="How Hashi classifies Move upgrades as exclusive or non-exclusive, rolls out validator binaries, and retires old package versions safely."><meta data-rh="true" name="keywords" content="Move upgrade,package version,exclusive upgrade,validator rollout,governance"><link data-rh="true" rel="icon" href="/hashi/pr-preview/pr-1086/img/favicon.svg"><link data-rh="true" rel="canonical" href="https://mystenlabs.github.io/hashi/pr-preview/pr-1086/move-upgrades/"><link data-rh="true" rel="alternate" href="https://mystenlabs.github.io/hashi/pr-preview/pr-1086/move-upgrades/" hreflang="en"><link data-rh="true" rel="alternate" href="https://mystenlabs.github.io/hashi/pr-preview/pr-1086/move-upgrades/" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Move Package Upgrades","item":"https://mystenlabs.github.io/hashi/pr-preview/pr-1086/move-upgrades"}]}</script><script>window.__COPY_PAGE_BUTTON_OPTIONS__={customStyles:{},enabledActions:["copy","view","chatgpt","claude"],id:"default"}</script>
+
+
+
+
+
+
+
+<meta name="algolia-site-verification" content="BCA21DA2879818D2">
+<script src="https://widget.kapa.ai/kapa-widget.bundle.js" data-website-id="8bd95839-754a-4bef-8ea5-4e0a0617227a" data-project-name="Hashi Knowledge" data-project-color="#298DFF" data-button-hide="true" data-modal-title="Ask Hashi AI" data-modal-ask-ai-input-placeholder="Ask me anything about Hashi!" data-modal-example-questions="How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?" data-modal-image="/hashi/pr-preview/pr-1086/img/logo.svg" async></script><link rel="stylesheet" href="/hashi/pr-preview/pr-1086/assets/css/styles.b093abbf.css">
+<script src="/hashi/pr-preview/pr-1086/assets/js/runtime~main.2e99a362.js" defer="defer"></script>
+<script src="/hashi/pr-preview/pr-1086/assets/js/main.6a30db0b.js" defer="defer"></script>
+</head>
+<body class="navigation-with-keyboard">
+<svg style="display: none;"><defs>
+<symbol id="theme-svg-external-link" viewBox="0 0 24 24"><path fill="currentColor" d="M21 13v10h-21v-19h12v2h-10v15h17v-8h2zm3-12h-10.988l4.035 4-6.977 7.07 2.828 2.828 6.977-7.07 4.125 4.172v-11z"/></symbol>
+</defs></svg>
+<script>!function(){var t=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();document.documentElement.setAttribute("data-theme",t||"dark"),document.documentElement.setAttribute("data-theme-choice",t||"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}(),document.documentElement.setAttribute("data-announcement-bar-initially-dismissed",function(){try{return"true"===localStorage.getItem("docusaurus.announcement.dismiss")}catch(t){}return!1}())</script>
+<link rel="alternate" type="text/plain" href="/hashi/pr-preview/pr-1086/llms.txt" title="LLMs.txt">
+
+
+
+
+
+<script>window.__PLAUSIBLE_OPTS__={domain:"",enableInDev:!1,trackOutboundLinks:!0,hashMode:!1,trackLocalhost:!1,id:"default"}</script><div id="__docusaurus"><link rel="preload" as="image" href="/hashi/pr-preview/pr-1086/img/logo.svg"><link rel="preload" as="image" href="/hashi/pr-preview/pr-1086/img/logo-dark.svg"><div role="region" aria-label="Skip to main content"><a class="skipToContent_fXgn" href="#__docusaurus_skipToContent_fallback">Skip to main content</a></div><div class="theme-announcement-bar announcementBar_mb4j" style="background-color:#298DFF;color:#FFFFFF" role="banner"><div class="announcementBarPlaceholder_vyr4"></div><div class="content_knG7 announcementBarContent_xLdY">Hashi is now <strong>LIVE on Testnet</strong>. <a target="_blank" rel="noopener noreferrer" href="https://testnet.hashi.sui.io">Get started &rarr;</a></div><button type="button" aria-label="Close" class="clean-btn close closeButton_CVFx announcementBarClose_gvF7"><svg viewBox="0 0 15 15" width="14" height="14"><g stroke="currentColor" stroke-width="3.1"><path d="M.75.75l13.5 13.5M14.25.75L.75 14.25"></path></g></svg></button></div><nav aria-label="Main" class="theme-layout-navbar navbar navbar--fixed-top"><div class="navbar__inner"><div class="theme-layout-navbar-left navbar__items"><button aria-label="Toggle navigation bar" aria-expanded="false" class="navbar__toggle clean-btn" type="button"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><path stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="2" d="M4 7h22M4 15h22M4 23h22"></path></svg></button><a class="navbar__brand" href="/hashi/pr-preview/pr-1086/"><div class="navbar__logo"><img src="/hashi/pr-preview/pr-1086/img/logo.svg" alt="Hashi logo" class="themedComponent_mlkZ themedComponent--light_NVdE"><img src="/hashi/pr-preview/pr-1086/img/logo-dark.svg" alt="Hashi logo" class="themedComponent_mlkZ themedComponent--dark_xIcU"></div><b class="navbar__title text--truncate">Hashi</b></a></div><div class="theme-layout-navbar-right navbar__items navbar__items--right"><div class="navbar__item"><button type="button" class="kapa-trigger-btn" onclick="window.Kapa&&window.Kapa.open()" aria-label="Ask Hashi AI"><img src="/hashi/pr-preview/pr-1086/img/logo.svg" alt="" width="20" height="20"><span class="kapa-trigger-btn__label">Ask Hashi AI</span></button></div><a href="https://github.com/MystenLabs/hashi" target="_blank" rel="noopener noreferrer" class="navbar__item navbar__link">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a><div class="toggle_vylO colorModeToggle_DEke"><button class="clean-btn toggleButton_gllP toggleButtonDisabled_aARS" type="button" disabled="" title="system mode" aria-label="Switch between dark and light mode (currently system mode)"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP lightToggleIcon_pyhR"><path fill="currentColor" d="M12,9c1.65,0,3,1.35,3,3s-1.35,3-3,3s-3-1.35-3-3S10.35,9,12,9 M12,7c-2.76,0-5,2.24-5,5s2.24,5,5,5s5-2.24,5-5 S14.76,7,12,7L12,7z M2,13l2,0c0.55,0,1-0.45,1-1s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S1.45,13,2,13z M20,13l2,0c0.55,0,1-0.45,1-1 s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S19.45,13,20,13z M11,2v2c0,0.55,0.45,1,1,1s1-0.45,1-1V2c0-0.55-0.45-1-1-1S11,1.45,11,2z M11,20v2c0,0.55,0.45,1,1,1s1-0.45,1-1v-2c0-0.55-0.45-1-1-1C11.45,19,11,19.45,11,20z M5.99,4.58c-0.39-0.39-1.03-0.39-1.41,0 c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0s0.39-1.03,0-1.41L5.99,4.58z M18.36,16.95 c-0.39-0.39-1.03-0.39-1.41,0c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0c0.39-0.39,0.39-1.03,0-1.41 L18.36,16.95z M19.42,5.99c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06c-0.39,0.39-0.39,1.03,0,1.41 s1.03,0.39,1.41,0L19.42,5.99z M7.05,18.36c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06 c-0.39,0.39-0.39,1.03,0,1.41s1.03,0.39,1.41,0L7.05,18.36z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP darkToggleIcon_wfgR"><path fill="currentColor" d="M9.37,5.51C9.19,6.15,9.1,6.82,9.1,7.5c0,4.08,3.32,7.4,7.4,7.4c0.68,0,1.35-0.09,1.99-0.27C17.45,17.19,14.93,19,12,19 c-3.86,0-7-3.14-7-7C5,9.07,6.81,6.55,9.37,5.51z M12,3c-4.97,0-9,4.03-9,9s4.03,9,9,9s9-4.03,9-9c0-0.46-0.04-0.92-0.1-1.36 c-0.98,1.37-2.58,2.26-4.4,2.26c-2.98,0-5.4-2.42-5.4-5.4c0-1.81,0.89-3.42,2.26-4.4C12.92,3.04,12.46,3,12,3L12,3z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP systemToggleIcon_QzmC"><path fill="currentColor" d="m12 21c4.971 0 9-4.029 9-9s-4.029-9-9-9-9 4.029-9 9 4.029 9 9 9zm4.95-13.95c1.313 1.313 2.05 3.093 2.05 4.95s-0.738 3.637-2.05 4.95c-1.313 1.313-3.093 2.05-4.95 2.05v-14c1.857 0 3.637 0.737 4.95 2.05z"></path></svg></button></div><div class="navbarSearchContainer_Bca1"></div></div></div><div role="presentation" class="navbar-sidebar__backdrop"></div></nav><div id="__docusaurus_skipToContent_fallback" class="theme-layout-main main-wrapper mainWrapper_z2l0"><div class="docsWrapper_hBAB"><button aria-label="Scroll back to top" class="clean-btn theme-back-to-top-button backToTopButton_sjWU" type="button"></button><div class="docRoot_UBD9"><aside class="theme-doc-sidebar-container docSidebarContainer_YfHR"><div class="sidebarViewport_aRkj"><div class="sidebar_njMd"><nav aria-label="Docs sidebar" class="menu thin-scrollbar menu_SIkG menuWithAnnouncementBar_GW3s"><ul class="theme-doc-sidebar-menu menu__list"><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-1 menu__list-item"><a class="menu__link" href="/hashi/pr-preview/pr-1086/"><span title="Introduction" class="linkLabel_WmDU">Introduction</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-1 menu__list-item"><a class="menu__link" href="/hashi/pr-preview/pr-1086/user-flows/"><span title="User Flows" class="linkLabel_WmDU">User Flows</span></a></li><li class="theme-doc-sidebar-item-category theme-doc-sidebar-item-category-level-1 menu__list-item"><div class="menu__list-item-collapsible"><a class="categoryLink_byQd menu__link menu__link--sublist menu__link--sublist-caret menu__link--active" role="button" aria-expanded="true" href="/hashi/pr-preview/pr-1086/committee/"><span title="Design" class="categoryLinkLabel_W154">Design</span></a></div><ul class="menu__list"><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/committee/"><span title="Committee" class="linkLabel_WmDU">Committee</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/governance-actions/"><span title="Governance Actions" class="linkLabel_WmDU">Governance Actions</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link menu__link--active" aria-current="page" tabindex="0" href="/hashi/pr-preview/pr-1086/move-upgrades/"><span title="Move Package Upgrades" class="linkLabel_WmDU">Move Package Upgrades</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/sanctions/"><span title="Handling Sanctions" class="linkLabel_WmDU">Handling Sanctions</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/service/"><span title="Service" class="linkLabel_WmDU">Service</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/mpc-protocol/"><span title="MPC Protocol" class="linkLabel_WmDU">MPC Protocol</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/guardian/"><span title="Guardian" class="linkLabel_WmDU">Guardian</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/address-scheme/"><span title="Address Scheme" class="linkLabel_WmDU">Address Scheme</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/limiter/"><span title="Limiter" class="linkLabel_WmDU">Limiter</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/fees/"><span title="Fees" class="linkLabel_WmDU">Fees</span></a></li><li class="theme-doc-sidebar-item-link theme-doc-sidebar-item-link-level-2 menu__list-item"><a class="menu__link" tabindex="0" href="/hashi/pr-preview/pr-1086/config/"><span title="Configuration" class="linkLabel_WmDU">Configuration</span></a></li></ul></li><li class="theme-doc-sidebar-item-category theme-doc-sidebar-item-category-level-1 menu__list-item menu__list-item--collapsed"><div class="menu__list-item-collapsible"><a class="categoryLink_byQd menu__link menu__link--sublist menu__link--sublist-caret" role="button" aria-expanded="false" href="/hashi/pr-preview/pr-1086/reconfiguration/"><span title="Flows" class="categoryLinkLabel_W154">Flows</span></a></div></li><li class="theme-doc-sidebar-item-category theme-doc-sidebar-item-category-level-1 menu__list-item menu__list-item--collapsed"><div class="menu__list-item-collapsible"><a class="categoryLink_byQd menu__link menu__link--sublist menu__link--sublist-caret" role="button" aria-expanded="false" href="/hashi/pr-preview/pr-1086/node-operator-runbook/"><span title="Operators" class="categoryLinkLabel_W154">Operators</span></a></div></li><li class="theme-doc-sidebar-item-category theme-doc-sidebar-item-category-level-1 menu__list-item menu__list-item--collapsed"><div class="menu__list-item-collapsible"><a class="categoryLink_byQd menu__link menu__link--sublist menu__link--sublist-caret" role="button" aria-expanded="false" href="/hashi/pr-preview/pr-1086/ts-sdk/"><span title="SDKs" class="categoryLinkLabel_W154">SDKs</span></a></div></li></ul></nav></div></div></aside><main class="docMainContainer_TBSr"><div class="container padding-top--md padding-bottom--lg"><div class="row"><div class="col docItemCol_VOVn"><div class="docItemContainer_Djhp"><article><nav class="theme-doc-breadcrumbs breadcrumbsContainer_Z_bl" aria-label="Breadcrumbs"><ul class="breadcrumbs"><li class="breadcrumbs__item"><a aria-label="Home page" class="breadcrumbs__link" href="/hashi/pr-preview/pr-1086/"><svg viewBox="0 0 24 24" class="breadcrumbHomeIcon_YNFT"><path d="M10 19v-5h4v5c0 .55.45 1 1 1h3c.55 0 1-.45 1-1v-7h1.7c.46 0 .68-.57.33-.87L12.67 3.6c-.38-.34-.96-.34-1.34 0l-8.36 7.53c-.34.3-.13.87.33.87H5v7c0 .55.45 1 1 1h3c.55 0 1-.45 1-1z" fill="currentColor"></path></svg></a></li><li class="breadcrumbs__item"><span class="breadcrumbs__link">Design</span></li><li class="breadcrumbs__item breadcrumbs__item--active"><span class="breadcrumbs__link">Move Package Upgrades</span></li></ul></nav><div class="tocCollapsible_ETCw theme-doc-toc-mobile tocMobile_ITEo"><button type="button" class="clean-btn tocCollapsibleButton_TO0P">On this page</button></div><div class="theme-doc-markdown markdown"><header><h1>Move Package Upgrades</h1></header><p>Hashi package versions are separate callable Sui packages, but they operate on
+the same shared <code>Hashi</code> object. Publishing a new package therefore does not make
+an old package harmless. If an old entry function interprets shared state using
+an obsolete invariant, it can overwrite or destroy work performed by the new
+version.</p>
+<p>The withdrawal v2 work exposed a concrete example. A request committed by v2
+could remain in a location that v1 treated as cancellable. While v1 remained
+enabled, its cancellation path could destroy that committed request, stranding
+burned hBTC and locked UTXOs. This is why package publication and version
+retirement sometimes need to be one atomic governance action.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="required-classification">Required classification<a href="#required-classification" class="hash-link" aria-label="Direct link to Required classification" title="Direct link to Required classification" translate="no">​</a></h2>
+<p>Every upgrade proposal must be labeled <strong>exclusive</strong> or <strong>non-exclusive</strong> in
+its design and rollout plan. Reviewers should treat a missing classification as
+an incomplete upgrade.</p>
+<p>Use an <strong>exclusive upgrade</strong> when any of the following is true:</p>
+<ul>
+<li class="">The new version changes the meaning, location, or lifecycle of shared state.</li>
+<li class="">An old entry function could undo, overwrite, replay, or misclassify a new
+version&#x27;s write.</li>
+<li class="">Safety depends on all callers using the new validation or authorization rule.</li>
+<li class="">Cross-version behavior has not been tested directly.</li>
+</ul>
+<p>Exclusive should be the default when there is doubt. It atomically replaces the
+enabled-version set with the newly committed version, so no transaction can
+observe the new version enabled while an older version is still callable.</p>
+<p>Use a <strong>non-exclusive upgrade</strong> only when retaining an older version is an
+intentional compatibility feature. The review must explain why old and new
+entry functions are safe against the same shared state and include direct
+cross-version tests for state both versions can mutate. A desire to let old
+validator binaries keep working is not, by itself, enough: binary rollout is an
+operational concern and must not weaken an onchain safety invariant.</p>
+<p>The <code>upgrade::Upgrade</code> proposal records this decision in its <code>exclusive</code>
+field. Execution returns the Sui <code>UpgradeTicket</code> together with a non-droppable
+authorization carrying the approved setting. Finalization consumes both in the
+same programmable transaction, binding the committee vote to the version policy
+that is applied when the package is committed. The CLI requires
+<code>--exclusive true</code> or <code>--exclusive false</code>; omission is rejected so the
+classification cannot be an accidental default.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="validator-rollout-contract">Validator rollout contract<a href="#validator-rollout-contract" class="hash-link" aria-label="Direct link to Validator rollout contract" title="Direct link to Validator rollout contract" translate="no">​</a></h2>
+<p>An exclusive upgrade deliberately makes old binaries unable to perform normal
+writes once the upgrade checkpoint is observed. An old binary does not contain
+the code or ABI routing for the newest package, and the previous package is no
+longer enabled. Updated Hashi nodes detect that they support no enabled package
+version and halt autonomous mutations instead of falling back unsafely.</p>
+<p>Use this sequence for every upgrade:</p>
+<ol>
+<li class="">Build the exact Move package and record its digest in the proposal. Create
+exclusive proposals with <code>--package-path</code>, which verifies the package&#x27;s
+<code>PACKAGE_VERSION</code> constant against the chain before proposing; the CLI
+refuses <code>--digest</code> for an exclusive upgrade unless
+<code>--allow-unverified-exclusive</code> explicitly acknowledges that the constant
+was not machine-checked.</li>
+<li class="">Release a node binary that understands both the currently active package and
+the proposed package.</li>
+<li class="">Restart validators one at a time. Each validator verifies healthy operation
+on the current package before casting its vote.</li>
+<li class="">Confirm that upgraded validators represent at least two thirds of committee
+<strong>weight</strong>, not merely two thirds of node count.</li>
+<li class="">Reach proposal quorum, then separately execute and publish the upgrade with
+<code>hashi proposal execute-upgrade &lt;proposal-id&gt; --package-path &lt;dir&gt;</code>, built
+from the same commit and <code>sui</code> binary as the proposal&#x27;s digest. Votes never
+auto-publish a package.</li>
+<li class="">Verify the package-upgrade checkpoint, enabled-version set, active routing,
+and validator health before resuming ordinary rollout work.</li>
+</ol>
+<p>This ordering means the network retains quorum-capable updated software before
+an exclusive publication causes old binaries to stop writing.</p>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="current-testnet-v1-to-v2-plan">Current testnet v1 to v2 plan<a href="#current-testnet-v1-to-v2-plan" class="hash-link" aria-label="Direct link to Current testnet v1 to v2 plan" title="Direct link to Current testnet v1 to v2 plan" translate="no">​</a></h2>
+<p>The deployed testnet v1 package only has the legacy <code>upgrade</code> proposal. That
+proposal always leaves previous versions enabled, so it cannot make the first
+v1-to-v2 transition atomic. Testnet carries no real funds, and we accept a small
+race window for this one migration. Run the migration under the emergency
+pause, which closes the withdrawal-replay surface described below; the
+withdrawal queue does not need to drain first.</p>
+<ol>
+<li class="">Create and fully vote the pause, v2 upgrade, and <code>DisableVersion(1)</code>
+proposals while v1 is active. Proposal creation permits targeting the
+current version; only execution rejects disabling it.</li>
+<li class="">Execute the pause once the remaining proposals are near quorum. Governance
+entries are not pause-gated, so the remaining steps execute while paused.</li>
+<li class="">Verify the bridge is still paused, then execute, publish, and finalize v2
+through the legacy v1 upgrade path (<code>hashi proposal execute-upgrade</code>).</li>
+<li class="">Wait for that transaction to succeed and obtain the newly published v2
+package ID.</li>
+<li class="">Immediately execute the already-approved disable-v1 proposal through the v2
+package. Pre-build this transaction so only the package ID needs filling.</li>
+<li class="">Verify that v1 calls fail with <code>EVersionDisabled</code> and that validators route
+ordinary work through v2.</li>
+<li class="">Create, vote, and execute the unpause.</li>
+</ol>
+<p>Proposal execution checks only quorum, not the caller, so any quorum-complete
+proposal is executable by any account. The strict ordering therefore votes the
+unpause only after <code>DisableVersion(1)</code> is verified: a pre-voted unpause would
+let an adversary unpause and commit through v2 in one transaction inside the
+window. The Testnet migration relaxes this and pre-votes the unpause
+alongside the other proposals, accepting the theoretical window: nothing of
+value is at stake, the window is seconds wide, and the proposing operators
+have executed every proposal to date. Any future migration that carries real
+value must use the strict ordering; on Mainnet the question should not arise
+at all, because exclusive upgrades replace the enabled set atomically and
+leave no window to protect.</p>
+<p>The upgrade and disable are necessarily two transactions. Do not submit them
+concurrently: the network does not guarantee shared-object ordering, and
+disable-v1 must execute through v2 after publication.</p>
+<p>The pause is what makes the window between them safe for withdrawals.
+Commitment and approval certificates bind no package version, so while both
+versions are enabled a live certificate can be replayed through v2&#x27;s
+<code>commit_withdrawal_tx</code>. That commits the request in place, where v1&#x27;s
+pause-exempt <code>cancel_withdrawal</code> (which checks only the <code>processed</code> bag) can
+destroy it, burning the user&#x27;s hBTC while releasing no BTC and wedging the
+referencing withdrawal transaction forever. Every corrupting interleaving
+requires such a v2 commit to land while v1 is still enabled.
+<code>commit_withdrawal_tx</code> and <code>approve_request</code> honor the pause in both
+packages, so holding the pause across the window means no transaction can
+create that state, and the pause-exempt v1 cancel has nothing corruptible to
+act on. In-flight withdrawals ride
+through the flip without draining: committed batches sign, confirm, and
+archive from their v1 locations, and approved or requested entries commit
+v2-style afterward.</p>
+<p>The pre-mainnet tree ships this way already: the legacy module is deleted,
+the atomic proposal type is named <code>upgrade</code>, and it is the only upgrade path.
+Mainnet begins with it from genesis.</p></div><footer class="theme-doc-footer docusaurus-mt-lg"><div class="row margin-top--sm theme-doc-footer-edit-meta-row"><div class="col noPrint_WFHX"><a href="https://github.com/MystenLabs/hashi/edit/main/design/docs/move-upgrades.mdx" target="_blank" rel="noopener noreferrer" class="theme-edit-this-page"><svg fill="currentColor" height="20" width="20" viewBox="0 0 40 40" class="iconEdit_Z9Sw" aria-hidden="true"><g><path d="m34.5 11.7l-3 3.1-6.3-6.3 3.1-3q0.5-0.5 1.2-0.5t1.1 0.5l3.9 3.9q0.5 0.4 0.5 1.1t-0.5 1.2z m-29.5 17.1l18.4-18.5 6.3 6.3-18.4 18.4h-6.3v-6.2z"></path></g></svg>Edit this page</a></div><div class="col lastUpdated_JAkA"></div></div></footer></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"><a class="pagination-nav__link pagination-nav__link--prev" href="/hashi/pr-preview/pr-1086/governance-actions/"><div class="pagination-nav__sublabel">Previous</div><div class="pagination-nav__label">Governance Actions</div></a><a class="pagination-nav__link pagination-nav__link--next" href="/hashi/pr-preview/pr-1086/sanctions/"><div class="pagination-nav__sublabel">Next</div><div class="pagination-nav__label">Handling Sanctions</div></a></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#required-classification" class="table-of-contents__link toc-highlight">Required classification</a></li><li><a href="#validator-rollout-contract" class="table-of-contents__link toc-highlight">Validator rollout contract</a></li><li><a href="#current-testnet-v1-to-v2-plan" class="table-of-contents__link toc-highlight">Current testnet v1 to v2 plan</a></li></ul></div></div></div></div></main></div></div></div></div>
+</body>
+</html>
