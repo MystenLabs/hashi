@@ -88,7 +88,7 @@ impl BtcRpcClient {
         Ok(Self {
             transport: HttpJsonRpcTransport {
                 rpc_url: cfg.btc.resolve_rpc_url()?,
-                headers: cfg.btc.http_headers.clone(),
+                headers: cfg.btc.resolve_http_headers()?,
             },
             confirmation_cache: RefCell::new(HashMap::new()),
         })
@@ -161,9 +161,12 @@ impl HttpJsonRpcTransport {
                 continue;
             }
 
-            let response_body: Value = response
-                .json()
-                .context("failed to decode bitcoin JSON-RPC response")?;
+            let response_body: Value = response.json().with_context(|| {
+                format!(
+                    "failed to decode bitcoin JSON-RPC response (HTTP {})",
+                    response.status_code
+                )
+            })?;
             if json_rpc_rate_limited(&response_body) {
                 Self::wait_before_rate_limit_retry(attempt)?;
                 continue;
@@ -415,6 +418,11 @@ fn response_index(response: &JsonRpcEnvelope, batch_len: usize) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::BufRead as _;
+    use std::io::BufReader;
+    use std::io::Read as _;
+    use std::io::Write as _;
+    use std::net::TcpListener;
     use std::sync::Once;
 
     use anyhow::Result;
@@ -429,6 +437,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::BtcRpcClient;
+    use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
     use crate::config::BtcConfig;
     use crate::config::Config;
@@ -530,5 +539,44 @@ mod tests {
         assert!(confirmed.is_some(), "expected confirmed transaction");
 
         Ok(())
+    }
+
+    #[test]
+    fn undecodable_response_error_names_the_http_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let rpc_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let line = line.to_ascii_lowercase();
+                if let Some(value) = line.strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            reader
+                .into_inner()
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let transport = HttpJsonRpcTransport {
+            rpc_url,
+            headers: BTreeMap::new(),
+        };
+
+        let error = transport
+            .call("getblockchaininfo", serde_json::json!([]))
+            .err()
+            .expect("an empty 401 body is not JSON");
+
+        server.join().unwrap();
+        assert!(format!("{error:#}").contains("HTTP 401"), "{error:#}");
     }
 }
