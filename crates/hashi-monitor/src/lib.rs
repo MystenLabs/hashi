@@ -19,4 +19,7 @@ pub mod config;
 /// Domain findings emitted by the monitor.
 pub mod findings;
 
+/// Prometheus metrics for continuous audits.
+pub mod metrics;
+
 pub use hashi_types::bitcoin::ExternalOutputUTXOWire as OutputUTXO;
