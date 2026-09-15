@@ -33,6 +33,7 @@ on:
       - crates/hashi-types/**
       - Cargo.toml
       - Cargo.lock
+      - .dockerignore
       - .github/workflows/guardian-enclave.yml
   workflow_dispatch:
     inputs:
@@ -90,7 +91,7 @@ jobs:
         id: diff
         run: |
           git diff --no-renames --name-only HEAD^1 HEAD > changed
-          if grep -E '^(docker/hashi-guardian/|crates/hashi-guardian/|crates/hashi-types/|Cargo\.(toml|lock)$|\.github/workflows/guardian-enclave\.yml$)' changed; then
+          if grep -E '^(docker/hashi-guardian/|crates/hashi-guardian/|crates/hashi-types/|Cargo\.(toml|lock)$|\.dockerignore$|\.github/workflows/guardian-enclave\.yml$)' changed; then
             echo "eif=true" >> "$GITHUB_OUTPUT"
           else
             echo "none of the $(wc -l < changed) changed files is an EIF input"
