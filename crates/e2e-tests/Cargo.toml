@@ -46,4 +46,5 @@ path = "src/main.rs"
 
 [dev-dependencies]
 fastcrypto-tbls.workspace = true
+hashi-monitor = { path = "../hashi-monitor" }
 tracing-subscriber.workspace = true
