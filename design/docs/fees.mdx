@@ -93,6 +93,11 @@ within `withdrawal_fee_conf_target` blocks (default `3`, around 30
 minutes). Low-traffic chains like signet might need a higher target to
 route the estimator to its long-horizon bucket.
 
+If Bitcoin Core has no estimate, for example while its estimator warms up
+after a restart, the leader doesn't build withdrawal transactions and
+validators don't sign them. Only regtest, which has no fee market, falls
+back to the floor below.
+
 The estimated fee rate is then floored at 3 sat/vB (configurable per node
 with `withdrawal_min_fee_rate_sat_vb`) but not capped, because a signed
 withdrawal can't be replaced by a higher-fee version. The onchain
