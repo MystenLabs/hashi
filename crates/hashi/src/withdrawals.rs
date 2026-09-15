@@ -33,6 +33,7 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::onchain::types::WithdrawalRequest;
 use crate::onchain::types::WithdrawalTransaction;
+use crate::trm;
 use crate::utxo_pool;
 use crate::utxo_pool::AncestorTx;
 use crate::utxo_pool::CoinSelectionParams;
@@ -1598,11 +1599,37 @@ impl Hashi {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id))]
     pub(crate) async fn screen_withdrawal(
         &self,
-        _request: &WithdrawalRequest,
+        request: &WithdrawalRequest,
     ) -> Result<(), WithdrawalApprovalError> {
-        Ok(())
+        let Some(trm) = self.trm_client() else {
+            return Ok(());
+        };
+        let bitcoin_address = hashi_bitcoin::address_string_from_witness_program(
+            &request.bitcoin_address,
+            self.config.bitcoin_network(),
+        )
+        .map_err(WithdrawalApprovalError::NeverRetry)?;
+        match trm
+            .screen_withdrawal(&bitcoin_address, request.sender)
+            .await
+        {
+            Ok(trm::Verdict::Approved) => Ok(()),
+            Ok(trm::Verdict::Pending) => Err(WithdrawalApprovalError::AmlServiceError(anyhow!(
+                "TRM has not finished screening withdrawal request {}",
+                request.id
+            ))),
+            Ok(trm::Verdict::Rejected(reason)) => {
+                Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+                    "AML screening rejected withdrawal request {}: {reason}",
+                    request.id
+                )))
+            }
+            Err(trm::TrmError::Transient(e)) => Err(WithdrawalApprovalError::AmlServiceError(e)),
+            Err(trm::TrmError::Permanent(e)) => Err(WithdrawalApprovalError::NeverRetry(e)),
+        }
     }
 }
 

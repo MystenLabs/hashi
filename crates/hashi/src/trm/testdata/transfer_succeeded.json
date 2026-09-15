@@ -1,0 +1,32 @@
+{
+  "accountExternalId": "0x0000000000000000000000000000000000000000000000000000000000000abc",
+  "accountUuid": "00000000-0000-4000-8000-000000000001",
+  "alerts": [],
+  "asset": "btc",
+  "assetAddress": null,
+  "assetAmount": "10000",
+  "chain": "bitcoin",
+  "counterparties": [
+    {
+      "category": "Wallet Cluster",
+      "categoryId": "1",
+      "displayName": null,
+      "trmUrn": "/entity/wallet_cluster/1"
+    }
+  ],
+  "destinationAddress": "17SkEw2md5avVNyYgj6RiXuQKNwkXaxFyQ",
+  "externalId": "hashi-deposit-0x0000000000000000000000000000000000000000000000000000000000000def",
+  "fiatCurrency": "USD",
+  "fiatValue": "0",
+  "onchainReference": "a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d",
+  "riskScoreLevel": 0,
+  "riskScoreLevelLabel": "Unknown",
+  "screenStatus": "SUCCEEDED",
+  "screenStatusFailedReason": null,
+  "sourceAddress": null,
+  "submittedAt": "2026-09-15T09:20:46.339Z",
+  "timestamp": "2010-05-22T18:16:31.000Z",
+  "transferType": "CRYPTO_DEPOSIT",
+  "trmAppUrl": "https://my.trmlabs.com/monitoring/transfers/00000000-0000-4000-8000-0000000000aa",
+  "uuid": "00000000-0000-4000-8000-0000000000aa"
+}
