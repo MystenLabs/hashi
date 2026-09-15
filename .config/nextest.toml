@@ -15,10 +15,6 @@ threads-required = 4
 filter = 'test(test_resigned_member_excluded_then_removed_permissionlessly)'
 threads-required = 16
 
-[[profile.default.overrides]]
-filter = 'package(hashi-monitor)'
-threads-required = 4
-
 # CI profile with more conservative settings
 [profile.ci]
 # Retry flaky tests once in CI
