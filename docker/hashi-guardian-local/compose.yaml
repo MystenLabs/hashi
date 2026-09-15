@@ -118,10 +118,10 @@ services:
       retries: 20
       start_period: 3s
 
-  # The out-of-enclave proxy: the only port published to the host. Holds the wid
-  # cache + serves the SingleProvisionerInit relay. Forwards to the withdraw
-  # guardian via the host bridge; reads the wid log straight from MinIO (it sits
-  # outside the enclave's S3 forwarder chain).
+  # The out-of-enclave proxy: the only port published to the host. Forwards to
+  # the withdraw guardian via the host bridge and serves the SingleProvisionerInit
+  # relay; reads the KP roster straight from MinIO (it sits outside the enclave's
+  # S3 forwarder chain).
   proxy:
     <<: *build
     command: ["/usr/bin/hashi-guardian-proxy"]
@@ -132,7 +132,6 @@ services:
       PROXY_LISTEN_ADDR: 0.0.0.0:3000
       GUARDIAN_LOG_BUCKET: hashi-guardian-dev
       GUARDIAN_LOG_REGION: us-east-1
-      BTC_NETWORK: regtest
       AWS_ENDPOINT_URL_S3: http://minio:9000
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin

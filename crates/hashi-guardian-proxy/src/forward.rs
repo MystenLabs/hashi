@@ -6,8 +6,7 @@
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
 //! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
-//! ceremony guardian, which is the relay's backend. Wrapped by
-//! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
+//! ceremony guardian, which is the relay's backend.
 
 use std::sync::Arc;
 
@@ -24,8 +23,8 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
+use crate::log_store::LogStore;
 use crate::roster::RosterCache;
-use crate::widlog::LogStore;
 
 /// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
 /// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
@@ -181,11 +180,9 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::CachingGuardianGrpc;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -296,7 +293,7 @@ mod tests {
         })
     }
 
-    type StubStore = crate::widlog::test_store::MemStore;
+    type StubStore = crate::log_store::test_store::MemStore;
 
     async fn spawn_stub() -> (StubGuardian, tonic::transport::Channel) {
         let stub = StubGuardian::default();
@@ -319,48 +316,27 @@ mod tests {
         (stub, channel)
     }
 
-    fn proxy_over(
-        active: tonic::transport::Channel,
-        ceremony: tonic::transport::Channel,
-        store: StubStore,
-    ) -> CachingGuardianGrpc<Forwarding<StubStore>, StubStore> {
-        CachingGuardianGrpc::new(
-            Forwarding::new(active, ceremony, Arc::new(RosterCache::new(store))),
-            StubStore::default(),
-            bitcoin::Network::Regtest,
-            std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
-        )
-    }
-
     /// A proxy whose active and ceremony guardian are the same stub.
-    async fn spawn_stub_proxy(
-        store: StubStore,
-    ) -> (
-        StubGuardian,
-        CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
-    ) {
+    async fn spawn_stub_proxy(store: StubStore) -> (StubGuardian, Forwarding<StubStore>) {
         let (stub, channel) = spawn_stub().await;
-        (stub, proxy_over(channel.clone(), channel, store))
+        let proxy = Forwarding::new(channel.clone(), channel, Arc::new(RosterCache::new(store)));
+        (stub, proxy)
     }
 
     #[tokio::test]
-    async fn forwards_and_caches_over_real_grpc() {
+    async fn forwards_over_real_grpc() {
         let (stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
 
-        // First withdrawal forwards to the stub; a same-wid retry at a bumped
-        // seq replays the cached response without re-calling the stub.
-        let r1 = proxy
+        // Retries reach the guardian too: it, not the proxy, replays a signed withdrawal.
+        proxy
             .standard_withdrawal(mock_request([0x11; 32], 0))
             .await
-            .unwrap()
-            .into_inner();
-        let r2 = proxy
+            .unwrap();
+        proxy
             .standard_withdrawal(mock_request([0x11; 32], 1))
             .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(stub.standard_withdrawal_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(r1, r2);
+            .unwrap();
+        assert_eq!(stub.standard_withdrawal_calls.load(Ordering::SeqCst), 2);
 
         // A non-withdrawal node RPC passes through to the stub.
         proxy

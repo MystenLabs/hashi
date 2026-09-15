@@ -355,8 +355,8 @@ the old key). Any `t` of the remaining KPs replace the whole set instead:
    guardian: `operator provision` (no `--do-genesis`) and
    `key-provisioner provision` by the new KPs run while the old guardian still
    serves. Switch traffic to the new guardian first, while that can still be
-   undone: the proxy keeps serving already-signed withdrawals from its cache,
-   and new ones get retriable errors until activation. Then stop the old
+   undone: withdrawals, retries of already-signed ones included, get retriable
+   errors until activation. Then stop the old
    guardian, which can't be undone (a restarted guardian is a new session
    that must be provisioned again), and run `operator activate`: it needs
    every other session in the bucket quiet for 10 minutes since its last

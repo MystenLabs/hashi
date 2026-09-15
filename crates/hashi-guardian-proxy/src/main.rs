@@ -3,25 +3,19 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use hashi_guardian_proxy::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::config::Config;
 use hashi_guardian_proxy::forward::Forwarding;
 use hashi_guardian_proxy::info;
-use hashi_guardian_proxy::metrics::ProxyMetrics;
+use hashi_guardian_proxy::log_store::S3LogStore;
 use hashi_guardian_proxy::relay::Relay;
-use hashi_guardian_proxy::remote_write;
 use hashi_guardian_proxy::roster::RosterCache;
-use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::sync::Arc;
-use std::time::Duration;
 use tonic::transport::Endpoint;
 use tonic_health::server::health_reporter;
-use tracing::error;
 use tracing::info;
-use tracing::warn;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,43 +26,23 @@ async fn main() -> Result<()> {
 
     abort_on_panic();
 
-    let mut config = Config::from_env()?;
+    let config = Config::from_env()?;
     info!(
         backend = %config.backend_url,
         standby = config.standby_backend_url.as_deref().unwrap_or("<none>"),
         listen = %config.listen_addr,
         log_bucket = %config.log_bucket,
-        network = %config.btc_network,
-        "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
+        "Starting hashi-guardian-proxy (node forwarder + provisioning relay)."
     );
 
-    // The wid cache's durable tier and the relay's roster source. Prove bucket
-    // access before serving: a proxy that can't read the log fails every retry
-    // closed.
     let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
-    probe_with_retries(&log_store).await?;
-
-    let metrics = Arc::new(ProxyMetrics::new());
-    tokio::spawn({
-        let metrics = metrics.clone();
-        let addr = config.metrics_listen_addr;
-        async move {
-            if let Err(e) = metrics.serve(addr).await {
-                error!(error = %e, "Metrics server exited.");
-            }
-        }
-    });
-    match config.remote_write.take() {
-        Some(remote_write) => remote_write::start(remote_write, metrics.registry())?,
-        None => warn!("MIMIR_URL is unset: guardian_proxy_* metrics will not leave this task."),
-    }
 
     // Lazy channel to the active enclave guardian, shared by the forwarder and
     // the /info reader. Mirrors the node-side client
     // (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
     let channel = lazy_channel(&config.backend_url, &config)?;
     // The relay provisions the standby when one is configured; the node-facing
-    // forwarder, wid cache, and /info always front the active guardian.
+    // forwarder and /info always front the active guardian.
     let relay_channel = match &config.standby_backend_url {
         Some(url) => lazy_channel(url, &config)?,
         None => channel.clone(),
@@ -76,7 +50,7 @@ async fn main() -> Result<()> {
 
     // One roster cache, shared: the relay authorizes submissions against it and
     // a cert rotation through the forwarder invalidates it.
-    let roster = Arc::new(RosterCache::new(log_store.clone()));
+    let roster = Arc::new(RosterCache::new(log_store));
     let relay_svc = Relay::new(relay_channel.clone(), roster.clone());
     let info_state = info::InfoState::new(
         GuardianServiceClient::new(channel.clone()),
@@ -84,18 +58,13 @@ async fn main() -> Result<()> {
     );
     // KPs confirm a ceremony to the guardian they are provisioning, so that
     // RPC follows the relay's backend.
-    let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel, relay_channel, roster),
-        log_store,
-        config.btc_network,
-        metrics.clone(),
-    );
+    let guardian_svc = Forwarding::new(channel, relay_channel, roster);
 
     // Standard gRPC health service (`grpc.health.v1.Health`) for gRPC
     // health-checkers; the HTTP `/health` route below covers plain-HTTP liveness.
     let (health_reporter, health_service) = health_reporter();
     health_reporter
-        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding<S3LogStore>, S3LogStore>>>()
+        .set_serving::<GuardianServiceServer<Forwarding<S3LogStore>>>()
         .await;
     health_reporter
         .set_serving::<GuardianRelayServiceServer<Relay<S3LogStore>>>()
@@ -172,25 +141,8 @@ fn lazy_channel(url: &str, config: &Config) -> Result<tonic::transport::Channel>
         .connect_lazy())
 }
 
-/// Retry transient S3 blips at boot (no target-group crash-loop), but fail
-/// fast on real misconfiguration (bad bucket, missing role).
-async fn probe_with_retries(log_store: &S3LogStore) -> Result<()> {
-    const ATTEMPTS: u32 = 5;
-    for attempt in 1..=ATTEMPTS {
-        match log_store.probe().await {
-            Ok(()) => return Ok(()),
-            Err(e) if attempt < ATTEMPTS => {
-                warn!(attempt, error = %e, "Wid log bucket probe failed; retrying.");
-                tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
-            }
-            Err(e) => return Err(e.context("wid log bucket is not readable")),
-        }
-    }
-    unreachable!("loop returns on success or final error")
-}
-
-/// Make any panic abort the process instead of unwinding. The wid-keyed cache
-/// uses a std `Mutex` whose `.expect("cache mutex poisoned")` assumes a
+/// Make any panic abort the process instead of unwinding. The `/info` cache
+/// uses a std `Mutex` whose `.expect("info cache mutex poisoned")` assumes a
 /// poisoned lock is unreachable — true only if a panic aborts rather than
 /// unwinds past the lock guard. (Same rationale as the enclave's `main`.)
 fn abort_on_panic() {
