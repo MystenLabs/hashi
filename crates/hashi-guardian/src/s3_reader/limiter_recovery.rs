@@ -1,12 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recovers a standby enclave's activation limiter state from guardian S3
+//! Recovers a standby enclave's activation withdrawal state from guardian S3
 //! withdrawal logs.
 //!
 //! Each successful withdrawal log carries the limiter `post_state` after that
 //! consume. The withdrawal seq is strictly monotonic across rotations, so the
-//! global max-seq Success log holds the most recent limiter state.
+//! global max-seq Success log holds the most recent limiter state and the last
+//! signed withdrawal.
 //!
 //! Finding that log is a 4-level S3 tree-walk over the hour-partitioned layout
 //! (`withdraw/YYYY/MM/DD/HH/`): at each level we list `CommonPrefixes`, pick the
@@ -26,6 +27,7 @@
 
 use super::GuardianReader;
 use super::VerifiedLogRecord;
+use crate::enclave::SignedWithdrawal;
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
@@ -40,48 +42,63 @@ use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use tracing::info;
 
+/// Withdrawal state recovered from the log for activation.
+pub struct RecoveredWithdrawals {
+    /// Limiter state to resume from.
+    pub limiter_state: LimiterState,
+    /// The max-seq successful withdrawal; `None` if none has succeeded.
+    pub last_signed: Option<SignedWithdrawal>,
+}
+
 impl GuardianReader {
-    /// Derive the activation limiter state from withdrawal logs. Uses the
-    /// global max-seq Success post-state when present, otherwise genesis, and
+    /// Derive the activation withdrawal state from withdrawal logs. Uses the
+    /// global max-seq Success record when present, otherwise genesis, and
     /// caps tokens to the supplied config in case capacity was lowered.
     ///
     /// Precondition: the caller must have already verified that every
     /// non-standby session is quiet (`ensure_session_live_and_others_quiet`).
     /// This read deliberately skips the `write_completion_time` gate, so it is
     /// only sound once the prior session's final writes are guaranteed visible.
-    pub async fn recover_limiter_state(
+    pub async fn recover_withdrawal_state(
         &mut self,
         limiter_config: &LimiterConfig,
-    ) -> GuardianResult<LimiterState> {
+    ) -> GuardianResult<RecoveredWithdrawals> {
         let Some(mut cursor) = find_latest_success_bucket(&self.s3).await? else {
             // The search covers the complete S3 withdrawal history, so this
             // branch is reachable only if no withdrawal has ever succeeded.
             info!("no successful withdrawal logs found; using genesis limiter state");
-            return Ok(LimiterState::genesis(limiter_config));
+            return Ok(RecoveredWithdrawals {
+                limiter_state: LimiterState::genesis(limiter_config),
+                last_signed: None,
+            });
         };
 
         // Read the found bucket + one bucket back, then take max-seq across
         // both. The peek-back defends against sub-hour clock skew that may have
         // placed a higher-seq log in the prior hour bucket.
-        let hit = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
+        let hit = bucket_max_success(self.read_logs_in_dir(&cursor).await?);
         cursor = cursor.prev_dir();
-        let peek = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
-        let recovered_state = [hit, peek]
+        let peek = bucket_max_success(self.read_logs_in_dir(&cursor).await?);
+        let (recovered_state, last_signed) = [hit, peek]
             .into_iter()
             .flatten()
-            .max_by_key(|s| s.next_seq)
+            .max_by_key(|(post_state, _)| post_state.next_seq)
             .ok_or_else(|| {
                 InvalidS3Log("latest success bucket contained no verified Success logs".into())
             })?;
-        let state = cap_limiter_state_to_config(recovered_state, limiter_config);
+        let limiter_state = cap_limiter_state_to_config(recovered_state, limiter_config);
         info!(
-            next_seq = state.next_seq,
-            last_updated_at = state.last_updated_at,
+            next_seq = limiter_state.next_seq,
+            last_updated_at = limiter_state.last_updated_at,
             recovered_num_tokens_available = recovered_state.num_tokens_available,
-            capped_num_tokens_available = state.num_tokens_available,
-            "recovered limiter state from withdrawal logs"
+            capped_num_tokens_available = limiter_state.num_tokens_available,
+            last_signed_wid = %last_signed.wid,
+            "recovered limiter state and last signed withdrawal from withdrawal logs"
         );
-        Ok(state)
+        Ok(RecoveredWithdrawals {
+            limiter_state,
+            last_signed: Some(last_signed),
+        })
     }
 }
 
@@ -132,7 +149,7 @@ async fn hour_bucket_has_success(
     Ok(!keys.is_empty())
 }
 
-fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
+fn bucket_max_success(logs: Vec<VerifiedLogRecord>) -> Option<(LimiterState, SignedWithdrawal)> {
     logs.into_iter()
         .filter_map(|log| {
             let boxed = match log.into_entry().into_message() {
@@ -142,11 +159,25 @@ fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
                 V1(_) | V2(_) => return None,
             };
             match *boxed {
-                WithdrawalLogMessage::Success { post_state, .. } => Some(post_state),
+                WithdrawalLogMessage::Success {
+                    txid,
+                    request_data,
+                    response,
+                    post_state,
+                    ..
+                } => Some((
+                    post_state,
+                    SignedWithdrawal {
+                        wid: request_data.wid,
+                        txid,
+                        seq: request_data.seq,
+                        response,
+                    },
+                )),
                 WithdrawalLogMessage::Failure { .. } => None,
             }
         })
-        .max_by_key(|s| s.next_seq)
+        .max_by_key(|(post_state, _)| post_state.next_seq)
 }
 
 fn cap_limiter_state_to_config(
@@ -173,6 +204,7 @@ mod tests {
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
+    use hashi_types::guardian::WithdrawalID;
 
     fn build_pcrs() -> BuildPcrs {
         BuildPcrs::new("current", vec![0])
@@ -186,12 +218,17 @@ mod tests {
         }
     }
 
+    /// A Success record whose wid and txid bytes are `next_seq`.
     fn withdrawal_success_log(next_seq: u64) -> VerifiedLogRecord {
-        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let wid = WithdrawalID::new([next_seq as u8; 32]);
+        let signed =
+            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
         let (request_sign, request_data) = signed.into_parts();
+        let mut request_data = StandardWithdrawalRequestWire::from(request_data);
+        request_data.seq = next_seq - 1;
         let msg = WithdrawalLogMessage::Success {
-            txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
-            request_data: StandardWithdrawalRequestWire::from(request_data),
+            txid: Txid::from_slice(&[next_seq as u8; 32]).expect("valid txid"),
+            request_data,
             request_sign,
             response: StandardWithdrawalResponse::mock_for_testing(),
             post_state: state_with_seq(next_seq),
@@ -224,14 +261,13 @@ mod tests {
 
     #[test]
     fn bucket_max_empty_is_none() {
-        assert!(bucket_max_post_state(vec![]).is_none());
+        assert!(bucket_max_success(vec![]).is_none());
     }
 
     #[test]
     fn bucket_max_only_failures_is_none() {
         assert!(
-            bucket_max_post_state(vec![withdrawal_failure_log(), withdrawal_failure_log()])
-                .is_none()
+            bucket_max_success(vec![withdrawal_failure_log(), withdrawal_failure_log()]).is_none()
         );
     }
 
@@ -242,8 +278,16 @@ mod tests {
             withdrawal_success_log(7),
             withdrawal_success_log(5),
         ];
-        let got = bucket_max_post_state(logs).expect("non-empty success set");
-        assert_eq!(got.next_seq, 7);
+        let (post_state, last_signed) = bucket_max_success(logs).expect("non-empty success set");
+        assert_eq!(post_state.next_seq, 7);
+        // The withdrawal comes from the same record as the post-state.
+        assert_eq!(last_signed.wid, WithdrawalID::new([7; 32]));
+        assert_eq!(last_signed.txid, Txid::from_slice(&[7; 32]).unwrap());
+        assert_eq!(last_signed.seq, 6);
+        assert_eq!(
+            last_signed.response,
+            StandardWithdrawalResponse::mock_for_testing()
+        );
     }
 
     #[test]
@@ -254,8 +298,9 @@ mod tests {
             withdrawal_failure_log(),
             withdrawal_success_log(9),
         ];
-        let got = bucket_max_post_state(logs).expect("non-empty success set");
-        assert_eq!(got.next_seq, 9);
+        let (post_state, last_signed) = bucket_max_success(logs).expect("non-empty success set");
+        assert_eq!(post_state.next_seq, 9);
+        assert_eq!(last_signed.seq, 8);
     }
 
     #[test]
