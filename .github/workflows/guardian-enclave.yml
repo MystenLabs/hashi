@@ -104,9 +104,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two kernels and two Docker releases. Pinned rather than ubuntu-latest:
-        # when -latest moves to 26.04 the pair would silently become one image.
-        os: [ubuntu-24.04, ubuntu-26.04]
+        os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
