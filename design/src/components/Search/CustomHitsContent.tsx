@@ -86,16 +86,19 @@ export default function CustomHitsContent({ name }) {
     );
   }
 
-  const grouped = new Map<string, typeof items>();
-  for (const hit of items) {
-    const group = grouped.get(hit.url_without_anchor);
-    if (group) group.push(hit);
-    else grouped.set(hit.url_without_anchor, [hit]);
-  }
+  const grouped = items.reduce(
+    (acc, hit) => {
+      const key = hit.url_without_anchor;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(hit);
+      return acc;
+    },
+    {} as Record<string, typeof items>,
+  );
 
   return (
     <>
-      {Array.from(grouped.values()).map((group, index) => {
+      {Object.entries(grouped).map(([key, group], index) => {
         const pageCrumbs = getHierarchyBreadcrumbs(group[0].hierarchy);
         const pageTitle =
           pageCrumbs.length > 0
