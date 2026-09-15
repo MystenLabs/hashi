@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use sui_sdk_types::Address;
+use tokio::time::Instant;
 
 use crate::btc_monitor::config::Network;
 use crate::config::Config;
@@ -20,6 +21,12 @@ const SUI_CHAIN: &str = "sui";
 
 /// One deadline for a whole screening, across all of its requests.
 const SCREENING_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long a deposit screening keeps reading a transfer TRM is still
+/// processing. TRM screens most confirmed transactions within seconds; a
+/// slower transfer is reported pending and read again on a later attempt.
+const TRANSFER_WAIT: Duration = Duration::from_secs(10);
+const TRANSFER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// TRM's "High" risk score level. Scores at or above it reject.
 const HIGH_RISK_SCORE_LEVEL: u8 = 10;
@@ -109,9 +116,10 @@ impl TrmClient {
     }
 
     /// Registers the Bitcoin deposit transaction with Transaction Monitoring,
-    /// screens the Sui recipient, then reads back the transfer's screening
-    /// result.
+    /// screens the Sui recipient, then waits briefly for the transfer's
+    /// screening result.
     pub async fn screen_deposit(&self, deposit: &DepositScreening) -> Result<Verdict, TrmError> {
+        let started = Instant::now();
         with_deadline(async {
             let transfer = self.submit_deposit_transfer(deposit).await?;
             if let Some(recipient) = deposit.recipient {
@@ -126,7 +134,12 @@ impl TrmClient {
                     return Ok(verdict);
                 }
             }
-            self.get_transfer(&transfer.uuid).await?.verdict()
+            let uuid = transfer.uuid.as_str();
+            poll_transfer(
+                || async move { self.get_transfer(uuid).await?.verdict() },
+                started + TRANSFER_WAIT,
+            )
+            .await
         })
         .await
     }
@@ -369,6 +382,22 @@ async fn with_deadline(
                 "TRM screening timed out after {SCREENING_TIMEOUT:?}"
             )))
         })
+}
+
+/// Reads a transfer until TRM has finished screening it, or until another read
+/// would start after `wait_until`.
+async fn poll_transfer<F, Fut>(mut read: F, wait_until: Instant) -> Result<Verdict, TrmError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Verdict, TrmError>>,
+{
+    loop {
+        let verdict = read().await?;
+        if verdict != Verdict::Pending || Instant::now() + TRANSFER_POLL_INTERVAL > wait_until {
+            return Ok(verdict);
+        }
+        tokio::time::sleep(TRANSFER_POLL_INTERVAL).await;
+    }
 }
 
 fn btc_amount(sats: u64) -> String {
@@ -706,6 +735,66 @@ mod tests {
             verdict(json!({ "uuid": TRANSFER_UUID, "screenStatus": null })),
             Err(TrmError::Permanent(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn deposit_reads_the_transfer_until_trm_finishes() {
+        let request = deposit_request(Some(Address::new([1; 32])));
+        let recipient = request.utxo.derivation_path.unwrap().to_string();
+        let (client, mock) = mock_trm([
+            (StatusCode::CREATED, transfer("PROCESSING", None)),
+            (
+                StatusCode::CREATED,
+                json!([address_screening(&recipient, "sui", json!([]))]),
+            ),
+            (StatusCode::OK, transfer("PROCESSING", None)),
+            (StatusCode::OK, transfer("SUCCEEDED", Some(0))),
+        ])
+        .await;
+
+        let verdict = client
+            .screen_deposit(&DepositScreening::new(&request, BITCOIN_ADDRESS.to_owned()))
+            .await
+            .unwrap();
+
+        assert_eq!(verdict, Verdict::Approved);
+        assert_eq!(mock.lock().unwrap().requests.len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_processing_transfer_is_read_until_trm_finishes() {
+        let started = Instant::now();
+        let mut reads = VecDeque::from([Verdict::Pending, Verdict::Pending, Verdict::Approved]);
+
+        let verdict = poll_transfer(
+            || std::future::ready(Ok(reads.pop_front().unwrap())),
+            started + TRANSFER_WAIT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(verdict, Verdict::Approved);
+        assert_eq!(started.elapsed(), 2 * TRANSFER_POLL_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transfer_still_processing_after_the_wait_is_pending() {
+        let started = Instant::now();
+        let mut reads = 0;
+
+        let verdict = poll_transfer(
+            || {
+                reads += 1;
+                std::future::ready(Ok(Verdict::Pending))
+            },
+            started + TRANSFER_WAIT,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(verdict, Verdict::Pending);
+        assert_eq!(reads, 6);
+        assert_eq!(started.elapsed(), TRANSFER_WAIT);
     }
 
     #[tokio::test]
