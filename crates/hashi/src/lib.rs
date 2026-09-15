@@ -66,7 +66,7 @@ pub struct Hashi {
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
-    trm_client: OnceLock<Option<trm::TrmClient>>,
+    trm_client: Option<trm::TrmClient>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
@@ -90,6 +90,8 @@ impl Hashi {
             .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new_default());
+        let trm_client = trm::TrmClient::from_config(&config)?;
+        metrics.trm_enabled.set(i64::from(trm_client.is_some()));
         Ok(Arc::new(Self {
             server_version,
             config_path,
@@ -101,7 +103,7 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
-            trm_client: OnceLock::new(),
+            trm_client,
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -124,6 +126,8 @@ impl Hashi {
             .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new(registry));
+        let trm_client = trm::TrmClient::from_config(&config)?;
+        metrics.trm_enabled.set(i64::from(trm_client.is_some()));
         Ok(Arc::new(Self {
             server_version,
             config_path,
@@ -135,7 +139,7 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
-            trm_client: OnceLock::new(),
+            trm_client,
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -250,7 +254,7 @@ impl Hashi {
     }
 
     pub fn trm_client(&self) -> Option<&trm::TrmClient> {
-        self.trm_client.get().and_then(|opt| opt.as_ref())
+        self.trm_client.as_ref()
     }
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
@@ -827,14 +831,6 @@ impl Hashi {
         // then that the chain pair is one the protocol deploys.
         self.verify_sui_chain_id().await?;
         self.verify_chain_pairing()?;
-
-        let trm_client = trm::TrmClient::from_config(&self.config)?;
-        self.metrics
-            .trm_enabled
-            .set(i64::from(trm_client.is_some()));
-        self.trm_client
-            .set(trm_client)
-            .map_err(|_| anyhow!("TRM client already initialized"))?;
 
         // Initialize on-chain state first so we can read guardian config from it.
         let onchain_service = self.initialize_onchain_state().await?;
