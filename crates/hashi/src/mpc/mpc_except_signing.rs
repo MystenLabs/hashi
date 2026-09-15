@@ -697,7 +697,7 @@ impl MpcManager {
     // alarm on the first reveal, log the evidence, and resume only through a manual config
     // override after review.
 
-    // TODO(Must fix): invalid complaints are a cheap way for a member to hog the
+    // TODO(defence in depth): invalid complaints are a cheap way for a member to hog the
     // manager write lock. The RPC layer takes `mgr.write()` for the whole call,
     // and a well-formed but invalid complaint (a recovery package over the
     // accuser's own valid shares) runs `handle_complaint`, i.e. decryption plus

@@ -334,7 +334,7 @@ impl SigningManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    // TODO(Must fix): recovery re-enables every presig slot that is still `Pending`
+    // TODO(defence in depth): recovery re-enables every presig slot that is still `Pending`
     // on chain, including slots this node already consumed and served partials
     // for before it restarted, and the only reuse guard (the `RequestChanged`
     // digest check in `prepare_local_partial_signatures`) lives in the in-memory
