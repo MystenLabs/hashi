@@ -34,7 +34,7 @@ load_roster
 endpoint="${WITHDRAW_GUARDIAN_ENDPOINT:-http://host:3000}"
 
 # operator provision talks to the withdraw guardian directly (via the host
-# bridge), NOT the proxy — init RPCs must not be cached.
+# bridge): the proxy denies operator RPCs.
 render_config "${endpoint}" ""
 
 echo "== operator provision ${genesis_flag} =="
