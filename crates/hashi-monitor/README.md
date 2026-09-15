@@ -110,6 +110,7 @@ btc:
   rpc_url: "env:BITCOIN_RPC_URL"
   # http_headers:
   #   Origin: "https://example.com"
+  #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
 ```
 
 ## Status
