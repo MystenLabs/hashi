@@ -57,20 +57,12 @@ impl Hashi {
         let deposit_address = self
             .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
             .map_err(UnapprovedDepositError::AmlServiceError)?;
-        let screening = trm::DepositScreening {
-            request_id: deposit_request.id,
-            txid: deposit_request.utxo.id.txid.to_string(),
-            deposit_address: deposit_address.to_string(),
-            amount_sats: deposit_request.utxo.amount,
-            created_timestamp_ms: deposit_request.created_timestamp_ms,
-            recipient: deposit_request.utxo.derivation_path,
-            sender: deposit_request.sender,
-        };
+        let screening = trm::DepositScreening::new(deposit_request, deposit_address.to_string());
         match trm.screen_deposit(&screening).await {
             Ok(trm::Verdict::Approved) => Ok(()),
             Ok(trm::Verdict::Pending) => Err(UnapprovedDepositError::AmlServiceError(anyhow!(
                 "TRM is still screening deposit transaction {}",
-                screening.txid
+                deposit_request.utxo.id.txid
             ))),
             Ok(trm::Verdict::Rejected(reason)) => {
                 Err(UnapprovedDepositError::AmlRejected(anyhow!(reason)))

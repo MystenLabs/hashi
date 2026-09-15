@@ -10,6 +10,8 @@ use std::time::Duration;
 use anyhow::anyhow;
 use sui_sdk_types::Address;
 
+use crate::onchain::types::DepositRequest;
+
 const TRM_API_URL: &str = "https://api.trmlabs.com";
 const BITCOIN_CHAIN: &str = "bitcoin";
 const SUI_CHAIN: &str = "sui";
@@ -44,14 +46,29 @@ pub enum TrmError {
 }
 
 pub struct DepositScreening {
-    pub request_id: Address,
-    pub txid: String,
-    pub deposit_address: String,
-    pub amount_sats: u64,
-    pub created_timestamp_ms: u64,
-    /// The Sui address credited with the minted BTC, if any.
-    pub recipient: Option<Address>,
-    pub sender: Address,
+    request_id: Address,
+    txid: String,
+    deposit_address: String,
+    amount_sats: u64,
+    created_timestamp_ms: u64,
+    recipient: Option<Address>,
+    sender: Address,
+}
+
+impl DepositScreening {
+    pub fn new(request: &DepositRequest, deposit_address: String) -> Self {
+        Self {
+            request_id: request.id,
+            txid: request.utxo.id.txid.to_string(),
+            deposit_address,
+            amount_sats: request.utxo.amount,
+            created_timestamp_ms: request.created_timestamp_ms,
+            // `confirm_deposit` mints to the derivation path, not to the
+            // request object, so that is the Sui address to screen.
+            recipient: request.utxo.derivation_path,
+            sender: request.sender,
+        }
+    }
 }
 
 impl TrmClient {
@@ -358,14 +375,16 @@ mod tests {
     use axum::routing::post;
     use base64ct::Encoding as _;
     use serde_json::json;
+    use sui_sdk_types::Digest;
 
     use super::*;
+    use crate::onchain::types::Utxo;
+    use crate::onchain::types::UtxoId;
 
     const API_KEY: &str = "test-key";
     const TRANSFER_UUID: &str = "00000000-0000-4000-8000-0000000000aa";
     const BTC_DEPOSIT_ADDRESS: &str =
         "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
-    const TXID: &str = "a1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d";
 
     const ADDRESS_CLEAN: &str = include_str!("testdata/addresses_no_indicators.json");
     const ADDRESS_OWNERSHIP_HIGH: &str = include_str!("testdata/addresses_ownership_high.json");
@@ -470,16 +489,28 @@ mod tests {
         transfer.to_string()
     }
 
-    fn deposit(recipient: Option<Address>) -> DepositScreening {
-        DepositScreening {
-            request_id: Address::new([2; 32]),
-            txid: TXID.to_owned(),
-            deposit_address: BTC_DEPOSIT_ADDRESS.to_owned(),
-            amount_sats: 12_345,
-            created_timestamp_ms: 1_789_464_112_688,
-            recipient,
+    fn deposit_request(recipient: Option<Address>) -> DepositRequest {
+        DepositRequest {
+            id: Address::new([2; 32]),
             sender: Address::new([3; 32]),
+            created_timestamp_ms: 1_789_464_112_688,
+            sui_tx_digest: Digest::new([4; 32]),
+            utxo: Utxo {
+                id: UtxoId {
+                    txid: Address::new([5; 32]).into(),
+                    vout: 0,
+                },
+                amount: 12_345,
+                derivation_path: recipient,
+            },
+            approval_cert: None,
+            approved_timestamp_ms: None,
+            confirmed_timestamp_ms: None,
         }
+    }
+
+    fn deposit(recipient: Option<Address>) -> DepositScreening {
+        DepositScreening::new(&deposit_request(recipient), BTC_DEPOSIT_ADDRESS.to_owned())
     }
 
     #[tokio::test]
@@ -509,7 +540,7 @@ mod tests {
                         "externalId": format!("hashi-deposit-{}", Address::new([2; 32])),
                         "fiatCurrency": "USD",
                         "fiatValue": "0",
-                        "onchainReference": TXID,
+                        "onchainReference": deposit_request(None).utxo.id.txid.to_string(),
                         "timestamp": "2026-09-15T09:21:52.688Z",
                         "transferType": "CRYPTO_DEPOSIT",
                     }),
@@ -524,6 +555,26 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn deposit_screens_the_mint_recipient_not_the_request_object() {
+        let request = deposit_request(Some(Address::new([1; 32])));
+        let (client, mock) =
+            start_mock((StatusCode::CREATED, ADDRESS_CLEAN), TRANSFER_SUCCEEDED).await;
+
+        client
+            .screen_deposit(&DepositScreening::new(
+                &request,
+                BTC_DEPOSIT_ADDRESS.to_owned(),
+            ))
+            .await
+            .unwrap();
+
+        let requests = mock.lock().unwrap().requests.clone();
+        let screened = requests[1].1[0]["address"].as_str().unwrap();
+        assert_eq!(screened, request.utxo.derivation_path.unwrap().to_string());
+        assert_ne!(screened, request.id.to_string());
     }
 
     #[tokio::test]
