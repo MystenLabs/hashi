@@ -99,7 +99,8 @@ must have sufficient capacity. If the request would exceed the current limit it
 remains in the queue until capacity is replenished. Requests are generally
 processed in FIFO order, but this is not a strict requirement.
 
-Each committee member independently screens the request (see
+Each committee member independently screens the Bitcoin destination address
+and the requesting Sui address with its own TRM Labs account (see
 [Handling Sanctioned Addresses](sanctions.mdx)). A member that rejects the
 request does not vote to approve it. If a quorum still approves, all members
 must assist in completing the withdrawal.
