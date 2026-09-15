@@ -41,7 +41,8 @@ export function cleanTooltipText(text: string): string {
     if (!label) continue;
 
     const period = input.indexOf(".", word.index + 2 * label.length);
-    if (period === -1) continue;
+    // No later word has a period after it either; stopping keeps this linear.
+    if (period === -1) break;
 
     const resume = /\s/.test(input[period + 1] ?? "") ? period + 2 : period + 1;
     cleaned += input.slice(consumed, word.index) + label + " ";
