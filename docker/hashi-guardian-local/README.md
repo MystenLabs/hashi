@@ -12,7 +12,7 @@ flowchart LR
     cli["operator / KP CLI"]
 
     subgraph docker["Docker: the Nitro replica"]
-        proxy["proxy :3000 (cache + relay)"]
+        proxy["proxy :3000 (forwarder + relay)"]
         host[host bridge]
         enclave[withdraw guardian]
         ceremony[ceremony guardian]

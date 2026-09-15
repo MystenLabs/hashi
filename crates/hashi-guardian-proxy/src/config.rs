@@ -10,10 +10,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use bitcoin::Network;
-
-use crate::remote_write;
-use crate::remote_write::RemoteWriteConfig;
 
 pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
@@ -28,9 +24,6 @@ pub struct Config {
     /// Address the proxy serves everything on — gRPC (forwarder + relay + health)
     /// and the HTTP `/info` + `/health` (`PROXY_LISTEN_ADDR`, default `0.0.0.0:3000`).
     pub listen_addr: SocketAddr,
-    /// Address the prometheus `/metrics` endpoint listens on
-    /// (`METRICS_LISTEN_ADDR`, default `0.0.0.0:9184`).
-    pub metrics_listen_addr: SocketAddr,
     /// TTL for the single-slot `/info` response cache
     /// (`INFO_CACHE_TTL_MS`, default 1000).
     pub info_cache_ttl: Duration,
@@ -40,20 +33,11 @@ pub struct Config {
     /// HTTP/2 keepalive ping interval to the backend
     /// (`GUARDIAN_KEEPALIVE_SECS`, default 5).
     pub keepalive_interval: Duration,
-    /// The guardian's S3 log bucket, read as the wid cache's durable tier
+    /// The guardian's S3 log bucket, read for the relay's KP roster
     /// (`GUARDIAN_LOG_BUCKET` + `GUARDIAN_LOG_REGION`, required). Credentials
     /// come from the AWS default provider chain.
     pub log_bucket: String,
     pub log_region: String,
-    /// BTC network the guardian signs for (`BTC_NETWORK`, required:
-    /// bitcoin|testnet|signet|regtest). Must match the guardian's config; used
-    /// to recompute sighashes when verifying a log replay.
-    pub btc_network: Network,
-    /// Push metrics to a Prometheus remote-write endpoint; `None` leaves them
-    /// on `/metrics`, which nothing can scrape (`MIMIR_URL`, `MIMIR_USERNAME`
-    /// default `incoming_metrics`, `MIMIR_PASSWORD`, `MIMIR_PUSH_INTERVAL_SECS`
-    /// default 60, `MIMIR_EXTERNAL_LABELS` comma-separated `k=v`).
-    pub remote_write: Option<RemoteWriteConfig>,
 }
 
 impl Config {
@@ -67,10 +51,6 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
             .parse()
             .context("PROXY_LISTEN_ADDR must be a valid socket address")?;
-        let metrics_listen_addr = std::env::var("METRICS_LISTEN_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:9184".to_string())
-            .parse()
-            .context("METRICS_LISTEN_ADDR must be a valid socket address")?;
         let info_cache_ttl = Duration::from_millis(parse_env_u64("INFO_CACHE_TTL_MS", 1000)?);
         let connect_timeout =
             Duration::from_secs(parse_env_u64("GUARDIAN_CONNECT_TIMEOUT_SECS", 5)?);
@@ -79,53 +59,15 @@ impl Config {
             .context("GUARDIAN_LOG_BUCKET must be set (the guardian's S3 log bucket)")?;
         let log_region = std::env::var("GUARDIAN_LOG_REGION")
             .context("GUARDIAN_LOG_REGION must be set (region of the guardian's S3 log bucket)")?;
-        let btc_network = std::env::var("BTC_NETWORK")
-            .context("BTC_NETWORK must be set (bitcoin|testnet|signet|regtest)")?
-            .parse()
-            .context("BTC_NETWORK must be one of bitcoin|testnet|signet|regtest")?;
-        let remote_write = match std::env::var("MIMIR_URL").ok().filter(|u| !u.is_empty()) {
-            None => None,
-            Some(url) => {
-                let username = std::env::var("MIMIR_USERNAME")
-                    .unwrap_or_else(|_| "incoming_metrics".to_string());
-                let password = std::env::var("MIMIR_PASSWORD")
-                    .context("MIMIR_PASSWORD must be set when MIMIR_URL is")?;
-                anyhow::ensure!(
-                    !username.is_empty() && !username.contains(':') && !password.is_empty(),
-                    "MIMIR_USERNAME and MIMIR_PASSWORD must be non-empty (no ':' in the name)"
-                );
-                // Zero panics `tokio::time::interval` (a panic aborts this binary);
-                // huge values overflow the deadline arithmetic.
-                let interval = Duration::from_secs(parse_env_u64("MIMIR_PUSH_INTERVAL_SECS", 60)?);
-                anyhow::ensure!(
-                    interval >= Duration::from_secs(1) && interval <= remote_write::MAX_INTERVAL,
-                    "MIMIR_PUSH_INTERVAL_SECS must be between 1 and {}",
-                    remote_write::MAX_INTERVAL.as_secs()
-                );
-                Some(RemoteWriteConfig {
-                    url: remote_write::parse_url(&url).context("MIMIR_URL")?,
-                    username,
-                    password,
-                    interval,
-                    external_labels: remote_write::parse_external_labels(
-                        &std::env::var("MIMIR_EXTERNAL_LABELS").unwrap_or_default(),
-                    )
-                    .context("MIMIR_EXTERNAL_LABELS")?,
-                })
-            }
-        };
         Ok(Self {
             backend_url,
             standby_backend_url,
             listen_addr,
-            metrics_listen_addr,
             info_cache_ttl,
             connect_timeout,
             keepalive_interval,
             log_bucket,
             log_region,
-            btc_network,
-            remote_write,
         })
     }
 }
