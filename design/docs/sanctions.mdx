@@ -68,9 +68,7 @@ A node does not vote for a deposit or withdrawal when:
 - TRM attributes a screened address itself (risk type `OWNERSHIP`) to a
   category scored High or Severe. Exposure only through counterparties or
   intermediaries does not count.
-- The deposit's transfer raises an alert at High or Severe. Alerts come from
-  the Transaction Monitoring rules each operator configures in their TRM
-  account.
+- The deposit's transfer raises an alert at High or Severe.
 - TRM cannot screen the transfer, or rejects the request.
 
 Transaction Monitoring is asynchronous. A node waits up to 10 seconds for TRM
