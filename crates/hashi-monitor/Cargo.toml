@@ -24,7 +24,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-base64ct.workspace = true
-e2e-tests = { path = "../e2e-tests" }
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
-tempfile.workspace = true

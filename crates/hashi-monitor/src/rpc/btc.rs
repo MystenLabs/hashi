@@ -24,7 +24,7 @@ use crate::config::Config;
 const HTTP_JSON_RPC_BATCH_SIZE: usize = 20;
 const HTTP_JSON_RPC_BATCH_DELAY: Duration = Duration::from_millis(200);
 const MAX_RATE_LIMIT_RETRIES: usize = 6;
-const MIN_CONFIRMATIONS: u64 = 6;
+pub const MIN_CONFIRMATIONS: u64 = 6;
 
 pub struct BtcRpcClient {
     transport: HttpJsonRpcTransport,
@@ -465,125 +465,9 @@ mod tests {
     use std::io::Read as _;
     use std::io::Write as _;
     use std::net::TcpListener;
-    use std::sync::Once;
-
-    use anyhow::Result;
-    use base64ct::Base64;
-    use base64ct::Encoding as _;
-    use bitcoin::Amount;
-    use bitcoin::Txid;
-    use bitcoin::hashes::Hash as _;
-    use e2e_tests::BitcoinNodeBuilder;
-    use e2e_tests::bitcoin_node::RPC_PASSWORD;
-    use e2e_tests::bitcoin_node::RPC_USER;
-    use tempfile::TempDir;
 
     use super::BlockchainInfo;
-    use super::BtcRpcClient;
     use super::HttpJsonRpcTransport;
-    use super::MIN_CONFIRMATIONS;
-    use crate::config::BtcConfig;
-    use crate::config::Config;
-    use crate::config::NextEventDelays;
-    use crate::config::SuiConfig;
-    use crate::domain::WithdrawalEventType;
-    use hashi_types::guardian::UnresolvedS3Config;
-
-    static TRACING_INIT: Once = Once::new();
-
-    fn init_test_tracing() {
-        TRACING_INIT.call_once(|| {
-            let _ = tracing_subscriber::fmt()
-                .with_test_writer()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .try_init();
-        });
-    }
-
-    fn test_config(rpc_url: String) -> Config {
-        Config {
-            next_event_delays: NextEventDelays::new(vec![
-                (WithdrawalEventType::E1HashiApproved, 100),
-                (WithdrawalEventType::E2GuardianApproved, 200),
-            ])
-            .expect("valid next event delays"),
-            clock_skew: 10,
-            withdrawal_predecessor_lookback: 60 * 60,
-            guardian_s3: UnresolvedS3Config {
-                bucket_info: hashi_types::guardian::S3BucketInfo {
-                    bucket: "bucket".to_string(),
-                    region: "us-east-1".to_string(),
-                },
-                access_key: Some("access-key".to_string()),
-                secret_key: Some("secret-key".to_string()),
-                retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
-            },
-            pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
-                hashi_types::guardian::BuildPcrs::new("", vec![]),
-                vec![],
-            )
-            .expect("valid PCR allowlist"),
-            sui: SuiConfig {
-                rpc_url: "http://sui".to_string(),
-                package_id: format!("0x{}", "11".repeat(32)),
-            },
-            btc: BtcConfig {
-                rpc_url,
-                http_headers: BTreeMap::from([(
-                    "Authorization".to_string(),
-                    format!(
-                        "Basic {}",
-                        Base64::encode_string(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
-                    ),
-                )]),
-            },
-        }
-    }
-
-    // Note that this test requires local bitcoind running.
-    #[tokio::test]
-    async fn lookup_btc_confirmation_with_local_regtest() -> Result<()> {
-        init_test_tracing();
-
-        let temp_dir = TempDir::new()?;
-        let node = BitcoinNodeBuilder::new()
-            .dir(temp_dir.path())
-            .build()
-            .await?;
-        let cfg = test_config(node.rpc_url().to_string());
-        let btc_rpc_client = BtcRpcClient::new(&cfg)?;
-        btc_rpc_client.ensure_synced()?;
-
-        let unknown_txid = Txid::from_slice(&[7u8; 32])?;
-        let unknown = btc_rpc_client.lookup_confirmation(unknown_txid)?;
-        assert!(
-            unknown.is_none(),
-            "expected unknown tx lookup to return none"
-        );
-
-        let destination = node.get_new_address()?;
-        let txid = node.send_to_address(&destination, Amount::from_sat(50_000))?;
-
-        let unconfirmed = btc_rpc_client.lookup_confirmation(txid)?;
-        assert!(unconfirmed.is_none(), "expected unconfirmed transaction");
-
-        node.generate_blocks(1)?;
-        btc_rpc_client.clear_confirmation_cache();
-
-        let insufficiently_confirmed = btc_rpc_client.lookup_confirmation(txid)?;
-        assert!(
-            insufficiently_confirmed.is_none(),
-            "expected one-confirmation transaction to remain pending"
-        );
-
-        node.generate_blocks(MIN_CONFIRMATIONS - 1)?;
-        btc_rpc_client.clear_confirmation_cache();
-
-        let confirmed = btc_rpc_client.lookup_confirmation(txid)?;
-        assert!(confirmed.is_some(), "expected confirmed transaction");
-
-        Ok(())
-    }
 
     #[test]
     fn undecodable_response_error_names_the_http_status() {

@@ -2188,6 +2188,7 @@ dependencies = [
  "futures",
  "hashi",
  "hashi-guardian",
+ "hashi-monitor",
  "hashi-screener",
  "hashi-types",
  "nix",
@@ -3105,10 +3106,8 @@ name = "hashi-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64ct",
  "bitcoin",
  "clap",
- "e2e-tests",
  "futures",
  "hashi-guardian",
  "hashi-types",
@@ -3118,7 +3117,6 @@ dependencies = [
  "serde_yaml 0.9.34+deprecated",
  "sui-rpc",
  "sui-sdk-types",
- "tempfile",
  "time",
  "tokio",
  "tower",
