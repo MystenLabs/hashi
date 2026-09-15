@@ -875,6 +875,35 @@ mod tests {
 
         let miner = BackgroundMiner::start(&networks.bitcoin_node);
 
+        // Once the withdrawal is finalized, members refuse to co-sign another
+        // guardian request for it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let finalized_txn_id = loop {
+            if let Some(txn) = hashi
+                .onchain_state()
+                .withdrawal_txns()
+                .into_iter()
+                .find(|txn| {
+                    txn.request_ids.contains(&withdrawal_request_id) && txn.is_fully_signed()
+                })
+            {
+                break txn.id;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "withdrawal was not finalized in time"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let checkpoint_secs = hashi.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+        let err = hashi
+            .validate_and_sign_guardian_withdrawal_request(&finalized_txn_id, checkpoint_secs, 0)
+            .expect_err("a finalized withdrawal must not get a guardian co-sign");
+        assert!(
+            err.to_string().contains("already finalized"),
+            "unexpected co-sign error: {err}"
+        );
+
         let confirmed_event = confirmations
             .wait_for(withdrawal_request_id, Duration::from_secs(60))
             .await?;
