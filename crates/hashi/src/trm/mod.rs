@@ -1030,11 +1030,49 @@ mod tests {
         TrmClient::new(std::env::var("TRM_API_KEY").expect("TRM_API_KEY")).unwrap()
     }
 
+    /// TRM attributes this Sui address to the May 2025 Cetus exploiter.
+    const CETUS_EXPLOITER: &str =
+        "0xe28b50cef1d633ea43d3296a3f6b67ff0312a5f1a99f0af753c85b8b5de8ff06";
+
+    /// A mainnet payment to a taproot address, like a hashi deposit. Each test
+    /// sets its own request id, since TRM keeps the first transfer registered
+    /// under an `externalId`.
+    fn live_taproot_deposit(request_id: Address, recipient: Address) -> DepositScreening {
+        let mut request = deposit_request(Some(recipient));
+        request.id = request_id;
+        request.utxo.id.txid = "2698d1571ba5b03f5866c80e1906a4237c9fdd03c15a8dea8d5856cbcb26b4a9"
+            .parse()
+            .unwrap();
+        request.utxo.amount = 6_376_139;
+        request.created_timestamp_ms = 1_789_464_853_000;
+        DepositScreening::new(
+            &request,
+            "bc1p7q7ds3239y334zus72d5m3gkf83mfcu8j8zrk49hws7yrf7k4vhqjqjauy".to_owned(),
+        )
+    }
+
+    async fn screen_live_deposit(deposit: &DepositScreening) -> Verdict {
+        let client = live_client();
+        tokio::time::timeout(Duration::from_secs(300), async {
+            loop {
+                match client.screen_deposit(deposit).await.unwrap() {
+                    Verdict::Pending => tokio::time::sleep(Duration::from_secs(10)).await,
+                    verdict => break verdict,
+                }
+            }
+        })
+        .await
+        .expect("TRM is still screening the transfer")
+    }
+
     #[tokio::test]
     #[ignore = "calls the live TRM API: set TRM_API_KEY"]
     async fn live_withdrawal_screening() {
         let client = live_client();
         let requester = Address::new([1; 32]);
+        // Attributed to mining, with severe counterparty exposure from dust
+        // sent to the genesis block address.
+        let genesis = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
         // On OFAC's SDN list.
         let sanctioned = "149w62rY42aZBox8fGcmqNsXUzSStKeq8C";
@@ -1044,41 +1082,27 @@ mod tests {
             .unwrap();
         assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(sanctioned)));
 
-        // The genesis block address: attributed to mining, with severe
-        // counterparty exposure from dust sent to it.
         let verdict = client
-            .screen_withdrawal("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", requester)
+            .screen_withdrawal(genesis, CETUS_EXPLOITER.parse().unwrap())
             .await
             .unwrap();
+        assert!(matches!(verdict, Verdict::Rejected(reason) if reason.contains(CETUS_EXPLOITER)));
+
+        let verdict = client.screen_withdrawal(genesis, requester).await.unwrap();
         assert_eq!(verdict, Verdict::Approved);
     }
 
     #[tokio::test]
     #[ignore = "calls the live TRM API: set TRM_API_KEY"]
     async fn live_deposit_screening() {
-        let client = live_client();
-        // A mainnet payment to a taproot address, like a hashi deposit.
-        let mut request = deposit_request(Some(Address::new([1; 32])));
-        request.utxo.id.txid = "2698d1571ba5b03f5866c80e1906a4237c9fdd03c15a8dea8d5856cbcb26b4a9"
-            .parse()
-            .unwrap();
-        request.utxo.amount = 6_376_139;
-        request.created_timestamp_ms = 1_789_464_853_000;
-        let deposit = DepositScreening::new(
-            &request,
-            "bc1p7q7ds3239y334zus72d5m3gkf83mfcu8j8zrk49hws7yrf7k4vhqjqjauy".to_owned(),
-        );
+        let clean = live_taproot_deposit(Address::new([2; 32]), Address::new([1; 32]));
+        assert_eq!(screen_live_deposit(&clean).await, Verdict::Approved);
 
-        let verdict = tokio::time::timeout(Duration::from_secs(300), async {
-            loop {
-                match client.screen_deposit(&deposit).await.unwrap() {
-                    Verdict::Pending => tokio::time::sleep(Duration::from_secs(10)).await,
-                    verdict => break verdict,
-                }
-            }
-        })
-        .await
-        .expect("TRM is still screening the transfer");
-        assert_eq!(verdict, Verdict::Approved);
+        let to_exploiter =
+            live_taproot_deposit(Address::new([0x11; 32]), CETUS_EXPLOITER.parse().unwrap());
+        assert!(matches!(
+            screen_live_deposit(&to_exploiter).await,
+            Verdict::Rejected(reason) if reason.contains(CETUS_EXPLOITER)
+        ));
     }
 }
