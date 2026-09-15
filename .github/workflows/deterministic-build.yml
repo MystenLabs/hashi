@@ -26,7 +26,6 @@ jobs:
       matrix:
         # Two kernels and two Docker releases. Pinned rather than ubuntu-latest:
         # when -latest moves to 26.04 the pair would silently become one image.
-        # ubuntu-22.04 is deprecated from 2026-09-17 and gone on 2027-04-17.
         os: [ubuntu-24.04, ubuntu-26.04]
         image: ${{ fromJSON(inputs.hashi_only && '[{"name":"hashi","dir":"hashi"}]' || '[{"name":"hashi","dir":"hashi"},{"name":"hashi-screener","dir":"hashi-screener"}]') }}
     runs-on: ${{ matrix.os }}
