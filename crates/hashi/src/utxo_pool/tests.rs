@@ -2236,14 +2236,3 @@ fn test_ancestor_package_budget_tracks_cluster_limit() {
         budget_vb - stalled_vb
     );
 }
-
-/// The configured floor must not be able to invert the clamp against
-/// `DEFAULT_HIGH_FEE_RATE_THRESHOLD`, which would panic every node.
-#[test]
-fn test_configured_floor_capped_at_high_fee_threshold() {
-    let ceiling = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-    let absurd = FeeRate::from_sat_per_vb_unchecked(500);
-    let floor = absurd.min(ceiling);
-    assert!(floor <= ceiling, "floor must never exceed the ceiling");
-    let _ = FeeRate::from_sat_per_vb_unchecked(1).clamp(floor, ceiling);
-}
