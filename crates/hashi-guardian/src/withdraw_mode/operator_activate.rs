@@ -58,11 +58,11 @@ impl OAInstall {
 
         let RecoveredWithdrawals {
             limiter_state,
-            last_signed,
+            signed_txids,
         } = reader.recover_withdrawal_state(&limiter_config).await?;
         let withdrawals = WithdrawalState {
             limiter: RateLimiter::new(limiter_config, limiter_state)?,
-            last_signed,
+            signed_txids,
         };
         let sharing_seq = armed_instance.sharing_seq();
         let committee_epoch = committee.epoch();

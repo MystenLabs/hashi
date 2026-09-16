@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::verify_hashi_cert;
-use crate::enclave::SignedWithdrawal;
 use crate::enclave::WithdrawalState;
 use crate::Enclave;
+use bitcoin::Txid;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::InternalError;
@@ -28,11 +28,15 @@ const MAX_REQUEST_AGE_SECS: u64 = 30 * 60;
 
 /// A verified request, resolved under the withdrawal lock.
 enum Resolved {
-    /// A retry of the last signed withdrawal.
-    Replay(SignedWithdrawal),
-    /// A new withdrawal, consumed and signed. The guard is held until its
+    /// A repeat of a transaction this guardian has already debited.
+    Replay(StandardWithdrawalResponse),
+    /// A new transaction, debited and signed. The guard is held until its
     /// success log is durable.
-    Signed(SignedWithdrawal, OwnedMutexGuard<WithdrawalState>),
+    Signed(
+        Txid,
+        StandardWithdrawalResponse,
+        OwnedMutexGuard<WithdrawalState>,
+    ),
 }
 
 pub async fn standard_withdrawal(
@@ -46,24 +50,23 @@ pub async fn standard_withdrawal(
     let wid = unsigned_request.wid;
 
     match normal_withdrawal_inner(enclave.clone(), signed_request).await {
-        Ok(Resolved::Replay(signed)) => {
+        Ok(Resolved::Replay(response)) => {
             info!(
-                "Withdrawal {} was already signed at seq {}; replaying its signatures for seq {}.",
-                wid, signed.seq, unsigned_request.seq
+                "Withdrawal {} was already signed; replaying its signatures for seq {}.",
+                wid, unsigned_request.seq
             );
-            Ok(enclave.sign(signed.response))
+            Ok(enclave.sign(response))
         }
-        Ok(Resolved::Signed(signed, withdrawals)) => {
+        Ok(Resolved::Signed(txid, response, withdrawals)) => {
             info!("Withdrawal {} processed successfully. Logging to S3.", wid);
-            let response = signed.response.clone();
             let msg = WithdrawalLogMessage::Success {
-                txid: signed.txid,
+                txid,
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 response: response.clone(),
                 post_state: *withdrawals.limiter.state(),
             };
-            log_withdrawal_success(enclave.as_ref(), msg, signed, withdrawals).await?;
+            log_withdrawal_success(enclave.as_ref(), wid, msg, txid, withdrawals).await?;
             // The withdrawal lock is retained through the durable log and released
             // when `log_withdrawal_success` returns. The next withdrawal may now begin.
             Ok(enclave.sign(response))
@@ -98,32 +101,33 @@ async fn normal_withdrawal_inner(
     let (_, request) = signed_request.into_parts();
     validate_request_timestamp(request.timestamp_secs(), now_timestamp_secs())?;
 
-    // 2) Acquire the withdrawal lock. The guard is held through signing and
-    //    durable logging — no other withdrawal can proceed until this one is
-    //    durably logged or the enclave aborts.
+    // 2) Sign. Signing is deterministic and touches no shared state; the
+    //    signatures leave the enclave only once this transaction is debited or
+    //    matched to a debit already in the log.
+    info!("Generating BTC signatures.");
+    let (txid, signatures) = enclave
+        .config
+        .btc_sign(request.utxos())
+        .expect("All BTC keys should be set");
+    let response = StandardWithdrawalResponse {
+        enclave_signatures: signatures,
+    };
+    info!("BTC signatures generated.");
+
+    // 3) Acquire the withdrawal lock. The guard is held through durable
+    //    logging — no other withdrawal can proceed until this one is durably
+    //    logged or the enclave aborts.
     let mut withdrawals = enclave.state.lock_withdrawals().await?;
 
-    // 3) Replay a retry of the last signed withdrawal. The seq is not part of
-    //    the match: a node may retry at a seq its limiter mirror reconciled to.
-    if let Some(last) = withdrawals
-        .last_signed
-        .as_ref()
-        .filter(|last| last.wid == *request.wid())
-    {
-        let txid = enclave
-            .config
-            .btc_txid(request.utxos())
-            .expect("All BTC keys should be set");
-        if txid != last.txid {
-            return Err(InvalidInputs(format!(
-                "withdrawal {} was signed for txid {}, not {}",
-                last.wid, last.txid, txid
-            )));
-        }
-        return Ok(Resolved::Replay(last.clone()));
+    // 4) A transaction this enclave has already debited is re-signed without a
+    //    second debit: the txid fixes the same inputs and outputs, so it
+    //    releases no new outflow. The seq is not part of the match, since a
+    //    node retries at whatever seq its limiter mirror reconciled to.
+    if withdrawals.signed_txids.contains(&txid) {
+        return Ok(Resolved::Replay(response));
     }
 
-    // 4) Rate limits
+    // 5) Rate limits
     info!("Checking rate limits.");
     // Gross outflow (= inputs - change = external_out + miner_fee).
     // Miner fee leaves the pool too, so it must consume the limit;
@@ -136,23 +140,7 @@ async fn normal_withdrawal_inner(
     )?;
     info!("Rate limit check passed.");
 
-    // 5) Sign tx (while holding the withdrawal lock)
-    info!("Generating BTC signatures.");
-    let (txid, signatures) = enclave
-        .config
-        .btc_sign(request.utxos())
-        .expect("All BTC keys should be set");
-    info!("BTC signatures generated.");
-
-    let signed = SignedWithdrawal {
-        wid: *request.wid(),
-        txid,
-        seq: request.seq(),
-        response: StandardWithdrawalResponse {
-            enclave_signatures: signatures,
-        },
-    };
-    Ok(Resolved::Signed(signed, withdrawals))
+    Ok(Resolved::Signed(txid, response, withdrawals))
 }
 
 fn validate_request_timestamp(
@@ -178,18 +166,19 @@ fn validate_request_timestamp(
 
 async fn log_withdrawal_success(
     enclave: &Enclave,
+    wid: WithdrawalID,
     msg: WithdrawalLogMessage,
-    signed: SignedWithdrawal,
+    txid: Txid,
     withdrawals: OwnedMutexGuard<WithdrawalState>,
 ) -> GuardianResult<()> {
     enclave
         .log_withdraw(msg)
         .await
         .expect("S3 logger must be initialized to log a withdrawal");
-    info!("Withdrawal {} logged.", signed.wid);
-    // Consumes the guard: the now-durable withdrawal is recorded for replay,
-    // and only then may the next withdrawal enter.
-    enclave.state.commit_withdrawal(withdrawals, signed);
+    info!("Withdrawal {} logged.", wid);
+    // Consumes the guard: the now-durable debit is recorded, and only then may
+    // the next withdrawal enter.
+    enclave.state.commit_withdrawal(withdrawals, txid);
     Ok(())
 }
 
@@ -236,6 +225,7 @@ mod tests {
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::guardian::WithdrawStage;
+    use std::collections::HashSet;
 
     /// An enclave through provisioner init, ready to activate with `limiter_config`.
     async fn provisioned_enclave(
@@ -294,17 +284,17 @@ mod tests {
         (enclave, captures)
     }
 
-    /// Activate the way operator_activate does after recovering `last_signed`.
-    fn activate_with_last_signed(
+    /// Activate the way operator_activate does after recovering the debited set.
+    fn activate_with_signed_txids(
         enclave: &Enclave,
         committee: HashiCommittee,
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
-        last_signed: SignedWithdrawal,
+        signed_txids: HashSet<Txid>,
     ) {
         let withdrawals = WithdrawalState {
             limiter: RateLimiter::new(limiter_config, limiter_state).unwrap(),
-            last_signed: Some(last_signed),
+            signed_txids,
         };
         enclave.state.init(committee, withdrawals).unwrap();
         enclave.clear_temporary_init_state();
@@ -532,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_of_the_last_withdrawal_replays_at_any_seq() {
+    async fn retry_replays_at_any_seq() {
         let wid = WithdrawalID::new([0xb1; 32]);
         let now = now_timestamp_secs();
         let (request, committee) = signed_request(wid, now, 0);
@@ -601,76 +591,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_wid_for_a_different_transaction_is_rejected() {
+    async fn same_wid_for_a_different_transaction_is_a_new_withdrawal() {
         let wid = WithdrawalID::new([0xb4; 32]);
         let now = now_timestamp_secs();
         let (request, committee) = signed_request(wid, now, 0);
         let limiter_config = no_refill_limiter(amount_sats(&request));
         let limiter_state = LimiterState::genesis(&limiter_config);
         let (enclave, captures) = provisioned_enclave(Network::Regtest, limiter_config).await;
-        let (_, enclave_signatures) = enclave.config.btc_sign(request.message().utxos()).unwrap();
-        let last_signed = SignedWithdrawal {
-            wid,
-            txid: Txid::all_zeros(),
-            seq: 0,
-            response: StandardWithdrawalResponse { enclave_signatures },
-        };
-        activate_with_last_signed(
+        // A debit for a different transaction must not cover this one, whatever
+        // withdrawal id it carries: another txid moves different coins.
+        activate_with_signed_txids(
             &enclave,
             committee,
             limiter_config,
             limiter_state,
-            last_signed.clone(),
+            HashSet::from([Txid::all_zeros()]),
         );
 
-        let err = standard_withdrawal(enclave.clone(), request)
+        standard_withdrawal(enclave.clone(), request)
             .await
-            .unwrap_err();
-        assert!(matches!(err, InvalidInputs(message) if message.contains("txid")));
+            .expect("a transaction with no debit of its own is signed as new");
 
-        // Neither replayed nor consumed as a new withdrawal, and logged as a failure.
-        assert_eq!(enclave.state.limiter_snapshot(), Some(limiter_state));
         assert_eq!(
-            enclave.state.lock_withdrawals().await.unwrap().last_signed,
-            Some(last_signed)
+            enclave.state.limiter_snapshot().unwrap().next_seq,
+            limiter_state.next_seq + 1
         );
         let captured = captures.lock().unwrap();
         assert_eq!(captured.len(), 1);
-        assert!(captured[0].0.contains("/failure-"));
+        assert!(captured[0].0.contains("/success-"));
     }
 
     #[tokio::test]
-    async fn only_the_last_withdrawal_replays() {
+    async fn an_earlier_withdrawal_still_replays() {
         let now = now_timestamp_secs();
         let earlier_wid = WithdrawalID::new([0xb5; 32]);
-        let last_wid = WithdrawalID::new([0xb6; 32]);
+        let later_wid = WithdrawalID::new([0xb6; 32]);
         let (earlier, committee) = signed_request(earlier_wid, now, 0);
-        let (enclave, _captures) =
+        // Room for the two withdrawals below and nothing more, so a re-debit of
+        // either would fail loudly.
+        let (enclave, captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, 2 * amount_sats(&earlier))
                 .await;
-        standard_withdrawal(enclave.clone(), earlier)
+        let first = standard_withdrawal(enclave.clone(), earlier)
             .await
             .expect("earlier withdrawal succeeds");
-        let (last, _) = signed_request(last_wid, now, 1);
-        standard_withdrawal(enclave.clone(), last)
-            .await
-            .expect("last withdrawal succeeds");
+        let earlier_signatures = signatures_of(&enclave, first);
 
-        let (last_retry, _) = signed_request(last_wid, now, 2);
-        standard_withdrawal(enclave.clone(), last_retry)
+        let (later, _) = signed_request(later_wid, now, 1);
+        standard_withdrawal(enclave.clone(), later)
             .await
-            .expect("the last withdrawal replays");
+            .expect("later withdrawal succeeds");
+        let state = enclave.state.limiter_snapshot();
 
-        // An earlier withdrawal is processed as new, and the bucket is empty.
+        // The earlier withdrawal is no longer the most recent one, and its retry
+        // still replays: same signatures, no debit, no new log.
         let (earlier_retry, _) = signed_request(earlier_wid, now, 2);
-        let err = standard_withdrawal(enclave, earlier_retry)
+        let replayed = standard_withdrawal(enclave.clone(), earlier_retry)
             .await
-            .unwrap_err();
-        assert!(matches!(err, GuardianError::RateLimitExceeded));
+            .expect("the earlier withdrawal replays");
+        assert_eq!(signatures_of(&enclave, replayed), earlier_signatures);
+        assert_eq!(enclave.state.limiter_snapshot(), state);
+        assert_eq!(captures.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn failed_withdrawal_keeps_the_last_signed_withdrawal() {
+    async fn failed_withdrawal_keeps_the_debited_transactions() {
         let now = now_timestamp_secs();
         let signed_wid = WithdrawalID::new([0xb7; 32]);
         let (request, committee) = signed_request(signed_wid, now, 0);
@@ -718,15 +703,7 @@ mod tests {
         );
 
         let response = StandardWithdrawalResponse { enclave_signatures };
-        enclave.state.commit_withdrawal(
-            withdrawals,
-            SignedWithdrawal {
-                wid,
-                txid,
-                seq: 0,
-                response: response.clone(),
-            },
-        );
+        enclave.state.commit_withdrawal(withdrawals, txid);
 
         let replayed = retry.await.unwrap().expect("retry replays");
         assert_eq!(
@@ -743,7 +720,7 @@ mod tests {
         let limiter_config = no_refill_limiter(amount_sats(&request));
         let (enclave, captures) = provisioned_enclave(Network::Regtest, limiter_config).await;
 
-        // What a previous session left in its max-seq success record.
+        // What a previous session's success records left behind.
         let (txid, enclave_signatures) =
             enclave.config.btc_sign(request.message().utxos()).unwrap();
         let post_state = LimiterState {
@@ -751,15 +728,13 @@ mod tests {
             last_updated_at: now,
             next_seq: 1,
         };
-        let last_signed = SignedWithdrawal {
-            wid,
-            txid,
-            seq: 0,
-            response: StandardWithdrawalResponse {
-                enclave_signatures: enclave_signatures.clone(),
-            },
-        };
-        activate_with_last_signed(&enclave, committee, limiter_config, post_state, last_signed);
+        activate_with_signed_txids(
+            &enclave,
+            committee,
+            limiter_config,
+            post_state,
+            HashSet::from([txid]),
+        );
 
         let (retry, _) = signed_request(wid, now, 1);
         let replayed = standard_withdrawal(enclave.clone(), retry)

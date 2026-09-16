@@ -21,6 +21,7 @@ use k256::Secp256k1 as K256Secp256k1;
 use rand::RngCore;
 #[cfg(test)]
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 #[cfg(test)]
 use std::io::Read;
 use std::num::NonZeroU16;
@@ -453,7 +454,7 @@ pub fn activate_enclave_for_testing(
 ) -> GuardianResult<()> {
     let withdrawals = crate::enclave::WithdrawalState {
         limiter: RateLimiter::new(limiter_config, limiter_state)?,
-        last_signed: None,
+        signed_txids: HashSet::new(),
     };
 
     enclave.state.init(committee, withdrawals)?;

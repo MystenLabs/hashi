@@ -426,7 +426,9 @@ impl StandardWithdrawalRequest {
         let addr_unchecked =
             BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network).into_unchecked();
 
-        let txid = bitcoin::Txid::from_slice(&[9u8; 32]).expect("valid txid bytes");
+        // Each withdrawal spends its own UTXO, as on chain, so no two mock
+        // withdrawals share a transaction.
+        let txid = bitcoin::Txid::from_slice(wid.as_bytes()).expect("valid txid bytes");
         let outpoint = bitcoin::OutPoint { txid, vout: 0 };
 
         let input = InputUTXO::new(outpoint, Amount::from_sat(10_000), [7u8; 32].into());

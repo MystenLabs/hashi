@@ -23,6 +23,7 @@ use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -98,18 +99,10 @@ pub struct EnclaveState {
 /// durable success log.
 pub struct WithdrawalState {
     pub limiter: RateLimiter,
-    /// The latest durably logged withdrawal, replayed to retries of its wid.
-    pub last_signed: Option<SignedWithdrawal>,
-}
-
-/// A withdrawal whose success log is durable.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SignedWithdrawal {
-    pub wid: WithdrawalID,
-    pub txid: Txid,
-    /// The limiter seq the withdrawal consumed.
-    pub seq: u64,
-    pub response: StandardWithdrawalResponse,
+    /// Every transaction durably logged as debited, recovered in full at
+    /// activation. A repeat is re-signed from the request rather than served
+    /// from a stored response, since signing is deterministic.
+    pub signed_txids: HashSet<Txid>,
 }
 
 /// Inputs needed only between operator initialization and activation.
@@ -250,18 +243,6 @@ impl EnclaveConfig {
         Ok((txid, sign_btc_tx(&messages, enclave_keypair)))
     }
 
-    /// The txid `btc_sign` would return for a BTC tx, without signing it.
-    /// Returns an Err if enclave btc keypair or hashi btc pk is not set.
-    pub fn btc_txid(&self, tx_utxos: &TxUTXOs) -> GuardianResult<Txid> {
-        let enclave_btc_pk = self.enclave_btc_pubkey()?;
-        let hashi_btc_pk = self
-            .hashi_btc_master_pubkey
-            .get()
-            .ok_or(InvalidInputs("Hashi BTC public key not set".into()))?;
-        let (_, txid) = tx_utxos.signing_messages_and_txid(&enclave_btc_pk, hashi_btc_pk);
-        Ok(txid)
-    }
-
     pub fn is_enclave_btc_keypair_set(&self) -> bool {
         self.enclave_btc_keypair.get().is_some()
     }
@@ -400,15 +381,11 @@ impl EnclaveState {
         .map_err(|_| Unavailable("timed out waiting for withdrawal lock".into()))
     }
 
-    /// Record the withdrawal the guard's holder has just made durable, then
-    /// release the lock. Consuming the guard orders the record before the release.
-    pub fn commit_withdrawal(
-        &self,
-        mut guard: OwnedMutexGuard<WithdrawalState>,
-        signed: SignedWithdrawal,
-    ) {
+    /// Record the debit the guard's holder has just made durable, then release
+    /// the lock. Consuming the guard orders the record before the release.
+    pub fn commit_withdrawal(&self, mut guard: OwnedMutexGuard<WithdrawalState>, txid: Txid) {
         *self.limiter_snapshot.write().unwrap() = Some(*guard.limiter.state());
-        guard.last_signed = Some(signed);
+        guard.signed_txids.insert(txid);
     }
 
     /// The limiter state as of the last durably logged withdrawal. `None` means
