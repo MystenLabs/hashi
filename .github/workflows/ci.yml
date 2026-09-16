@@ -85,7 +85,8 @@ jobs:
       - name: Detect TRM client changes
         uses: dorny/paths-filter@v3
         id: trm-filter
-        if: github.event_name == 'pull_request'
+        # Pull requests from forks don't get the TRM API key.
+        if: github.event.pull_request.head.repo.full_name == github.repository
         with:
           filters: |
             trm:
