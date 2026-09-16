@@ -84,7 +84,6 @@ impl ContinuousAuditor {
         let inner = AuditorCore::new(cfg, cursors).await?;
         metrics.set_checked_through(SOURCE_SUI, inner.get_sui_cursor());
         metrics.set_checked_through(SOURCE_GUARDIAN, inner.get_guardian_cursor());
-        metrics.set_checked_through(SOURCE_BTC, cur_time);
         Ok(Self {
             inner,
             window: audit_window,
