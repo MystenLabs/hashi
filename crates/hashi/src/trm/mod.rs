@@ -426,38 +426,52 @@ impl Transfer {
 
 /// Spaces the requests to one TRM endpoint `REQUEST_INTERVAL` apart.
 struct Pacer {
-    next_turn: Mutex<Instant>,
+    turns: Mutex<Turns>,
+}
+
+struct Turns {
+    next: Instant,
+    hold_until: Instant,
 }
 
 impl Pacer {
     fn new() -> Self {
+        let now = Instant::now();
         Self {
-            next_turn: Mutex::new(Instant::now()),
+            turns: Mutex::new(Turns {
+                next: now,
+                hold_until: now,
+            }),
         }
     }
 
     /// Waits for the endpoint's next free turn. Refuses, without taking the
     /// turn, when it would start after `deadline`.
     async fn wait_turn(&self, deadline: Instant) -> Result<(), TrmError> {
-        let turn = {
-            let mut next_turn = self.next_turn.lock().unwrap();
-            let turn = (*next_turn).max(Instant::now());
-            if turn > deadline {
-                return Err(TrmError::Transient(anyhow!(
-                    "TRM requests are queued past the screening deadline"
-                )));
+        loop {
+            let turn = {
+                let mut turns = self.turns.lock().unwrap();
+                let turn = turns.next.max(turns.hold_until).max(Instant::now());
+                if turn > deadline {
+                    return Err(TrmError::Transient(anyhow!(
+                        "TRM requests are queued past the screening deadline"
+                    )));
+                }
+                turns.next = turn + REQUEST_INTERVAL;
+                turn
+            };
+            tokio::time::sleep_until(turn).await;
+            // A 429 answered while this request waited takes its turn back.
+            if self.turns.lock().unwrap().hold_until <= turn {
+                return Ok(());
             }
-            *next_turn = turn + REQUEST_INTERVAL;
-            turn
-        };
-        tokio::time::sleep_until(turn).await;
-        Ok(())
+        }
     }
 
-    /// Holds back every later turn until `until`.
+    /// Holds back this endpoint's turns until `until`.
     fn hold_until(&self, until: Instant) {
-        let mut next_turn = self.next_turn.lock().unwrap();
-        *next_turn = (*next_turn).max(until);
+        let mut turns = self.turns.lock().unwrap();
+        turns.hold_until = turns.hold_until.max(until);
     }
 }
 
@@ -1021,8 +1035,30 @@ mod tests {
             .await
             .unwrap_err();
 
-        let next_turn = *client.address_screenings.next_turn.lock().unwrap();
-        assert!(next_turn > Instant::now() + Duration::from_secs(1));
+        let hold_until = client.address_screenings.turns.lock().unwrap().hold_until;
+        assert!(hold_until > Instant::now() + Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_holds_back_a_turn_already_taken() {
+        let pacer = &Pacer::new();
+        let started = Instant::now();
+        let deadline = started + SCREENING_TIMEOUT;
+        let response_time = Duration::from_millis(50);
+        let retry_after = Duration::from_secs(2);
+
+        let rate_limited = async move {
+            pacer.wait_turn(deadline).await.unwrap();
+            tokio::time::sleep(response_time).await;
+            pacer.hold_until(Instant::now() + retry_after);
+        };
+        let queued = async move {
+            pacer.wait_turn(deadline).await.unwrap();
+            started.elapsed()
+        };
+        let ((), waited) = tokio::join!(rate_limited, queued);
+
+        assert_eq!(waited, response_time + retry_after);
     }
 
     #[test]
