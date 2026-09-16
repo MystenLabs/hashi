@@ -118,6 +118,14 @@ impl NextEventDelays {
             .find(|(event_source, _)| *event_source == source)
             .map(|(_, next_event_delay_secs)| *next_event_delay_secs)
     }
+
+    pub fn max_delay(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|(_, next_event_delay_secs)| *next_event_delay_secs)
+            .max()
+            .unwrap_or_default()
+    }
 }
 
 impl TryFrom<Vec<(WithdrawalEventType, u64)>> for NextEventDelays {

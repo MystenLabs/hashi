@@ -42,6 +42,11 @@ pub const S3_DIR_GENESIS: &str = "genesis";
 pub const SECONDS_PER_HOUR: UnixSeconds = 60 * 60;
 const DIR_WRITES_COMPLETION_DELAY: Duration = Duration::from_mins(10);
 
+/// How far a reader's cursor can trail wall clock: the hour it is still waiting
+/// on, plus the delay before that directory counts as complete.
+pub const MAX_DIR_COMPLETION_LAG: UnixSeconds =
+    SECONDS_PER_HOUR + DIR_WRITES_COMPLETION_DELAY.as_secs();
+
 type Year = i32;
 type Month = u8;
 type Day = u8;

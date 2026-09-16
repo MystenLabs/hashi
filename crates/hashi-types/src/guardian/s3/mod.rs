@@ -9,4 +9,5 @@ mod log_record;
 mod log_schema;
 
 pub use config::*;
+pub use log_layout::MAX_DIR_COMPLETION_LAG;
 pub use log_layout::S3HourScopedDirectory;
