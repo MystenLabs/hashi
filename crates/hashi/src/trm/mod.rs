@@ -309,13 +309,14 @@ impl TrmClient {
                 },
             );
         }
-        response.json().await.map_err(|e| {
-            if e.is_decode() {
-                TrmError::Permanent(anyhow!("unexpected TRM response: {e}"))
-            } else {
-                TrmError::Transient(e.into())
-            }
-        })
+        // reqwest reports a connection that drops mid-body as a decode error
+        // too, so read the body first and let only parsing fail permanently.
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| TrmError::Transient(e.into()))?;
+        serde_json::from_slice(&body)
+            .map_err(|e| TrmError::Permanent(anyhow!("unexpected TRM response: {e}")))
     }
 }
 
@@ -528,6 +529,8 @@ mod tests {
     use serde_json::Value;
     use serde_json::json;
     use sui_sdk_types::Digest;
+    use tokio::io::AsyncReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
 
     use super::*;
     use crate::constants::BITCOIN_MAINNET_CHAIN_ID;
@@ -936,6 +939,32 @@ mod tests {
                 "{status} {body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_response_is_transient() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_ne!(socket.read(&mut [0; 1024]).await.unwrap(), 0);
+            socket
+                .write_all(b"HTTP/1.1 201 Created\r\ncontent-length: 64\r\n\r\n[{")
+                .await
+                .unwrap();
+            // Half-close and drain the request, so the client sees the body end
+            // early rather than a reset.
+            socket.shutdown().await.unwrap();
+            let _ = socket.read_to_end(&mut Vec::new()).await;
+        });
+        let client = TrmClient::with_base_url(API_KEY.to_owned(), &base_url).unwrap();
+
+        let error = client
+            .screen_withdrawal(BITCOIN_ADDRESS, Address::new([1; 32]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TrmError::Transient(_)));
     }
 
     #[tokio::test(start_paused = true)]
