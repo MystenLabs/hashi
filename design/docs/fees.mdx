@@ -102,6 +102,11 @@ instead: while a batch's share would exceed it, the leader waits for fees
 to fall or for more requests to share them, rather than broadcasting a
 transaction that would sit unconfirmed.
 
+Raising that floor on the leader alone only helps so far. Validators
+derive their ceiling from their own floor and estimate, so a fee more than
+3x above what they see is rejected; a larger rescue has to be configured
+across the fleet.
+
 ## Worst-case network fee
 
 Every withdrawal is required to cover not just its own onchain footprint
