@@ -17,6 +17,7 @@ use crate::metrics::MonitorMetrics;
 use crate::metrics::SOURCE_BTC;
 use crate::metrics::SOURCE_GUARDIAN;
 use crate::metrics::SOURCE_SUI;
+use hashi_types::guardian::s3::MAX_DIR_COMPLETION_LAG;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
@@ -62,12 +63,14 @@ impl ContinuousAuditWindow {
     }
 
     /// The earliest start whose checks can still be pending: the longest
-    /// next-event delay and clock skew, plus one poll and state tick to report.
+    /// next-event delay and clock skew, the lag of the hourly guardian cursor
+    /// that judges those deadlines, and one poll and state tick to report.
     pub fn default_start(cfg: &Config, now: UnixSeconds) -> UnixSeconds {
         let lookback = cfg
             .next_event_delays
             .max_delay()
             .saturating_add(cfg.clock_skew)
+            .saturating_add(MAX_DIR_COMPLETION_LAG)
             .saturating_add(POLL_INTERVAL.as_secs())
             .saturating_add(STATE_TICK_INTERVAL.as_secs());
         now.saturating_sub(lookback)
@@ -285,7 +288,21 @@ btc:
 
         assert_eq!(
             ContinuousAuditWindow::default_start(&cfg, 1_000_000),
-            1_000_000 - 86_400 - 300 - 600 - 300,
+            1_000_000 - 86_400 - 300 - 4_200 - 600 - 300,
         );
+    }
+
+    #[test]
+    fn default_start_precedes_every_deadline_the_guardian_cursor_has_yet_to_judge() {
+        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        let now = 1_000_000;
+
+        // A missing guardian approval is only found once the hourly cursor
+        // passes its deadline, so the oldest one still unreported belongs to a
+        // withdrawal that started a whole delay before the cursor's own lag.
+        let oldest_unjudged_start =
+            now - MAX_DIR_COMPLETION_LAG - cfg.next_event_delays.max_delay();
+
+        assert!(ContinuousAuditWindow::default_start(&cfg, now) <= oldest_unjudged_start);
     }
 }
