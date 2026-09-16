@@ -236,9 +236,13 @@ reconfiguration, submits the abort (the chain settles the race between nodes),
 and submits the replacement `start_reconfig` as soon as the abort is
 reflected. A node that observes an abort it did not submit, including one an
 operator sent by hand with `hashi committee abort-reconfig`, starts the
-replacement in the same way. The CLI command is therefore a fallback for when
-no node is doing this; it refuses up front when nothing is pending or the
-pending epoch is still Sui's current epoch.
+replacement in the same way, as does a node that comes up to find Hashi's
+epoch behind Sui's with nothing pending, whether or not it can rebuild its
+own signing state for the lagging epoch. The CLI commands are therefore
+fallbacks for when no node is doing this: `abort-reconfig` refuses up front
+when nothing is pending or the pending epoch is still Sui's current epoch,
+and `hashi committee start-reconfig` submits the replacement, refusing when
+a reconfiguration is pending or Hashi is already on Sui's current epoch.
 
 Every abort observed on chain, whoever submitted it, increments the node
 metric `hashi_reconfig_aborted_total`. An abort means a reconfiguration
