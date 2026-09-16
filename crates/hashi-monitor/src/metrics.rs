@@ -3,7 +3,6 @@
 
 //! Prometheus metrics for continuous audits, served at `/metrics`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use hashi_types::guardian::time::UnixSeconds;
@@ -99,8 +98,8 @@ impl MonitorMetrics {
         String::from_utf8(buf).expect("metrics are utf-8")
     }
 
-    /// Serve `GET /metrics` forever.
-    pub async fn serve(self: Arc<Self>, addr: SocketAddr) -> anyhow::Result<()> {
+    /// Serve `GET /metrics` on an already bound listener, forever.
+    pub async fn serve(self: Arc<Self>, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
         let app = axum::Router::new().route(
             "/metrics",
             axum::routing::get(move || {
@@ -108,8 +107,7 @@ impl MonitorMetrics {
                 async move { metrics.render() }
             }),
         );
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        info!("Metrics listening on {addr}.");
+        info!("Metrics listening on {}.", listener.local_addr()?);
         axum::serve(listener, app).await?;
         Ok(())
     }
@@ -128,6 +126,33 @@ mod tests {
     use crate::domain::MonitorEventType;
     use crate::domain::WithdrawalEventType;
     use crate::findings::EventRelation;
+
+    #[tokio::test]
+    async fn the_metrics_route_serves_the_registry() {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let metrics = Arc::new(MonitorMetrics::new());
+        metrics.set_checked_through(SOURCE_SUI, 1_700_000_000);
+        tokio::spawn(metrics.serve(listener));
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+
+        assert!(
+            response.contains(
+                r#"hashi_monitor_checked_through_timestamp_seconds{source="sui"} 1700000000"#
+            ),
+            "{response}"
+        );
+    }
 
     #[test]
     fn every_series_is_exported_before_the_auditor_runs() {
