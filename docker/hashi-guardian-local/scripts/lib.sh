@@ -51,14 +51,18 @@ gen_kp_keys() { # FIRST LAST
   chmod 700 "${GNUPGHOME}"
   local i fpr
   for i in $(seq "$1" "$2"); do
-    [ -s "${CERTS_DIR}/kp${i}.asc" ] && continue
-    gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
-      "hashi-local-kp${i} <kp${i}@localhost>" ed25519 sign never >/dev/null 2>&1
-    fpr="$(gpg --list-keys --with-colons "kp${i}@localhost" | awk -F: '/^fpr:/{print $10; exit}')"
-    gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key \
-      "${fpr}" cv25519 encr never >/dev/null 2>&1
-    gpg --armor --export "${fpr}" > "${CERTS_DIR}/kp${i}.asc"
-    hashi-guardian-init tools dev-attest --kp-pgp-cert-path "${CERTS_DIR}/kp${i}.asc"
+    if [ ! -s "${CERTS_DIR}/kp${i}.asc" ]; then
+      gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
+        "hashi-local-kp${i} <kp${i}@localhost>" ed25519 sign never >/dev/null 2>&1
+      fpr="$(gpg --list-keys --with-colons "kp${i}@localhost" | awk -F: '/^fpr:/{print $10; exit}')"
+      gpg --batch --pinentry-mode loopback --passphrase '' --quick-add-key \
+        "${fpr}" cv25519 encr never >/dev/null 2>&1
+      gpg --armor --export "${fpr}" > "${CERTS_DIR}/kp${i}.asc"
+    fi
+    # Guarded on its own: a run interrupted after the export would otherwise
+    # leave a cert that later runs skip and the ceremony rejects.
+    [ -s "${CERTS_DIR}/kp${i}.attestation-dec.pem" ] ||
+      hashi-guardian-init tools dev-attest --kp-pgp-cert-path "${CERTS_DIR}/kp${i}.asc"
   done
   echo "KP certs kp$1..kp$2 in ${CERTS_DIR}."
 }
