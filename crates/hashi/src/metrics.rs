@@ -34,6 +34,11 @@ pub struct Metrics {
     pub(crate) mpc_bytes_sent_total: IntCounterVec,
     pub(crate) mpc_bytes_received_total: IntCounterVec,
 
+    // TRM AML screening metrics
+    pub trm_enabled: IntGauge,
+    pub trm_screenings_total: IntCounterVec,
+    pub trm_screening_duration_seconds: HistogramVec,
+
     // Guardian / local-limiter metrics
     pub guardian_enabled: IntGauge,
     pub guardian_limiter_initialized: IntGauge,
@@ -435,6 +440,28 @@ impl Metrics {
                 "hashi_mpc_bytes_received_total",
                 "Total bytes received in MPC RPC bodies, labeled by MPC protocol",
                 &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            trm_enabled: register_int_gauge_with_registry!(
+                "hashi_trm_enabled",
+                "Whether this node screens deposits and withdrawals with TRM Labs (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            trm_screenings_total: register_int_counter_vec_with_registry!(
+                "hashi_trm_screenings_total",
+                "TRM screenings by flow and outcome \
+                 (outcomes: approved, rejected, pending, transient_error, permanent_error)",
+                &["flow", "outcome"],
+                registry,
+            )
+            .unwrap(),
+            trm_screening_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_trm_screening_duration_seconds",
+                "Latency of TRM screenings by flow and outcome",
+                &["flow", "outcome"],
+                LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
@@ -1517,6 +1544,21 @@ impl Metrics {
             .observe(elapsed_secs);
     }
 
+    pub fn record_trm_screening(
+        &self,
+        flow: &str,
+        result: &Result<crate::trm::Verdict, crate::trm::TrmError>,
+        elapsed_secs: f64,
+    ) {
+        let outcome = trm_outcome_label(result);
+        self.trm_screenings_total
+            .with_label_values(&[flow, outcome])
+            .inc();
+        self.trm_screening_duration_seconds
+            .with_label_values(&[flow, outcome])
+            .observe(elapsed_secs);
+    }
+
     pub fn record_guardian_bootstrap_outcome(&self, outcome: &str) {
         self.guardian_bootstrap_outcomes_total
             .with_label_values(&[outcome])
@@ -1815,6 +1857,15 @@ pub const GUARDIAN_RPC_OUTCOME_RATE_LIMITED: &str = "rate_limited";
 pub const GUARDIAN_RPC_OUTCOME_UNAVAILABLE: &str = "unavailable";
 pub const GUARDIAN_RPC_OUTCOME_PARSE_ERROR: &str = "parse_error";
 
+pub const TRM_FLOW_DEPOSIT: &str = "deposit";
+pub const TRM_FLOW_WITHDRAWAL: &str = "withdrawal";
+
+pub const TRM_OUTCOME_APPROVED: &str = "approved";
+pub const TRM_OUTCOME_REJECTED: &str = "rejected";
+pub const TRM_OUTCOME_PENDING: &str = "pending";
+pub const TRM_OUTCOME_TRANSIENT_ERROR: &str = "transient_error";
+pub const TRM_OUTCOME_PERMANENT_ERROR: &str = "permanent_error";
+
 fn limiter_outcome_label(
     result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
 ) -> &'static str {
@@ -1826,6 +1877,18 @@ fn limiter_outcome_label(
         Err(LocalLimiterError::InsufficientCapacity { .. }) => {
             GUARDIAN_LIMITER_OUTCOME_INSUFFICIENT_CAPACITY
         }
+    }
+}
+
+fn trm_outcome_label(result: &Result<crate::trm::Verdict, crate::trm::TrmError>) -> &'static str {
+    use crate::trm::TrmError;
+    use crate::trm::Verdict;
+    match result {
+        Ok(Verdict::Approved) => TRM_OUTCOME_APPROVED,
+        Ok(Verdict::Rejected(_)) => TRM_OUTCOME_REJECTED,
+        Ok(Verdict::Pending) => TRM_OUTCOME_PENDING,
+        Err(TrmError::Transient(_)) => TRM_OUTCOME_TRANSIENT_ERROR,
+        Err(TrmError::Permanent(_)) => TRM_OUTCOME_PERMANENT_ERROR,
     }
 }
 

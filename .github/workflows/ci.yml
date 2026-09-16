@@ -82,6 +82,24 @@ jobs:
           cargo nextest run --workspace --all-features --profile ci
           cargo test --workspace --all-features --doc
 
+      - name: Detect TRM client changes
+        uses: dorny/paths-filter@v3
+        id: trm-filter
+        # Pull requests from forks don't get the TRM API key.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          filters: |
+            trm:
+              - 'crates/hashi/src/trm/**'
+              - '.github/workflows/ci.yml'
+
+      - name: Run live TRM tests
+        # These call TRM's API, so leave them to the PRs that change the client.
+        if: steps.trm-filter.outputs.trm == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          TRM_API_KEY: ${{ secrets.TRM_API_KEY }}
+        run: cargo nextest run --workspace --all-features --profile ci --run-ignored only trm::tests::live
+
       - run: make is-dirty
 
   lint:

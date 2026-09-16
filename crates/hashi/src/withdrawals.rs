@@ -26,6 +26,7 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::leader::RetryPolicy;
+use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -33,6 +34,7 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::onchain::types::WithdrawalRequest;
 use crate::onchain::types::WithdrawalTransaction;
+use crate::trm;
 use crate::utxo_pool;
 use crate::utxo_pool::AncestorTx;
 use crate::utxo_pool::CoinSelectionParams;
@@ -1598,11 +1600,53 @@ impl Hashi {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id))]
     pub(crate) async fn screen_withdrawal(
         &self,
-        _request: &WithdrawalRequest,
+        request: &WithdrawalRequest,
     ) -> Result<(), WithdrawalApprovalError> {
-        Ok(())
+        let Some(trm) = self.trm_client() else {
+            return Ok(());
+        };
+        let bitcoin_address = hashi_bitcoin::address_string_from_witness_program(
+            &request.bitcoin_address,
+            self.config.bitcoin_network(),
+        )
+        .map_err(WithdrawalApprovalError::NeverRetry)?;
+        let started = std::time::Instant::now();
+        let result = trm
+            .screen_withdrawal(&bitcoin_address, request.sender)
+            .await;
+        self.metrics.record_trm_screening(
+            metrics::TRM_FLOW_WITHDRAWAL,
+            &result,
+            started.elapsed().as_secs_f64(),
+        );
+        match result {
+            Ok(trm::Verdict::Approved) => Ok(()),
+            Ok(trm::Verdict::Pending) => Err(WithdrawalApprovalError::AmlServiceError(anyhow!(
+                "TRM has not finished screening withdrawal request {}",
+                request.id
+            ))),
+            Ok(trm::Verdict::Rejected(reason)) => {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "TRM rejected withdrawal request: {reason}"
+                );
+                Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+                    "AML screening rejected withdrawal request {}: {reason}",
+                    request.id
+                )))
+            }
+            Err(trm::TrmError::Transient(e)) => Err(WithdrawalApprovalError::AmlServiceError(e)),
+            Err(trm::TrmError::Permanent(e)) => {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "TRM could not screen withdrawal request: {e:#}"
+                );
+                Err(WithdrawalApprovalError::NeverRetry(e))
+            }
+        }
     }
 }
 
