@@ -356,11 +356,10 @@ the old key). Any `t` of the remaining KPs replace the whole set instead:
    `key-provisioner provision` by the new KPs run while the old guardian still
    serves. Switch traffic to the new guardian first, while that can still be
    undone: withdrawals, retries of already-signed ones included, get retriable
-   errors until activation. Then stop the old
-   guardian, which can't be undone (a restarted guardian is a new session
-   that must be provisioned again), and run `operator activate`: it needs
-   every other session in the bucket quiet for 10 minutes since its last
-   heartbeat and retries until then.
+   errors until activation. Then stop the old guardian, which can't be undone
+   (a restarted guardian is a new session that must be provisioned again), and
+   run `operator activate`: it needs every other session in the bucket quiet
+   for 10 minutes since its last heartbeat and retries until then.
 
 The rotation does not revoke the old shares: `kp-shares/{old seq}/` stays
 readable by the old certs, so `t` old keys could still reconstruct the key
