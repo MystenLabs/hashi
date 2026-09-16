@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::audit::AuditWindow;
@@ -11,6 +12,12 @@ use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::utc_timestamp;
+use crate::findings::MonitorFinding;
+use crate::metrics::MonitorMetrics;
+use crate::metrics::SOURCE_BTC;
+use crate::metrics::SOURCE_GUARDIAN;
+use crate::metrics::SOURCE_SUI;
+use hashi_types::guardian::s3::MAX_DIR_COMPLETION_LAG;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
@@ -34,6 +41,7 @@ pub struct ContinuousAuditWindow {
 pub struct ContinuousAuditor {
     pub inner: AuditorCore,
     pub window: ContinuousAuditWindow,
+    metrics: Arc<MonitorMetrics>,
 }
 
 impl AuditWindow for ContinuousAuditWindow {
@@ -53,10 +61,28 @@ impl ContinuousAuditWindow {
             guardian_start,
         }
     }
+
+    /// The earliest start whose checks can still be pending: the longest
+    /// next-event delay and clock skew, the lag of the hourly guardian cursor
+    /// that judges those deadlines, and one poll and state tick to report.
+    pub fn default_start(cfg: &Config, now: UnixSeconds) -> UnixSeconds {
+        let lookback = cfg
+            .next_event_delays
+            .max_delay()
+            .saturating_add(cfg.clock_skew)
+            .saturating_add(MAX_DIR_COMPLETION_LAG)
+            .saturating_add(POLL_INTERVAL.as_secs())
+            .saturating_add(STATE_TICK_INTERVAL.as_secs());
+        now.saturating_sub(lookback)
+    }
 }
 
 impl ContinuousAuditor {
-    pub async fn new(cfg: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(
+        cfg: &Config,
+        start: UnixSeconds,
+        metrics: Arc<MonitorMetrics>,
+    ) -> anyhow::Result<Self> {
         let cur_time = now_timestamp_secs();
         anyhow::ensure!(
             start <= cur_time,
@@ -70,21 +96,32 @@ impl ContinuousAuditor {
             guardian: audit_window.guardian_start,
         };
 
+        let inner = AuditorCore::new(cfg, cursors).await?;
+        metrics.set_checked_through(SOURCE_SUI, inner.get_sui_cursor());
+        metrics.set_checked_through(SOURCE_GUARDIAN, inner.get_guardian_cursor());
         Ok(Self {
-            inner: AuditorCore::new(cfg, cursors).await?,
+            inner,
             window: audit_window,
+            metrics,
         })
+    }
+
+    fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
+        log_findings("continuous", phase, findings);
+        self.metrics.record_findings(findings, now_timestamp_secs());
     }
 
     pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
         let findings = self.inner.ingest_batch(events);
-        log_findings("continuous", "ingest", &findings);
+        self.report_findings("ingest", &findings);
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
         let up_to = now_timestamp_secs();
         while let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui(up_to).await? {
             self.ingest_batch(events);
+            self.metrics
+                .set_checked_through(SOURCE_SUI, self.inner.get_sui_cursor());
         }
         Ok(())
     }
@@ -92,21 +129,25 @@ impl ContinuousAuditor {
     async fn tick_guardian(&mut self) -> anyhow::Result<()> {
         while let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
             self.ingest_batch(events);
+            self.metrics
+                .set_checked_through(SOURCE_GUARDIAN, self.inner.get_guardian_cursor());
         }
         Ok(())
     }
 
     /// Throws an error if BTC RPC infra fails.
     fn tick_btc(&mut self) -> anyhow::Result<()> {
+        let started_at = now_timestamp_secs();
         let findings = self.inner.fetch_btc_info(&self.window)?;
-        log_findings("continuous", "btc", &findings);
+        self.report_findings("btc", &findings);
+        self.metrics.set_checked_through(SOURCE_BTC, started_at);
         Ok(())
     }
 
     fn tick_state_checks_and_gc(&mut self) {
         let violations = self.inner.detect_violations(&self.window);
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
-        log_findings("continuous", "violations", &violations);
+        self.report_findings("violations", &violations);
 
         // Garbage collect
         self.inner.garbage_collect(&self.window);
@@ -214,5 +255,54 @@ impl ContinuousAuditor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONFIG: &str = r#"
+next_event_delays:
+  - [E1HashiApproved, 1200]
+  - [E2GuardianApproved, 86400]
+clock_skew: 300
+guardian_s3:
+  bucket: "bucket"
+  region: "us-west-2"
+  retention_environment: "testnet"
+current_build:
+  git_revision: "0000000000000000000000000000000000000000"
+  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+prev_builds: []
+sui:
+  rpc_url: "http://sui"
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+btc:
+  rpc_url: "http://btc"
+"#;
+
+    #[test]
+    fn default_start_covers_the_longest_next_event_delay() {
+        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+
+        assert_eq!(
+            ContinuousAuditWindow::default_start(&cfg, 1_000_000),
+            1_000_000 - 86_400 - 300 - 4_200 - 600 - 300,
+        );
+    }
+
+    #[test]
+    fn default_start_precedes_every_deadline_the_guardian_cursor_has_yet_to_judge() {
+        let cfg: Config = serde_yaml::from_str(CONFIG).unwrap();
+        let now = 1_000_000;
+
+        // A missing guardian approval is only found once the hourly cursor
+        // passes its deadline, so the oldest one still unreported belongs to a
+        // withdrawal that started a whole delay before the cursor's own lag.
+        let oldest_unjudged_start =
+            now - MAX_DIR_COMPLETION_LAG - cfg.next_event_delays.max_delay();
+
+        assert!(ContinuousAuditWindow::default_start(&cfg, now) <= oldest_unjudged_start);
     }
 }
