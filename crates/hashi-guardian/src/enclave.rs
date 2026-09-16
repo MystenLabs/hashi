@@ -99,7 +99,6 @@ pub struct EnclaveState {
 pub struct WithdrawalState {
     pub limiter: RateLimiter,
     /// The latest durably logged withdrawal, replayed to retries of its wid.
-    /// Retries of earlier withdrawals fail the limiter's seq check instead.
     pub last_signed: Option<SignedWithdrawal>,
 }
 
