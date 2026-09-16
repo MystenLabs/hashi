@@ -28,6 +28,10 @@ prost.workspace = true
 reqwest.workspace = true
 snap.workspace = true
 
+[features]
+# Dev deploys: admit the KP attestations a non-enclave-dev guardian accepts.
+non-enclave-dev = ["hashi-types/non-enclave-dev"]
+
 [dev-dependencies]
 hashi-types = { path = "../hashi-types", features = ["test-utils"] }
 tokio = { workspace = true, features = ["test-util"] }

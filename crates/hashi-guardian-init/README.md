@@ -408,9 +408,15 @@ Guardian helper tooling lives under `tools`:
 
 ```bash
 cargo run -p hashi-guardian-init -- tools fetch-info --endpoint <guardian-endpoint>
+cargo run -p hashi-guardian-init --features non-enclave-dev -- tools dev-attest --kp-pgp-cert-path /path/to/kp1.asc
 ```
 
 `fetch-info` prints a deployed guardian's public keys (signing key, or the
 enclave BTC pubkey after provisioning), used by deploy to record them on-chain.
 It verifies the GuardianInfo signature but does not verify Nitro attestation or
 PCRs.
+
+`dev-attest` exists only in `non-enclave-dev` builds. It writes a software KP
+key's three PEM sidecars from a self-signed device that only `non-enclave-dev`
+builds trust, so dev ceremonies (the devnet deploy, the local replica) run
+without YubiKeys.

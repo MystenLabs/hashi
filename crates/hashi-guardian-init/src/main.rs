@@ -149,6 +149,13 @@ enum ToolsCommand {
         #[command(flatten)]
         args: fetch_info::Args,
     },
+    /// Write a dev KP's attestation files from a software device, in place of a YubiKey.
+    #[cfg(feature = "non-enclave-dev")]
+    DevAttest {
+        /// Path to the dev KP's armored OpenPGP public cert.
+        #[arg(long)]
+        kp_pgp_cert_path: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -220,6 +227,10 @@ async fn main() -> anyhow::Result<()> {
         },
         Command::Tools { command } => match command {
             ToolsCommand::FetchInfo { args } => fetch_info::run(args).await?,
+            #[cfg(feature = "non-enclave-dev")]
+            ToolsCommand::DevAttest { kp_pgp_cert_path } => {
+                hashi_guardian_init::write_dev_attestations(&kp_pgp_cert_path)?
+            }
         },
     }
     Ok(())
