@@ -43,6 +43,11 @@ pub fn write_dev_attestations(path: &Path) -> Result<()> {
     let cert = read_kp_cert(path)?;
     let pems = hashi_types::guardian::test_utils::dev_kp_attestations(&cert)
         .with_context(|| format!("failed to attest PGP cert at {}", path.display()))?;
+    let [device_pem, sig_pem, dec_pem] = &pems;
+    // Verify before writing: a bundle the verifier rejects would still look
+    // attested to every later run.
+    hashi_types::pgp::verify_yubikey_attestations(&cert, device_pem, sig_pem, dec_pem)
+        .with_context(|| format!("unusable attestations for PGP cert at {}", path.display()))?;
     for (attestation_path, pem) in attestation_paths(path).iter().zip(pems) {
         std::fs::write(attestation_path, pem).with_context(|| {
             format!(
@@ -51,7 +56,7 @@ pub fn write_dev_attestations(path: &Path) -> Result<()> {
             )
         })?;
     }
-    load_attested_kp_cert(path).map(|_| ())
+    Ok(())
 }
 
 fn read_kp_cert(path: &Path) -> Result<PgpPublicCert> {
