@@ -296,12 +296,11 @@ pub struct CoinSelectionParams {
     pub long_term_fee_rate: FeeRate,
 
     /// The fee rate threshold at which the algorithm aggressively
-    /// minimizes inputs and performs no pool consolidation.
-    /// `max_fee_per_request` is derived from this rate applied to the
-    /// worst-case transaction shape. Also used as the reference point
-    /// for scaling the consolidation budget: `max_fee_per_request` is
-    /// proportionally scaled from this rate to `long_term_fee_rate`
-    /// when computing the low-fee consolidation budget.
+    /// minimizes inputs and performs no pool consolidation. Also the
+    /// reference point for scaling the consolidation budget:
+    /// `max_fee_per_request` is proportionally scaled from this rate to
+    /// `long_term_fee_rate` when computing the low-fee consolidation
+    /// budget.
     pub high_fee_rate_threshold: FeeRate,
 
     /// Maximum number of extra consolidation inputs per request when the
