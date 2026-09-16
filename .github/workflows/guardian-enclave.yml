@@ -27,6 +27,7 @@ on:
   pull_request:
     paths:
       - docker/hashi-guardian/**
+      - .dockerignore
       - .github/workflows/guardian-enclave.yml
   # Hosts build main commits. Same list as out/nitro.eif's prerequisites in
   # docker/hashi-guardian/Makefile.
@@ -78,7 +79,6 @@ concurrency:
 jobs:
   build:
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
@@ -101,7 +101,7 @@ jobs:
       # guardian, so the two must name the same commit or the EIF measures a
       # build that never existed.
       - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pin@v7
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.git_revision || github.sha }}
 
@@ -144,7 +144,6 @@ jobs:
           echo "nproc         : $(nproc)"
           echo "docker        : $(docker version --format '{{.Server.Version}}')"
           echo "buildx        : $(docker buildx version)"
-          echo "buildkit      : $(docker buildx inspect | awk '/^BuildKit version:/ {print $3}')"
           sha256sum out/rootfs.cpio out/bzImage out/kernel.config
 
       - name: Upload build-input hashes
@@ -166,27 +165,33 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download PCRs
+      - name: Download ubuntu-latest PCRs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
         with:
-          pattern: nitro-pcrs-*
-          path: pcrs
+          name: nitro-pcrs-ubuntu-latest
+          path: pcrs-latest
 
-      # One nitro.pcrs per runner, at pcrs/nitro-pcrs-<runner>/nitro.pcrs.
+      - name: Download ubuntu-22.04 PCRs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
+        with:
+          name: nitro-pcrs-ubuntu-22.04
+          path: pcrs-22
+
       - name: Compare PCRs
         id: compare
         run: |
-          files=(pcrs/*/nitro.pcrs)
-          sha256sum "${files[@]}"
-          distinct=$(sha256sum "${files[@]}" | cut -d' ' -f1 | sort -u | wc -l)
-          if [ "${#files[@]}" -ge 2 ] && [ "$distinct" -eq 1 ]; then match=true; else match=false; fi
-          {
-            echo "match=$match"
-            echo "runners=$(printf '%s\n' "${files[@]}" | sed 's#^pcrs/nitro-pcrs-##; s#/nitro.pcrs$##' | paste -sd, -)"
-            echo "pcr0=$(awk '$2 == "PCR0" {print $1}' "${files[0]}")"
-            echo "pcr1=$(awk '$2 == "PCR1" {print $1}' "${files[0]}")"
-            echo "pcr2=$(awk '$2 == "PCR2" {print $1}' "${files[0]}")"
-          } >> "$GITHUB_OUTPUT"
+          if diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+          # Extract individual PCR values
+          PCR0=$(awk '/PCR0/ {print $1}' pcrs-latest/nitro.pcrs)
+          PCR1=$(awk '/PCR1/ {print $1}' pcrs-latest/nitro.pcrs)
+          PCR2=$(awk '/PCR2/ {print $1}' pcrs-latest/nitro.pcrs)
+          echo "pcr0=$PCR0" >> "$GITHUB_OUTPUT"
+          echo "pcr1=$PCR1" >> "$GITHUB_OUTPUT"
+          echo "pcr2=$PCR2" >> "$GITHUB_OUTPUT"
 
       - name: Print results
         run: |
@@ -199,7 +204,7 @@ jobs:
             echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |"
             echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |"
             echo ""
-            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (${{ steps.compare.outputs.runners }})"
+            echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)"
             echo ""
             echo "**Trigger**: \`${{ github.event_name }}\`${{ github.event_name != 'workflow_dispatch' && ' — reproducibility check with canonical inputs, NOT a deployment measurement' || '' }}"
             echo ""
@@ -229,27 +234,23 @@ jobs:
       - name: Fail if PCRs differ
         if: steps.compare.outputs.match != 'true'
         run: |
-          echo "PCRs differ across runners (${{ steps.compare.outputs.runners }})!"
-          for f in pcrs/*/nitro.pcrs; do
-            echo "== $f"
-            cat "$f"
-          done
+          echo "PCRs differ across platforms!"
+          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs || true
           echo
-          echo "Which build input moved (rootfs.cpio is the app ramdisk = PCR2, bzImage the kernel = PCR1):"
-          sha256sum inputs/*/rootfs.cpio inputs/*/bzImage inputs/*/kernel.config || true
+          echo "Which build input moved:"
           for f in rootfs.cpio bzImage kernel.config; do
-            copies=$(sha256sum inputs/*/"$f" 2>/dev/null | wc -l | tr -d ' ')
-            distinct=$(sha256sum inputs/*/"$f" 2>/dev/null | cut -d' ' -f1 | sort -u | wc -l)
-            if [ "$copies" -lt 2 ]; then
-              echo "  $f: only $copies copy present"
-            elif [ "$distinct" -eq 1 ]; then
-              echo "  $f: same"
+            a="$(sha256sum "inputs/build-inputs-ubuntu-latest/$f" 2>/dev/null | cut -d' ' -f1)"
+            b="$(sha256sum "inputs/build-inputs-ubuntu-22.04/$f" 2>/dev/null | cut -d' ' -f1)"
+            if [ -z "$a" ] || [ -z "$b" ]; then
+              printf '  %-14s ?  (artifact missing)\n' "$f"
+            elif [ "$a" = "$b" ]; then
+              printf '  %-14s same\n' "$f"
             else
-              echo "  $f: DIFFERS"
+              printf '  %-14s DIFFERS\n    ubuntu-latest %s\n    ubuntu-22.04  %s\n' "$f" "$a" "$b"
             fi
           done
           echo
-          echo "If only bzImage moved, suspect something the kernel build absorbs from its"
-          echo "environment — a clock reaching the built-in initramfs is the failure mode"
-          echo "that has happened before."
+          echo "rootfs.cpio is the app ramdisk; bzImage the kernel. If only bzImage moved,"
+          echo "suspect something the kernel build absorbs from its environment — a clock"
+          echo "reaching the built-in initramfs is the failure mode that has happened before."
           exit 1
