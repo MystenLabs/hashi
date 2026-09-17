@@ -149,6 +149,12 @@ enum ToolsCommand {
         #[command(flatten)]
         args: fetch_info::Args,
     },
+    /// Verify a KP's cert and attestation files, then print its primary-key fingerprint.
+    VerifyKpCert {
+        /// Path to the KP's armored OpenPGP public cert, with its attestation files beside it.
+        #[arg(long)]
+        kp_pgp_cert_path: PathBuf,
+    },
     /// Write a dev KP's attestation files from a software device, in place of a YubiKey.
     #[cfg(feature = "non-enclave-dev")]
     DevAttest {
@@ -227,6 +233,10 @@ async fn main() -> anyhow::Result<()> {
         },
         Command::Tools { command } => match command {
             ToolsCommand::FetchInfo { args } => fetch_info::run(args).await?,
+            ToolsCommand::VerifyKpCert { kp_pgp_cert_path } => {
+                let cert = hashi_guardian_init::load_attested_kp_cert(&kp_pgp_cert_path)?;
+                println!("{}", cert.fingerprint().to_hex());
+            }
             #[cfg(feature = "non-enclave-dev")]
             ToolsCommand::DevAttest { kp_pgp_cert_path } => {
                 hashi_guardian_init::write_dev_attestations(&kp_pgp_cert_path)?
@@ -392,6 +402,29 @@ mod tests {
             "config.yaml",
         ]);
 
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tools_verify_kp_cert_requires_cert_path() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "tools",
+            "verify-kp-cert",
+            "--kp-pgp-cert-path",
+            "kp1.asc",
+        ])
+        .unwrap();
+
+        let Command::Tools {
+            command: ToolsCommand::VerifyKpCert { kp_pgp_cert_path },
+        } = cli.command
+        else {
+            panic!("expected tools verify-kp-cert command");
+        };
+        assert_eq!(kp_pgp_cert_path, PathBuf::from("kp1.asc"));
+
+        let result = Cli::try_parse_from(["hashi-guardian-init", "tools", "verify-kp-cert"]);
         assert!(result.is_err());
     }
 }
