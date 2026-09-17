@@ -545,6 +545,7 @@ impl MpcManager {
                 reason: "retrieval messages are response-only".into(),
             });
         }
+        self.reject_kind_mismatch(sender, &request.messages)?;
         let cache_key = match &request.messages {
             Messages::Dkg(_) => MessageResponsesKey::Dkg { sender },
             Messages::Rotation(_) => MessageResponsesKey::Rotation { sender },
@@ -2153,6 +2154,7 @@ impl MpcManager {
         dealer: Address,
         messages: &Messages,
     ) -> MpcResult<BLS12381Signature> {
+        self.reject_kind_mismatch(dealer, messages)?;
         let message = match messages {
             Messages::Dkg(msg) => msg,
             Messages::Rotation(_)
@@ -3174,6 +3176,22 @@ impl MpcManager {
                 sender: *dealer,
                 reason: format!("Dealer not in {scope}"),
             })
+    }
+
+    fn reject_kind_mismatch(&self, sender: Address, messages: &Messages) -> MpcResult<()> {
+        match (&self.protocol_type, messages) {
+            (ProtocolType::Dkg, Messages::Dkg(_))
+            | (ProtocolType::KeyRotation, Messages::Rotation(_)) => Ok(()),
+            (_, Messages::Dkg(_) | Messages::Rotation(_)) => Err(MpcError::InvalidMessage {
+                sender,
+                reason: format!(
+                    "{:?} message rejected: this epoch runs {:?}",
+                    messages.protocol_type(),
+                    self.protocol_type
+                ),
+            }),
+            _ => Ok(()),
+        }
     }
 
     fn certified_dealer_party_id(committee: &Committee, dealer: &Address) -> MpcResult<PartyId> {
@@ -4670,6 +4688,7 @@ impl MpcManager {
         dealer: Address,
         messages: &Messages,
     ) -> MpcResult<BLS12381Signature> {
+        self.reject_kind_mismatch(dealer, messages)?;
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
             Messages::Dkg(_)
