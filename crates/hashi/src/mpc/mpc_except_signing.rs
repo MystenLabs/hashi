@@ -2362,6 +2362,7 @@ impl MpcManager {
         let avid_builder = dealer
             .create_avid_messages(builder, avid_confirm)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let signers = crate::mpc::types::resolve_signers(&confirm_cert, &self.committee)?;
         self.committee
             .members()
             .iter()
@@ -2377,6 +2378,9 @@ impl MpcManager {
                         kind: AvidNonceMessageKind::Dispersal {
                             dispersal: message.dispersal,
                             confirm_cert: confirm_cert.clone(),
+                            optimistic_message: (!signers.contains(&(j as u16)))
+                                .then(|| builder.message_for(j as u16))
+                                .flatten(),
                         },
                     }),
                 ))
@@ -2682,7 +2686,28 @@ impl MpcManager {
             AvidNonceMessageKind::Dispersal {
                 dispersal,
                 confirm_cert,
+                optimistic_message,
             } => {
+                match (
+                    self.get_avid_round_state(batch_index, &sender)?,
+                    optimistic_message,
+                ) {
+                    (None, Some(msg)) => {
+                        let _ = self.try_sign_avid_nonce_optimistic(sender, batch_index, msg)?;
+                        tracing::info!(
+                            dealer = %sender,
+                            batch_index,
+                            "processed round-1 message bundled with an AVID dispersal"
+                        );
+                    }
+                    (Some(state), Some(msg)) if state.common.hash() != msg.common.hash() => {
+                        return Err(MpcError::InvalidMessage {
+                            sender,
+                            reason: "Dealer sent different messages".to_string(),
+                        });
+                    }
+                    _ => {}
+                }
                 let common = self
                     .get_avid_round_state(batch_index, &sender)?
                     .map(|state| state.common)
@@ -6587,6 +6612,7 @@ fn consume_certified_nonce_outputs<T>(
     (pre_filter, dealers, outputs)
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum RetrieveOutcome {
     Ready(RetrieveMessagesResponse),
     NeedsStore,
