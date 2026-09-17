@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 bitcoin.workspace = true
 clap.workspace = true
 futures.workspace = true
@@ -12,6 +13,7 @@ hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
 minreq = { workspace = true, features = ["json-using-serde"] }
+prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

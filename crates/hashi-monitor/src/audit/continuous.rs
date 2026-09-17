@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::audit::AuditWindow;
@@ -11,6 +12,11 @@ use crate::domain::Cursors;
 use crate::domain::MonitorEvent;
 use crate::domain::PollOutcome;
 use crate::domain::utc_timestamp;
+use crate::findings::MonitorFinding;
+use crate::metrics::MonitorMetrics;
+use crate::metrics::SOURCE_BTC;
+use crate::metrics::SOURCE_GUARDIAN;
+use crate::metrics::SOURCE_SUI;
 use hashi_types::guardian::time::UnixSeconds;
 use hashi_types::guardian::time::now_timestamp_secs;
 
@@ -34,6 +40,7 @@ pub struct ContinuousAuditWindow {
 pub struct ContinuousAuditor {
     pub inner: AuditorCore,
     pub window: ContinuousAuditWindow,
+    metrics: Arc<MonitorMetrics>,
 }
 
 impl AuditWindow for ContinuousAuditWindow {
@@ -56,7 +63,11 @@ impl ContinuousAuditWindow {
 }
 
 impl ContinuousAuditor {
-    pub async fn new(cfg: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
+    pub async fn new(
+        cfg: &Config,
+        start: UnixSeconds,
+        metrics: Arc<MonitorMetrics>,
+    ) -> anyhow::Result<Self> {
         let cur_time = now_timestamp_secs();
         anyhow::ensure!(
             start <= cur_time,
@@ -70,21 +81,32 @@ impl ContinuousAuditor {
             guardian: audit_window.guardian_start,
         };
 
+        let inner = AuditorCore::new(cfg, cursors).await?;
+        metrics.set_checked_through(SOURCE_SUI, inner.get_sui_cursor());
+        metrics.set_checked_through(SOURCE_GUARDIAN, inner.get_guardian_cursor());
         Ok(Self {
-            inner: AuditorCore::new(cfg, cursors).await?,
+            inner,
             window: audit_window,
+            metrics,
         })
+    }
+
+    fn report_findings(&self, phase: &'static str, findings: &[MonitorFinding]) {
+        log_findings("continuous", phase, findings);
+        self.metrics.record_findings(findings, now_timestamp_secs());
     }
 
     pub fn ingest_batch(&mut self, events: Vec<MonitorEvent>) {
         let findings = self.inner.ingest_batch(events);
-        log_findings("continuous", "ingest", &findings);
+        self.report_findings("ingest", &findings);
     }
 
     async fn tick_sui(&mut self) -> anyhow::Result<()> {
         let up_to = now_timestamp_secs();
         while let PollOutcome::CursorAdvanced(events) = self.inner.poll_sui(up_to).await? {
             self.ingest_batch(events);
+            self.metrics
+                .set_checked_through(SOURCE_SUI, self.inner.get_sui_cursor());
         }
         Ok(())
     }
@@ -92,21 +114,25 @@ impl ContinuousAuditor {
     async fn tick_guardian(&mut self) -> anyhow::Result<()> {
         while let PollOutcome::CursorAdvanced(events) = self.inner.poll_guardian().await? {
             self.ingest_batch(events);
+            self.metrics
+                .set_checked_through(SOURCE_GUARDIAN, self.inner.get_guardian_cursor());
         }
         Ok(())
     }
 
     /// Throws an error if BTC RPC infra fails.
     fn tick_btc(&mut self) -> anyhow::Result<()> {
+        let started_at = now_timestamp_secs();
         let findings = self.inner.fetch_btc_info(&self.window)?;
-        log_findings("continuous", "btc", &findings);
+        self.report_findings("btc", &findings);
+        self.metrics.set_checked_through(SOURCE_BTC, started_at);
         Ok(())
     }
 
     fn tick_state_checks_and_gc(&mut self) {
         let violations = self.inner.detect_violations(&self.window);
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
-        log_findings("continuous", "violations", &violations);
+        self.report_findings("violations", &violations);
 
         // Garbage collect
         self.inner.garbage_collect(&self.window);
