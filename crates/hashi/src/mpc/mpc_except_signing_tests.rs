@@ -12216,6 +12216,31 @@ fn avid_pessimistic_fixture(
     }
 }
 
+fn with_optimistic_message(
+    msg: &Messages,
+    optimistic_message: Option<batch_avss_avid::AvssMessage>,
+) -> Messages {
+    match msg {
+        Messages::NonceGenerationAvid(AvidNonceMessage {
+            batch_index,
+            kind:
+                AvidNonceMessageKind::Dispersal {
+                    dispersal,
+                    confirm_cert,
+                    ..
+                },
+        }) => Messages::NonceGenerationAvid(AvidNonceMessage {
+            batch_index: *batch_index,
+            kind: AvidNonceMessageKind::Dispersal {
+                dispersal: dispersal.clone(),
+                confirm_cert: confirm_cert.clone(),
+                optimistic_message,
+            },
+        }),
+        _ => panic!("expected an AVID dispersal message"),
+    }
+}
+
 fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, AvidConfirmCertificate) {
     match msg {
         Messages::NonceGenerationAvid(AvidNonceMessage {
@@ -12223,6 +12248,7 @@ fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, AvidConfirm
                 AvidNonceMessageKind::Dispersal {
                     dispersal,
                     confirm_cert,
+                    ..
                 },
             ..
         }) => (dispersal.clone(), confirm_cert.clone()),
@@ -12738,14 +12764,64 @@ fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
     let result = laggard.handle_send_messages_request(
         fx.dealer_addr,
         &SendMessagesRequest {
-            messages: dispersals[5].1.clone(),
+            messages: with_optimistic_message(&dispersals[5].1, None),
         },
     );
     assert!(
         matches!(result, Err(MpcError::NotReady(_))),
-        "laggard dispersal must be NotReady: {result:?}"
+        "a dispersal with no attachment to a party without round state must be NotReady: {result:?}"
     );
     assert!(laggard.avid_held_echoes.is_empty());
+}
+
+#[test]
+fn test_handle_avid_dispersal_with_bundled_optimistic_lets_non_signer_vote() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let mut non_signer = setup.create_manager(5);
+    non_signer
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[5].1.clone(),
+            },
+        )
+        .expect("a non-signer processes the bundled round 1 and votes");
+    assert!(
+        non_signer
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, fx.dealer_addr)),
+        "the bundled round-1 message is processed into an output"
+    );
+    let (non_signer_vote, _) = non_signer
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .expect("the non-signer holds echoes after voting");
+
+    let confirmer = &mut fx.confirmers[1];
+    confirmer
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .unwrap();
+    let (confirmer_vote, _) = confirmer
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap();
+    assert_eq!(
+        hash_avid_vote(non_signer_vote),
+        hash_avid_vote(confirmer_vote),
+        "the attached voter votes on the same value, so one certificate covers both"
+    );
 }
 
 #[test]
@@ -13110,6 +13186,136 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
             .avid_held_echoes
             .contains_key(&(batch_index, dealer_addr)),
         "voters hold echoes for the pending recipient"
+    );
+}
+
+struct BundleScenarioP2PChannel {
+    managers: Arc<std::sync::Mutex<HashMap<Address, MpcManager>>>,
+    current_sender: Address,
+    fail_optimistic_to: Address,
+    fail_dispersal_to: Address,
+}
+
+#[async_trait::async_trait]
+impl P2PChannel for BundleScenarioP2PChannel {
+    async fn send_messages(
+        &self,
+        recipient: &Address,
+        request: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse> {
+        let is_optimistic = matches!(
+            &request.messages,
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                kind: AvidNonceMessageKind::Optimistic(_),
+                ..
+            })
+        );
+        let is_dispersal = matches!(
+            &request.messages,
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                kind: AvidNonceMessageKind::Dispersal { .. },
+                ..
+            })
+        );
+        if (is_optimistic && *recipient == self.fail_optimistic_to)
+            || (is_dispersal && *recipient == self.fail_dispersal_to)
+        {
+            return Err(crate::communication::ChannelError::RequestFailed(
+                "injected network failure".to_string(),
+            ));
+        }
+        let mut managers = self.managers.lock().unwrap();
+        let manager = managers.get_mut(recipient).ok_or_else(|| {
+            crate::communication::ChannelError::RequestFailed(format!(
+                "Recipient {:?} not found",
+                recipient
+            ))
+        })?;
+        let response = manager
+            .handle_send_messages_request(self.current_sender, request)
+            .map_err(|e| ChannelError::RequestFailed(format!("Handler failed: {}", e)))?;
+        Ok(response)
+    }
+
+    async fn retrieve_messages(
+        &self,
+        _party: &Address,
+        _request: &RetrieveMessagesRequest,
+    ) -> ChannelResult<RetrieveMessagesResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement retrieve_messages")
+    }
+
+    async fn complain(
+        &self,
+        _party: &Address,
+        _request: &ComplainRequest,
+    ) -> ChannelResult<ComplaintResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement complain")
+    }
+
+    async fn get_public_mpc_output(
+        &self,
+        _party: &Address,
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement get_public_mpc_output")
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        _party: &Address,
+        _request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement get_partial_signatures")
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[tracing_test::traced_test]
+async fn test_run_as_avid_nonce_dealer_bundled_non_signer_completes_the_round() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let others: HashMap<_, _> = (1..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let channel = BundleScenarioP2PChannel {
+        managers: Arc::new(std::sync::Mutex::new(others)),
+        current_sender: dealer_addr,
+        fail_optimistic_to: setup.address(5),
+        fail_dispersal_to: setup.address(4),
+    };
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
+    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+
+    MpcManager::run_as_avid_nonce_dealer(
+        &dealer,
+        batch_index,
+        &channel,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .expect("the round completes because the bundled non-signer votes");
+
+    let published = mock_tob.published.lock().unwrap().clone();
+    assert_eq!(published.len(), 1);
+    assert!(
+        published[0].weight(setup.committee()).unwrap() >= 5,
+        "the Vote cert reaches the W-f quorum with the bundled non-signer's vote"
+    );
+    assert!(logs_contain(
+        "processed round-1 message bundled with an AVID dispersal"
+    ));
+    assert!(logs_contain("AVID nonce Vote quorum reached"));
+
+    let managers = channel.managers.lock().unwrap();
+    let non_signer = managers.get(&setup.address(5)).unwrap();
+    assert!(
+        non_signer
+            .avid_held_echoes
+            .contains_key(&(batch_index, dealer_addr)),
+        "the non-signer processed the attachment and voted"
     );
 }
 

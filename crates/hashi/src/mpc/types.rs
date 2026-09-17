@@ -55,6 +55,7 @@ pub enum AvidNonceMessageKind {
     Dispersal {
         dispersal: batch_avss_avid::Dispersal,
         confirm_cert: AvidConfirmCertificate,
+        optimistic_message: Option<batch_avss_avid::AvssMessage>,
     },
     Echo {
         dealer: Address,
