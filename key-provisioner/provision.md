@@ -170,25 +170,13 @@ or a node-backup key. The private keys remain on the YubiKey.
 
 ### Provision the YubiKey
 
-By default, provisioning requires **firmware 5.7+** and generates Ed25519 signing
-and X25519 decryption keys with standard attestation encodings.
-Keep the original factory OpenPGP ATT key and certificate intact, and label the
-device so its physical identity matches its public certificate and storage record.
-
-Use a setup machine with a physical USB port. Install [`oct`](https://codeberg.org/openpgp-card/openpgp-card-tools), [`gpg`](https://gnupg.org/), [`jq`](https://jqlang.org/), and [`ykman`](https://docs.yubico.com/software/yubikey/tools/ykman/), then
-disconnect every YubiKey except the device being provisioned.
+Disconnect every YubiKey except the device being provisioned.
 
 From the repository root, run the interactive provisioning script:
 
 ```sh
 ./key-provisioner/scripts/provision-yubikey.sh
 ```
-
-For older devices with firmware **5.2.3+**, explicitly select P-256 signing and
-decryption with `./key-provisioner/scripts/provision-yubikey.sh --legacy`.
-On firmware below 5.7 this requires confirming the
-[known ECDSA physical-attack risk](https://www.yubico.com/support/security-advisories/ysa-2024-03/).
-Both profiles require full-key attestation verification; `--legacy` does not bypass it.
 
 Follow its prompts. The script changes the factory PINs, checks the SIG/DEC
 slots, generates those keys, enables touch, and tests signing and decryption.
