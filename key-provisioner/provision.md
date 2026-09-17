@@ -2,7 +2,55 @@
 
 ## Setting up 1Password
 
-TBD
+On your normal development MacBook, **not the MacBook Neo**, open 1Password
+and select the **Personal vault in your business 1Password account**.
+
+Use the 1Password password generator to create and save three separate random
+passwords. Each must be **at least 12 characters long** and contain **letters,
+numbers, and symbols**. Label each saved password clearly:
+
+- **Hashi key provisioner - MacBook Neo login password** — for the local `kp` account.
+- **Hashi key provisioner - YubiKey User PIN** — for signing and decryption.
+- **Hashi key provisioner - YubiKey Admin PIN** — for administering the YubiKey's
+  OpenPGP application.
+
+Despite their names, the YubiKey OpenPGP PINs support letters, numbers, and
+symbols; they are not limited to digits. Use a different generated password
+for each of the three credentials. You will use these saved passwords during
+the setup steps below.
+
+Save the **serial number** printed on the back of the YubiKey you will set up
+in the rest of these instructions in the same 1Password vault. Label it
+**Hashi key provisioner - YubiKey serial number** so you can identify the
+device associated with your saved PINs.
+
+## Okta
+
+On your **normal development MacBook, not the MacBook Neo**, register the same
+YubiKey that you will provision in the later sections as an Okta passkey /
+security key:
+
+1. Sign in to [mystenlabs.okta.com](https://mystenlabs.okta.com) using your
+   existing sign-in method.
+2. Open your account menu and select **Settings**. Under **Security Methods**
+   (sometimes labeled **Extra Verification**), find **Passkeys** or
+   **Security Key or Biometric Authenticator** and select **Set up** or
+   **Set up another**. Complete any reauthentication prompts.
+3. Follow the browser prompts and choose **Security key**. If the browser
+   initially offers another passkey provider, choose the option to use a
+   different passkey or another device, then select **Security key**. Store
+   the credential on the physical YubiKey, not in 1Password, iCloud Keychain,
+   or the Mac's Touch ID.
+4. Connect the YubiKey to your development MacBook. If prompted, allow Okta
+   to see the key's make and model, and touch the YubiKey when requested.
+5. Complete enrollment and confirm that the new key appears in your Okta
+   security methods.
+6. On the Okta security methods page, label the newly added YubiKey
+   **Hashi key provisioner YubiKey**.
+
+Exact labels depend on the browser and your organization's Okta settings.
+If security-key enrollment is unavailable, contact your Okta administrator.
+See [Okta's enrollment guidance](https://help.okta.com/OIE/en-us/content/topics/identity-engine/authenticators/passkeys-end-user-experience.htm).
 
 ## Setting up your MacBook Neo
 
@@ -22,9 +70,8 @@ using the following settings:
 7. Create the local account:
    - Set **Full Name** to `Hashi Guardian Key Provisioner`.
    - Set **Account Name** to `kp`.
-   - Generate a random password in 1Password and save it there. The password
-     must be at least 12 characters long and contain uppercase letters,
-     lowercase letters, numbers, and symbols.
+   - Use the **Hashi key provisioner - MacBook Neo login password** you
+     generated and saved in 1Password above.
    - Leave **Allow this computer account password to be reset with your Apple
      Account** unchecked.
 8. Do not sign in to an Apple Account. Select **Other Sign-In Options**, then
@@ -145,6 +192,11 @@ Both profiles require full-key attestation verification; `--legacy` does not byp
 
 Follow its prompts. The script changes the factory PINs, checks the SIG/DEC
 slots, generates those keys, enables touch, and tests signing and decryption.
+When prompted for the new User PIN and Admin PIN, use the
+**Hashi key provisioner - YubiKey User PIN** and
+**Hashi key provisioner - YubiKey Admin PIN**, respectively, that you generated
+and saved in 1Password above.
+
 Empty SIG/DEC slots need no confirmation; existing keys require `y` or `yes`
 before irreversible replacement. The Authentication slot is left unchanged.
 
