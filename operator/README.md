@@ -189,3 +189,37 @@ The bucket keeps every packet and submission version.
   be rejected by the ceremony. Find the cause before anyone re-provisions.
 - **Lost secret:** `revoke-kp-packet-key.sh`, then `create-kp-packet-bucket.sh`
   with a new name, then publish the packet again.
+
+## Run a guardian operation
+
+`guardian-operation.sh` walks one operation step by step, so the runbook is the script:
+
+```sh
+./operator/scripts/guardian-operation.sh <flow> <name>          # the steps, and which is next
+./operator/scripts/guardian-operation.sh <flow> <name> <step>   # run that step
+```
+
+`<flow>` is `provision`, `rotate`, or `rotate-kp-set`. `<name>` is the same name the packet
+bucket was created with. Progress is kept in `.hashi/guardian-runs/<flow>-<name>/`, and a step
+out of order is refused: the order is what keeps a rotation from losing a guardian.
+
+Steps come in two kinds. A `packet` step runs here and does what the section above describes. An
+`enclave` step changes the deployment, and only the sui-operations guardian driver runs those,
+because it asserts every pulumi plan and targets one slot. By default the script prints the
+command to run there:
+
+```sh
+./operator/scripts/guardian-operation.sh provision mainnet measure
+# -> <sui-operations>/scripts/hashi/guardian-driver/operator.sh measure
+./operator/scripts/guardian-operation.sh provision mainnet measure --done
+```
+
+Set `HASHI_GUARDIAN_DRIVER` to that driver, once you have checked it is the copy for this
+environment, and the script offers to run each enclave step itself after a confirmation:
+
+```sh
+export HASHI_GUARDIAN_DRIVER=~/Developer/MystenLabs/sui-operations/scripts/hashi/guardian-driver/operator.sh
+```
+
+Render each packet's bundle with that driver's `bundle <phase> <dir>` into the directory the
+script names, so the configuration key provisioners get is the same render as your own.
