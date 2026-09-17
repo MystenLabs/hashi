@@ -76,7 +76,11 @@ pub struct AvidRoundState {
     pub own_ciphertext: Ciphertext,
 }
 
-pub(crate) type HeldAvidEchoes = (batch_avss_avid::AvidVote, Vec<(Address, Messages)>);
+pub(crate) type HeldAvidEchoes = (
+    batch_avss_avid::AvidVote,
+    Vec<(Address, Messages)>,
+    AvidConfirmCertificate,
+);
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =
@@ -1065,7 +1069,7 @@ pub(crate) struct AvidDealerFlowData {
     pub(crate) total_reduced_weight: u32,
     /// `W − f` in reduced weight.
     pub(crate) vote_quorum_weight: u32,
-    pub(crate) replay_signers: Option<BTreeSet<PartyId>>,
+    pub(crate) stored_confirm_cert: Option<AvidConfirmCertificate>,
 }
 
 pub(crate) struct RotationComplainContext {
