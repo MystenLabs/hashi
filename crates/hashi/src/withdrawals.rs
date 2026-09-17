@@ -291,6 +291,12 @@ fn withdrawal_batch_request_cap(pending_requests: usize, available_utxos: usize)
     }
 }
 
+/// The rate leader and validators price a withdrawal at. Uncapped: the on-chain
+/// per-request budget bounds the fee, and a signed withdrawal can't be replaced.
+fn withdrawal_fee_rate(config: &crate::config::Config, estimate: FeeRate) -> FeeRate {
+    estimate.max(config.withdrawal_min_fee_rate())
+}
+
 /// Estimate the weight of the unsigned withdrawal transaction described by
 /// a commitment: fixed segwit overhead, the CompactSize input and output
 /// counts, script-path 2-of-2 inputs, and the declared outputs. Matches the
@@ -680,7 +686,7 @@ impl Hashi {
                 .btc_monitor()
                 .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
                 .await?;
-            let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, self.effective_min_fee_rate());
+            let clamped_fee_rate = withdrawal_fee_rate(&self.config, kyoto_fee_rate);
 
             let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
                 self,
@@ -703,7 +709,7 @@ impl Hashi {
             anyhow::ensure!(
                 fee <= max_fee,
                 "Fee {fee} sats exceeds maximum allowed {max_fee} sats \
-                 ({FEE_RATE_TOLERANCE_MULTIPLIER}x the clamped estimate of \
+                 ({FEE_RATE_TOLERANCE_MULTIPLIER}x the estimate of \
                  {estimated_fee} sats at {clamped_fee_rate}, including a \
                  {cpfp_deficit} sat CPFP deficit for {ancestor_weight} of \
                  unconfirmed ancestors)"
@@ -1300,16 +1306,6 @@ impl Hashi {
 
     // --- UTXO selection and tx crafting ---
 
-    /// The configured fee-rate floor, capped at the high-fee threshold.
-    ///
-    /// Leader and validator must derive this identically or they price
-    /// fees differently. The cap also keeps `clamp` from inverting.
-    fn effective_min_fee_rate(&self) -> FeeRate {
-        self.config
-            .withdrawal_min_fee_rate()
-            .min(CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD)
-    }
-
     /// Build an unsigned Bitcoin transaction for a withdrawal. This is used both
     /// by the leader when initially crafting the tx, and by validators when
     /// verifying that a proposed `WithdrawalTxCommitment` produces the expected txid.
@@ -1348,16 +1344,13 @@ impl Hashi {
         &self,
         requests: &[WithdrawalRequest],
     ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
-        // Fetch current fee rate from the Bitcoin node, clamped to a high
-        // fee rate threshold to avoid overpaying during fee spikes.
         let kyoto_fee_rate = self
             .btc_monitor()
             .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
-        let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-        let min_fee_rate = self.effective_min_fee_rate();
-        let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
+        let min_fee_rate = self.config.withdrawal_min_fee_rate();
+        let fee_rate = withdrawal_fee_rate(&self.config, kyoto_fee_rate);
 
         let change_address = self
             .get_deposit_address(None)
@@ -2722,6 +2715,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("change outputs"), "{err}");
+    }
+
+    #[test]
+    fn withdrawal_fee_rate_floors_the_estimate_without_capping_it() {
+        let sat_per_vb = FeeRate::from_sat_per_vb_unchecked;
+        let mut config = crate::config::Config::new_for_testing();
+        assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(1)), sat_per_vb(3));
+        assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(70)), sat_per_vb(70));
+
+        config.withdrawal_min_fee_rate_sat_vb = Some(50);
+        assert_eq!(withdrawal_fee_rate(&config, sat_per_vb(10)), sat_per_vb(50));
     }
 
     #[test]
