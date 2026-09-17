@@ -1123,8 +1123,15 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
 #[test]
 fn test_send_messages_entry_point_rejects_only_a_non_member() {
     let setup = TestSetup::new(5);
-    let request = SendMessagesRequest {
+    let cross_kind_request = SendMessagesRequest {
         messages: Messages::Rotation(BTreeMap::new()),
+    };
+    let dkg_request = SendMessagesRequest {
+        messages: Messages::Dkg(
+            setup
+                .create_manager(1)
+                .create_dealer_message(&mut rand::thread_rng()),
+        ),
     };
     let guard_fired = |r: &MpcResult<SendMessagesResponse>| matches!(r, Err(MpcError::InvalidMessage { reason, .. }) if reason.contains("no receiver role"));
 
@@ -1145,9 +1152,10 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         &test_metrics(),
     )
     .expect("non-member must construct");
-    assert!(guard_fired(
-        &observer.handle_send_messages_request(setup.address(0), &request)
-    ));
+    assert!(guard_fired(&observer.handle_send_messages_request(
+        setup.address(0),
+        &cross_kind_request
+    )));
 
     let mut member = MpcManager::new(
         setup.address(0),
@@ -1166,9 +1174,8 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         &test_metrics(),
     )
     .expect("member must construct");
-    assert!(!guard_fired(
-        &member.handle_send_messages_request(setup.address(1), &request)
-    ));
+    let member_result = member.handle_send_messages_request(setup.address(1), &dkg_request);
+    assert!(member_result.is_ok(), "{member_result:?}");
 }
 
 #[test]
@@ -3868,6 +3875,40 @@ async fn test_handle_send_messages_request() {
     // Verify we got a valid BLS signature (non-empty)
     assert!(!response.signature.as_ref().is_empty());
     let _ = receiver_address; // suppress unused warning
+}
+
+#[test]
+fn test_handle_send_messages_request_rejects_dkg_message_in_rotation_epoch() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_address = setup.address(1);
+    let mut dealer_manager = setup.create_manager(1);
+    dealer_manager.protocol_type = ProtocolType::KeyRotation;
+    let mut receiver = setup.create_manager(0);
+    receiver.protocol_type = ProtocolType::KeyRotation;
+    let request = SendMessagesRequest {
+        messages: Messages::Dkg(dealer_manager.create_dealer_message(&mut rng)),
+    };
+
+    let result = receiver.handle_send_messages_request(dealer_address, &request);
+
+    assert!(
+        matches!(&result, Err(MpcError::InvalidMessage { reason, .. }) if reason.contains("epoch runs KeyRotation")),
+        "{result:?}"
+    );
+    assert!(
+        receiver
+            .public_messages_store
+            .get_dealer_message(receiver.mpc_config.epoch, &dealer_address)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !receiver
+            .dealer_outputs
+            .contains_key(&DealerOutputsKey::Dkg(dealer_address))
+    );
+    assert!(receiver.current_dkg_messages.is_empty());
 }
 
 #[tokio::test]
