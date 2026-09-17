@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["generate_template","show_config","show_onchain_config"]};
