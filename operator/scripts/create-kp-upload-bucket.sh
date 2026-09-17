@@ -6,6 +6,7 @@ set -euo pipefail
 # Keep parsed CLI output stable regardless of the user's locale.
 export LC_ALL=C
 export AWS_PAGER=""
+export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
 
 REGION=us-west-2
 IAM_PATH=/hashi-kp-pubkeys/
