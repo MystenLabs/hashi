@@ -89,3 +89,104 @@ uploaded version.
 - **A failed `create-kp-upload-bucket.sh`:** follow the cleanup commands in its
   error message.
 - **An expired AWS session:** run `aws sso login --profile admin` again.
+
+## Publish a guardian packet
+
+Every guardian operation needs each key provisioner (KP) to hold the same
+configuration, every roster certificate with its attestation files, and read
+access to the guardian's log bucket. The scripts in `operator/scripts` deliver
+all of it through one packet bucket, with one access key shared in the meeting:
+
+1. `create-kp-packet-bucket.sh` makes the bucket and an access key that can read
+   packets, write submissions, and only read the guardian's log bucket.
+2. `publish-kp-packet.sh` checks a rendered bundle, removes any AWS credentials
+   from its configuration, verifies every certificate, and publishes it.
+3. Each KP runs `key-provisioner/scripts/run-guardian-step.sh`, as described in
+   the [KP guide](../key-provisioner/guardian-operations.md).
+4. `download-kp-submissions.sh` collects the signed files a KP-set rotation
+   produces.
+5. `revoke-kp-packet-key.sh` deletes the access key once the operation is over.
+
+Like the pubkey scripts, each one takes a `<name>` that identifies one operation,
+such as `mainnet-ceremony`. It selects the bucket `mysten-hashi-kp-packet-<name>`
+in `us-west-2` and the IAM user `hashi-kp-packet-<name>-kp` under the IAM path
+`/hashi-kp-packet/`.
+
+### The packet
+
+A packet is a rendered `guardian-init.yaml` plus a `certs/` directory holding
+every roster certificate and its three attestation files, with
+`kp_pgp_cert_paths` written as `certs/`-relative paths. Render it with the same
+renderer that produces your own operator configuration, so a KP's `config_hash`
+cannot drift from yours. `publish-kp-packet.sh` never changes anything that
+`config_hash` covers; it only empties `guardian_s3.access_key` and
+`guardian_s3.secret_key` and drops `kp_pgp_cert_path`, which each KP's script
+fills in from their connected YubiKey.
+
+`<phase>` tells the KP script which command to run:
+
+| Guardian operation | `<phase>` | Who runs it |
+| --- | --- | --- |
+| Key ceremony | `ceremony` | every KP |
+| First provisioning of a guardian | `provision-genesis` | threshold of KPs |
+| Any later provisioning, including a rotation | `provision` | threshold of KPs |
+| KP-set rotation, signing round | `rotate-kp-set` | threshold of current KPs |
+| KP-set rotation, new holders | `ceremony` | every new KP |
+| Replacing one KP's certificate | `rotate-cert` | that KP |
+
+### Before the round
+
+```sh
+aws sso login --profile admin
+export AWS_PROFILE=admin
+./operator/scripts/create-kp-packet-bucket.sh mainnet-ceremony <guardian-bucket>
+./operator/scripts/publish-kp-packet.sh mainnet-ceremony ceremony <bundle-dir>
+```
+
+`create-kp-packet-bucket.sh` prints the AWS account and asks for confirmation. It
+tests the new key against both buckets and proves, with a policy simulation, that
+it cannot write to the guardian's log bucket. `publish-kp-packet.sh` refuses a
+checkout with uncommitted changes, because the packet pins the commit KPs must
+run.
+
+### During the round
+
+1. Paste the bucket, access key ID, secret access key, and packet digest in a
+   code block into the meeting's private channel.
+2. Each KP runs `./key-provisioner/scripts/run-guardian-step.sh` and confirms the
+   packet digest before anything runs.
+3. Run your own phase of the operation, and wait for the KPs. `operator ceremony`
+   and `operator rotate-kp-set submit` block until every KP confirms.
+4. For a KP-set rotation, run `./operator/scripts/download-kp-submissions.sh
+   mainnet-ceremony` once the current KPs report success; it prints the
+   `--submission` flags for `operator rotate-kp-set submit`.
+
+Publish a new packet for each round. Each publication gets its own packet ID, and
+the pointer is written last, so a KP downloading during a publication sees either
+the whole old packet or the whole new one.
+
+### After the round
+
+```sh
+./operator/scripts/revoke-kp-packet-key.sh mainnet-ceremony
+```
+
+The bucket keeps every packet and submission version.
+
+### Fixing problems
+
+- **A KP's packet digest differs:** they downloaded during a publication. Have
+  them run the script again.
+- **A KP has no certificate in the packet:** they have the wrong YubiKey
+  connected, or the bundle's roster is wrong. Check the roster before
+  re-publishing.
+- **A KP reports `guardian session ... is not live in S3`:** the guardian has not
+  written its first heartbeat. The script waits it out; if it gives up, confirm
+  the session is running and have them run the script again.
+- **A KP reports a `config_hash` mismatch:** stop. The packet and the guardian
+  disagree, and provisioning would fail later at `operator activate`.
+- **`publish-kp-packet.sh` refuses a certificate:** that certificate would also
+  be rejected by the ceremony. Find the cause before anyone re-provisions.
+- **Lost secret:** `revoke-kp-packet-key.sh`, then `create-kp-packet-bucket.sh`
+  with a new name, then publish the packet again.
+
