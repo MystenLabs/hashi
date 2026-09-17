@@ -53,7 +53,7 @@ use thiserror::Error;
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fee rate tolerance multiplier for validation.
-const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
+const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
 
 /// Max drift between the leader-supplied `timestamp_secs` and the follower's
 /// own latest checkpoint timestamp before signing a guardian request.
