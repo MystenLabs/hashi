@@ -3,21 +3,23 @@
 ## Collect key provisioner public keys
 
 Key provisioners (KPs) provision their YubiKeys on Macs that are not signed in
-to corporate accounts. `operator/scripts/kp-pubkeys.sh` collects their public
+to corporate accounts. The scripts in `operator/scripts` collect their public
 files through an upload-only S3 bucket:
 
-1. `create` makes the bucket and an access key that can only upload into it.
+1. `create-kp-upload-bucket.sh` makes the bucket and an access key that can only
+   upload into it.
 2. Each KP uploads their five public files with
    `key-provisioner/scripts/upload-pubkey.sh`, as described in the
    [KP guide](../key-provisioner/provision.md#provide-the-public-artifacts-to-the-operator).
-3. `download` fetches every upload, verifies each certificate and its YubiKey
-   attestations exactly as ceremony commands do, and prints a roster.
-4. `revoke` deletes the upload key once every KP has confirmed the roster.
+3. `download-kp-pubkeys.sh` fetches every upload, verifies each certificate and
+   its YubiKey attestations exactly as ceremony commands do, and prints a roster.
+4. `revoke-kp-upload-key.sh` deletes the upload key once every KP has confirmed
+   the roster.
 
-`<name>` identifies one collection, such as `mainnet`. It selects the bucket
-`mysten-hashi-kp-pubkeys-<name>` in `us-west-2` and the IAM user
-`hashi-kp-pubkeys-<name>-upload` under the IAM path `/hashi-kp-pubkeys/`. The
-script never touches any other resource.
+Each script takes a `<name>` that identifies one collection, such as `mainnet`.
+It selects the bucket `mysten-hashi-kp-pubkeys-<name>` in `us-west-2` and the
+IAM user `hashi-kp-pubkeys-<name>-upload` under the IAM path
+`/hashi-kp-pubkeys/`. The scripts never touch any other resource.
 
 ### Before the meeting
 
@@ -27,17 +29,18 @@ credentials for the guardian AWS account, for example:
 ```sh
 aws sso login --profile admin
 export AWS_PROFILE=admin
-./operator/scripts/kp-pubkeys.sh create mainnet
-./operator/scripts/kp-pubkeys.sh download mainnet
+./operator/scripts/create-kp-upload-bucket.sh mainnet
+./operator/scripts/download-kp-pubkeys.sh mainnet
 ```
 
-`create` prints the AWS account and asks you to type the name. It then tests the
-new access key with a real upload and prints the bucket, access key ID, and
-secret access key. The secret is not stored anywhere; if you lose it before
-sharing it, run `revoke`, then `create` with a new name.
+`create-kp-upload-bucket.sh` prints the AWS account and asks for confirmation.
+It then tests the new access key with a real upload and prints the bucket,
+access key ID, and secret access key. The secret is not stored anywhere; if you
+lose it before sharing it, run `revoke-kp-upload-key.sh`, then
+`create-kp-upload-bucket.sh` with a new name.
 
-The first `download` builds `hashi-guardian-init`, which can take several
-minutes, and then reports that there are no uploads yet.
+The first `download-kp-pubkeys.sh` builds `hashi-guardian-init`, which can take
+several minutes, and then reports that there are no uploads yet.
 
 ### During the meeting
 
@@ -47,8 +50,8 @@ minutes, and then reports that there are no uploads yet.
 2. Paste the bucket, access key ID, and secret access key in a code block into
    the meeting's private channel.
 3. As KPs report their user IDs, run
-   `./operator/scripts/kp-pubkeys.sh download mainnet`. Each run downloads into a
-   new directory under `.hashi/kp-pubkeys/` and prints one row per user ID:
+   `./operator/scripts/download-kp-pubkeys.sh mainnet`. Each run downloads into
+   a new directory under `.hashi/kp-pubkeys/` and prints one row per user ID:
    - `VERIFIED`: the certificate, its attestations, and its fingerprint file
      agree.
    - `INCOMPLETE`: files are missing because the upload is still running or
@@ -66,11 +69,11 @@ minutes, and then reports that there are no uploads yet.
 ### After the meeting
 
 ```sh
-./operator/scripts/kp-pubkeys.sh revoke mainnet
-./operator/scripts/kp-pubkeys.sh download mainnet
+./operator/scripts/revoke-kp-upload-key.sh mainnet
+./operator/scripts/download-kp-pubkeys.sh mainnet
 ```
 
-The final `download` must print the same roster you posted. Keep its directory,
+The final download must print the same roster you posted. Keep its directory,
 which holds the verified certificates and `roster.txt`. The bucket keeps every
 uploaded version.
 
@@ -83,5 +86,6 @@ uploaded version.
   download again.
 - **A re-upload note:** the latest upload is verified. Confirm with the KP that
   they uploaded again.
-- **A failed `create`:** follow the cleanup commands it prints.
+- **A failed `create-kp-upload-bucket.sh`:** follow the cleanup commands in its
+  error message.
 - **An expired AWS session:** run `aws sso login --profile admin` again.
