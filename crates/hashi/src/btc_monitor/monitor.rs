@@ -1272,23 +1272,11 @@ impl Monitor {
         };
         let result = rpc_result
             .map_err(anyhow::Error::from)
-            .and_then(|res| Ok(res.into_model()?))
-            .map(|res| {
-                let sat_per_kwu = match res.fee_rate {
-                    Some(fee_rate) => fee_rate.to_sat_per_kwu(),
-                    None => {
-                        warn!(
-                            conf_target,
-                            fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
-                            "Node could not estimate fee rate; falling back to minimum relay fee"
-                        );
-                        FALLBACK_FEE_RATE_SAT_PER_KWU
-                    }
-                };
+            .and_then(|estimate| fee_rate_from_estimate(&estimate, conf_target))
+            .inspect(|fee_rate| {
                 metrics
                     .btc_fee_rate_sat_per_kvb
-                    .set((sat_per_kwu * 4) as i64);
-                FeeRate::from_sat_per_kwu(sat_per_kwu)
+                    .set((fee_rate.to_sat_per_kwu() * 4) as i64);
             });
         caller.reply(result);
     }
@@ -1746,6 +1734,24 @@ fn get_tx_out_best_block(response: &serde_json::Value) -> Result<bitcoin::BlockH
         .map_err(|e| anyhow::anyhow!("invalid gettxout bestblock: {e}"))
 }
 
+/// Rounds the BTC/kvB estimate up to the next sat/kwu. corepc's `into_model`
+/// truncates to whole sat/vB, which turns a 0.93 sat/vB estimate into zero.
+fn fee_rate_from_estimate(
+    estimate: &corepc_client::types::v29::EstimateSmartFee,
+    conf_target: u16,
+) -> Result<FeeRate> {
+    let Some(btc_per_kvb) = estimate.fee_rate else {
+        warn!(
+            conf_target,
+            fallback_sat_per_kwu = FALLBACK_FEE_RATE_SAT_PER_KWU,
+            "Node could not estimate fee rate; falling back to minimum relay fee"
+        );
+        return Ok(FeeRate::from_sat_per_kwu(FALLBACK_FEE_RATE_SAT_PER_KWU));
+    };
+    let sat_per_kvb = bitcoin::Amount::from_btc(btc_per_kvb)?.to_sat();
+    Ok(FeeRate::from_sat_per_kwu(sat_per_kvb.div_ceil(4)))
+}
+
 async fn check_unspent_at_tip(
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     tip: HashCheckpoint,
@@ -2181,6 +2187,30 @@ mod tests {
         let error = worker.await.unwrap().unwrap_err();
 
         assert!(error.to_string().contains("chain tip changed"));
+    }
+
+    #[test]
+    fn fee_rate_from_estimate_keeps_sub_sat_per_vb_precision() {
+        // 0.00000929 and 0.00070929 are live signet answers that `into_model`
+        // truncated to 0 and 70 sat/vB.
+        for (btc_per_kvb, sat_per_kwu) in [
+            (0.00000929, 233),
+            (0.00003999, 1_000),
+            (0.00070929, 17_733),
+            (0.000001, 25),
+        ] {
+            let estimate = corepc_client::types::v29::EstimateSmartFee {
+                fee_rate: Some(btc_per_kvb),
+                errors: None,
+                blocks: 3,
+            };
+            let fee_rate = fee_rate_from_estimate(&estimate, 3).unwrap();
+            assert_eq!(
+                fee_rate.to_sat_per_kwu(),
+                sat_per_kwu,
+                "{btc_per_kvb} BTC/kvB"
+            );
+        }
     }
 
     #[test]
