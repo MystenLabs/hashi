@@ -190,3 +190,94 @@ The bucket keeps every packet and submission version.
 - **Lost secret:** `revoke-kp-packet-key.sh`, then `create-kp-packet-bucket.sh`
   with a new name, then publish the packet again.
 
+## Run a guardian operation
+
+`guardian.sh` drives a guardian's whole key lifetime: provisioning a new
+guardian, rotating the guardian, and rotating the key provisioner set.
+
+```sh
+./operator/scripts/guardian.sh <env> <step> [arguments]
+./operator/scripts/guardian.sh --help
+```
+
+`<env>` is on every command line and is checked against the configuration, so a
+command typed from memory cannot land on another guardian. Configuration lives
+in `.hashi/guardian.env`; copy `operator/guardian.env.sample` there and fill it
+in. It names the sui-operations checkout, the environment, the hashi deployment,
+and the verified roster directory `download-kp-pubkeys.sh` wrote. Everything
+else is read from the Pulumi stack and from the guardian itself, so no step can
+act on a stale fact and every step is re-runnable.
+
+Pulumi is the only thing the driver needs sui-operations for, and it reaches it
+with `pulumi -C`. **Steps that change stack config write to
+`Pulumi.<env>.yaml` in that checkout**, so check `git status` there afterwards
+and commit or revert it deliberately.
+
+### Provisioning a new guardian
+
+```sh
+./operator/scripts/guardian.sh mainnet status
+./operator/scripts/guardian.sh mainnet measure ceremony      # then record-pcr0
+./operator/scripts/guardian.sh mainnet measure withdraw
+./operator/scripts/guardian.sh mainnet deploy-ceremony
+./operator/scripts/guardian.sh mainnet proxy
+./operator/scripts/guardian.sh mainnet packet ceremony <packet-bucket-name>
+./operator/scripts/guardian.sh mainnet ceremony              # blocks on the KPs
+./operator/scripts/guardian.sh mainnet flip-withdraw
+./operator/scripts/guardian.sh mainnet proxy
+./operator/scripts/guardian.sh mainnet provision --genesis
+./operator/scripts/guardian.sh mainnet packet provision-genesis <packet-bucket-name>
+./operator/scripts/guardian.sh mainnet wait-kps
+./operator/scripts/guardian.sh mainnet activate
+./operator/scripts/guardian.sh mainnet verify
+```
+
+`measure` dispatches hashi's own `guardian-enclave.yml`, which builds on two
+runners that must agree; `record-pcr0 <mode> <run id>` writes the result onto
+the stack. A stack built with `non-enclave-dev` reports an all-zero PCR0 and has
+nothing to measure, and its packets say `attestation mock` so key provisioners
+build their tools the same way. That is a rehearsal, never production.
+
+`deploy-ceremony` is the only untargeted update: it mints a fresh bucket and
+therefore a fresh guardian key, and it refuses to run if the configured bucket
+already exists, because a ceremony must never be dealt onto an earlier
+lifetime's records. Every other enclave update is targeted at one slot with its
+plan asserted first.
+
+### Rotating the guardian
+
+```sh
+./operator/scripts/guardian.sh mainnet arm
+./operator/scripts/guardian.sh mainnet provision
+./operator/scripts/guardian.sh mainnet packet provision <packet-bucket-name>
+./operator/scripts/guardian.sh mainnet wait-kps
+./operator/scripts/guardian.sh mainnet switchover
+./operator/scripts/guardian.sh mainnet activate
+./operator/scripts/guardian.sh mainnet verify
+./operator/scripts/guardian.sh mainnet teardown
+```
+
+`switchover` re-checks that the standby holds the key the serving guardian
+holds, and only then flips. After the old guardian stops there is no rollback.
+
+### Rotating the key provisioner set
+
+Set `NEW_KP_ROSTER_DIR` and `NEW_KP_THRESHOLD` in `.hashi/guardian.env` first.
+
+```sh
+./operator/scripts/guardian.sh mainnet rotate-kp-set init
+./operator/scripts/guardian.sh mainnet packet rotate-kp-set <packet-bucket-name>
+./operator/scripts/download-kp-submissions.sh <packet-bucket-name> <dir>
+./operator/scripts/guardian.sh mainnet packet ceremony <packet-bucket-name>
+./operator/scripts/guardian.sh mainnet rotate-kp-set submit <dir>
+```
+
+Then point `KP_ROSTER_DIR` at the new roster and provision a withdraw-mode
+standby with it, as in a guardian rotation.
+
+### While key provisioners are working
+
+Never roll the proxy or restart a standby during a key provisioner round: the
+relay accumulates their submissions in memory, keyed to the session. Key
+provisioners who start before the guardian has written its first heartbeat see
+`guardian session ... is not live in S3`; their script waits it out.
