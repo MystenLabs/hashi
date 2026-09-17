@@ -200,7 +200,7 @@ while true; do
     printf 'Uploading %s\n' "${file##*/}"
     if ! upload_error="$(
       env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN \
-        AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+        AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true \
         AWS_ACCESS_KEY_ID="$ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$SECRET_ACCESS_KEY" \
         aws s3api put-object --region "$REGION" --bucket "$BUCKET" --key "$USER_ID/${file##*/}" \
         --body "$file" 2>&1 > /dev/null
