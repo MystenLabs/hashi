@@ -94,6 +94,11 @@ within `withdrawal_fee_conf_target` blocks (default `3`, around 30
 minutes). Low-traffic chains like signet might need a higher target to
 route the estimator to its long-horizon bucket.
 
+If Bitcoin Core has no estimate, for example while its estimator warms up
+after a restart, the leader doesn't build withdrawal transactions and
+validators don't sign them. Only regtest, which has no fee market, falls
+back to `1 sat/vB`.
+
 The estimated fee rate is then capped at a high fee rate threshold
 (30 sat/vB by default). This prevents a single fee spike from producing
 unexpectedly expensive withdrawals. The per-user miner fee is additionally

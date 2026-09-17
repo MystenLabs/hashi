@@ -144,6 +144,7 @@ A Hashi node depends on two external services that you provide:
   - `txindex=1` (Hashi calls `getrawtransaction` on arbitrary deposit txids)
   - `blockfilterindex=1` + `peerblockfilters=1` (BIP-157/158 compact block filter serving for the embedded light client)
   - `server=1` plus RPC auth
+  - transaction relay left on (no `blocksonly=1`, which disables `estimatesmartfee`); without a fee estimate the node won't build or sign withdrawals
 - **Sui fullnode serving the gRPC v2 API** (`sui.rpc.v2` services, including the `SubscribeCheckpoints` stream). The public fullnode works out of the box, or self-host one if you want isolation; see [1.4](#14-sui-rpc).
 
 > Run both dependencies on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others.
