@@ -40,6 +40,7 @@ sui:
 
 btc:
   rpc_url: "env:BITCOIN_RPC_URL"
-  # Optional headers for hosted JSON-RPC providers:
+  # Optional headers for hosted JSON-RPC providers; values accept `env:` too:
   # http_headers:
   #   Origin: "https://example.com"
+  #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
