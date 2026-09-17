@@ -167,13 +167,33 @@ normal GnuPG keyring (or the caller's `GNUPGHOME`, if set).
 
 ### Provide the public artifacts to the operator
 
-Send all five files to the guardian operator, including for replacement
-certificates. Keep the PEMs beside their `.asc` file. Do not send either PIN or
-local GnuPG private-key material.
+Upload all five files to the guardian operator's bucket, including for
+replacement certificates. The operator shares three values over a private
+channel: a bucket name, an access key ID, and a secret access key. The key can
+only upload into that bucket.
 
-The script only checks that its outputs are nonempty. The CLI and guardian
-verify the attestations and reject missing or invalid proofs, comparing complete
-public keys and binding operations to the attested SIG/DEC keys.
+If `key-provisioner/scripts/upload-pubkey.sh` does not exist, update the
+repository first with `git -C ~/hashi pull --ff-only`.
+
+Keep the YubiKey connected and run the upload script with the path of your
+`.asc` file, as printed at the end of provisioning:
+
+```sh
+./key-provisioner/scripts/upload-pubkey.sh ./jdoe-kp-pubkey.asc
+```
+
+The script checks that the five files are present, agree on the primary-key
+fingerprint, and belong to the connected YubiKey, then asks for the three
+values. Spaces in the values are optional. If an upload fails, the script shows
+the error and asks again; press Enter to keep a value. When the upload
+completes, tell the operator your user ID. Keep the PEMs beside their `.asc`
+file. Do not share either PIN or local GnuPG private-key material. If uploading
+is impossible, give the operator the five files another way, such as a USB
+drive.
+
+The provisioning script only checks that its outputs are nonempty. The CLI and
+guardian verify the attestations and reject missing or invalid proofs, comparing
+complete public keys and binding operations to the attested SIG/DEC keys.
 Attestation does not check X.509 expiry, revocation, touch policy, or freshness.
 
 The operator configures exactly one `.asc` certificate path per KP, in any order:
@@ -197,3 +217,17 @@ commands.
 Store the YubiKey separately from the public certificate and guardian
 configuration. Losing the YubiKey prevents that KP from decrypting and
 submitting its guardian share.
+
+### Verify the operator's roster
+
+After verifying the uploads, the operator posts a roster with one row per KP: a
+number, a user ID, and a primary-key fingerprint. With your YubiKey connected,
+run:
+
+```sh
+./key-provisioner/scripts/show-fingerprint.sh
+```
+
+Check that the row with your user ID shows exactly the printed fingerprint,
+comparing every group of four characters, and that the roster has one row per
+KP. Tell the operator immediately if anything differs.

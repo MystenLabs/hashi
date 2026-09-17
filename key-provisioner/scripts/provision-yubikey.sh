@@ -416,7 +416,6 @@ printf 'DEC attestation (PEM): %s\n' "$ATTESTATION_DEC_FILE"
 printf 'Primary-key fingerprint: %s\n' "$FINGERPRINT"
 printf 'Fingerprint file: %s\n' "$FINGERPRINT_FILE"
 printf '%s\n' \
-  "Give these five public files to the guardian operator." \
   "Keep matching PEM sidecars beside every .asc on each host running certificate-loading commands." \
   "The script checks attestation outputs are nonempty; the CLI and guardian verify the proofs." \
   "For attestation policy and replacement bundles, see key-provisioner/provision.md." \
@@ -424,3 +423,5 @@ printf '%s\n' \
   "The public certificate, fingerprint file, and attestation PEMs are retained in the selected output directory." \
   "The public certificate remains in your GnuPG keyring; the four test files will now be deleted."
 printf '\nYubiKey provisioning completed successfully! Public key outputted to %s\n' "$OUTPUT_FILE"
+printf '\nNext, upload the five public files for the guardian operator:\n  %q %q\n' \
+  "$(dirname "$0")/upload-pubkey.sh" "$OUTPUT_FILE"
