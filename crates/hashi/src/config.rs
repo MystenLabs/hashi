@@ -18,6 +18,9 @@ const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 pub(crate) const DEFAULT_GRPC_PER_PEER_INFLIGHT_LIMIT: u32 = 200;
+/// Core's short fee-estimation horizon. Longer targets are answered from
+/// horizons that lag the fee market by hours to days.
+const MAX_WITHDRAWAL_FEE_CONF_TARGET: u16 = 12;
 
 fn deserialize_backup_pgp_cert<'de, D>(
     deserializer: D,
@@ -201,10 +204,9 @@ pub struct Config {
     pub max_mempool_chain_depth: Option<usize>,
 
     /// Confirmation target (blocks) passed to `estimatesmartfee` when
-    /// pricing withdrawal miner fees. Low-traffic chains (e.g. signet)
-    /// need a high value (≥ 49) so Core's long-horizon estimator is used.
+    /// pricing withdrawal miner fees.
     ///
-    /// Defaults to 3.
+    /// Defaults to 3. Values outside 1-12 are rejected at load.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_fee_conf_target: Option<u16>,
 
@@ -289,6 +291,12 @@ impl Config {
         anyhow::ensure!(
             config.grpc_per_peer_inflight_limit != Some(0),
             "grpc_per_peer_inflight_limit must be at least 1"
+        );
+        anyhow::ensure!(
+            config
+                .withdrawal_fee_conf_target
+                .is_none_or(|target| (1..=MAX_WITHDRAWAL_FEE_CONF_TARGET).contains(&target)),
+            "withdrawal_fee_conf_target must be between 1 and {MAX_WITHDRAWAL_FEE_CONF_TARGET} blocks"
         );
         Ok(config)
     }
@@ -645,6 +653,36 @@ mod tests {
 
         let config = Config::load(&config_path).unwrap();
         assert_eq!(config.backup_pgp_cert.armored(), public_cert.as_str());
+    }
+
+    #[test]
+    fn withdrawal_fee_conf_target_is_bounded_at_load() {
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let (public_cert, _) = hashi_types::pgp::test_utils::mock_pgp_keypair();
+        let load = |target: i64| {
+            let mut config = toml::Table::new();
+            config.insert(
+                "backup-pgp-cert".to_string(),
+                toml::Value::String(public_cert.clone()),
+            );
+            config.insert(
+                "backup-dir".to_string(),
+                toml::Value::String(dir.path().join("backups").to_string_lossy().into_owned()),
+            );
+            config.insert(
+                "withdrawal-fee-conf-target".to_string(),
+                toml::Value::Integer(target),
+            );
+            std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+            Config::load(&config_path)
+        };
+
+        assert_eq!(load(12).unwrap().withdrawal_fee_conf_target(), 12);
+        for target in [0, 13, 100] {
+            let error = load(target).unwrap_err().to_string();
+            assert!(error.contains("withdrawal_fee_conf_target"), "{error}");
+        }
     }
 
     #[test]

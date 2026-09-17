@@ -91,8 +91,8 @@ the worst case, so the user receives more.
 Hashi obtains the current fee rate from the connected Bitcoin Core node
 through `estimatesmartfee` in `ECONOMICAL` mode, targeting confirmation
 within `withdrawal_fee_conf_target` blocks (default `3`, around 30
-minutes). Low-traffic chains like signet might need a higher target to
-route the estimator to its long-horizon bucket.
+minutes; at most `12`). Longer targets would read Core's day- and
+week-long estimation horizons, which lag the fee market.
 
 If Bitcoin Core has no estimate, for example while its estimator warms up
 after a restart, the leader doesn't build withdrawal transactions and
