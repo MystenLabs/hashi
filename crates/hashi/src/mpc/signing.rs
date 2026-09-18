@@ -10,9 +10,7 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
-use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
-use fastcrypto_tbls::threshold_schnorr::signing::finalize_schnorr_signature;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
@@ -1109,37 +1107,6 @@ impl AggregationContext {
         &self,
         sigs: Vec<Eval<S>>,
         metrics: &Metrics,
-    ) -> Result<SchnorrSignature, FastCryptoError> {
-        let _timer = metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
-        let (message, nonce, beacon, vk, deriv, threshold) = (
-            self.message.clone(),
-            self.nonce,
-            self.beacon,
-            self.vk,
-            self.deriv,
-            self.threshold,
-        );
-        super::spawn_blocking(move || {
-            aggregate_signatures(
-                &message,
-                &nonce,
-                &beacon,
-                &sigs,
-                threshold,
-                &vk,
-                deriv.as_ref(),
-            )
-        })
-        .await
-    }
-
-    async fn recover(
-        &self,
-        sigs: Vec<Eval<S>>,
-        metrics: &Metrics,
     ) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
         let _timer = metrics
             .mpc_sign_aggregation_duration_seconds
@@ -1154,7 +1121,7 @@ impl AggregationContext {
             self.threshold,
         );
         super::spawn_blocking(move || {
-            aggregate_signatures_with_recovery(
+            aggregate_signatures(
                 &message,
                 &nonce,
                 &beacon,
@@ -1201,7 +1168,7 @@ async fn try_finalize_signature(
     if !st.clean_attempted {
         st.clean_attempted = true;
         match ctx.aggregate(st.partials[..t].to_vec(), metrics).await {
-            Ok(sig) => return FinalizeOutcome::Done(sig, Vec::new()),
+            Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
@@ -1210,13 +1177,13 @@ async fn try_finalize_signature(
     if let Some(key) = st.unflagged_prefix_key(t, &unflagged, flagged) {
         st.unflagged_prefix_attempted = Some(key);
         match ctx.aggregate(unflagged[..t].to_vec(), metrics).await {
-            Ok(sig) => return FinalizeOutcome::Done(sig, Vec::new()),
+            Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
     }
     if st.recovery_attemptable(t) {
-        match ctx.recover(st.partials.clone(), metrics).await {
+        match ctx.aggregate(st.partials.clone(), metrics).await {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::TooManyErrors(_) | FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
@@ -1226,7 +1193,7 @@ async fn try_finalize_signature(
     if let Some(key) = st.erased_key(t, &unflagged) {
         let n_unflagged = unflagged.len();
         st.erased_attempted = Some(key);
-        match ctx.recover(unflagged, metrics).await {
+        match ctx.aggregate(unflagged, metrics).await {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
             Err(FastCryptoError::TooManyErrors(_) | FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
@@ -1448,34 +1415,6 @@ impl SigningManager {
         }
         progressed
     }
-}
-
-fn aggregate_signatures_with_recovery(
-    message: &[u8],
-    public_presig: &G,
-    beacon_value: &S,
-    partial_signatures: &[Eval<S>],
-    threshold: u16,
-    verifying_key: &G,
-    derivation_address: Option<&DerivationAddress>,
-) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
-    let indices: Vec<_> = partial_signatures.iter().map(|e| e.index).collect();
-    let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
-    let poly = RSDecoder::new(indices, threshold as usize).compute_message_polynomial(&values)?;
-    let sig = finalize_schnorr_signature(
-        message,
-        public_presig,
-        beacon_value,
-        poly.c0(),
-        verifying_key,
-        derivation_address,
-    )?;
-    let mismatched = partial_signatures
-        .iter()
-        .filter(|e| poly.eval(e.index).value != e.value)
-        .map(|e| e.index)
-        .collect();
-    Ok((sig, mismatched))
 }
 
 #[cfg(test)]
@@ -2161,7 +2100,7 @@ mod tests {
         }
     }
 
-    /// Pre-built partial sigs for aggregate_signatures_with_recovery tests.
+    /// Pre-built partial sigs for the error-correcting aggregation tests.
     struct AggregateTestData {
         partial_sigs: Vec<Eval<S>>,
         public_nonce: G,
@@ -4085,7 +4024,7 @@ mod tests {
         data.partial_sigs[0].value = S::rand(&mut data.rng);
         let corrupted_index = data.partial_sigs[0].index;
 
-        let (sig, mismatched) = aggregate_signatures_with_recovery(
+        let (sig, mismatched) = aggregate_signatures(
             message,
             &data.public_nonce,
             &data.beacon,
@@ -4113,7 +4052,7 @@ mod tests {
         data.partial_sigs[0].value = S::rand(&mut data.rng);
         data.partial_sigs[1].value = S::rand(&mut data.rng);
 
-        let result = aggregate_signatures_with_recovery(
+        let result = aggregate_signatures(
             message,
             &data.public_nonce,
             &data.beacon,
@@ -4124,9 +4063,9 @@ mod tests {
         );
 
         assert!(
-            matches!(result, Err(FastCryptoError::TooManyErrors(_))),
-            "expected TooManyErrors, got: {:?}",
-            result.err()
+            matches!(result, Err(FastCryptoError::InvalidSignature)),
+            "expected InvalidSignature, got: {:?}",
+            result.err().map(|e| e.to_string())
         );
     }
 
