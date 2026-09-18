@@ -105,7 +105,6 @@ use hashi_types::committee::ReducedWeight;
 use hashi_types::committee::SignedMessage;
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -218,6 +217,7 @@ pub struct MpcManager {
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
+    pub complaint_rejections: HashSet<(Address, ComplaintResponsesKey)>,
     pub public_messages_store: Arc<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
@@ -511,6 +511,7 @@ impl MpcManager {
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
+            complaint_rejections: HashSet::new(),
             public_messages_store: public_message_store,
             chain_id: chain_id.to_string(),
             hashi_object_id,
@@ -662,11 +663,11 @@ impl MpcManager {
         Ok(RetrieveOutcome::NeedsStore)
     }
 
-    pub fn handle_complain_request(
+    pub(crate) fn prepare_complaint(
         &mut self,
         caller: Address,
         request: &ComplainRequest,
-    ) -> MpcResult<ComplaintResponse> {
+    ) -> MpcResult<PreparedComplaint> {
         if request.epoch == self.mpc_config.epoch && !self.is_committee_member() {
             return Err(MpcError::InvalidMessage {
                 sender: caller,
@@ -725,7 +726,15 @@ impl MpcManager {
         let cache_is_current = request.epoch == self.mpc_config.epoch;
         if cache_is_current && let Some(cached_response) = self.complaint_responses.get(&cache_key)
         {
-            return Ok(cached_response.clone());
+            return Ok(PreparedComplaint::Ready(cached_response.clone()));
+        }
+        let reject_key = (caller, cache_key);
+        if cache_is_current && self.complaint_rejections.contains(&reject_key) {
+            return Err(MpcError::InvalidMessage {
+                sender: caller,
+                reason: "a complaint from this accuser for this dealer already failed verification"
+                    .into(),
+            });
         }
         if matches!(
             request.complaint,
@@ -737,11 +746,13 @@ impl MpcManager {
                     reason: "AVID complaints require the nonce-generation protocol type".into(),
                 });
             }
-            let response = self.handle_avid_nonce_complaint_request(caller, request)?;
-            if cache_is_current {
-                self.complaint_responses.insert(cache_key, response.clone());
-            }
-            return Ok(response);
+            let verify = self.prepare_avid_nonce_complaint(caller, request)?;
+            return Ok(PreparedComplaint::Verify {
+                cache_key,
+                reject_key,
+                epoch: request.epoch,
+                verify,
+            });
         }
         if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
             return Err(MpcError::InvalidMessage {
@@ -770,7 +781,7 @@ impl MpcManager {
             };
             from_db.ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?
         };
-        let responses = match messages {
+        let verify: Box<dyn FnOnce() -> MpcResult<ComplaintResponse>> = match messages {
             Messages::Dkg(message) => {
                 let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
                 let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
@@ -799,9 +810,16 @@ impl MpcManager {
                         reason: "DKG complaint requires an AVSS complaint".into(),
                     });
                 };
-                let complaint_response =
-                    receiver.handle_complaint(&message, accuser_id, complaint, &partial_output)?;
-                ComplaintResponse::Dkg(complaint_response)
+                let complaint = complaint.clone();
+                Box::new(move || {
+                    let complaint_response = receiver.handle_complaint(
+                        &message,
+                        accuser_id,
+                        &complaint,
+                        &partial_output,
+                    )?;
+                    Ok(ComplaintResponse::Dkg(complaint_response))
+                })
             }
             Messages::Rotation(rotation_messages) => {
                 let complained_share_index =
@@ -818,7 +836,8 @@ impl MpcManager {
                             "No rotation message for complained share_index {}",
                             complained_share_index
                         ))
-                    })?;
+                    })?
+                    .clone();
                 let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
                 let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
                 let session_id = self
@@ -827,7 +846,7 @@ impl MpcManager {
                 let complained_output = self.get_or_derive_rotation_output(
                     &request.dealer,
                     complained_share_index,
-                    complained_message,
+                    &complained_message,
                     request.epoch,
                     &session_id,
                 )?;
@@ -847,13 +866,16 @@ impl MpcManager {
                         reason: "Rotation complaint requires an AVSS complaint".into(),
                     });
                 };
-                let response = receiver.handle_complaint(
-                    complained_message,
-                    accuser_id,
-                    complaint,
-                    &complained_output,
-                )?;
-                ComplaintResponse::Rotation(response)
+                let complaint = complaint.clone();
+                Box::new(move || {
+                    let response = receiver.handle_complaint(
+                        &complained_message,
+                        accuser_id,
+                        &complaint,
+                        &complained_output,
+                    )?;
+                    Ok(ComplaintResponse::Rotation(response))
+                })
             }
             Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
                 return Err(MpcError::ProtocolFailed(
@@ -861,11 +883,72 @@ impl MpcManager {
                 ));
             }
         };
-        if cache_is_current {
-            self.complaint_responses
-                .insert(cache_key, responses.clone());
+        Ok(PreparedComplaint::Verify {
+            cache_key,
+            reject_key,
+            epoch: request.epoch,
+            verify,
+        })
+    }
+
+    pub(crate) fn cache_complaint_response(
+        &mut self,
+        epoch: u64,
+        cache_key: ComplaintResponsesKey,
+        response: ComplaintResponse,
+    ) {
+        if epoch == self.mpc_config.epoch {
+            self.complaint_responses.insert(cache_key, response);
         }
-        Ok(responses)
+    }
+
+    pub(crate) fn record_complaint_rejection(
+        &mut self,
+        epoch: u64,
+        reject_key: (Address, ComplaintResponsesKey),
+    ) {
+        if epoch == self.mpc_config.epoch {
+            self.complaint_rejections.insert(reject_key);
+        }
+    }
+
+    pub(crate) fn commit_complaint_outcome(
+        &mut self,
+        epoch: u64,
+        cache_key: ComplaintResponsesKey,
+        reject_key: (Address, ComplaintResponsesKey),
+        result: MpcResult<ComplaintResponse>,
+    ) -> MpcResult<ComplaintResponse> {
+        match result {
+            Ok(response) => {
+                self.cache_complaint_response(epoch, cache_key, response.clone());
+                Ok(response)
+            }
+            Err(e) => {
+                self.record_complaint_rejection(epoch, reject_key);
+                Err(e)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_complain_request(
+        &mut self,
+        caller: Address,
+        request: &ComplainRequest,
+    ) -> MpcResult<ComplaintResponse> {
+        match self.prepare_complaint(caller, request)? {
+            PreparedComplaint::Ready(response) => Ok(response),
+            PreparedComplaint::Verify {
+                cache_key,
+                reject_key,
+                epoch,
+                verify,
+            } => {
+                let result = verify();
+                self.commit_complaint_outcome(epoch, cache_key, reject_key, result)
+            }
+        }
     }
 
     pub fn handle_get_public_mpc_output_request(
@@ -1503,7 +1586,6 @@ impl MpcManager {
             DealerStopRule {
                 threshold: dealer_data.required_reduced_weight,
                 grace: Duration::ZERO,
-                required: None,
             },
             p2p_channel,
             MPC_LABEL_DKG,
@@ -1802,7 +1884,6 @@ impl MpcManager {
             DealerStopRule {
                 threshold: dealer_data.required_reduced_weight,
                 grace: Duration::ZERO,
-                required: None,
             },
             p2p_channel,
             MPC_LABEL_KEY_ROTATION,
@@ -2364,6 +2445,7 @@ impl MpcManager {
         let avid_builder = dealer
             .create_avid_messages(builder, avid_confirm)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let signers = crate::mpc::types::resolve_signers(&confirm_cert, &self.committee)?;
         self.committee
             .members()
             .iter()
@@ -2379,6 +2461,9 @@ impl MpcManager {
                         kind: AvidNonceMessageKind::Dispersal {
                             dispersal: message.dispersal,
                             confirm_cert: confirm_cert.clone(),
+                            optimistic_message: (!signers.contains(&(j as u16)))
+                                .then(|| builder.message_for(j as u16))
+                                .flatten(),
                         },
                     }),
                 ))
@@ -2469,11 +2554,11 @@ impl MpcManager {
         Ok((vote, avid_vote, echoes))
     }
 
-    fn handle_avid_nonce_complaint_request(
+    fn prepare_avid_nonce_complaint(
         &mut self,
         caller: Address,
         request: &ComplainRequest,
-    ) -> MpcResult<ComplaintResponse> {
+    ) -> MpcResult<Box<dyn FnOnce() -> MpcResult<ComplaintResponse>>> {
         if request.epoch != self.mpc_config.epoch {
             return Err(MpcError::NotFound(
                 "AVID complaints serve the current epoch only".into(),
@@ -2499,22 +2584,12 @@ impl MpcManager {
             })?;
         let receiver = self.create_avid_nonce_receiver(request.dealer, batch_index)?;
         let verified_common = self.avid_round_verified_common(request.dealer, batch_index)?;
-        let mut rng = rand::thread_rng();
-        let response = match &request.complaint {
-            ProtocolComplaint::AvidReveal(complaint) => receiver
-                .handle_avss_complaint(
-                    complaint,
-                    accuser_id,
-                    &verified_common,
-                    state.own_ciphertext,
-                    &mut rng,
-                )
-                .map_err(|e| MpcError::CryptoError(e.to_string()))?,
-            ProtocolComplaint::AvidBlame {
-                complaint,
-                vote_cert,
-            } => {
-                let (held_vote, _) = self
+        let own_ciphertext = state.own_ciphertext;
+        let complaint = request.complaint.clone();
+        let dealer = request.dealer;
+        let blame_cert = match &request.complaint {
+            ProtocolComplaint::AvidBlame { vote_cert, .. } => {
+                let (held_vote, _, _) = self
                     .try_get_avid_held_echoes(batch_index, &request.dealer)?
                     .ok_or_else(|| {
                         MpcError::NotFound("no held vote for the complained round".into())
@@ -2526,48 +2601,71 @@ impl MpcManager {
                         self.mpc_config.epoch,
                     )));
                 }
-                let unclassified = UnclassifiedNonceCert::from_signed(vote_cert, batch_index);
-                match self.verify_and_classify_nonce_cert(&unclassified)? {
-                    (Some(CertKind::AvidVote), _) => {}
-                    (kind, _) => {
-                        return Err(MpcError::InvalidCertificate(format!(
-                            "blame carried a {kind:?} cert; only an AvidVote cert can back a blame"
-                        )));
-                    }
+                let (committee, nodes, params) =
+                    self.cert_verification_context(vote_cert.epoch())?;
+                let claimed_weight = vote_cert
+                    .committee_signature()
+                    .reduced_weight(committee, nodes)
+                    .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+                let required = Self::avid_vote_quorum(nodes, params.f);
+                if claimed_weight < required {
+                    return Err(MpcError::InvalidCertificate(format!(
+                        "blame vote cert claims reduced weight {claimed_weight} below the \
+                         AvidVote bar {required}"
+                    )));
                 }
-                let cert = AvidCertificate::vote(
+                Some(AvidCertificate::vote(
                     self.hashi_object_id,
                     vote_cert.clone(),
                     held_vote,
                     Arc::new(self.committee.clone()),
-                )?
-                .to_verified()
-                .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-                receiver
-                    .handle_avid_complaint(
+                )?)
+            }
+            _ => None,
+        };
+        Ok(Box::new(move || {
+            let mut rng = rand::thread_rng();
+            let response = match &complaint {
+                ProtocolComplaint::AvidReveal(complaint) => receiver
+                    .handle_avss_complaint(
                         complaint,
                         accuser_id,
                         &verified_common,
-                        &cert,
-                        state.own_ciphertext,
+                        own_ciphertext,
                         &mut rng,
                     )
-                    .map_err(|e| MpcError::CryptoError(e.to_string()))?
-            }
-            ProtocolComplaint::Avss(_) => unreachable!("routed by the AVID complaint check"),
-        };
-        tracing::info!(
-            "AVID nonce complaint answered: accuser {:?}, dealer {:?}, batch_index={batch_index}, \
-             kind {}",
-            caller,
-            request.dealer,
-            match &request.complaint {
-                ProtocolComplaint::AvidReveal(_) => "reveal",
-                ProtocolComplaint::AvidBlame { .. } => "blame",
-                _ => unreachable!("routed by the AVID complaint check"),
-            }
-        );
-        Ok(ComplaintResponse::NonceGenerationAvid(response))
+                    .map_err(|e| MpcError::CryptoError(e.to_string()))?,
+                ProtocolComplaint::AvidBlame { complaint, .. } => {
+                    let cert = blame_cert
+                        .expect("blame path always builds its cert")
+                        .to_verified()
+                        .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                    receiver
+                        .handle_avid_complaint(
+                            complaint,
+                            accuser_id,
+                            &verified_common,
+                            &cert,
+                            own_ciphertext,
+                            &mut rng,
+                        )
+                        .map_err(|e| MpcError::CryptoError(e.to_string()))?
+                }
+                ProtocolComplaint::Avss(_) => unreachable!("routed by the AVID complaint check"),
+            };
+            tracing::info!(
+                "AVID nonce complaint answered: accuser {:?}, dealer {:?}, \
+                 batch_index={batch_index}, kind {}",
+                caller,
+                dealer,
+                match &complaint {
+                    ProtocolComplaint::AvidReveal(_) => "reveal",
+                    ProtocolComplaint::AvidBlame { .. } => "blame",
+                    _ => unreachable!("routed by the AVID complaint check"),
+                }
+            );
+            Ok(ComplaintResponse::NonceGenerationAvid(response))
+        }))
     }
 
     fn ensure_avid_nonce_output(
@@ -2684,7 +2782,28 @@ impl MpcManager {
             AvidNonceMessageKind::Dispersal {
                 dispersal,
                 confirm_cert,
+                optimistic_message,
             } => {
+                match (
+                    self.get_avid_round_state(batch_index, &sender)?,
+                    optimistic_message,
+                ) {
+                    (None, Some(msg)) => {
+                        let _ = self.try_sign_avid_nonce_optimistic(sender, batch_index, msg)?;
+                        tracing::info!(
+                            dealer = %sender,
+                            batch_index,
+                            "processed round-1 message bundled with an AVID dispersal"
+                        );
+                    }
+                    (Some(state), Some(msg)) if state.common.hash() != msg.common.hash() => {
+                        return Err(MpcError::InvalidMessage {
+                            sender,
+                            reason: "Dealer sent different messages".to_string(),
+                        });
+                    }
+                    _ => {}
+                }
                 let common = self
                     .get_avid_round_state(batch_index, &sender)?
                     .map(|state| state.common)
@@ -2699,7 +2818,8 @@ impl MpcManager {
                     confirm_cert.clone(),
                 )?;
                 let vote_hash = hash_avid_vote(&avid_vote);
-                if let Some((held_vote, _)) = self.try_get_avid_held_echoes(batch_index, &sender)?
+                if let Some((held_vote, _, _)) =
+                    self.try_get_avid_held_echoes(batch_index, &sender)?
                     && hash_avid_vote(&held_vote) != vote_hash
                 {
                     return Err(MpcError::InvalidMessage {
@@ -2710,7 +2830,7 @@ impl MpcManager {
                 self.persist_and_cache_avid_held_echoes(
                     batch_index,
                     sender,
-                    (avid_vote.clone(), echoes),
+                    (avid_vote.clone(), echoes, confirm_cert.clone()),
                 )?;
                 Ok(vote)
             }
@@ -2771,14 +2891,7 @@ impl MpcManager {
         let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
         let vote_quorum_weight =
             Self::avid_vote_quorum(&self.mpc_config.nodes, self.mpc_config.max_faulty);
-        let replay_signers = held.map(|(stored_vote, _)| {
-            let pending = stored_vote.vote.recipients;
-            self.mpc_config
-                .nodes
-                .node_ids_iter()
-                .filter(|id| !pending.contains(id))
-                .collect()
-        });
+        let stored_confirm_cert = held.map(|(_, _, cert)| cert);
         Ok(AvidDealerFlowData {
             builder,
             confirm_target,
@@ -2789,7 +2902,7 @@ impl MpcManager {
             nodes: self.mpc_config.nodes.clone(),
             total_reduced_weight,
             vote_quorum_weight,
-            replay_signers,
+            stored_confirm_cert,
         })
     }
 
@@ -2814,24 +2927,6 @@ impl MpcManager {
             .await?
         };
         drop(_timer);
-        let mut aggregator = BlsSignatureAggregator::new_reduced(
-            dealer_data.hashi_id,
-            &dealer_data.committee,
-            dealer_data.confirm_target.clone(),
-            &dealer_data.nodes,
-        )
-        .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
-        aggregator
-            .add_signature(dealer_data.my_signature.clone())
-            .expect("own signature must always verify");
-        let _timer = metrics
-            .mpc_p2p_broadcast_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-            .start_timer();
-        let requests: Vec<_> = std::mem::take(&mut dealer_data.recipient_messages)
-            .into_iter()
-            .map(|(addr, messages)| (addr, Arc::new(SendMessagesRequest { messages })))
-            .collect();
         let (max_faulty, min_confirm_weight, address) = {
             let mgr = mpc_manager.read().unwrap();
             (
@@ -2840,126 +2935,80 @@ impl MpcManager {
                 mgr.address,
             )
         };
-        let decided_weight = dealer_data.vote_quorum_weight.max(min_confirm_weight);
-        let replay_allowed = dealer_data
-            .replay_signers
-            .as_ref()
-            .map(|expected| {
-                expected
-                    .iter()
-                    .map(|id| {
-                        dealer_data
-                            .committee
-                            .members()
-                            .get(*id as usize)
-                            .map(|member| member.validator_address())
-                            .ok_or_else(|| {
-                                MpcError::ProtocolFailed(format!(
-                                    "stored AVID round for batch {batch_index} names party \
-                                     {id}, which is not in this epoch's committee"
-                                ))
-                            })
-                    })
-                    .collect::<MpcResult<BTreeSet<Address>>>()
-            })
-            .transpose()?;
-        let replay_signatures = collect_dealer_signatures(
-            &mut aggregator,
-            requests,
-            DealerStopRule {
-                threshold: decided_weight,
-                grace: BATCH_AVSS_VOTES_GRACE,
-                required: replay_allowed.as_ref(),
-            },
-            p2p_channel,
-            MPC_LABEL_NONCE_GENERATION,
-            metrics,
-        )
-        .await;
-        drop(_timer);
-        let confirmed = aggregator.reduced_weight() as u32;
-        if confirmed >= dealer_data.total_reduced_weight {
-            if dealer_data.replay_signers.is_some() {
-                metrics
-                    .mpc_nonce_dealer_signer_set_replay_total
-                    .with_label_values(&["unneeded"])
-                    .inc();
-            }
-            let cert = aggregator
-                .finish()
-                .expect("signatures should always be valid");
-            return Self::publish_nonce_generation_cert(tob_channel, batch_index, cert, metrics)
-                .await;
-        }
-        let pending = dealer_data.total_reduced_weight - confirmed;
-        if pending > max_faulty || confirmed < min_confirm_weight {
-            tracing::warn!(
-                "AVID nonce round abandoned: confirmed weight {confirmed} < required \
-                 {decided_weight} (W={}, f={max_faulty}, t+f={min_confirm_weight}, \
-                 batch_index={batch_index})",
-                dealer_data.total_reduced_weight
-            );
-            metrics
-                .mpc_dealer_cert_shortfall_total
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                .inc();
-            if dealer_data.replay_signers.is_some() {
-                metrics
-                    .mpc_nonce_dealer_signer_set_replay_total
-                    .with_label_values(&["abandoned"])
-                    .inc();
-            }
-            return Err(MpcError::NotEnoughApprovals {
-                needed: decided_weight as usize,
-                got: confirmed as usize,
-            });
-        }
-        tracing::info!(
-            "AVID nonce round entered the pessimistic path: dealer {address:?}, \
-             batch_index={batch_index}, confirmed weight {confirmed}, pending weight {pending}"
-        );
-        let confirm_cert = match dealer_data.replay_signers.as_ref() {
-            Some(expected) => {
-                let mut replay = BlsSignatureAggregator::new_reduced(
+        let confirm_cert = match dealer_data.stored_confirm_cert.take() {
+            Some(cert) => cert,
+            None => {
+                let mut aggregator = BlsSignatureAggregator::new_reduced(
                     dealer_data.hashi_id,
                     &dealer_data.committee,
                     dealer_data.confirm_target.clone(),
                     &dealer_data.nodes,
                 )
                 .map_err(|e| MpcError::InvalidConfig(e.to_string()))?;
-                replay
+                aggregator
                     .add_signature(dealer_data.my_signature.clone())
                     .expect("own signature must always verify");
-                for (addr, signature) in replay_signatures {
-                    if let Err(e) = replay.add_signature_from(addr, signature) {
-                        tracing::info!("Could not replay the signature of {:?}: {}", addr, e);
-                    }
+                let _timer = metrics
+                    .mpc_p2p_broadcast_duration_seconds
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                    .start_timer();
+                let requests: Vec<_> = std::mem::take(&mut dealer_data.recipient_messages)
+                    .into_iter()
+                    .map(|(addr, messages)| (addr, Arc::new(SendMessagesRequest { messages })))
+                    .collect();
+                let decided_weight = dealer_data.vote_quorum_weight.max(min_confirm_weight);
+                collect_dealer_signatures(
+                    &mut aggregator,
+                    requests,
+                    DealerStopRule {
+                        threshold: decided_weight,
+                        grace: BATCH_AVSS_VOTES_GRACE,
+                    },
+                    p2p_channel,
+                    MPC_LABEL_NONCE_GENERATION,
+                    metrics,
+                )
+                .await;
+                drop(_timer);
+                let confirmed = aggregator.reduced_weight() as u32;
+                if confirmed >= dealer_data.total_reduced_weight {
+                    let cert = aggregator
+                        .finish()
+                        .expect("signatures should always be valid");
+                    return Self::publish_nonce_generation_cert(
+                        tob_channel,
+                        batch_index,
+                        cert,
+                        metrics,
+                    )
+                    .await;
                 }
-                let cert = replay.finish().expect("signatures should always be valid");
-                let signers = crate::mpc::types::resolve_signers(&cert, &dealer_data.committee)?;
-                if &signers != expected {
+                let pending = dealer_data.total_reduced_weight - confirmed;
+                if pending > max_faulty || confirmed < min_confirm_weight {
+                    tracing::warn!(
+                        "AVID nonce round abandoned: confirmed weight {confirmed} < required \
+                         {decided_weight} (W={}, f={max_faulty}, t+f={min_confirm_weight}, \
+                         batch_index={batch_index})",
+                        dealer_data.total_reduced_weight
+                    );
                     metrics
-                        .mpc_nonce_dealer_signer_set_replay_total
-                        .with_label_values(&["incomplete"])
+                        .mpc_dealer_cert_shortfall_total
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                         .inc();
-                    let missing: Vec<_> = expected.difference(&signers).collect();
-                    return Err(MpcError::ProtocolFailed(format!(
-                        "AVID nonce round for batch {batch_index} reproduced {} of the {} \
-                         signers the stored round fixed, missing {missing:?}; not dealing a \
-                         divergent dispersal",
-                        signers.len(),
-                        expected.len(),
-                    )));
+                    return Err(MpcError::NotEnoughApprovals {
+                        needed: decided_weight as usize,
+                        got: confirmed as usize,
+                    });
                 }
-                metrics
-                    .mpc_nonce_dealer_signer_set_replay_total
-                    .with_label_values(&["reused"])
-                    .inc();
-                cert
+                tracing::info!(
+                    "AVID nonce round entered the pessimistic path: dealer {address:?}, \
+                     batch_index={batch_index}, confirmed weight {confirmed}, pending weight \
+                     {pending}"
+                );
+                aggregator
+                    .finish()
+                    .expect("signatures should always be valid")
             }
-            None => aggregator
-                .finish()
-                .expect("signatures should always be valid"),
         };
         let _timer = metrics
             .mpc_dealer_crypto_duration_seconds
@@ -3025,7 +3074,6 @@ impl MpcManager {
             DealerStopRule {
                 threshold: dealer_data.vote_quorum_weight,
                 grace: Duration::ZERO,
-                required: None,
             },
             p2p_channel,
             MPC_LABEL_NONCE_GENERATION,
@@ -3391,7 +3439,7 @@ impl MpcManager {
                 })
             }),
             CertKind::AvidVote => self.try_get_avid_held_echoes(batch_index, dealer).map(|e| {
-                e.map(|(vote, _)| {
+                e.map(|(vote, _, _)| {
                     (
                         hash_avid_vote(&vote),
                         MessagesHash::from(vote.common_message_hash.digest),
@@ -4023,6 +4071,10 @@ impl MpcManager {
             _ => true,
         });
         mgr.complaint_responses.retain(|k, _| match k {
+            ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
+            _ => true,
+        });
+        mgr.complaint_rejections.retain(|(_, k)| match k {
             ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
         });
@@ -6190,32 +6242,19 @@ fn verify_complaint_response_from_signer(
     }
 }
 
-struct DealerStopRule<'a> {
+struct DealerStopRule {
     threshold: u32,
     grace: Duration,
-    /// Peers whose signatures the round must reproduce.
-    required: Option<&'a BTreeSet<Address>>,
 }
 
 async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::IntentMessage + Clone>(
     aggregator: &mut BlsSignatureAggregator<'_, M, ReducedWeight<'_>>,
     requests: Vec<(Address, Arc<SendMessagesRequest>)>,
-    stop: DealerStopRule<'_>,
+    stop: DealerStopRule,
     p2p_channel: &P,
     protocol: &'static str,
     metrics: &Metrics,
-) -> Vec<(Address, BLS12381Signature)> {
-    let mut awaited: BTreeSet<Address> = stop
-        .required
-        .map(|required| {
-            requests
-                .iter()
-                .map(|(addr, _)| *addr)
-                .filter(|addr| required.contains(addr))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut accepted = Vec::new();
+) {
     let mut in_flight: FuturesUnordered<_> = requests
         .into_iter()
         .map(|(addr, request)| async move {
@@ -6225,9 +6264,9 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
         })
         .collect();
     let ceiling = tokio::time::Instant::now() + DEALER_COLLECTION_CEILING;
-    let mut grace_deadline = (aggregator.reduced_weight_reached(stop.threshold)
-        && awaited.is_empty())
-    .then(|| tokio::time::Instant::now() + stop.grace);
+    let mut grace_deadline = aggregator
+        .reduced_weight_reached(stop.threshold)
+        .then(|| tokio::time::Instant::now() + stop.grace);
     let stop_reason = loop {
         let deadline = grace_deadline.map_or(ceiling, |grace| grace.min(ceiling));
         let (addr, result) = match tokio::time::timeout_at(deadline, in_flight.next()).await {
@@ -6241,26 +6280,15 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
                 };
             }
         };
-        awaited.remove(&addr);
         match result {
             Ok(response) => {
-                let keep = stop
-                    .required
-                    .is_some_and(|required| required.contains(&addr))
-                    .then(|| response.signature.clone());
-                match aggregator.add_signature_from(addr, response.signature) {
-                    Ok(()) => accepted.extend(keep.map(|signature| (addr, signature))),
-                    Err(e) => {
-                        tracing::info!("Invalid signature from {:?} ({protocol}): {}", addr, e)
-                    }
+                if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
+                    tracing::info!("Invalid signature from {:?} ({protocol}): {}", addr, e)
                 }
             }
             Err(e) => tracing::info!("Failed to send message to {:?} ({protocol}): {}", addr, e),
         }
-        if grace_deadline.is_none()
-            && aggregator.reduced_weight_reached(stop.threshold)
-            && awaited.is_empty()
-        {
+        if grace_deadline.is_none() && aggregator.reduced_weight_reached(stop.threshold) {
             grace_deadline = Some(tokio::time::Instant::now() + stop.grace);
         }
     };
@@ -6275,7 +6303,6 @@ async fn collect_dealer_signatures<P: P2PChannel, M: hashi_types::intent::Intent
             .with_label_values(&[protocol])
             .observe(f64::from(collected - stop.threshold));
     }
-    accepted
 }
 
 fn fan_out_complaints<'a, P: P2PChannel + 'a>(
@@ -6606,6 +6633,18 @@ fn consume_certified_nonce_outputs<T>(
     (pre_filter, dealers, outputs)
 }
 
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PreparedComplaint {
+    Ready(ComplaintResponse),
+    Verify {
+        cache_key: ComplaintResponsesKey,
+        reject_key: (Address, ComplaintResponsesKey),
+        epoch: u64,
+        verify: Box<dyn FnOnce() -> MpcResult<ComplaintResponse>>,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum RetrieveOutcome {
     Ready(RetrieveMessagesResponse),
     NeedsStore,
@@ -6660,7 +6699,7 @@ fn build_avid_response(
     held: Option<HeldAvidEchoes>,
 ) -> MpcResult<RetrieveMessagesResponse> {
     let (avid_vote, echo) = match &held {
-        Some((vote, echoes)) => {
+        Some((vote, echoes, _)) => {
             let echo = echoes.iter().find_map(|(addr, msg)| {
                 (*addr == requester).then(|| match msg {
                     Messages::NonceGenerationAvid(AvidNonceMessage {

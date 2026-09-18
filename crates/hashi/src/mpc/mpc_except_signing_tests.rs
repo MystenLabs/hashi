@@ -12216,6 +12216,31 @@ fn avid_pessimistic_fixture(
     }
 }
 
+fn with_optimistic_message(
+    msg: &Messages,
+    optimistic_message: Option<batch_avss_avid::AvssMessage>,
+) -> Messages {
+    match msg {
+        Messages::NonceGenerationAvid(AvidNonceMessage {
+            batch_index,
+            kind:
+                AvidNonceMessageKind::Dispersal {
+                    dispersal,
+                    confirm_cert,
+                    ..
+                },
+        }) => Messages::NonceGenerationAvid(AvidNonceMessage {
+            batch_index: *batch_index,
+            kind: AvidNonceMessageKind::Dispersal {
+                dispersal: dispersal.clone(),
+                confirm_cert: confirm_cert.clone(),
+                optimistic_message,
+            },
+        }),
+        _ => panic!("expected an AVID dispersal message"),
+    }
+}
+
 fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, AvidConfirmCertificate) {
     match msg {
         Messages::NonceGenerationAvid(AvidNonceMessage {
@@ -12223,6 +12248,7 @@ fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, AvidConfirm
                 AvidNonceMessageKind::Dispersal {
                     dispersal,
                     confirm_cert,
+                    ..
                 },
             ..
         }) => (dispersal.clone(), confirm_cert.clone()),
@@ -12243,98 +12269,6 @@ fn extract_echo_for(echoes: &[(Address, Messages)], recipient: Address) -> batch
             })
         })
         .expect("echo addressed to recipient")
-}
-
-fn avid_confirm_cert_over(
-    setup: &TestSetup,
-    flow: &crate::mpc::types::AvidDealerFlowData,
-    dealer_addr: Address,
-    batch_index: u32,
-    signer_idxs: &[usize],
-) -> AvidConfirmCertificate {
-    let mut agg = BlsSignatureAggregator::new(
-        TEST_HASHI_ID,
-        setup.committee(),
-        flow.confirm_target.clone(),
-    );
-    for &i in signer_idxs {
-        if setup.address(i) == dealer_addr {
-            agg.add_signature(flow.my_signature.clone()).unwrap();
-            continue;
-        }
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == setup.address(i))
-            .expect("optimistic message for signer");
-        let avss = extract_optimistic(msg).clone();
-        let mut mgr = setup.create_manager(i);
-        let sig = mgr
-            .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss)
-            .unwrap();
-        agg.add_signature(MemberSignature::new(mgr.mpc_config.epoch, mgr.address, sig))
-            .unwrap();
-    }
-    agg.finish().unwrap()
-}
-
-#[test]
-fn test_repeat_dealer_round_rebuilds_the_stored_signer_sets_dispersal() {
-    let setup = TestSetup::new(6);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let mut rng = rand::thread_rng();
-
-    let flow1 = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
-    assert!(
-        flow1.replay_signers.is_none(),
-        "a batch with no stored round must deal a fresh signer set"
-    );
-
-    let signers = [0usize, 1, 2, 3, 4];
-    let cert1 = avid_confirm_cert_over(&setup, &flow1, dealer_addr, batch_index, &signers);
-    let dispersals1 = dealer
-        .create_avid_nonce_dispersal_messages(&flow1.builder, cert1, batch_index)
-        .unwrap();
-
-    let own = dispersals1
-        .iter()
-        .find(|(a, _)| *a == dealer_addr)
-        .map(|(_, m)| m.clone())
-        .expect("dealer is addressed by its own dispersal");
-    let Messages::NonceGenerationAvid(own_avid) = own else {
-        panic!("expected an AVID dispersal message");
-    };
-    dealer
-        .handle_avid_nonce_message(dealer_addr, &own_avid)
-        .expect("the dealer self-handles its own dispersal");
-
-    let flow2 = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
-    let replayed = flow2
-        .replay_signers
-        .clone()
-        .expect("a stored round fixes the signer set to reproduce");
-    let expected: std::collections::BTreeSet<fastcrypto_tbls::nodes::PartyId> = signers
-        .iter()
-        .map(|i| *i as fastcrypto_tbls::nodes::PartyId)
-        .collect();
-    assert_eq!(replayed, expected);
-
-    let replayed_idxs: Vec<usize> = replayed.iter().map(|id| *id as usize).collect();
-    let cert2 = avid_confirm_cert_over(&setup, &flow2, dealer_addr, batch_index, &replayed_idxs);
-    let dispersals2 = dealer
-        .create_avid_nonce_dispersal_messages(&flow2.builder, cert2, batch_index)
-        .unwrap();
-    assert_eq!(
-        bcs::to_bytes(&dispersals1).unwrap(),
-        bcs::to_bytes(&dispersals2).unwrap(),
-        "a repeat round over the stored signer set must reproduce the dispersal byte for byte"
-    );
 }
 
 #[test]
@@ -12689,7 +12623,7 @@ fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
         .handle_send_messages_request(fx.dealer_addr, &request)
         .unwrap();
 
-    let (held_vote, echoes) = receiver
+    let (held_vote, echoes, _) = receiver
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
         .expect("echoes held for the round")
@@ -12738,14 +12672,64 @@ fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
     let result = laggard.handle_send_messages_request(
         fx.dealer_addr,
         &SendMessagesRequest {
-            messages: dispersals[5].1.clone(),
+            messages: with_optimistic_message(&dispersals[5].1, None),
         },
     );
     assert!(
         matches!(result, Err(MpcError::NotReady(_))),
-        "laggard dispersal must be NotReady: {result:?}"
+        "a dispersal with no attachment to a party without round state must be NotReady: {result:?}"
     );
     assert!(laggard.avid_held_echoes.is_empty());
+}
+
+#[test]
+fn test_handle_avid_dispersal_with_bundled_optimistic_lets_non_signer_vote() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let mut non_signer = setup.create_manager(5);
+    non_signer
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[5].1.clone(),
+            },
+        )
+        .expect("a non-signer processes the bundled round 1 and votes");
+    assert!(
+        non_signer
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, fx.dealer_addr)),
+        "the bundled round-1 message is processed into an output"
+    );
+    let (non_signer_vote, _, _) = non_signer
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .expect("the non-signer holds echoes after voting");
+
+    let confirmer = &mut fx.confirmers[1];
+    confirmer
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .unwrap();
+    let (confirmer_vote, _, _) = confirmer
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap();
+    assert_eq!(
+        hash_avid_vote(non_signer_vote),
+        hash_avid_vote(confirmer_vote),
+        "the attached voter votes on the same value, so one certificate covers both"
+    );
 }
 
 #[test]
@@ -12865,7 +12849,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
             },
         )
         .unwrap();
-    let (held_vote_before, _) = receiver
+    let (held_vote_before, _, _) = receiver
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
         .unwrap()
@@ -12881,7 +12865,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
         matches!(second, Err(MpcError::InvalidMessage { .. })),
         "a different dispersal for the same round must be rejected: {second:?}"
     );
-    let (held_vote_after, _) = receiver
+    let (held_vote_after, _, _) = receiver
         .avid_held_echoes
         .get(&(batch_index, fx.dealer_addr))
         .unwrap()
@@ -13081,7 +13065,7 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
         panic!("expected a nonce cert");
     };
     let mgr = dealer.read().unwrap();
-    let (held_vote, _) = mgr
+    let (held_vote, _, _) = mgr
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .expect("the dealer voted on its own dispersal and held its echoes");
@@ -13113,222 +13097,193 @@ async fn test_run_as_avid_nonce_dealer_straggler_posts_vote_cert() {
     );
 }
 
+struct BundleScenarioP2PChannel {
+    managers: Arc<std::sync::Mutex<HashMap<Address, MpcManager>>>,
+    current_sender: Address,
+    fail_optimistic_to: HashSet<Address>,
+    fail_dispersal_to: HashSet<Address>,
+}
+
+#[async_trait::async_trait]
+impl P2PChannel for BundleScenarioP2PChannel {
+    async fn send_messages(
+        &self,
+        recipient: &Address,
+        request: &SendMessagesRequest,
+    ) -> ChannelResult<SendMessagesResponse> {
+        let is_optimistic = matches!(
+            &request.messages,
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                kind: AvidNonceMessageKind::Optimistic(_),
+                ..
+            })
+        );
+        let is_dispersal = matches!(
+            &request.messages,
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                kind: AvidNonceMessageKind::Dispersal { .. },
+                ..
+            })
+        );
+        if (is_optimistic && self.fail_optimistic_to.contains(recipient))
+            || (is_dispersal && self.fail_dispersal_to.contains(recipient))
+        {
+            return Err(crate::communication::ChannelError::RequestFailed(
+                "injected network failure".to_string(),
+            ));
+        }
+        let mut managers = self.managers.lock().unwrap();
+        let manager = managers.get_mut(recipient).ok_or_else(|| {
+            crate::communication::ChannelError::RequestFailed(format!(
+                "Recipient {:?} not found",
+                recipient
+            ))
+        })?;
+        let response = manager
+            .handle_send_messages_request(self.current_sender, request)
+            .map_err(|e| ChannelError::RequestFailed(format!("Handler failed: {}", e)))?;
+        Ok(response)
+    }
+
+    async fn retrieve_messages(
+        &self,
+        _party: &Address,
+        _request: &RetrieveMessagesRequest,
+    ) -> ChannelResult<RetrieveMessagesResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement retrieve_messages")
+    }
+
+    async fn complain(
+        &self,
+        _party: &Address,
+        _request: &ComplainRequest,
+    ) -> ChannelResult<ComplaintResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement complain")
+    }
+
+    async fn get_public_mpc_output(
+        &self,
+        _party: &Address,
+        _request: &GetPublicMpcOutputRequest,
+    ) -> ChannelResult<GetPublicMpcOutputResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement get_public_mpc_output")
+    }
+
+    async fn get_partial_signatures(
+        &self,
+        _party: &Address,
+        _request: &GetPartialSignaturesRequest,
+    ) -> ChannelResult<GetPartialSignaturesResponse> {
+        unimplemented!("BundleScenarioP2PChannel does not implement get_partial_signatures")
+    }
+}
+
 #[tokio::test(start_paused = true)]
-async fn test_repeat_dealer_round_engages_the_replay_path_and_reuses_the_signer_set() {
+#[tracing_test::traced_test]
+async fn test_run_as_avid_nonce_dealer_bundled_non_signer_completes_the_round() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let metrics = test_metrics();
-    let reused = || {
-        metrics
-            .mpc_nonce_dealer_signer_set_replay_total
-            .with_label_values(&["reused"])
-            .get()
-    };
-    let incomplete = || {
-        metrics
-            .mpc_nonce_dealer_signer_set_replay_total
-            .with_label_values(&["incomplete"])
-            .get()
-    };
-
-    let others: HashMap<_, _> = (1..5)
+    let others: HashMap<_, _> = (1..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
-    let mock_p2p = MockP2PChannel::new(others, dealer_addr);
+    let channel = BundleScenarioP2PChannel {
+        managers: Arc::new(std::sync::Mutex::new(others)),
+        current_sender: dealer_addr,
+        fail_optimistic_to: [setup.address(5)].into_iter().collect(),
+        fail_dispersal_to: [setup.address(4)].into_iter().collect(),
+    };
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
     let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
 
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &mock_p2p, &mut mock_tob, &metrics)
-        .await
-        .unwrap();
-    assert_eq!(
-        reused(),
-        0,
-        "the first round has no stored signer set to reuse"
-    );
-
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &mock_p2p, &mut mock_tob, &metrics)
-        .await
-        .unwrap();
-    assert_eq!(
-        reused(),
-        1,
-        "the repeat round must rebuild the stored signer set, not collect a fresh one"
-    );
-    assert_eq!(incomplete(), 0);
-
-    let published = mock_tob.published.lock().unwrap().clone();
-    assert_eq!(published.len(), 2);
-    let hash_of = |c: &CertificateV1| {
-        let CertificateV1::NonceGeneration { cert, .. } = c else {
-            panic!("expected a nonce cert");
-        };
-        cert.message().messages_hash
-    };
-    assert_eq!(
-        hash_of(&published[0]),
-        hash_of(&published[1]),
-        "the repeat round reproduces the stored round's AvidVote"
-    );
-
-    let swapped: HashMap<_, _> = [1, 2, 3, 5]
-        .into_iter()
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let swapped = MockP2PChannel::new(swapped, dealer_addr);
-    let result = MpcManager::run_as_avid_nonce_dealer(
+    MpcManager::run_as_avid_nonce_dealer(
         &dealer,
         batch_index,
-        &swapped,
+        &channel,
         &mut mock_tob,
-        &metrics,
+        &test_metrics(),
+    )
+    .await
+    .expect("the round completes because the bundled non-signer votes");
+
+    let published = mock_tob.published.lock().unwrap().clone();
+    assert_eq!(published.len(), 1);
+    assert!(
+        published[0].weight(setup.committee()).unwrap() >= 5,
+        "the Vote cert reaches the W-f quorum with the bundled non-signer's vote"
+    );
+    assert!(logs_contain(
+        "processed round-1 message bundled with an AVID dispersal"
+    ));
+    assert!(logs_contain("AVID nonce Vote quorum reached"));
+
+    let managers = channel.managers.lock().unwrap();
+    let non_signer = managers.get(&setup.address(5)).unwrap();
+    assert!(
+        non_signer
+            .avid_held_echoes
+            .contains_key(&(batch_index, dealer_addr)),
+        "the non-signer processed the attachment and voted"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_repeat_dealer_round_reuses_the_stored_cert_without_reconfirming() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let managers = std::sync::Arc::new(std::sync::Mutex::new(
+        (1..6)
+            .map(|i| (setup.address(i), setup.create_manager(i)))
+            .collect::<HashMap<_, _>>(),
+    ));
+    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
+
+    let run1 = BundleScenarioP2PChannel {
+        managers: managers.clone(),
+        current_sender: dealer_addr,
+        fail_optimistic_to: [setup.address(5)].into_iter().collect(),
+        fail_dispersal_to: [setup.address(4), setup.address(5)].into_iter().collect(),
+    };
+    let mut tob1 = MockOrderedBroadcastChannel::new(vec![]);
+    let first = MpcManager::run_as_avid_nonce_dealer(
+        &dealer,
+        batch_index,
+        &run1,
+        &mut tob1,
+        &test_metrics(),
     )
     .await;
     assert!(
-        matches!(result, Err(MpcError::ProtocolFailed(_))),
-        "{result:?}"
+        matches!(first, Err(MpcError::NotEnoughApprovals { .. })),
+        "run 1 reaches the pessimistic path but the vote falls short: {first:?}"
     );
-    assert_eq!(
-        incomplete(),
-        1,
-        "a round that cannot reassemble the stored signer set must refuse, and say so"
-    );
-    assert_eq!(reused(), 1);
-    assert_eq!(
-        mock_tob.published.lock().unwrap().len(),
-        2,
-        "the refusing round published nothing"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn test_repeat_dealer_round_waits_for_a_slow_member_of_the_stored_signer_set() {
-    let setup = TestSetup::new(9);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
-    let metrics = test_metrics();
-    let reused = || {
-        metrics
-            .mpc_nonce_dealer_signer_set_replay_total
-            .with_label_values(&["reused"])
-            .get()
-    };
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let reachable: HashMap<_, _> = (1..8)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let first = MockP2PChannel::new(reachable, dealer_addr);
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &first, &mut mock_tob, &metrics)
-        .await
-        .unwrap();
-    assert_eq!(reused(), 0);
-    let pending = dealer
-        .read()
-        .unwrap()
-        .avid_held_echoes
-        .get(&(batch_index, dealer_addr))
-        .map(|(vote, _)| vote.vote.recipients.clone())
-        .expect("the first round dispersed and held its own echoes");
+    assert!(tob1.published.lock().unwrap().is_empty());
     assert!(
-        (dealer.read().unwrap().mpc_config.max_faulty as usize) > pending.len(),
-        "the stored signer set must carry slack over W-f, or the weight bar cannot be met \
-         without the slow member and the gate is inert"
-    );
-
-    let reachable: HashMap<_, _> = (1..8)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let stalls = (BATCH_AVSS_VOTES_GRACE.as_secs()
-        / crate::communication::timeout_and_retry::CALL_TIMEOUT.as_secs()
-        + 1) as usize;
-    let slow = FlakyP2PChannel::new(
-        MockP2PChannel::new(reachable, dealer_addr),
-        HashMap::from([(setup.address(7), stalls)]),
-    );
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &slow, &mut mock_tob, &metrics)
-        .await
-        .unwrap();
-    assert_eq!(
-        reused(),
-        1,
-        "the round must hold collection open for a stored signer that answers after the grace"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn test_repeat_dealer_round_narrows_a_wider_confirm_set_back_to_the_stored_one() {
-    let setup = TestSetup::new(9);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
-    let metrics = test_metrics();
-    let reused = || {
-        metrics
-            .mpc_nonce_dealer_signer_set_replay_total
-            .with_label_values(&["reused"])
-            .get()
-    };
-
-    let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
-    let narrow: HashMap<_, _> = (1..7)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let first = MockP2PChannel::new(narrow, dealer_addr);
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &first, &mut mock_tob, &metrics)
-        .await
-        .unwrap();
-    let pending = dealer
-        .read()
-        .unwrap()
-        .avid_held_echoes
-        .get(&(batch_index, dealer_addr))
-        .map(|(vote, _)| vote.vote.recipients.clone())
-        .expect("the first round dispersed and held its own echoes");
-    assert_eq!(
-        pending.len(),
-        2,
-        "two pending members leave room for a strictly wider confirm set that is still short of W"
-    );
-
-    let wider: HashMap<_, _> = (1..8)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
-    let second = MockP2PChannel::new(wider, dealer_addr);
-    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &second, &mut mock_tob, &metrics)
-        .await
-        .unwrap();
-    assert!(
-        second
-            .managers
-            .lock()
+        dealer
+            .read()
             .unwrap()
-            .get(&setup.address(7))
-            .unwrap()
-            .dealer_avid_nonce_outputs
+            .avid_held_echoes
             .contains_key(&(batch_index, dealer_addr)),
-        "the member pending in round 1 must have confirmed in round 2, or the round never \
-         collected a wider set and this test proves nothing"
-    );
-    assert_eq!(
-        reused(),
-        1,
-        "a round that confirms more than the stored set must narrow back to it, not refuse"
+        "run 1 persisted the held echoes and the confirm certificate"
     );
 
-    let published = mock_tob.published.lock().unwrap().clone();
-    assert_eq!(published.len(), 2);
-    let hash_of = |c: &CertificateV1| {
-        let CertificateV1::NonceGeneration { cert, .. } = c else {
-            panic!("expected a nonce cert");
-        };
-        cert.message().messages_hash
+    let run2 = BundleScenarioP2PChannel {
+        managers: managers.clone(),
+        current_sender: dealer_addr,
+        fail_optimistic_to: (1..6).map(|i| setup.address(i)).collect(),
+        fail_dispersal_to: HashSet::new(),
     };
-    assert_eq!(
-        hash_of(&published[0]),
-        hash_of(&published[1]),
-        "the extra confirmer must not change the dispersal"
+    let mut tob2 = MockOrderedBroadcastChannel::new(vec![]);
+    MpcManager::run_as_avid_nonce_dealer(&dealer, batch_index, &run2, &mut tob2, &test_metrics())
+        .await
+        .expect("the replay reproduces the dispersal from the stored cert, reconfirming nobody");
+    let published = tob2.published.lock().unwrap().clone();
+    assert_eq!(published.len(), 1);
+    assert!(
+        published[0].weight(setup.committee()).unwrap() >= 5,
+        "the replay reuses the stored cert and publishes without attempting round 1 (had it not, \
+         every round-1 send is configured to fail and the round would abandon)"
     );
 }
 
@@ -15894,7 +15849,7 @@ fn test_avid_voter_state_survives_restart() {
             response.signature,
         ));
     }
-    let (held_vote, held_echoes) = voter
+    let (held_vote, held_echoes, _) = voter
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .unwrap()
@@ -15961,7 +15916,7 @@ fn test_avid_voter_state_survives_restart() {
     for (i, echo) in [(1usize, served_echo)]
         .into_iter()
         .chain([2, 3, 4].map(|i| {
-            let (_, held) = others[&i]
+            let (_, held, _) = others[&i]
                 .avid_held_echoes
                 .get(&(batch_index, dealer_addr))
                 .unwrap()
@@ -16078,7 +16033,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
             addr,
             response.signature,
         ));
-        let (_, held) = mgr
+        let (_, held, _) = mgr
             .avid_held_echoes
             .get(&(batch_index, dealer_addr))
             .unwrap()
@@ -16088,7 +16043,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
             extract_echo_for(&held, victim),
         ));
     }
-    let (held_vote, _) = confirmers[0]
+    let (held_vote, _, _) = confirmers[0]
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .unwrap()
@@ -16166,7 +16121,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         "a complaint from the wrong accuser must not be answered: {result:?}"
     );
 
-    let (blame_vote, _) = confirmers[0]
+    let (blame_vote, _, _) = confirmers[0]
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
         .unwrap()
@@ -16234,6 +16189,149 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         !matches!(result, Err(MpcError::InvalidCertificate(_))),
         "a full-quorum AvidVote cert must clear certificate verification; verifying it \
          in the legacy domain would reject every blame complaint: {result:?}"
+    );
+}
+
+#[test]
+fn test_complaint_rejection_is_memoized_so_a_flood_reruns_no_crypto() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer = setup.address(0);
+    let caller = setup.address(1);
+    let mut mgr = setup.create_manager(2);
+
+    let cache_key = ComplaintResponsesKey::NonceGeneration {
+        batch_index,
+        dealer,
+    };
+    mgr.record_complaint_rejection(setup.epoch(), (caller, cache_key));
+
+    let vote_cert = {
+        use fastcrypto::traits::ToFromBytes;
+        let message = AvidVoteMessagesHash {
+            dealer_address: dealer,
+            messages_hash: MessagesHash::from([0u8; 32]),
+            batch_index,
+        };
+        let signature = hashi_types::committee::BLS12381AggregateSignature::default();
+        hashi_types::committee::SignedMessage::new(
+            setup.epoch(),
+            message,
+            signature.as_bytes(),
+            &[1u8],
+        )
+        .unwrap()
+    };
+    let request = ComplainRequest {
+        dealer,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert,
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = mgr.handle_complain_request(caller, &request);
+    assert!(
+        matches!(
+            &result,
+            Err(MpcError::InvalidMessage { reason, .. })
+                if reason.contains("already failed verification")
+        ),
+        "a memoized rejection short-circuits before any complaint crypto: {result:?}"
+    );
+}
+
+#[test]
+fn test_transient_complaint_failure_is_not_memoized() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer = setup.address(0);
+    let caller = setup.address(1);
+    let mut mgr = setup.create_manager(2);
+
+    let vote_cert = {
+        use fastcrypto::traits::ToFromBytes;
+        let message = AvidVoteMessagesHash {
+            dealer_address: dealer,
+            messages_hash: MessagesHash::from([0u8; 32]),
+            batch_index,
+        };
+        let signature = hashi_types::committee::BLS12381AggregateSignature::default();
+        SignedMessage::new(setup.epoch(), message, signature.as_bytes(), &[1u8]).unwrap()
+    };
+    let request = ComplainRequest {
+        dealer,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert,
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = mgr.handle_complain_request(caller, &request);
+    assert!(
+        matches!(&result, Err(MpcError::NotFound(_))),
+        "no round state -> a transient prepare failure, not a crypto rejection: {result:?}"
+    );
+    assert!(
+        mgr.complaint_rejections.is_empty(),
+        "a transient prepare failure must not be memoized, or a later valid complaint is blocked"
+    );
+}
+
+#[test]
+fn test_commit_complaint_outcome_memoizes_a_verification_failure() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer = setup.address(0);
+    let accuser = setup.address(1);
+    let mut mgr = setup.create_manager(2);
+
+    let cache_key = ComplaintResponsesKey::NonceGeneration {
+        batch_index,
+        dealer,
+    };
+    let reject_key = (accuser, cache_key);
+    let failure: MpcResult<ComplaintResponse> = Err(MpcError::CryptoError("bad signature".into()));
+
+    let out = mgr.commit_complaint_outcome(setup.epoch(), cache_key, reject_key, failure);
+    assert!(
+        matches!(out, Err(MpcError::CryptoError(_))),
+        "the failure is returned to the caller: {out:?}"
+    );
+    assert!(
+        mgr.complaint_rejections.contains(&reject_key),
+        "an off-lock verification failure is memoized so a repeat short-circuits"
+    );
+
+    let stale_epoch = setup.epoch() + 1;
+    let key2 = (
+        accuser,
+        ComplaintResponsesKey::NonceGeneration {
+            batch_index: 1,
+            dealer,
+        },
+    );
+    let _ = mgr.commit_complaint_outcome(
+        stale_epoch,
+        key2.1,
+        key2,
+        Err(MpcError::CryptoError("bad".into())),
+    );
+    assert!(
+        !mgr.complaint_rejections.contains(&key2),
+        "a write for a non-current epoch is dropped (reconfig TOCTOU guard)"
     );
 }
 
