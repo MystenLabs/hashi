@@ -13241,7 +13241,8 @@ async fn test_repeat_dealer_round_reuses_the_stored_cert_without_reconfirming() 
     assert_eq!(published.len(), 1);
     assert!(
         published[0].weight(setup.committee()).unwrap() >= 5,
-        "the replayed round publishes the vote cert though every round-1 send failed"
+        "the replay reuses the stored cert and publishes without attempting round 1 (had it not, \
+         every round-1 send is configured to fail and the round would abandon)"
     );
 }
 
@@ -16147,6 +16148,149 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         !matches!(result, Err(MpcError::InvalidCertificate(_))),
         "a full-quorum AvidVote cert must clear certificate verification; verifying it \
          in the legacy domain would reject every blame complaint: {result:?}"
+    );
+}
+
+#[test]
+fn test_complaint_rejection_is_memoized_so_a_flood_reruns_no_crypto() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer = setup.address(0);
+    let caller = setup.address(1);
+    let mut mgr = setup.create_manager(2);
+
+    let cache_key = ComplaintResponsesKey::NonceGeneration {
+        batch_index,
+        dealer,
+    };
+    mgr.record_complaint_rejection(setup.epoch(), (caller, cache_key));
+
+    let vote_cert = {
+        use fastcrypto::traits::ToFromBytes;
+        let message = AvidVoteMessagesHash {
+            dealer_address: dealer,
+            messages_hash: MessagesHash::from([0u8; 32]),
+            batch_index,
+        };
+        let signature = hashi_types::committee::BLS12381AggregateSignature::default();
+        hashi_types::committee::SignedMessage::new(
+            setup.epoch(),
+            message,
+            signature.as_bytes(),
+            &[1u8],
+        )
+        .unwrap()
+    };
+    let request = ComplainRequest {
+        dealer,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert,
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = mgr.handle_complain_request(caller, &request);
+    assert!(
+        matches!(
+            &result,
+            Err(MpcError::InvalidMessage { reason, .. })
+                if reason.contains("already failed verification")
+        ),
+        "a memoized rejection short-circuits before any complaint crypto: {result:?}"
+    );
+}
+
+#[test]
+fn test_transient_complaint_failure_is_not_memoized() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer = setup.address(0);
+    let caller = setup.address(1);
+    let mut mgr = setup.create_manager(2);
+
+    let vote_cert = {
+        use fastcrypto::traits::ToFromBytes;
+        let message = AvidVoteMessagesHash {
+            dealer_address: dealer,
+            messages_hash: MessagesHash::from([0u8; 32]),
+            batch_index,
+        };
+        let signature = hashi_types::committee::BLS12381AggregateSignature::default();
+        SignedMessage::new(setup.epoch(), message, signature.as_bytes(), &[1u8]).unwrap()
+    };
+    let request = ComplainRequest {
+        dealer,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert,
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = mgr.handle_complain_request(caller, &request);
+    assert!(
+        matches!(&result, Err(MpcError::NotFound(_))),
+        "no round state -> a transient prepare failure, not a crypto rejection: {result:?}"
+    );
+    assert!(
+        mgr.complaint_rejections.is_empty(),
+        "a transient prepare failure must not be memoized, or a later valid complaint is blocked"
+    );
+}
+
+#[test]
+fn test_commit_complaint_outcome_memoizes_a_verification_failure() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let dealer = setup.address(0);
+    let accuser = setup.address(1);
+    let mut mgr = setup.create_manager(2);
+
+    let cache_key = ComplaintResponsesKey::NonceGeneration {
+        batch_index,
+        dealer,
+    };
+    let reject_key = (accuser, cache_key);
+    let failure: MpcResult<ComplaintResponse> = Err(MpcError::CryptoError("bad signature".into()));
+
+    let out = mgr.commit_complaint_outcome(setup.epoch(), cache_key, reject_key, failure);
+    assert!(
+        matches!(out, Err(MpcError::CryptoError(_))),
+        "the failure is returned to the caller: {out:?}"
+    );
+    assert!(
+        mgr.complaint_rejections.contains(&reject_key),
+        "an off-lock verification failure is memoized so a repeat short-circuits"
+    );
+
+    let stale_epoch = setup.epoch() + 1;
+    let key2 = (
+        accuser,
+        ComplaintResponsesKey::NonceGeneration {
+            batch_index: 1,
+            dealer,
+        },
+    );
+    let _ = mgr.commit_complaint_outcome(
+        stale_epoch,
+        key2.1,
+        key2,
+        Err(MpcError::CryptoError("bad".into())),
+    );
+    assert!(
+        !mgr.complaint_rejections.contains(&key2),
+        "a write for a non-current epoch is dropped (reconfig TOCTOU guard)"
     );
 }
 
