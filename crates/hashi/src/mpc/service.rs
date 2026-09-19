@@ -824,6 +824,7 @@ impl MpcService {
                     params,
                     batch_size_per_weight,
                     floor,
+                    may_wait_for_floor(batch_start, num_consumed),
                 )
                 .await?;
             let Some(size) = size else {
@@ -926,66 +927,36 @@ impl MpcService {
         params: Parameters,
         batch_size_per_weight: u16,
         floor: u32,
+        wait_for_floor: bool,
     ) -> anyhow::Result<Option<usize>> {
         let onchain_state = self.inner.onchain_state().clone();
+        let (certs, settled_cutoff_ms) = Self::fetch_final_nonce_certs(
+            &onchain_state,
+            mpc_manager,
+            epoch,
+            batch_index,
+            wait_for_floor,
+            &self.inner.metrics,
+        )
+        .await?;
         let weight = match protocol {
-            NonceGenerationProtocol::Vanilla => {
-                let Some(certs) = self
-                    .bounded_cert_read(
-                        MPC_LABEL_NONCE_GENERATION,
-                        &format!(
-                            "nonce cert read for epoch {epoch} batch {batch_index} \
-                             (boundary rebuild)"
-                        ),
-                        onchain_state.fetch_nonce_certs_stamped_or_bare(epoch, Some(batch_index)),
-                    )
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let certs = MpcManager::verified_nonce_certs(
-                    mpc_manager,
-                    epoch,
-                    certs,
-                    batch_index,
-                    &mut HashMap::new(),
-                    &self.inner.metrics,
-                )
-                .await;
-                certified_nonce_weight(mpc_manager, &certs)
-            }
+            NonceGenerationProtocol::Vanilla => certified_nonce_weight(mpc_manager, &certs),
             NonceGenerationProtocol::Avid => {
-                let certs = self
-                    .bounded_cert_read(
-                        MPC_LABEL_NONCE_GENERATION,
-                        &format!(
-                            "nonce cert read for epoch {epoch} batch {batch_index} \
-                             (boundary rebuild)"
-                        ),
-                        fetch_certificates(
-                            &onchain_state,
-                            epoch,
-                            Some(batch_index),
-                            move_types::ProtocolType::NonceGeneration,
-                        ),
-                    )
-                    .await?;
-                if certs.is_empty() {
-                    return Ok(None);
-                }
-                let certs = MpcManager::verified_nonce_certs(
-                    mpc_manager,
-                    epoch,
-                    certs,
-                    batch_index,
-                    &mut HashMap::new(),
-                    &self.inner.metrics,
-                )
-                .await;
+                let avid_certs = certs.filter_map(|dealer, stamped| {
+                    let cert = stamped.to_dealer_certificate(epoch).ok()?;
+                    Some((
+                        *dealer,
+                        CertificateV1::NonceGeneration {
+                            batch_index,
+                            cert,
+                            timestamp_ms: stamped.timestamp_ms,
+                        },
+                    ))
+                });
                 mpc_manager
                     .read()
                     .unwrap()
-                    .avid_admitted_nonce_dealers(&certs, None)
+                    .avid_admitted_nonce_dealers(&avid_certs, settled_cutoff_ms)
                     .weight
             }
         };
@@ -2251,6 +2222,23 @@ fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmission
             ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
         }
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
+    }
+}
+
+fn may_wait_for_floor(batch_start: u64, cursor: u64) -> bool {
+    batch_start < cursor
+}
+
+#[cfg(test)]
+mod wait_for_floor_tests {
+    use super::may_wait_for_floor;
+
+    #[test]
+    fn waits_below_the_cursor_but_never_at_it() {
+        assert!(may_wait_for_floor(0, 1));
+        assert!(may_wait_for_floor(2519, 2520));
+        assert!(!may_wait_for_floor(0, 0));
+        assert!(!may_wait_for_floor(2520, 2520));
     }
 }
 
