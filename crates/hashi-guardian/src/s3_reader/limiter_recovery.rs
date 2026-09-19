@@ -1,32 +1,30 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Recovers a standby enclave's activation limiter state from guardian S3
+//! Recovers a standby enclave's activation withdrawal state from guardian S3
 //! withdrawal logs.
 //!
-//! Each successful withdrawal log carries the limiter `post_state` after that
-//! consume. The withdrawal seq is strictly monotonic across rotations, so the
-//! global max-seq Success log holds the most recent limiter state.
-//!
-//! Finding that log is a 4-level S3 tree-walk over the hour-partitioned layout
-//! (`withdraw/YYYY/MM/DD/HH/`): at each level we list `CommonPrefixes`, pick the
-//! lex-greatest, and descend. The first hour bucket containing any `success-*`
-//! key is the latest non-empty bucket. We read it and one bucket back
-//! (sub-hour clock-skew defense across hour boundaries), then take the max-seq
-//! Success across both.
+//! Each successful withdrawal log carries the txid it debited and the limiter
+//! `post_state` after that consume. Activation reads every one of them, by
+//! walking the whole hour-partitioned layout (`withdraw/YYYY/MM/DD/HH/`): the
+//! complete txid set is what lets the enclave re-sign any repeat without a
+//! second debit, and the max-seq `post_state` is the limiter state to resume
+//! from. The walk is O(history) by design, because a set missing one txid would
+//! let that transaction be debited twice.
 //!
 //! We deliberately do not apply the auditor's `write_completion_time`
-//! (`DIR_WRITES_COMPLETION_DELAY`) gate when reading the found bucket. That gate
-//! exists for polling/auditor reads where the source might still be writing; if
-//! used here, an enclave that died late in an hour could have its final-hour
-//! bucket treated as not-yet-complete, and recovery would miss the most recent
-//! log. Activation instead calls this only after the heartbeat quiet check has
-//! confirmed every non-standby session has been silent long enough for S3
-//! read-after-write consistency to cover the old session's final writes.
+//! (`DIR_WRITES_COMPLETION_DELAY`) gate. That gate exists for polling/auditor
+//! reads where the source might still be writing; if used here, an enclave that
+//! died late in an hour could have its final-hour bucket treated as
+//! not-yet-complete, and recovery would miss its most recent logs. Activation
+//! instead calls this only after the heartbeat quiet check has confirmed every
+//! non-standby session has been silent long enough for S3 read-after-write
+//! consistency to cover the old session's final writes.
 
 use super::GuardianReader;
 use super::VerifiedLogRecord;
 use crate::s3_client::GuardianS3Client;
+use bitcoin::Txid;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
@@ -38,88 +36,91 @@ use hashi_types::guardian::VersionedLogMessage::V1;
 use hashi_types::guardian::VersionedLogMessage::V2;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
+use std::collections::HashSet;
 use tracing::info;
 
+/// Withdrawal state recovered from the log for activation.
+pub struct RecoveredWithdrawals {
+    /// Limiter state to resume from.
+    pub limiter_state: LimiterState,
+    /// Every transaction the log shows as debited in this bucket.
+    pub signed_txids: HashSet<Txid>,
+}
+
 impl GuardianReader {
-    /// Derive the activation limiter state from withdrawal logs. Uses the
-    /// global max-seq Success post-state when present, otherwise genesis, and
-    /// caps tokens to the supplied config in case capacity was lowered.
+    /// Derive the activation withdrawal state from withdrawal logs: every
+    /// debited txid, plus the global max-seq Success `post_state` (genesis when
+    /// no withdrawal has ever succeeded), with tokens capped to the supplied
+    /// config in case capacity was lowered.
     ///
     /// Precondition: the caller must have already verified that every
     /// non-standby session is quiet (`ensure_session_live_and_others_quiet`).
     /// This read deliberately skips the `write_completion_time` gate, so it is
     /// only sound once the prior session's final writes are guaranteed visible.
-    pub async fn recover_limiter_state(
+    pub async fn recover_withdrawal_state(
         &mut self,
         limiter_config: &LimiterConfig,
-    ) -> GuardianResult<LimiterState> {
-        let Some(mut cursor) = find_latest_success_bucket(&self.s3).await? else {
-            // The search covers the complete S3 withdrawal history, so this
-            // branch is reachable only if no withdrawal has ever succeeded.
-            info!("no successful withdrawal logs found; using genesis limiter state");
-            return Ok(LimiterState::genesis(limiter_config));
-        };
+    ) -> GuardianResult<RecoveredWithdrawals> {
+        let dirs = list_success_buckets(&self.s3).await?;
+        let mut signed_txids = HashSet::new();
+        let mut max_post_state: Option<LimiterState> = None;
+        for dir in dirs {
+            for (post_state, txid) in
+                bucket_successes(self.read_successful_withdrawals_in_dir(&dir).await?)
+            {
+                signed_txids.insert(txid);
+                max_post_state = Some(match max_post_state {
+                    Some(max) if max.next_seq >= post_state.next_seq => max,
+                    _ => post_state,
+                });
+            }
+        }
 
-        // Read the found bucket + one bucket back, then take max-seq across
-        // both. The peek-back defends against sub-hour clock skew that may have
-        // placed a higher-seq log in the prior hour bucket.
-        let hit = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
-        cursor = cursor.prev_dir();
-        let peek = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
-        let recovered_state = [hit, peek]
-            .into_iter()
-            .flatten()
-            .max_by_key(|s| s.next_seq)
-            .ok_or_else(|| {
-                InvalidS3Log("latest success bucket contained no verified Success logs".into())
-            })?;
-        let state = cap_limiter_state_to_config(recovered_state, limiter_config);
+        let Some(recovered_state) = max_post_state else {
+            info!("no successful withdrawal logs found; using genesis limiter state");
+            return Ok(RecoveredWithdrawals {
+                limiter_state: LimiterState::genesis(limiter_config),
+                signed_txids,
+            });
+        };
+        let limiter_state = cap_limiter_state_to_config(recovered_state, limiter_config);
         info!(
-            next_seq = state.next_seq,
-            last_updated_at = state.last_updated_at,
+            next_seq = limiter_state.next_seq,
+            last_updated_at = limiter_state.last_updated_at,
             recovered_num_tokens_available = recovered_state.num_tokens_available,
-            capped_num_tokens_available = state.num_tokens_available,
-            "recovered limiter state from withdrawal logs"
+            capped_num_tokens_available = limiter_state.num_tokens_available,
+            signed_txids = signed_txids.len(),
+            "recovered limiter state and signed transactions from withdrawal logs"
         );
-        Ok(state)
+        Ok(RecoveredWithdrawals {
+            limiter_state,
+            signed_txids,
+        })
     }
 }
 
-/// Finds the latest hour bucket under `withdraw/` containing at least one
-/// `success-*` key, by descending the YYYY/MM/DD/HH tree in lex-greatest
-/// order at each level. Returns `None` if no Success log exists anywhere.
-async fn find_latest_success_bucket(
+/// Every hour bucket under `withdraw/` holding at least one `success-*` key,
+/// from a full walk of the YYYY/MM/DD/HH tree.
+async fn list_success_buckets(
     s3_client: &GuardianS3Client,
-) -> GuardianResult<Option<S3HourScopedDirectory>> {
+) -> GuardianResult<Vec<S3HourScopedDirectory>> {
+    let mut dirs = Vec::new();
     let root = format!("{}/", S3_DIR_WITHDRAW);
-    let years = list_subdirs_desc(s3_client, &root).await?;
-    for year in years {
-        let months = list_subdirs_desc(s3_client, &year).await?;
-        for month in months {
-            let days = list_subdirs_desc(s3_client, &month).await?;
-            for day in days {
-                let hours = list_subdirs_desc(s3_client, &day).await?;
-                for hour in hours {
-                    if hour_bucket_has_success(s3_client, &hour).await? {
-                        let dir = S3HourScopedDirectory::from_path(&hour).map_err(|e| {
-                            InvalidS3Log(format!("invalid withdrawal-log directory {hour}: {e}"))
-                        })?;
-                        return Ok(Some(dir));
+    for year in s3_client.list_common_prefixes(&root).await? {
+        for month in s3_client.list_common_prefixes(&year).await? {
+            for day in s3_client.list_common_prefixes(&month).await? {
+                for hour in s3_client.list_common_prefixes(&day).await? {
+                    if !hour_bucket_has_success(s3_client, &hour).await? {
+                        continue;
                     }
+                    dirs.push(S3HourScopedDirectory::from_path(&hour).map_err(|e| {
+                        InvalidS3Log(format!("invalid withdrawal-log directory {hour}: {e}"))
+                    })?);
                 }
             }
         }
     }
-    Ok(None)
-}
-
-async fn list_subdirs_desc(
-    s3_client: &GuardianS3Client,
-    prefix: &str,
-) -> GuardianResult<Vec<String>> {
-    let mut subs = s3_client.list_common_prefixes(prefix).await?;
-    subs.sort_by(|a, b| b.cmp(a));
-    Ok(subs)
+    Ok(dirs)
 }
 
 async fn hour_bucket_has_success(
@@ -132,7 +133,7 @@ async fn hour_bucket_has_success(
     Ok(!keys.is_empty())
 }
 
-fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
+fn bucket_successes(logs: Vec<VerifiedLogRecord>) -> Vec<(LimiterState, Txid)> {
     logs.into_iter()
         .filter_map(|log| {
             let boxed = match log.into_entry().into_message() {
@@ -142,11 +143,13 @@ fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
                 V1(_) | V2(_) => return None,
             };
             match *boxed {
-                WithdrawalLogMessage::Success { post_state, .. } => Some(post_state),
+                WithdrawalLogMessage::Success {
+                    txid, post_state, ..
+                } => Some((post_state, txid)),
                 WithdrawalLogMessage::Failure { .. } => None,
             }
         })
-        .max_by_key(|s| s.next_seq)
+        .collect()
 }
 
 fn cap_limiter_state_to_config(
@@ -173,6 +176,7 @@ mod tests {
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::StandardWithdrawalRequestWire;
     use hashi_types::guardian::StandardWithdrawalResponse;
+    use hashi_types::guardian::WithdrawalID;
 
     fn build_pcrs() -> BuildPcrs {
         BuildPcrs::new("current", vec![0])
@@ -186,12 +190,17 @@ mod tests {
         }
     }
 
+    /// A Success record whose wid and txid bytes are `next_seq`.
     fn withdrawal_success_log(next_seq: u64) -> VerifiedLogRecord {
-        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let wid = WithdrawalID::new([next_seq as u8; 32]);
+        let signed =
+            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
         let (request_sign, request_data) = signed.into_parts();
+        let mut request_data = StandardWithdrawalRequestWire::from(request_data);
+        request_data.seq = next_seq - 1;
         let msg = WithdrawalLogMessage::Success {
-            txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
-            request_data: StandardWithdrawalRequestWire::from(request_data),
+            txid: Txid::from_slice(&[next_seq as u8; 32]).expect("valid txid"),
+            request_data,
             request_sign,
             response: StandardWithdrawalResponse::mock_for_testing(),
             post_state: state_with_seq(next_seq),
@@ -223,39 +232,36 @@ mod tests {
     }
 
     #[test]
-    fn bucket_max_empty_is_none() {
-        assert!(bucket_max_post_state(vec![]).is_none());
+    fn bucket_successes_empty_is_empty() {
+        assert!(bucket_successes(vec![]).is_empty());
     }
 
     #[test]
-    fn bucket_max_only_failures_is_none() {
+    fn bucket_successes_skips_failures() {
         assert!(
-            bucket_max_post_state(vec![withdrawal_failure_log(), withdrawal_failure_log()])
-                .is_none()
+            bucket_successes(vec![withdrawal_failure_log(), withdrawal_failure_log()]).is_empty()
         );
     }
 
     #[test]
-    fn bucket_max_picks_highest_seq_success() {
+    fn bucket_successes_returns_every_success_with_its_post_state() {
         let logs = vec![
             withdrawal_success_log(3),
+            withdrawal_failure_log(),
             withdrawal_success_log(7),
             withdrawal_success_log(5),
         ];
-        let got = bucket_max_post_state(logs).expect("non-empty success set");
-        assert_eq!(got.next_seq, 7);
-    }
-
-    #[test]
-    fn bucket_max_ignores_failures_when_picking_success() {
-        let logs = vec![
-            withdrawal_failure_log(),
-            withdrawal_success_log(2),
-            withdrawal_failure_log(),
-            withdrawal_success_log(9),
-        ];
-        let got = bucket_max_post_state(logs).expect("non-empty success set");
-        assert_eq!(got.next_seq, 9);
+        let got = bucket_successes(logs);
+        // Every debited transaction is returned, each paired with the limiter
+        // state from its own record.
+        assert_eq!(
+            got,
+            vec![
+                (state_with_seq(3), Txid::from_slice(&[3; 32]).unwrap()),
+                (state_with_seq(7), Txid::from_slice(&[7; 32]).unwrap()),
+                (state_with_seq(5), Txid::from_slice(&[5; 32]).unwrap()),
+            ]
+        );
     }
 
     #[test]
@@ -281,74 +287,59 @@ mod tests {
         format!("withdraw/{year:04}/{month:02}/{day:02}/{hour:02}/failure-sess-widabc-{n:08x}.json")
     }
 
-    fn assert_bucket(actual: Option<S3HourScopedDirectory>, expected_path: &str) {
-        let got = actual.expect("expected Some bucket");
+    fn bucket_paths(dirs: Vec<S3HourScopedDirectory>) -> Vec<String> {
+        dirs.iter().map(|dir| dir.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn list_success_buckets_empty_returns_nothing() {
+        let s3 = crate::test_utils::mock_logger_with_layout(std::iter::empty());
+        assert!(list_success_buckets(&s3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_success_buckets_returns_every_success_hour() {
+        // Recovery needs all of them, not just the newest: one missing txid
+        // would let that transaction be debited a second time.
+        let keys = vec![
+            withdraw_success_key(2023, 12, 31, 23, 1),
+            withdraw_success_key(2024, 1, 1, 0, 2),
+            withdraw_success_key(2024, 3, 15, 12, 9),
+        ];
+        let s3 = crate::test_utils::mock_logger_with_layout(keys);
+        let got = bucket_paths(list_success_buckets(&s3).await.unwrap());
         assert_eq!(
             got,
-            S3HourScopedDirectory::from_path(expected_path).unwrap()
+            vec![
+                "withdraw/2023/12/31/23/",
+                "withdraw/2024/01/01/00/",
+                "withdraw/2024/03/15/12/",
+            ]
         );
     }
 
     #[tokio::test]
-    async fn find_latest_success_bucket_empty_returns_none() {
-        let s3 = crate::test_utils::mock_logger_with_layout(std::iter::empty());
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert!(got.is_none());
-    }
-
-    #[tokio::test]
-    async fn find_latest_success_bucket_single_success_returns_that_bucket() {
-        let keys = vec![withdraw_success_key(2024, 3, 15, 14, 7)];
-        let s3 = crate::test_utils::mock_logger_with_layout(keys);
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert_bucket(got, "withdraw/2024/03/15/14/");
-    }
-
-    #[tokio::test]
-    async fn find_latest_success_bucket_rejects_deleted_latest_hour() {
-        let s3 = crate::test_utils::mock_logger_with_deleted_layout(
-            [withdraw_success_key(2024, 3, 15, 13, 5)],
-            [withdraw_success_key(2024, 3, 15, 14, 7)],
-        );
-        let err = find_latest_success_bucket(&s3).await.unwrap_err();
-        assert!(matches!(
-            err,
-            GuardianError::S3Error(message)
-                if message == "Delete marker found under prefix withdraw/2024/03/15/14/success-"
-        ));
-    }
-
-    #[tokio::test]
-    async fn find_latest_success_bucket_skips_latest_hour_with_only_failures() {
+    async fn list_success_buckets_skips_hours_with_only_failures() {
         let keys = vec![
             withdraw_failure_key(2024, 3, 15, 14, 0xdead_beef),
             withdraw_success_key(2024, 3, 15, 13, 5),
         ];
         let s3 = crate::test_utils::mock_logger_with_layout(keys);
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert_bucket(got, "withdraw/2024/03/15/13/");
+        let got = bucket_paths(list_success_buckets(&s3).await.unwrap());
+        assert_eq!(got, vec!["withdraw/2024/03/15/13/"]);
     }
 
     #[tokio::test]
-    async fn find_latest_success_bucket_picks_lex_greatest_across_years() {
-        let keys = vec![
-            withdraw_success_key(2023, 12, 31, 23, 1),
-            withdraw_success_key(2024, 1, 1, 0, 2),
-        ];
-        let s3 = crate::test_utils::mock_logger_with_layout(keys);
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert_bucket(got, "withdraw/2024/01/01/00/");
-    }
-
-    #[tokio::test]
-    async fn find_latest_success_bucket_backtracks_within_day() {
-        let keys = vec![
-            withdraw_failure_key(2024, 3, 15, 15, 1),
-            withdraw_failure_key(2024, 3, 15, 14, 2),
-            withdraw_success_key(2024, 3, 15, 12, 9),
-        ];
-        let s3 = crate::test_utils::mock_logger_with_layout(keys);
-        let got = find_latest_success_bucket(&s3).await.unwrap();
-        assert_bucket(got, "withdraw/2024/03/15/12/");
+    async fn list_success_buckets_rejects_a_deleted_record() {
+        let s3 = crate::test_utils::mock_logger_with_deleted_layout(
+            [withdraw_success_key(2024, 3, 15, 13, 5)],
+            [withdraw_success_key(2024, 3, 15, 14, 7)],
+        );
+        let err = list_success_buckets(&s3).await.unwrap_err();
+        assert!(matches!(
+            err,
+            GuardianError::S3Error(message)
+                if message == "Delete marker found under prefix withdraw/2024/03/15/14/success-"
+        ));
     }
 }

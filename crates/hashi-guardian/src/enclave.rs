@@ -23,6 +23,7 @@ use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -80,18 +81,28 @@ pub struct EnclaveConfig {
 }
 
 /// Mutable state that changes during operation.
-/// Committee + rate limiter are installed during operator_activate.
+/// Committee + withdrawal state are installed during operator_activate.
 pub struct EnclaveState {
     /// Authoritative mode-specific lifecycle, initialized at boot.
     lifecycle: RwLock<EnclaveLifecycle>,
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
-    /// Rate limiter. Set once during operator_activate.
+    /// Withdrawal state. Set once during operator_activate.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
-    rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
-    /// Mirrors the limiter's state so status reads never wait on the limiter
-    /// lock, which a withdrawal holds across its durable log write.
+    withdrawals: OnceLock<Arc<tokio::sync::Mutex<WithdrawalState>>>,
+    /// Mirrors the limiter's state so status reads never wait on the
+    /// withdrawal lock, which a withdrawal holds across its durable log write.
     limiter_snapshot: RwLock<Option<LimiterState>>,
+}
+
+/// State a withdrawal holds exclusively from its limiter debit through its
+/// durable success log.
+pub struct WithdrawalState {
+    pub limiter: RateLimiter,
+    /// Every transaction durably logged as debited, recovered in full at
+    /// activation. A repeat is re-signed from the request rather than served
+    /// from a stored response, since signing is deterministic.
+    pub signed_txids: HashSet<Txid>,
 }
 
 /// Inputs needed only between operator initialization and activation.
@@ -258,10 +269,14 @@ impl EnclaveState {
     // Activation State Installation
     // ========================================================================
 
-    /// Install the activation-derived committee + rate limiter. Called from operator_activate.
-    pub fn init(&self, committee: HashiCommittee, rate_limiter: RateLimiter) -> GuardianResult<()> {
+    /// Install the activation-derived committee + withdrawal state. Called from operator_activate.
+    pub fn init(
+        &self,
+        committee: HashiCommittee,
+        withdrawals: WithdrawalState,
+    ) -> GuardianResult<()> {
         self.set_committee(committee)?;
-        self.set_rate_limiter(rate_limiter)?;
+        self.set_withdrawals(withdrawals)?;
         Ok(())
     }
 
@@ -331,57 +346,46 @@ impl EnclaveState {
     }
 
     // ========================================================================
-    // Rate Limiter Management
+    // Withdrawal State Management
     // ========================================================================
 
-    fn set_rate_limiter(&self, limiter: RateLimiter) -> GuardianResult<()> {
-        info!("Setting rate limiter.");
+    fn set_withdrawals(&self, withdrawals: WithdrawalState) -> GuardianResult<()> {
+        info!("Setting withdrawal state.");
 
-        let state = *limiter.state();
-        self.rate_limiter
-            .set(Arc::new(tokio::sync::Mutex::new(limiter)))
-            .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))?;
+        let state = *withdrawals.limiter.state();
+        self.withdrawals
+            .set(Arc::new(tokio::sync::Mutex::new(withdrawals)))
+            .map_err(|_| InvalidInputs("withdrawal state already initialized".into()))?;
         *self.limiter_snapshot.write().unwrap() = Some(state);
         Ok(())
     }
 
-    /// Timeout for acquiring the limiter lock. If a withdrawal is in progress and
+    /// Timeout for acquiring the withdrawal lock. If a withdrawal is in progress and
     /// takes longer than this, callers bail rather than wait indefinitely.
-    const LIMITER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+    const WITHDRAWAL_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// Acquire exclusive access to the limiter, bounded by
-    /// `LIMITER_LOCK_TIMEOUT`.
-    async fn lock_limiter(&self) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
-        let rate_limiter = self
-            .rate_limiter
+    /// Acquire exclusive access to the withdrawal state, bounded by
+    /// `WITHDRAWAL_LOCK_TIMEOUT`. A withdrawal holds the guard through signing
+    /// and durable logging so no other withdrawal can start until this one is
+    /// durably logged or the enclave aborts.
+    pub async fn lock_withdrawals(&self) -> GuardianResult<OwnedMutexGuard<WithdrawalState>> {
+        let withdrawals = self
+            .withdrawals
             .get()
-            .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
+            .ok_or_else(|| InternalError("withdrawal state not initialized".into()))?;
         tokio::time::timeout(
-            Self::LIMITER_LOCK_TIMEOUT,
-            rate_limiter.clone().lock_owned(),
+            Self::WITHDRAWAL_LOCK_TIMEOUT,
+            withdrawals.clone().lock_owned(),
         )
         .await
-        .map_err(|_| Unavailable("timed out waiting for rate limiter lock".into()))
+        .map_err(|_| Unavailable("timed out waiting for withdrawal lock".into()))
     }
 
-    /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
-    /// The guard is held through signing and durable logging so no other withdrawal
-    /// can start until this one is durably logged or the enclave aborts.
-    pub async fn consume_from_limiter(
-        &self,
-        seq: u64,
-        timestamp: u64,
-        amount_sats: u64,
-    ) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
-        let mut guard = self.lock_limiter().await?;
-        guard.consume(seq, timestamp, amount_sats)?;
-        Ok(guard)
-    }
-
-    /// Record the consumption a withdrawal has just made durable, then release
-    /// the limiter. Consuming the guard orders the record before the release.
-    pub fn set_limiter_snapshot(&self, guard: OwnedMutexGuard<RateLimiter>) {
-        *self.limiter_snapshot.write().unwrap() = Some(*guard.state());
+    /// Record the debit the guard's holder has just made durable, then release
+    /// the lock. Consuming the guard orders the record before the release.
+    pub fn commit_withdrawal(&self, mut guard: OwnedMutexGuard<WithdrawalState>, txid: Txid) {
+        *self.limiter_snapshot.write().unwrap() = Some(*guard.limiter.state());
+        guard.signed_txids.insert(txid);
     }
 
     /// The limiter state as of the last durably logged withdrawal. `None` means
@@ -409,7 +413,7 @@ impl Enclave {
                     EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
                 }),
                 committee: RwLock::new(None),
-                rate_limiter: OnceLock::new(),
+                withdrawals: OnceLock::new(),
                 limiter_snapshot: RwLock::new(None),
             },
             temporary_init_state: RwLock::new(None),
@@ -537,7 +541,7 @@ impl Enclave {
             }
             EnclaveLifecycle::Withdraw(WithdrawStage::Activated) => {
                 self.state.has_committee()
-                    && self.state.rate_limiter.get().is_some()
+                    && self.state.withdrawals.get().is_some()
                     && !self.temporary_init_state_is_available()
             }
         };
