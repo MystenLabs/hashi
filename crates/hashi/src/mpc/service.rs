@@ -70,7 +70,6 @@ const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_WAIT_TOTAL_BUDGET: Duration = Duration::from_secs(600);
-const USE_LEGACY_PRESIG_DERIVATION: bool = false;
 /// Move `hashi::reconfig` abort constants, matched by their clever-error
 /// constant names (the `#[error]` abort code encodes a source line, so the
 /// numeric code is not stable). Together they tell the benign "another node
@@ -789,13 +788,8 @@ impl MpcService {
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let presignatures = Presignatures::new(
-            outcome.outputs,
-            batch_size_per_weight,
-            params,
-            USE_LEGACY_PRESIG_DERIVATION,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let presignatures = Presignatures::new(outcome.outputs, batch_size_per_weight, params)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
         let served_implies = presig_count(served_weight as usize, params, batch_size_per_weight);
         if presignatures.len() != served_implies {
@@ -1647,13 +1641,8 @@ impl MpcService {
             ));
         }
         let dealer_count = outputs.len();
-        let presignatures = Presignatures::new(
-            outputs,
-            batch_size_per_weight,
-            params,
-            USE_LEGACY_PRESIG_DERIVATION,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let presignatures = Presignatures::new(outputs, batch_size_per_weight, params)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         let metrics = &self.inner.metrics;
         let served_implies = presig_count(served_weight as usize, params, batch_size_per_weight);
         if presignatures.len() != served_implies {
@@ -2545,23 +2534,19 @@ mod presig_count_tests {
         use fastcrypto::groups::GroupElement;
         use fastcrypto::groups::Scalar;
         use fastcrypto_tbls::threshold_schnorr::S;
-        use fastcrypto_tbls::threshold_schnorr::batch_avss;
-        use fastcrypto_tbls::types::ShareIndex;
+        use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 
         use super::G;
         use super::Presignatures;
-        use super::USE_LEGACY_PRESIG_DERIVATION;
 
         let mut rng = rand::thread_rng();
         let params = Parameters { t: 3, f: 1 };
         let batch_size_per_weight = 2u16;
         let total_weight = 5usize;
-        let index = ShareIndex::new(1).unwrap();
-        let outputs: Vec<batch_avss::ReceiverOutput> = (0..total_weight)
-            .map(|_| batch_avss::ReceiverOutput {
-                my_shares: batch_avss::SharesForNode {
-                    shares: vec![batch_avss::ShareBatch {
-                        index,
+        let outputs: Vec<batch_avss_avid::ReceiverOutput> = (0..total_weight)
+            .map(|_| batch_avss_avid::ReceiverOutput {
+                my_shares: batch_avss_avid::SharesForNode {
+                    shares: vec![batch_avss_avid::ShareBatch {
                         batch: (0..batch_size_per_weight)
                             .map(|_| S::rand(&mut rng))
                             .collect(),
@@ -2576,14 +2561,9 @@ mod presig_count_tests {
 
         let expected = presig_count(total_weight, params, batch_size_per_weight);
         assert_eq!(
-            Presignatures::new(
-                outputs,
-                batch_size_per_weight,
-                params,
-                USE_LEGACY_PRESIG_DERIVATION
-            )
-            .unwrap()
-            .len(),
+            Presignatures::new(outputs, batch_size_per_weight, params,)
+                .unwrap()
+                .len(),
             expected
         );
         assert_ne!(
