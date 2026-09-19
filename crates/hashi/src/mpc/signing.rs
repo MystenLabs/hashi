@@ -1503,7 +1503,7 @@ mod tests {
     use fastcrypto::traits::AllowedRng;
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::threshold_schnorr::Parameters;
-    use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use fastcrypto_tbls::types::ShareIndex;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
@@ -1966,15 +1966,13 @@ mod tests {
 
             let managers: Vec<_> = (0..n as usize)
                 .map(|i| {
-                    let index = ShareIndex::new(i as u16 + 1).unwrap();
                     let key_shares = avss::SharesForNode {
                         shares: vec![sk_shares[i].clone()],
                     };
-                    let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
-                        .map(|j| batch_avss::ReceiverOutput {
-                            my_shares: batch_avss::SharesForNode {
-                                shares: vec![batch_avss::ShareBatch {
-                                    index,
+                    let outputs: Vec<batch_avss_avid::ReceiverOutput> = (0..n as usize)
+                        .map(|j| batch_avss_avid::ReceiverOutput {
+                            my_shares: batch_avss_avid::SharesForNode {
+                                shares: vec![batch_avss_avid::ShareBatch {
                                     batch: (0..batch_size_per_weight as usize)
                                         .map(|l| nonces_for_dealer[j].1[l][i])
                                         .collect(),
@@ -1984,13 +1982,9 @@ mod tests {
                             public_keys: nonces_for_dealer[j].0.clone(),
                         })
                         .collect();
-                    let presignatures = Presignatures::new(
-                        outputs,
-                        batch_size_per_weight,
-                        Parameters { t, f },
-                        true,
-                    )
-                    .unwrap();
+                    let presignatures =
+                        Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f })
+                            .unwrap();
                     let mgr = SigningManager::new(
                         test_address(i),
                         committee.clone(),
@@ -2116,12 +2110,10 @@ mod tests {
                 .collect();
             (0..self.managers.len())
                 .map(|i| {
-                    let index = ShareIndex::new(i as u16 + 1).unwrap();
-                    let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
-                        .map(|j| batch_avss::ReceiverOutput {
-                            my_shares: batch_avss::SharesForNode {
-                                shares: vec![batch_avss::ShareBatch {
-                                    index,
+                    let outputs: Vec<batch_avss_avid::ReceiverOutput> = (0..self.n as usize)
+                        .map(|j| batch_avss_avid::ReceiverOutput {
+                            my_shares: batch_avss_avid::SharesForNode {
+                                shares: vec![batch_avss_avid::ShareBatch {
                                     batch: (0..batch_size_per_weight as usize)
                                         .map(|l| nonces_for_dealer[j].1[l][i])
                                         .collect(),
@@ -2138,7 +2130,6 @@ mod tests {
                             t: self.t,
                             f: self.f,
                         },
-                        true,
                     )
                     .unwrap()
                 })
@@ -2222,15 +2213,13 @@ mod tests {
         let mut public_nonce = None;
         let mut partial_sigs: Vec<Eval<S>> = Vec::new();
         for (i, sk_share) in sk_shares.iter().enumerate().take(6) {
-            let index = ShareIndex::new(i as u16 + 1).unwrap();
             let key_shares = avss::SharesForNode {
                 shares: vec![sk_share.clone()],
             };
-            let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
-                .map(|j| batch_avss::ReceiverOutput {
-                    my_shares: batch_avss::SharesForNode {
-                        shares: vec![batch_avss::ShareBatch {
-                            index,
+            let outputs: Vec<batch_avss_avid::ReceiverOutput> = (0..n as usize)
+                .map(|j| batch_avss_avid::ReceiverOutput {
+                    my_shares: batch_avss_avid::SharesForNode {
+                        shares: vec![batch_avss_avid::ShareBatch {
                             batch: (0..batch_size_per_weight as usize)
                                 .map(|l| nonces_for_dealer[j].1[l][i])
                                 .collect(),
@@ -2241,7 +2230,7 @@ mod tests {
                 })
                 .collect();
             let presigs: Vec<(Vec<S>, G)> =
-                Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f }, true)
+                Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f })
                     .unwrap()
                     .collect();
             let (pn, sigs) = generate_partial_signatures(
@@ -2314,13 +2303,10 @@ mod tests {
                 (public_keys, nonce_shares)
             })
             .collect();
-
-        let index = ShareIndex::new(1).unwrap();
-        let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
-            .map(|j| batch_avss::ReceiverOutput {
-                my_shares: batch_avss::SharesForNode {
-                    shares: vec![batch_avss::ShareBatch {
-                        index,
+        let outputs: Vec<batch_avss_avid::ReceiverOutput> = (0..n as usize)
+            .map(|j| batch_avss_avid::ReceiverOutput {
+                my_shares: batch_avss_avid::SharesForNode {
+                    shares: vec![batch_avss_avid::ShareBatch {
                         batch: (0..batch_size_per_weight as usize)
                             .map(|l| nonces_for_dealer[j].1[l][0])
                             .collect(),
@@ -2332,7 +2318,7 @@ mod tests {
             .collect();
         let params = Parameters { t, f };
         let new_batch =
-            || Presignatures::new(outputs.clone(), batch_size_per_weight, params, true).unwrap();
+            || Presignatures::new(outputs.clone(), batch_size_per_weight, params).unwrap();
         let size0 = new_batch().len() as u64;
         assert!(size0 > 6, "batch must be large enough for the index math");
 

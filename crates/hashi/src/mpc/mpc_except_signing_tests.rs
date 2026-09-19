@@ -11,7 +11,7 @@ async fn run_nonce_generation_for_test(
     p2p_channel: &impl P2PChannel,
     tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
     metrics: &Metrics,
-) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+) -> MpcResult<Vec<batch_avss_avid::ReceiverOutput>> {
     MpcManager::run_nonce_dealer_phase(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
         .await;
     let admitted = admitted_from_tob(tob_channel, mpc_manager, batch_index, None).await;
@@ -12479,7 +12479,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
-    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=2 echoes; the Vote cert needs W−f=4.
+    // Confirmers {0..4}, decoder = node 5. The Vote cert needs W−f weight.
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
@@ -12487,11 +12487,11 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         .unwrap();
     let decoder_addr = setup.address(5);
 
-    // Four voters process their dispersal -> Vote sigs (for the W−f cert) and echoes for the decoder.
+    // The voters process their dispersal -> Vote sigs (for the W−f cert) and echoes for the decoder.
     let mut vote_sigs = Vec::new();
     let mut avid_vote = None;
     let mut echoes = Vec::new();
-    for j in [1usize, 2, 3, 4] {
+    for j in [0usize, 1, 2, 3, 4] {
         let voter = &mut fx.confirmers[j];
         let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
         let (vote, av, es) = voter
@@ -14212,18 +14212,13 @@ fn test_consume_certified_nonce_outputs_drops_avid_entries_the_loop_did_not_stam
         .get_mut(&(batch_index, stamped))
         .unwrap()
         .cert_digest = Some(MessagesHash::from([1u8; 32]));
-    let indices = party
-        .mpc_config
-        .nodes
-        .share_ids_of(party.party_id().unwrap())
-        .unwrap();
 
     let (_, dealers, outputs) = consume_certified_nonce_outputs(
         &mut party.dealer_avid_nonce_outputs,
         batch_index,
         &HashSet::from([stamped, overwritten]),
         |tagged| tagged.cert_digest.is_some(),
-        |tagged| tagged.output.clone().into_legacy(&indices),
+        |tagged| tagged.output.clone(),
     );
 
     assert_eq!(dealers, vec![stamped]);
@@ -15550,7 +15545,7 @@ fn test_decoded_shares_match_optimistic_shares() {
     let mut vote_sigs = Vec::new();
     let mut avid_vote = None;
     let mut echoes = Vec::new();
-    for j in [1usize, 2, 3, 4] {
+    for j in [0usize, 1, 2, 3, 4] {
         let voter = &mut fx.confirmers[j];
         let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
         let (vote, av, es) = voter
@@ -15637,8 +15632,7 @@ fn test_decoded_shares_match_optimistic_shares() {
         .nodes
         .share_ids_of(decoder.party_id().unwrap())
         .unwrap();
-    let decoded = decoded.into_legacy(&indices);
-    let direct = direct.output.into_legacy(&indices);
+    let direct = direct.output;
     assert_eq!(
         bcs::to_bytes(&decoded.public_keys).unwrap(),
         bcs::to_bytes(&direct.public_keys).unwrap(),
@@ -15649,24 +15643,24 @@ fn test_decoded_shares_match_optimistic_shares() {
         direct.my_shares.shares.len(),
         "share-batch counts must match"
     );
-    for (d, o) in decoded
+    for ((d, o), index) in decoded
         .my_shares
         .shares
         .iter()
         .zip(direct.my_shares.shares.iter())
+        .zip(&indices)
     {
-        assert_eq!(d.index, o.index, "share indices must match");
         assert_eq!(
             bcs::to_bytes(&d.batch).unwrap(),
             bcs::to_bytes(&o.batch).unwrap(),
             "share values must match for index {}",
-            d.index
+            index
         );
         assert_eq!(
             bcs::to_bytes(&d.blinding_share).unwrap(),
             bcs::to_bytes(&o.blinding_share).unwrap(),
             "blinding shares must match for index {}",
-            d.index
+            index
         );
     }
 }
@@ -15873,17 +15867,17 @@ fn test_avid_voter_state_survives_restart() {
         .unwrap();
 
     let mut vote_sigs = Vec::new();
-    for i in [1usize, 2, 3, 4] {
+    for i in [0usize, 1, 2, 3, 4] {
         let addr = setup.address(i);
         let (_, msg) = dispersals_a
             .iter()
             .find(|(a, _)| *a == addr)
             .unwrap()
             .clone();
-        let mgr = if i == 1 {
-            &mut voter
-        } else {
-            others.get_mut(&i).unwrap()
+        let mgr = match i {
+            0 => &mut dealer,
+            1 => &mut voter,
+            _ => others.get_mut(&i).unwrap(),
         };
         let response = mgr
             .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
@@ -16088,6 +16082,20 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
             extract_echo_for(&held, victim),
         ));
     }
+    // The dealer also votes on its own dispersal, so the Vote cert reaches W − f.
+    let (_, msg) = dispersals
+        .iter()
+        .find(|(a, _)| *a == dealer_addr)
+        .unwrap()
+        .clone();
+    let response = dealer_mgr
+        .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+        .unwrap();
+    vote_sigs.push(MemberSignature::new(
+        dealer_mgr.mpc_config.epoch,
+        dealer_addr,
+        response.signature,
+    ));
     let (held_vote, _) = confirmers[0]
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
