@@ -38,6 +38,12 @@ pub enum Field {
     SigningPubKey,
     /// X-only enclave BTC pubkey (32 bytes hex). Absent before `provisioner_init`.
     EnclaveBtcPubkey,
+    /// Signed enclave mode and lifecycle stage.
+    Lifecycle,
+    /// Digest of the operator-supplied `InitConfig`. Absent before `operator_init`.
+    ConfigHash,
+    /// Revision the enclave reports for its own build. Untrusted.
+    Revision,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -65,6 +71,18 @@ pub async fn run(args: Args) -> Result<()> {
                 )
             })?;
             println!("{}", hex::encode(btc_pk.serialize()));
+        }
+        Field::Lifecycle => {
+            println!("{:?}", info.lifecycle);
+        }
+        Field::ConfigHash => {
+            let config_hash = info
+                .config_hash
+                .ok_or_else(|| anyhow!("guardian /info did not return config_hash"))?;
+            println!("{}", hex::encode(config_hash));
+        }
+        Field::Revision => {
+            println!("{}", info.untrusted_git_revision);
         }
     }
     Ok(())
