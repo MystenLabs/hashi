@@ -414,6 +414,10 @@ pub(crate) struct RotationReconstructionContext<'a> {
     pub output_threshold: u16,
     pub output_max_faulty: u16,
     pub input_threshold: u16,
+    /// The committee the rotation reshares from, and its reduced nodes: a dealer may only deal
+    /// the share indices it held there.
+    pub input_committee: &'a Committee,
+    pub input_nodes: &'a Nodes<EncryptionGroupElement>,
     pub epoch: u64,
 }
 

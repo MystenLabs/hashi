@@ -197,6 +197,10 @@ pub struct MpcManager {
     pub previous_reconfig_output_threshold: Option<u16>,
     pub previous_reconfig_output_max_faulty: Option<u16>,
     pub previous_reconfig_input_threshold: Option<u16>,
+    /// The committee the previous epoch's rotation reshared from, and its reduced nodes. Used to
+    /// check which share indices a dealer of that rotation was entitled to deal.
+    pub previous_reconfig_input_committee: Option<Committee>,
+    pub previous_reconfig_input_nodes: Option<Nodes<EncryptionGroupElement>>,
     chain_id: String,
     /// The Hashi shared-object id, bound into every signing preimage this
     /// manager produces or verifies.
@@ -459,7 +463,11 @@ impl MpcManager {
             }
             None => (None, None, None, None),
         };
-        let previous_reconfig_input_threshold = committee_set
+        let (
+            previous_reconfig_input_committee,
+            previous_reconfig_input_nodes,
+            previous_reconfig_input_threshold,
+        ) = committee_set
             .committees()
             .range(..previous_epoch)
             .next_back()
@@ -473,8 +481,11 @@ impl MpcManager {
                         );
                     })
                     .ok()
-                    .map(|(_, threshold, _)| threshold)
-            });
+                    .map(|(nodes, threshold, _)| {
+                        (Some(input_committee.clone()), Some(nodes), Some(threshold))
+                    })
+            })
+            .unwrap_or((None, None, None));
         let identity = match (party_id_opt, encryption_key, signing_key) {
             (Some(party_id), Some(encryption_key), Some(signing_key)) => Some(TargetIdentity {
                 party_id,
@@ -501,6 +512,8 @@ impl MpcManager {
             previous_reconfig_output_threshold,
             previous_reconfig_output_max_faulty,
             previous_reconfig_input_threshold,
+            previous_reconfig_input_committee,
+            previous_reconfig_input_nodes,
             dealer_outputs: HashMap::new(),
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),
@@ -4963,6 +4976,11 @@ impl MpcManager {
             let Some(input_threshold) = mgr.previous_reconfig_output_threshold else {
                 return MpcOutputRecoveryOutcome::NotApplicable;
             };
+            let (Some(input_committee), Some(input_nodes)) =
+                (mgr.previous_committee.as_ref(), mgr.previous_nodes.as_ref())
+            else {
+                return MpcOutputRecoveryOutcome::NotApplicable;
+            };
             // Not `Suspicious`: a non-member has no current share to rebuild, which contradicts
             // nothing on chain.
             let Ok(identity) = mgr.identity() else {
@@ -4975,6 +4993,8 @@ impl MpcManager {
                 output_threshold: mgr.mpc_config.threshold,
                 output_max_faulty: mgr.mpc_config.max_faulty,
                 input_threshold,
+                input_committee,
+                input_nodes,
                 epoch: mgr.mpc_config.epoch,
             };
             let current =
@@ -5184,6 +5204,16 @@ impl MpcManager {
                 "Rotation reconstruction requires previous reconfig's output max_faulty".into(),
             )
         })?;
+        let input_committee = self.previous_reconfig_input_committee.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "Rotation reconstruction requires the previous reconfig's input committee".into(),
+            )
+        })?;
+        let input_nodes = self.previous_reconfig_input_nodes.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "Rotation reconstruction requires the previous reconfig's input nodes".into(),
+            )
+        })?;
         let input_threshold = self.previous_reconfig_input_threshold.ok_or_else(|| {
             MpcError::InvalidConfig(
                 "Rotation reconstruction requires previous reconfig's input threshold \
@@ -5203,6 +5233,8 @@ impl MpcManager {
             output_threshold,
             output_max_faulty,
             input_threshold,
+            input_committee,
+            input_nodes,
             epoch: self.previous_epoch,
         };
         self.reconstruct_rotation_output_locally(&context, certificates, complaint_cache)
@@ -5217,8 +5249,6 @@ impl MpcManager {
     ) -> MpcResult<ReconstructionOutcome> {
         let source_session_id =
             self.base_session_id_for_epoch(context.epoch, &ProtocolType::KeyRotation);
-        // Share indices are unique across certified dealers: every honest signer of a
-        // rotation cert rejects unowned indices at ack time.
         let mut local_outputs: HashMap<ShareIndex, avss::AvssOutput> = HashMap::new();
         let mut certified_share_indices = Vec::new();
         for cert in certificates {
@@ -5254,9 +5284,27 @@ impl MpcManager {
                     dealer: dealer_address,
                 });
             }
+            // Mirrors `select_rotation_indices` on the live path: a dealer may only contribute
+            // resharings of the indices it held in the input committee, so that both paths pick
+            // the same shares from the same certificates.
+            let dealer_party_id =
+                Self::member_party_id(context.input_committee, &dealer_address, "input committee")?;
+            let owned = context.input_nodes.share_ids_of(dealer_party_id).map_err(|_| {
+                MpcError::InvalidMessage {
+                    sender: dealer_address,
+                    reason: "Dealer has no shares in the input committee".into(),
+                }
+            })?;
             for (share_index, message) in rotation_msgs {
                 if certified_share_indices.len() >= context.input_threshold as usize {
                     break;
+                }
+                if !owned.contains(&share_index) {
+                    tracing::warn!(
+                        "reconstruct_rotation: dealer {:?} dealt share_index={share_index},                          which it does not hold in the input committee; skipping it",
+                        dealer_address,
+                    );
+                    continue;
                 }
                 if certified_share_indices.contains(&share_index) {
                     tracing::warn!(

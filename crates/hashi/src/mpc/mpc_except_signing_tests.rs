@@ -6361,9 +6361,12 @@ impl RotationTestSetup {
         if let Some(ref prev) = previous_committee {
             let (nodes, threshold, _max_faulty) =
                 build_reduced_nodes(prev, TEST_WEIGHT_DIVISOR, TEST_CHAIN_ID).unwrap();
-            manager.previous_nodes = Some(nodes);
+            manager.previous_nodes = Some(nodes.clone());
             manager.previous_reconfig_output_threshold = Some(threshold);
             manager.previous_reconfig_input_threshold = Some(threshold);
+            // Tests reuse the same committee on both sides of the rotation.
+            manager.previous_reconfig_input_committee = Some(prev.clone());
+            manager.previous_reconfig_input_nodes = Some(nodes);
         }
         manager.previous_committee = previous_committee;
         // Tests reuse the same key across epochs.
