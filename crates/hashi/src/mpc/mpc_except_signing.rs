@@ -116,7 +116,6 @@ use sui_sdk_types::Address;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
-const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
@@ -4179,7 +4178,7 @@ impl MpcManager {
             .collect::<Result<_, MpcError>>()?;
         let combined_output =
             avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs)
-                .expect(EXPECT_THRESHOLD_MET);
+                .map_err(|e| MpcError::ProtocolFailed(format!("complete_dkg failed: {e}")))?;
         tracing::info!(
             "complete_dkg: epoch={}, result vk={}",
             self.mpc_config.epoch,
@@ -4821,7 +4820,7 @@ impl MpcManager {
             &self.mpc_config.nodes,
             &indexed_outputs,
         )
-        .expect(EXPECT_THRESHOLD_MET);
+        .map_err(|e| MpcError::ProtocolFailed(format!("complete_key_rotation failed: {e}")))?;
         tracing::info!(
             "complete_key_rotation: epoch={}, result vk={}, matches_previous={}",
             self.mpc_config.epoch,
@@ -5145,7 +5144,7 @@ impl MpcManager {
         );
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
-                .expect(EXPECT_THRESHOLD_MET);
+                .map_err(|e| MpcError::ProtocolFailed(format!("complete_dkg failed: {e}")))?;
         tracing::info!(
             "reconstruct_dkg: result vk={}",
             hex::encode(combined_output.vk.to_byte_array()),
@@ -5345,7 +5344,7 @@ impl MpcManager {
             context.nodes,
             &indexed_outputs,
         )
-        .expect(EXPECT_THRESHOLD_MET);
+        .map_err(|e| MpcError::ProtocolFailed(format!("complete_key_rotation failed: {e}")))?;
         tracing::info!(
             "reconstruct_rotation: result vk={}",
             hex::encode(combined.vk.to_byte_array()),
