@@ -6915,6 +6915,7 @@ async fn test_departing_dealer_deals_into_the_rotation_that_removes_it() {
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerOnly,
+        &[],
     )
     .await
     .expect("a departing node must be able to deal into the rotation that removes it");
@@ -6960,6 +6961,7 @@ async fn test_departing_dealer_surfaces_a_failed_deal_instead_of_reporting_succe
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerOnly,
+        &[],
     )
     .await;
 
@@ -7005,6 +7007,7 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerOnly,
+        &[],
     )
     .await;
     assert!(
@@ -7018,6 +7021,7 @@ async fn test_departing_dealer_retries_a_failed_reconstruction_instead_of_parkin
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .expect("the party path still falls back to the public-only output");
@@ -7116,6 +7120,7 @@ async fn test_run_key_rotation() {
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .unwrap()
@@ -7254,6 +7259,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .unwrap()
@@ -7398,6 +7404,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .unwrap()
@@ -7634,6 +7641,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .unwrap()
@@ -7771,6 +7779,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         &mut mock_tob,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .unwrap()
@@ -7917,6 +7926,7 @@ async fn test_prepare_previous_output_for_new_member() {
         &mock_p2p,
         &metrics,
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .unwrap();
@@ -8000,6 +8010,7 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
         &mock_p2p,
         &metrics,
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .expect("prepare_previous_output should succeed by retrieving missing DKG messages");
@@ -8087,6 +8098,7 @@ async fn test_prepare_previous_output_refetches_diverged_dkg_message() {
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .expect("prepare_previous_output should succeed after re-fetching the diverged message");
@@ -8208,6 +8220,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
         &mock_p2p,
         &metrics,
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .expect("prepare_previous_output should succeed by retrieving missing rotation messages");
@@ -8329,6 +8342,7 @@ async fn test_prepare_previous_output_refetches_diverged_rotation_message() {
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .expect("prepare_previous_output should succeed after re-fetching the diverged message");
@@ -8443,6 +8457,7 @@ async fn test_prepare_previous_output_does_not_refetch_matching_messages() {
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await
     .expect("prepare_previous_output should succeed from the stored messages alone");
@@ -8564,6 +8579,7 @@ async fn test_prepare_previous_output_repairs_later_dealers_after_one_fails() {
         &mock_p2p,
         &test_metrics(),
         RotationRole::DealerAndParty,
+        &[],
     )
     .await;
 

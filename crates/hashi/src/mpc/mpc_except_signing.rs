@@ -929,6 +929,7 @@ impl MpcManager {
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
         role: RotationRole,
+        onchain_mpc_key: &[u8],
     ) -> MpcResult<ReconfigOutcome> {
         tracing::info!("run_key_rotation: starting prepare_previous_output, role={role:?}");
         let _timer = metrics
@@ -941,6 +942,7 @@ impl MpcManager {
             p2p_channel,
             metrics,
             role,
+            onchain_mpc_key,
         )
         .await?;
         drop(_timer);
@@ -5421,12 +5423,16 @@ impl MpcManager {
         })
     }
 
+    /// Rebuilds the previous epoch's output, either from its certificates or, for a node that was
+    /// not in that committee, from a quorum of peers. `onchain_mpc_key` is the authoritative copy
+    /// of the key both paths must arrive at; pass an empty slice when the chain has none yet.
     async fn prepare_previous_output(
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[VerifiedCertificateV1],
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
         role: RotationRole,
+        onchain_mpc_key: &[u8],
     ) -> MpcResult<(MpcOutput, bool)> {
         let (is_member_of_previous_committee, has_previous_key, threshold_opt) = {
             let mgr = mpc_manager.read().unwrap();
@@ -5491,6 +5497,14 @@ impl MpcManager {
              previous_vk={}",
             hex::encode(previous.public_key.to_byte_array()),
         );
+        // Rotation preserves the key, so the previous key is the one on chain. Without this, a
+        // wrong previous output only shows up as dealings this node cannot ack.
+        let previous_key = bcs::to_bytes(&previous.public_key).expect(EXPECT_SERIALIZATION_SUCCESS);
+        if !onchain_mpc_key.is_empty() && previous_key != onchain_mpc_key {
+            return Err(MpcError::ProtocolFailed(
+                "previous output does not match the on-chain key".into(),
+            ));
+        }
         Ok((previous, is_member_of_previous_committee))
     }
 
