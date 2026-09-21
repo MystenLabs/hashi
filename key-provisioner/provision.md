@@ -231,3 +231,8 @@ Find the row with your user ID and compare every group of four characters in
 its fingerprint with the printed fingerprint. Check that the roster has one
 row per participating KP. Confirm your row with the operator, or tell him
 immediately if anything differs.
+
+## Taking part in guardian operations
+
+Your YubiKey is now ready. See [Guardian Operations](guardian-operations.md) for
+the key ceremony, guardian provisioning, and the two kinds of rotation.
