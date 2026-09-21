@@ -89,8 +89,8 @@ aws-credential-types = "1"
 aws-sdk-s3 = "1.12.0"
 
 # fastcrypto — pinned to a `main` rev.
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d9e43e572b45f18cf1f1f333fbc2711f032a5015" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d9e43e572b45f18cf1f1f333fbc2711f032a5015" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "fc3786373d4a10d38e5c68f0937f866370c6839b" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "fc3786373d4a10d38e5c68f0937f866370c6839b" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
