@@ -231,12 +231,7 @@ struct ShareLogRecord {
 
 #[derive(Deserialize)]
 enum ShareLogMessage {
-    KpShareState(ShareState),
-}
-
-#[derive(Deserialize)]
-struct ShareState {
-    encrypted_shares: Vec<LabeledShare>,
+    KpShareState { encrypted_shares: Vec<LabeledShare> },
 }
 
 /// Each encrypted share contains exactly one required recipient fingerprint.
@@ -248,9 +243,8 @@ struct LabeledShare {
 
 fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
     let record: ShareLogRecord = serde_json::from_slice(bytes)?;
-    let ShareLogMessage::KpShareState(state) = record.message;
-    state
-        .encrypted_shares
+    let ShareLogMessage::KpShareState { encrypted_shares } = record.message;
+    encrypted_shares
         .iter()
         .map(|share| parse_recipient_fingerprint(&share.recipient_fingerprint))
         .collect()
