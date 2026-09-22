@@ -4189,15 +4189,16 @@ impl MpcManager {
             .unwrap_or(0);
         let combined_output =
             avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs).map_err(
-                |e| {
-                    classify_completion_failure(
-                        format!(
-                            "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
-                             dealer weight={dealer_weight}, share counts={share_counts:?})"
-                        ),
-                        dealer_weight as usize,
-                        e,
-                    )
+                |e| match e {
+                    FastCryptoError::NotEnoughWeight(needed) => MpcError::NotEnoughApprovals {
+                        needed,
+                        got: dealer_weight as usize,
+                    },
+                    // The rest are a bare `InvalidInput`, so the operands are the only diagnosis.
+                    e => MpcError::ProtocolFailed(format!(
+                        "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
+                         dealer weight={dealer_weight}, share counts={share_counts:?}): {e}"
+                    )),
                 },
             )?;
         tracing::info!(
@@ -4841,17 +4842,21 @@ impl MpcManager {
             &self.mpc_config.nodes,
             &indexed_outputs,
         )
-        .map_err(|e| {
-            let indices = indexed_outputs.iter().map(|o| o.index).collect::<Vec<_>>();
-            classify_completion_failure(
-                format!(
-                    "complete_key_rotation failed (threshold={threshold}, \
-                     outputs={}, indices={indices:?})",
+        .map_err(|e| match e {
+            FastCryptoError::InputLengthWrong(needed) if indexed_outputs.len() < needed => {
+                MpcError::NotEnoughApprovals {
+                    needed,
+                    got: indexed_outputs.len(),
+                }
+            }
+            e => {
+                let indices = indexed_outputs.iter().map(|o| o.index).collect::<Vec<_>>();
+                MpcError::ProtocolFailed(format!(
+                    "complete_key_rotation failed (threshold={threshold}, outputs={}, \
+                     indices={indices:?}): {e}",
                     indexed_outputs.len(),
-                ),
-                indexed_outputs.len(),
-                e,
-            )
+                ))
+            }
         })?;
         tracing::info!(
             "complete_key_rotation: epoch={}, result vk={}, matches_previous={}",
@@ -5181,16 +5186,18 @@ impl MpcManager {
         let dealers = outputs.len();
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
-                .map_err(|e| {
-                    classify_completion_failure(
-                        format!(
-                            "complete_dkg failed (threshold={}, dealers={dealers}, \
-                             dealer weight={dealer_weight_sum}, share counts={share_counts:?})",
-                            context.output_threshold,
-                        ),
-                        dealer_weight_sum as usize,
-                        e,
-                    )
+                .map_err(|e| match e {
+                    // Same shortfall the weight check above reports, and it heals on retry, unlike
+                    // the `ProtocolFailed` that `classify_reconstruction` treats as suspicious.
+                    FastCryptoError::NotEnoughWeight(needed) => MpcError::NotEnoughApprovals {
+                        needed,
+                        got: dealer_weight_sum as usize,
+                    },
+                    e => MpcError::ProtocolFailed(format!(
+                        "complete_dkg failed (threshold={}, dealers={dealers}, \
+                         dealer weight={dealer_weight_sum}, share counts={share_counts:?}): {e}",
+                        context.output_threshold,
+                    )),
                 })?;
         tracing::info!(
             "reconstruct_dkg: result vk={}",
@@ -5391,16 +5398,20 @@ impl MpcManager {
             context.nodes,
             &indexed_outputs,
         )
-        .map_err(|e| {
-            classify_completion_failure(
-                format!(
-                    "complete_key_rotation failed (threshold={}, outputs={}, indices={used_indices:?})",
-                    context.input_threshold,
-                    indexed_outputs.len(),
-                ),
+        .map_err(|e| match e {
+            // As in `reconstruct_dkg`: a shortfall must stay retryable.
+            FastCryptoError::InputLengthWrong(needed) if indexed_outputs.len() < needed => {
+                MpcError::NotEnoughApprovals {
+                    needed,
+                    got: indexed_outputs.len(),
+                }
+            }
+            e => MpcError::ProtocolFailed(format!(
+                "complete_key_rotation failed (threshold={}, outputs={}, \
+                 indices={used_indices:?}): {e}",
+                context.input_threshold,
                 indexed_outputs.len(),
-                e,
-            )
+            )),
         })?;
         tracing::info!(
             "reconstruct_rotation: result vk={}",
@@ -6412,21 +6423,6 @@ fn select_rotation_indices(
         .copied()
         .filter(|idx| owned.contains(idx) && !already.iter().any(|(_, i)| i == idx))
         .collect()
-}
-
-/// Map a failure of `complete_dkg` or `complete_key_rotation` onto an [MpcError]. Most arrive as a
-/// bare `InvalidInput`, so `context` carries the operands. A shortfall heals on retry, unlike the
-/// `ProtocolFailed` that [MpcManager::classify_reconstruction] treats as suspicious.
-///
-/// `got` is what fell short, in the unit the callee counts in: weight for `complete_dkg`, outputs
-/// for `complete_key_rotation`. It is only read for a shortfall.
-fn classify_completion_failure(context: String, got: usize, e: FastCryptoError) -> MpcError {
-    match e {
-        FastCryptoError::NotEnoughWeight(needed) | FastCryptoError::InputLengthWrong(needed) => {
-            MpcError::NotEnoughApprovals { needed, got }
-        }
-        _ => MpcError::ProtocolFailed(format!("{context}: {e}")),
-    }
 }
 
 fn required_previous_commitment(
