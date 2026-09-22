@@ -35,8 +35,7 @@ on:
     branches: [main]
     paths:
       - docker/hashi-guardian/**
-      - crates/hashi-guardian/**
-      - crates/hashi-types/**
+      - crates/**
       - Cargo.toml
       - Cargo.lock
       - .dockerignore

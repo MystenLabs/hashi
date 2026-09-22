@@ -19,57 +19,15 @@ FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c
 COPY --from=user-eif_build . /
 COPY --from=user-cpio . /
 
-# Only the guardian's dependency closure goes in: hashi-guardian, hashi-types,
-# root manifest, root lock. `-p` does not narrow resolution, so copying all of
-# crates/ would pull test-only deps into this build, and two of them
-# (`move-binary-format`, `move-core-types`) sit under a path the sui workspace
-# `exclude`s, which this cargo cannot resolve (#960). `cargo fetch` narrows the
-# root lock in place; the assertion after it proves that only pruned and never
-# re-picked a version, so the --frozen build compiles exactly what the root
-# lock pins. No build args: CI (guardian-enclave-resolve) runs just this stage.
+# Keep Cargo's dependency cache outside the workspace. A manifest at / makes
+# Cargo misidentify excluded crates in git dependencies (including Sui's Move
+# crates). Resolve the complete workspace so the root lock stays unchanged.
+# No build args: CI (guardian-enclave-resolve) runs just this stage.
 FROM base AS resolve
-COPY Cargo.toml /Cargo.toml
-COPY Cargo.lock /Cargo.lock
-COPY crates/hashi-guardian /crates/hashi-guardian
-COPY crates/hashi-types /crates/hashi-types
-WORKDIR /
-RUN <<-EOF
-	set -eu
-	cp /Cargo.lock /root-Cargo.lock
-	cargo fetch
-	# One "name|version|source|checksum" tuple per [[package]]. Whole paragraphs
-	# would not match: narrowing rewrites retained packages' dependency lists.
-	canon() {
-		in=0; n=; v=; s=; c=
-		while IFS= read -r l; do
-			case "$l" in
-			'[[package]]')
-				[ "$in" = 0 ] || printf '%s|%s|%s|%s\n' "$n" "$v" "$s" "$c"
-				in=1; n=; v=; s=; c= ;;
-			'['*)
-				[ "$in" = 0 ] || printf '%s|%s|%s|%s\n' "$n" "$v" "$s" "$c"
-				in=0 ;;
-			'name = '*) [ "$in" = 0 ] || n="${l#name = }" ;;
-			'version = '*) [ "$in" = 0 ] || v="${l#version = }" ;;
-			'source = '*) [ "$in" = 0 ] || s="${l#source = }" ;;
-			'checksum = '*) [ "$in" = 0 ] || c="${l#checksum = }" ;;
-			esac
-		done < "$1"
-		[ "$in" = 0 ] || printf '%s|%s|%s|%s\n' "$n" "$v" "$s" "$c"
-	}
-	canon /root-Cargo.lock | sort > /root.pkgs
-	canon /Cargo.lock | sort > /slice.pkgs
-	extra="$(grep -Fxv -f /root.pkgs /slice.pkgs || true)"
-	if [ -n "$extra" ]; then
-		echo "ERROR: resolution picked packages the committed root Cargo.lock does not pin:" >&2
-		echo "$extra" >&2
-		echo "The enclave must compile exactly what the root lock records. Update" >&2
-		echo "Cargo.toml and Cargo.lock together (any cargo build rewrites the lock)." >&2
-		exit 1
-	fi
-	echo "enclave lock subset OK: $(wc -l < /slice.pkgs) of $(wc -l < /root.pkgs) root packages"
-	rm /root-Cargo.lock /root.pkgs /slice.pkgs
-EOF
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo fetch --locked
 
 FROM resolve AS build
 ARG BUCKET_NAME
@@ -101,7 +59,7 @@ COPY --from=core-musl . initramfs
 COPY --from=core-ca-certificates /etc/ssl/certs initramfs
 COPY --from=core-busybox /bin/sh initramfs/sh
 COPY --from=user-socat /bin/socat . initramfs
-RUN cp /target/${TARGET}/release/hashi-guardian initramfs/guardian
+RUN cp /workspace/target/${TARGET}/release/hashi-guardian initramfs/guardian
 # run.sh is the enclave init: the kernel execs /init as PID 1.
 COPY docker/hashi-guardian/run.sh initramfs/init
 RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g; s/\${CEREMONY_MODE}/${CEREMONY_MODE}/g" initramfs/init

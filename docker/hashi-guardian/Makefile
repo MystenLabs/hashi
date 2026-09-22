@@ -16,7 +16,7 @@ out:
 
 # The EIF's inputs. .github/workflows/guardian-enclave.yml builds main pushes
 # that touch this list; a path added here must be added there too.
-out/nitro.eif: $(shell git ls-files ../../Cargo.toml ../../Cargo.lock ../../.dockerignore ../../crates/hashi-guardian ../../crates/hashi-types .) | out
+out/nitro.eif: $(shell git ls-files ../../Cargo.toml ../../Cargo.lock ../../.dockerignore ../../crates .) | out
 	docker build \
 		--pull \
 		--tag $(REGISTRY)/guardian-enclave \
@@ -50,8 +50,8 @@ run-debug: out/nitro.eif
 		--debug-mode \
 		--attach-console
 
-# The EIF build's resolve stage on its own: slice resolve + root-lock subset
-# assertion, in the enclave toolchain. CI runs this (guardian-enclave-resolve).
+# Resolve the complete workspace with the committed lock in the enclave
+# toolchain. CI runs this stage on its own (guardian-enclave-resolve).
 .PHONY: resolve-check
 resolve-check:
 	docker build \
