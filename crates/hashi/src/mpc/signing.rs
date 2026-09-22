@@ -7,6 +7,7 @@ use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
@@ -88,7 +89,7 @@ impl PresigBatch {
 struct SigningEpochConfig {
     address: Address,
     committee: Committee,
-    threshold: u16,
+    params: Parameters,
     key_shares: avss::SharesForNode,
     verifying_key: G,
     share_owners: HashMap<ShareIndex, Address>,
@@ -277,7 +278,7 @@ impl SigningManager {
     pub fn new(
         address: Address,
         committee: Committee,
-        threshold: u16,
+        params: Parameters,
         key_shares: avss::SharesForNode,
         verifying_key: G,
         share_owners: HashMap<ShareIndex, Address>,
@@ -307,7 +308,7 @@ impl SigningManager {
             config: Arc::new(SigningEpochConfig {
                 address,
                 committee,
-                threshold,
+                params,
                 key_shares,
                 verifying_key,
                 owned_counts: owned_counts_by_member(&share_owners),
@@ -329,7 +330,7 @@ impl SigningManager {
     pub fn new_recovered(
         address: Address,
         committee: Committee,
-        threshold: u16,
+        params: Parameters,
         key_shares: avss::SharesForNode,
         verifying_key: G,
         share_owners: HashMap<ShareIndex, Address>,
@@ -389,7 +390,7 @@ impl SigningManager {
                 config: Arc::new(SigningEpochConfig {
                     address,
                     committee,
-                    threshold,
+                    params,
                     key_shares,
                     verifying_key,
                     owned_counts: owned_counts_by_member(&share_owners),
@@ -519,7 +520,7 @@ impl SigningManager {
     }
 
     pub fn threshold(&self) -> u16 {
-        self.config.threshold
+        self.config.params.t
     }
 
     pub fn key_shares(&self) -> &avss::SharesForNode {
@@ -570,7 +571,8 @@ impl SigningManager {
         metrics: &Metrics,
         result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
     ) {
-        let threshold = self.config.threshold;
+        let params = self.config.params;
+        let threshold = params.t;
         let verifying_key = self.config.verifying_key;
         let self_address = self.config.address;
         let all_peers: HashSet<Address> = self
@@ -632,7 +634,7 @@ impl SigningManager {
             self.finalize_sweep(
                 &mut pending,
                 &mut flagged,
-                threshold,
+                params,
                 &verifying_key,
                 metrics,
                 &result_tx,
@@ -681,7 +683,7 @@ impl SigningManager {
         &self,
         pending: &mut Vec<InputSigningState>,
         flagged: &mut HashSet<ShareIndex>,
-        threshold: u16,
+        params: Parameters,
         verifying_key: &G,
         metrics: &Metrics,
         result_tx: &tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
@@ -694,7 +696,7 @@ impl SigningManager {
                 let peers_exhausted = pending[i].peers_remaining.is_empty();
                 let outcome = try_finalize_signature(
                     &mut pending[i],
-                    threshold,
+                    params,
                     verifying_key,
                     peers_exhausted,
                     flagged,
@@ -729,7 +731,7 @@ impl SigningManager {
                     st.signing_id,
                     Err(SigningError::TooManyInvalidSignatures {
                         collected: st.partials.len(),
-                        threshold,
+                        threshold: params.t,
                     }),
                 ));
                 false
@@ -1099,7 +1101,7 @@ struct AggregationContext {
     beacon: S,
     vk: G,
     deriv: Option<DerivationAddress>,
-    threshold: u16,
+    params: Parameters,
 }
 
 impl AggregationContext {
@@ -1112,13 +1114,13 @@ impl AggregationContext {
             .mpc_sign_aggregation_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
             .start_timer();
-        let (message, nonce, beacon, vk, deriv, threshold) = (
+        let (message, nonce, beacon, vk, deriv, params) = (
             self.message.clone(),
             self.nonce,
             self.beacon,
             self.vk,
             self.deriv,
-            self.threshold,
+            self.params,
         );
         super::spawn_blocking(move || {
             aggregate_signatures(
@@ -1126,7 +1128,7 @@ impl AggregationContext {
                 &nonce,
                 &beacon,
                 &sigs,
-                threshold,
+                params,
                 &vk,
                 deriv.as_ref(),
             )
@@ -1137,13 +1139,13 @@ impl AggregationContext {
 
 async fn try_finalize_signature(
     st: &mut InputSigningState,
-    threshold: u16,
+    params: Parameters,
     verifying_key: &G,
     peers_exhausted: bool,
     flagged: &HashSet<ShareIndex>,
     metrics: &Metrics,
 ) -> FinalizeOutcome {
-    let t = threshold as usize;
+    let t = params.t as usize;
     let n = st.partials.len();
     let need_more_or_fail = || {
         if peers_exhausted {
@@ -1161,7 +1163,7 @@ async fn try_finalize_signature(
         beacon: st.beacon,
         vk: *verifying_key,
         deriv: st.derivation_address,
-        threshold,
+        params,
     };
     let crypto_error =
         |e: FastCryptoError| FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string()));
@@ -1223,7 +1225,7 @@ impl SigningManager {
         flagged: &HashSet<ShareIndex>,
         metrics: &Metrics,
     ) -> bool {
-        let t = self.config.threshold as usize;
+        let t = self.config.params.t as usize;
         let now = Instant::now();
         let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
         for st in pending.iter_mut() {
@@ -1921,7 +1923,7 @@ mod tests {
                     let mgr = SigningManager::new(
                         test_address(i),
                         committee.clone(),
-                        t,
+                        Parameters { t, f },
                         key_shares,
                         vk,
                         test_share_owners(n),
@@ -2107,6 +2109,7 @@ mod tests {
         vk: G,
         beacon: S,
         t: u16,
+        f: u16,
         rng: StdRng,
     }
 
@@ -2187,6 +2190,7 @@ mod tests {
             vk,
             beacon,
             t,
+            f,
             rng,
         }
     }
@@ -2261,7 +2265,7 @@ mod tests {
         let mgr = SigningManager::new_recovered(
             test_address(0),
             committee.clone(),
-            t,
+            Parameters { t, f },
             avss::SharesForNode {
                 shares: vec![sk_shares[0].clone()],
             },
@@ -2281,7 +2285,7 @@ mod tests {
         let (_, unmasked) = SigningManager::new_recovered(
             test_address(0),
             committee.clone(),
-            t,
+            Parameters { t, f },
             avss::SharesForNode {
                 shares: vec![sk_shares[0].clone()],
             },
@@ -2346,7 +2350,7 @@ mod tests {
         let err = SigningManager::new_recovered(
             test_address(0),
             committee,
-            t,
+            Parameters { t, f },
             avss::SharesForNode {
                 shares: vec![sk_shares[0].clone()],
             },
@@ -2868,7 +2872,7 @@ mod tests {
 
         let outcome = try_finalize_signature(
             &mut pending[0],
-            setup.managers[0].config.threshold,
+            setup.managers[0].config.params,
             &setup.verifying_key,
             true,
             &HashSet::new(),
@@ -3965,7 +3969,18 @@ mod tests {
             data.t as usize,
             HashSet::new(),
         );
-        try_finalize_signature(&mut st, data.t, &data.vk, true, flagged, &test_metrics()).await
+        try_finalize_signature(
+            &mut st,
+            Parameters {
+                t: data.t,
+                f: data.f,
+            },
+            &data.vk,
+            true,
+            flagged,
+            &test_metrics(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -4009,7 +4024,9 @@ mod tests {
         match finalize_with(&data, message, one_flagged, &flags(&[4])).await {
             FinalizeOutcome::Done(sig, mismatched) => {
                 verify_schnorr(&data.vk, message, &sig);
-                assert_eq!(mismatched, vec![share_index(5)]);
+                // The correction is right, but 5 partials with 1 excluded leaves 4 against the
+                // t + f = 5 the aggregation needs before it will name an index.
+                assert!(mismatched.is_empty());
             }
             _ => panic!("erasing the flagged index must let recovery correct the other"),
         }
@@ -4029,7 +4046,10 @@ mod tests {
             &data.public_nonce,
             &data.beacon,
             &data.partial_sigs,
-            data.t,
+            Parameters {
+                t: data.t,
+                f: data.f,
+            },
             &data.vk,
             None,
         )
@@ -4057,7 +4077,10 @@ mod tests {
             &data.public_nonce,
             &data.beacon,
             &data.partial_sigs,
-            data.t,
+            Parameters {
+                t: data.t,
+                f: data.f,
+            },
             &data.vk,
             None,
         );
