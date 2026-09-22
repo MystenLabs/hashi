@@ -9,10 +9,11 @@ non-canonical records. Random failure suffixes are sampled once before signing.
 Unsigned OI attestations bind placement through their Nitro-authenticated
 signing key and derived session ID.
 
-Guardians emit schema V2 records. Readers still deserialize V1 records and
-verify their signatures over the original V1 payload. Both schema versions use
-the same KP-share payload: one recipient fingerprint and one ciphertext per
-share.
+Guardians emit and read a single log schema, with `schema_version: 1` reset
+for the testnet wipe. Pre-wipe records are no longer supported. KP-share records
+carry one recipient fingerprint and one ciphertext per share. The
+`VersionedLogMessage` wrapper retains explicit version dispatch for future
+schema changes.
 
 ## Heartbeat write fencing
 
@@ -98,7 +99,7 @@ Where:
 - `kp-shares/proposed` contains one session-addressed ceremony proposal with the ceremony metadata and initial encrypted KP shares. Ceremony participants read this record before confirmation. Proposals use the short object-lock policy and are not authoritative serving state.
 - `ceremony` logs are flat (not date-partitioned) and contain only completed ceremonies. After every KP confirms a proposal, the guardian writes its initial finalized `kp-shares` state and then its `CeremonyLogMessage`; the ceremony write is the commit record. `NewKey { instance }` represents genesis (`sharing_seq=0`) and `Rotate { old_instance, new_instance }` advances `sharing_seq` by one. A rotation records the `old_instance` it consumed so the chain is auditable from the log alone. Readers select the lexicographically last ceremony as the current authoritative instance.
 - Finalized `kp-shares` logs carry the current encrypted KP share state for a completed `sharing_seq`. Setup and KP-set rotation publish `cert_seq=0` during ceremony completion; individual KP cert rotations append higher `cert_seq` entries. Each share id has one recipient fingerprint and one PGP-encrypted ciphertext. Readers take the lexicographically last entry under `kp-shares/{sharing_seq:020}/`. Integrity is the enclave signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
-- `genesis` is a fixed singleton record carrying the first-deploy committee, Hashi object id, and MPC master `G` after KP-authorized PI reaches threshold, before any `committee-update/` success exists. Deployed V1 records contain only the committee.
+- `genesis` is a fixed singleton record carrying the first-deploy committee, Hashi object id, and MPC master `G` after KP-authorized PI reaches threshold, before any `committee-update/` success exists.
 - `committee-update` logs are flat (not date-partitioned). Successes are epoch-sorted; failures lead with `failure-` so all successes sort first — the lex-last non-`failure-` key is the latest successfully-applied epoch.
 
 ## Why this layout

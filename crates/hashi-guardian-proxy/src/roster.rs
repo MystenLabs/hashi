@@ -251,7 +251,7 @@ struct ShareState {
 
 /// Both the legacy `Shares` envelope and versioned `KpShareState` envelope
 /// contain exactly one required recipient fingerprint per encrypted share.
-/// Removed map-shaped V2 payloads intentionally fail deserialization.
+/// Removed map-shaped payloads intentionally fail deserialization.
 #[derive(Deserialize)]
 struct LabeledShare {
     recipient_fingerprint: String,
@@ -291,7 +291,7 @@ mod tests {
         hex.parse().unwrap()
     }
 
-    /// Scalar shares used by both deployed V1 and current V2 records.
+    /// Scalar shares used by the current log schema.
     fn single_cert_shares(fingerprints: &[&str]) -> Vec<serde_json::Value> {
         fingerprints
             .iter()
@@ -338,18 +338,9 @@ mod tests {
         cert_seq: u64,
         fingerprints: &[&str],
     ) -> (String, Vec<u8>) {
-        versioned_kp_shares_record(2, sharing_seq, cert_seq, fingerprints)
-    }
-
-    fn versioned_kp_shares_record(
-        schema_version: u16,
-        sharing_seq: u64,
-        cert_seq: u64,
-        fingerprints: &[&str],
-    ) -> (String, Vec<u8>) {
         let shares = single_cert_shares(fingerprints);
         let record = serde_json::json!({
-            "schema_version": schema_version,
+            "schema_version": hashi_types::guardian::VersionedLogMessage::SCHEMA_VERSION_V1,
             "session_id": "test-session",
             "timestamp_ms": 0,
             "message": { "KpShareState": {
@@ -401,8 +392,8 @@ mod tests {
     #[tokio::test]
     async fn latest_cert_seq_wins_within_a_sharing_seq() {
         let store = MemStore::default();
-        let (key0, bytes0) = versioned_kp_shares_record(1, 3, 0, &[FP_A]);
-        let (key1, bytes1) = versioned_kp_shares_record(2, 3, 1, &[FP_B]);
+        let (key0, bytes0) = kp_shares_record(3, 0, &[FP_A]);
+        let (key1, bytes1) = kp_shares_record(3, 1, &[FP_B]);
         // An older sharing seq must lose regardless of cert_seq.
         let (key_old, bytes_old) = kp_shares_record(2, 9, &[FP_A]);
         store.insert(key0, bytes0);

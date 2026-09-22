@@ -155,7 +155,7 @@ pub struct WithdrawOperatorInitRequest {
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
 /// and that the enclave exposes via `GuardianInfo`.
 // TODO(testnet-wipe): Load the immutable Hashi object id and MPC master G from
-// the verified V2 genesis record, then remove their duplicate operator-supplied
+// the verified genesis record, then remove their duplicate operator-supplied
 // fields from InitConfig.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitConfig {

@@ -1,12 +1,26 @@
 {
   "schema_version": 1,
-  "object_key": "kp-shares/00000000000000000000/00000000000000000000-d54207da194977dc.json",
+  "object_key": "kp-shares/proposed/d54207da194977dc.json",
   "session_id": "d54207da194977dc",
   "timestamp_ms": 1700000000000,
   "message": {
-    "KpShareState": {
-      "sharing_seq": 0,
-      "cert_seq": 0,
+    "CeremonyProposal": {
+      "ceremony": {
+        "NewKey": {
+          "instance": {
+            "commitments": {
+              "1": "010101010101010101010101010101010101010101010101010101010101010101",
+              "2": "020202020202020202020202020202020202020202020202020202020202020202"
+            },
+            "params": {
+              "num_shares": 2,
+              "threshold": 2
+            },
+            "sharing_seq": 0
+          },
+          "btc_master_pubkey": "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"
+        }
+      },
       "encrypted_shares": [
         {
           "id": 1,
@@ -36,5 +50,5 @@
       ]
     }
   },
-  "signature": "5bb7fd3825a6dd5c80f343c23c2190b7937641b3fc81df1debc5b4908fbfffa64f56a8a027806ad9d07f3ba8710afba9f35c88ae65ea3337e1cbc82b10956209"
+  "signature": "20cdc5b560314ed637ae4125850173722c9468a4cf3a604f93a83d3df721174860a7e6ceb9379d053ca10f65b3f89342cf5307ad70fdeb799b98a63127ffeb08"
 }

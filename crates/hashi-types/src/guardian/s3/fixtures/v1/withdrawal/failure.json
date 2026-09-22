@@ -1,12 +1,11 @@
 {
   "schema_version": 1,
-  "object_key": "withdraw/2023/11/14/22/success-00000000000000000000-d54207da194977dc-wid0xabababababababababababababababababababababababababababababababab.json",
+  "object_key": "withdraw/2023/11/14/22/failure-d54207da194977dc-wid0xabababababababababababababababababababababababababababababababab-00000000000000000000000000000000.json",
   "session_id": "d54207da194977dc",
   "timestamp_ms": 1700000000000,
   "message": {
     "Withdrawal": {
-      "Success": {
-        "txid": "0303030303030303030303030303030303030303030303030303030303030303",
+      "Failure": {
         "request_data": {
           "wid": "0xabababababababababababababababababababababababababababababababab",
           "utxos": {
@@ -44,21 +43,9 @@
             ]
           }
         },
-        "response": {
-          "enclave_signatures": [
-            {
-              "signature": "a537e4fdaddeab887de5b34d4a9e55d5f2e3ad7659e660ebb73f7829ed384398f68f02add6fd759b5f8a093746b63633f80f9338a25c31488269c1d455f35085",
-              "sighash_type": "SIGHASH_DEFAULT"
-            }
-          ]
-        },
-        "post_state": {
-          "num_tokens_available": 10,
-          "last_updated_at": 20,
-          "next_seq": 1
-        }
+        "error": "Rate limit exceeded"
       }
     }
   },
-  "signature": "905c335ec692a6e69227bb1f0c2fdcfa8f43586353c1a43ae9792373656c3c4570ee9c7536a63d63efdf125c6d647ae564dd620dd1e75c2d039c9805c89fa002"
+  "signature": "2f06c4ab9154b4c6c3a92289aa058ea62a61c21f3a39c8c797385517c3785c87331dc0c4c6514ee2b9335c7ff74060270ec0ebb6fb349ea762104f82b714720c"
 }

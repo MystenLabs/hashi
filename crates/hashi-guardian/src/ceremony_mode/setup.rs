@@ -91,7 +91,7 @@ mod tests {
     use crate::test_utils::decrypt_kp_shares;
     use crate::test_utils::mock_kp_certs_roster_with_secrets;
     use hashi_types::guardian::crypto::combine_shares;
-    use hashi_types::guardian::LogMessageV2;
+    use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
 
@@ -153,9 +153,9 @@ mod tests {
             &format!("kp-shares/proposed/{}.json", enclave.s3_session_id())
         );
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::CeremonyProposal(proposal)) = record.message()
+        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) = record.message()
         else {
-            panic!("expected V2 CeremonyProposal variant");
+            panic!("expected V1 CeremonyProposal variant");
         };
         let CeremonyLogMessage::NewKey {
             instance,

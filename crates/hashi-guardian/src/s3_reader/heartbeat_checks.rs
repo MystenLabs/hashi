@@ -15,10 +15,8 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::PriorSessionHeartbeatStillRecent;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LogMessageV1;
-use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VersionedLogMessage::V1;
-use hashi_types::guardian::VersionedLogMessage::V2;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::info;
@@ -126,8 +124,8 @@ fn summarize_heartbeats_by_session(
         let session_id = entry.session_id().clone();
         let ts = entry.timestamp_ms();
         match entry.into_message() {
-            V1(LogMessageV1::Heartbeat(..)) | V2(LogMessageV2::Heartbeat(..)) => {}
-            V1(_) | V2(_) => {
+            V1(LogMessageV1::Heartbeat(..)) => {}
+            V1(_) => {
                 return Err(InvalidS3Log(
                     "non-heartbeat log found under the heartbeat prefix".into(),
                 ));

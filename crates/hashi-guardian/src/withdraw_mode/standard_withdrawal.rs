@@ -188,7 +188,7 @@ mod tests {
     use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::LogMessageV2;
+    use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::VersionedLogMessage;
@@ -390,8 +390,8 @@ mod tests {
         );
         let success: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
         assert_eq!(captured[0].0, success.object_key());
-        let VersionedLogMessage::V2(LogMessageV2::Withdrawal(message)) = success.message() else {
-            panic!("expected V2 withdrawal record");
+        let VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) = success.message() else {
+            panic!("expected V1 withdrawal record");
         };
         let WithdrawalLogMessage::Success {
             request_data,
@@ -407,8 +407,8 @@ mod tests {
 
         let failure: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
         assert_eq!(captured[1].0, failure.object_key());
-        let VersionedLogMessage::V2(LogMessageV2::Withdrawal(message)) = failure.message() else {
-            panic!("expected V2 withdrawal record");
+        let VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) = failure.message() else {
+            panic!("expected V1 withdrawal record");
         };
         let WithdrawalLogMessage::Failure {
             request_data,

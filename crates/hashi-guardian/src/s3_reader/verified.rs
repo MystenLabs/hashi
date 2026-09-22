@@ -11,13 +11,11 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::LogMessageV1;
-use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::LogType;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::VersionedLogMessage::V1;
-use hashi_types::guardian::VersionedLogMessage::V2;
 
 /// Initialization checkpoint required by or verified for a session.
 ///
@@ -192,8 +190,8 @@ impl VerifiedSessionInfo {
         let record = s3.get_log_record(key).await?;
         let entry = record.validate_into_entry(signing_pubkey)?;
         match entry.into_message() {
-            V1(LogMessageV1::Init(message)) | V2(LogMessageV2::Init(message)) => Ok(message),
-            V1(_) | V2(_) => Err(InvalidS3Log(format!("expected an init log at key {key}"))),
+            V1(LogMessageV1::Init(message)) => Ok(message),
+            V1(_) => Err(InvalidS3Log(format!("expected an init log at key {key}"))),
         }
     }
 

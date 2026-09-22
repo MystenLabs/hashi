@@ -124,7 +124,7 @@ mod tests {
     use hashi_types::guardian::Ciphertext;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
-    use hashi_types::guardian::LogMessageV2;
+    use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::SecretSharingParams;
@@ -270,9 +270,9 @@ mod tests {
             .0
             .starts_with("kp-shares/00000000000000000000/00000000000000000008-"));
         let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::KpShareState(persisted)) = record.message()
+        let VersionedLogMessage::V1(LogMessageV1::KpShareState(persisted)) = record.message()
         else {
-            panic!("certificate rotation should persist a V2 KP-share snapshot");
+            panic!("certificate rotation should persist a V1 KP-share snapshot");
         };
         assert_eq!(persisted.sharing_seq, 0);
         assert_eq!(persisted.cert_seq, INITIAL_CERT_SEQ + 1);

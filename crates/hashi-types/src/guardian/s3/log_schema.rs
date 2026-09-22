@@ -10,7 +10,6 @@ use super::log_messages::CeremonyLogMessage;
 use super::log_messages::CeremonyProposalLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
 use super::log_messages::GenesisLogMessageV1;
-use super::log_messages::GenesisLogMessageV2;
 use super::log_messages::HeartbeatLogMessage;
 use super::log_messages::InitLogMessage;
 use super::log_messages::KpShareStateLogMessage;
@@ -29,18 +28,11 @@ use std::time::Duration;
 #[derive(Debug)]
 pub enum VersionedLogMessage {
     V1(LogMessageV1),
-    V2(LogMessageV2),
 }
 
 impl From<LogMessageV1> for VersionedLogMessage {
     fn from(message: LogMessageV1) -> Self {
         Self::V1(message)
-    }
-}
-
-impl From<LogMessageV2> for VersionedLogMessage {
-    fn from(message: LogMessageV2) -> Self {
-        Self::V2(message)
     }
 }
 
@@ -51,16 +43,15 @@ impl Serialize for VersionedLogMessage {
     {
         match self {
             Self::V1(message) => message.serialize(serializer),
-            Self::V2(message) => message.serialize(serializer),
         }
     }
 }
 
-/// Schema-version-1 log messages.
+/// Schema-version-1 log messages emitted by the guardian enclave.
+/// Uses an enum discriminator for automatic domain separation between variants.
 ///
-/// Separate V1 and V2 types force readers to handle each deployed version
-/// explicitly. Most variants share their payload types; genesis retains its
-/// deployed V1 committee-only payload while V2 also binds the Hashi object id.
+/// When variants, payload fields, or serialization change, update the dummy
+/// corpus and its coverage in `log_record::tests`; see `fixtures/README.md`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
@@ -70,26 +61,11 @@ pub enum LogMessageV1 {
     KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessageV1>),
-}
-
-/// Schema-version-2 log messages emitted by the guardian enclave.
-/// Uses an enum discriminator for automatic domain separation between variants.
-// TODO(testnet-wipe): Collapse the V1/V2 compatibility layer into a single log
-// schema once existing testnet records no longer need to be read.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum LogMessageV2 {
-    Heartbeat(HeartbeatLogMessage),
-    Init(Box<InitLogMessage>),
-    Withdrawal(Box<WithdrawalLogMessage>),
-    Ceremony(Box<CeremonyLogMessage>),
-    KpShareState(Box<KpShareStateLogMessage>),
-    CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
-    Genesis(Box<GenesisLogMessageV2>),
     CeremonyProposal(Box<CeremonyProposalLogMessage>),
 }
 
 /// Writer-facing alias for the log-message schema emitted by guardians.
-pub type LogMessage = LogMessageV2;
+pub type LogMessage = LogMessageV1;
 
 /// Schema-independent category of a Guardian log payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,25 +139,20 @@ macro_rules! impl_log_message_schema {
     };
 }
 
-impl_log_message_schema!(LogMessageV1);
-impl_log_message_schema!(LogMessageV2, CeremonyProposal);
+impl_log_message_schema!(LogMessageV1, CeremonyProposal);
 
 impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;
-    pub const SCHEMA_VERSION_V2: u64 = 2;
 
     pub fn schema_version(&self) -> u64 {
         match self {
             Self::V1(_) => Self::SCHEMA_VERSION_V1,
-            Self::V2(_) => Self::SCHEMA_VERSION_V2,
         }
     }
 
     pub fn as_attestation_log(&self) -> Option<&InitLogMessage> {
         let init = match self {
-            Self::V1(LogMessageV1::Init(init)) | Self::V2(LogMessageV2::Init(init)) => {
-                init.as_ref()
-            }
+            Self::V1(LogMessageV1::Init(init)) => init.as_ref(),
             _ => return None,
         };
         matches!(init, InitLogMessage::OIAttestationUnsigned { .. }).then_some(init)
@@ -194,7 +165,6 @@ impl VersionedLogMessage {
     pub fn log_type(&self) -> LogType {
         match self {
             Self::V1(message) => message.log_type(),
-            Self::V2(message) => message.log_type(),
         }
     }
 
@@ -205,7 +175,6 @@ impl VersionedLogMessage {
     ) -> ObjectKeyPattern {
         match self {
             Self::V1(message) => message.object_key_pattern(session_id, timestamp_ms),
-            Self::V2(message) => message.object_key_pattern(session_id, timestamp_ms),
         }
     }
 }

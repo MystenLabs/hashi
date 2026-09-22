@@ -20,13 +20,11 @@ use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessageV1;
-use hashi_types::guardian::LogMessageV2;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VersionedLogMessage::V1;
-use hashi_types::guardian::VersionedLogMessage::V2;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
@@ -170,8 +168,8 @@ impl GuardianReader {
         }
         let session_id = verified_record.entry().session_id().clone();
         let msg = match verified_record.into_entry().into_message() {
-            V1(LogMessageV1::Ceremony(msg)) | V2(LogMessageV2::Ceremony(msg)) => msg,
-            V1(_) | V2(_) => {
+            V1(LogMessageV1::Ceremony(msg)) => msg,
+            V1(_) => {
                 return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
             }
         };
@@ -236,8 +234,8 @@ impl GuardianReader {
             .require_current_build(verified_record.build_pcrs())?;
         let writing_session_id = verified_record.entry().session_id().clone();
         let proposal = match verified_record.into_entry().into_message() {
-            V2(LogMessageV2::CeremonyProposal(proposal)) => *proposal,
-            V1(_) | V2(_) => {
+            V1(LogMessageV1::CeremonyProposal(proposal)) => *proposal,
+            V1(_) => {
                 return Err(InvalidS3Log(format!(
                     "expected a ceremony proposal log at {key}"
                 )));
@@ -269,8 +267,8 @@ impl GuardianReader {
         }
         let session_id = verified_record.entry().session_id().clone();
         let msg = match verified_record.into_entry().into_message() {
-            V1(LogMessageV1::KpShareState(msg)) | V2(LogMessageV2::KpShareState(msg)) => *msg,
-            V1(_) | V2(_) => {
+            V1(LogMessageV1::KpShareState(msg)) => *msg,
+            V1(_) => {
                 return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
             }
         };
@@ -363,8 +361,8 @@ impl GuardianReader {
         let verified_record = self.read_verified_record(&key).await?;
         let session_id = verified_record.entry().session_id().clone();
         let msg = match verified_record.into_entry().into_message() {
-            V1(LogMessageV1::CommitteeUpdate(msg)) | V2(LogMessageV2::CommitteeUpdate(msg)) => msg,
-            V1(_) | V2(_) => {
+            V1(LogMessageV1::CommitteeUpdate(msg)) => msg,
+            V1(_) => {
                 return Err(InvalidS3Log(format!(
                     "expected a committee-update log at {key}"
                 )));
@@ -400,8 +398,7 @@ impl GuardianReader {
         let session_id = verified_record.entry().session_id().clone();
         let committee = match verified_record.into_entry().into_message() {
             V1(LogMessageV1::Genesis(msg)) => msg.committee,
-            V2(LogMessageV2::Genesis(msg)) => msg.committee,
-            V1(_) | V2(_) => {
+            V1(_) => {
                 return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
             }
         };
