@@ -4176,9 +4176,24 @@ impl MpcManager {
                 Ok((dealer_party_id, output))
             })
             .collect::<Result<_, MpcError>>()?;
+        let share_counts = outputs
+            .values()
+            .map(|o| o.my_shares.weight())
+            .collect::<Vec<_>>();
+        let dealers = outputs.len();
         let combined_output =
-            avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs)
-                .map_err(|e| MpcError::ProtocolFailed(format!("complete_dkg failed: {e}")))?;
+            avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs).map_err(
+                |e| {
+                    combine_dealings_error(
+                        format!(
+                            "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
+                             share counts={share_counts:?})"
+                        ),
+                        dealers,
+                        e,
+                    )
+                },
+            )?;
         tracing::info!(
             "complete_dkg: epoch={}, result vk={}",
             self.mpc_config.epoch,
@@ -4820,7 +4835,18 @@ impl MpcManager {
             &self.mpc_config.nodes,
             &indexed_outputs,
         )
-        .map_err(|e| MpcError::ProtocolFailed(format!("complete_key_rotation failed: {e}")))?;
+        .map_err(|e| {
+            let indices = indexed_outputs.iter().map(|o| o.index).collect::<Vec<_>>();
+            combine_dealings_error(
+                format!(
+                    "complete_key_rotation failed (threshold={threshold}, \
+                     outputs={}, indices={indices:?})",
+                    indexed_outputs.len(),
+                ),
+                indexed_outputs.len(),
+                e,
+            )
+        })?;
         tracing::info!(
             "complete_key_rotation: epoch={}, result vk={}, matches_previous={}",
             self.mpc_config.epoch,
@@ -5142,9 +5168,24 @@ impl MpcManager {
             dealer_ids,
             context.output_threshold,
         );
+        let share_counts = outputs
+            .values()
+            .map(|o| o.my_shares.weight())
+            .collect::<Vec<_>>();
+        let dealers = outputs.len();
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
-                .map_err(|e| MpcError::ProtocolFailed(format!("complete_dkg failed: {e}")))?;
+                .map_err(|e| {
+                    combine_dealings_error(
+                        format!(
+                            "complete_dkg failed (threshold={}, dealers={dealers}, \
+                             dealer weight={dealer_weight_sum}, share counts={share_counts:?})",
+                            context.output_threshold,
+                        ),
+                        dealer_weight_sum as usize,
+                        e,
+                    )
+                })?;
         tracing::info!(
             "reconstruct_dkg: result vk={}",
             hex::encode(combined_output.vk.to_byte_array()),
@@ -5344,7 +5385,17 @@ impl MpcManager {
             context.nodes,
             &indexed_outputs,
         )
-        .map_err(|e| MpcError::ProtocolFailed(format!("complete_key_rotation failed: {e}")))?;
+        .map_err(|e| {
+            combine_dealings_error(
+                format!(
+                    "complete_key_rotation failed (threshold={}, outputs={}, indices={used_indices:?})",
+                    context.input_threshold,
+                    indexed_outputs.len(),
+                ),
+                indexed_outputs.len(),
+                e,
+            )
+        })?;
         tracing::info!(
             "reconstruct_rotation: result vk={}",
             hex::encode(combined.vk.to_byte_array()),
@@ -6355,6 +6406,21 @@ fn select_rotation_indices(
         .copied()
         .filter(|idx| owned.contains(idx) && !already.iter().any(|(_, i)| i == idx))
         .collect()
+}
+
+/// Map a failure to combine dealings onto an [MpcError], given the operands that produced it.
+///
+/// Most of these come back as a bare `InvalidInput`, which does not say which case it was, so the
+/// operands in `context` are the only diagnosis. A shortfall is mapped to `NotEnoughApprovals`
+/// instead, because it heals on retry, while `ProtocolFailed` makes
+/// [MpcManager::classify_reconstruction] treat the epoch as suspicious.
+fn combine_dealings_error(context: String, got: usize, e: FastCryptoError) -> MpcError {
+    match e {
+        FastCryptoError::NotEnoughWeight(needed) | FastCryptoError::InputLengthWrong(needed) => {
+            MpcError::NotEnoughApprovals { needed, got }
+        }
+        _ => MpcError::ProtocolFailed(format!("{context}: {e}")),
+    }
 }
 
 fn required_previous_commitment(
