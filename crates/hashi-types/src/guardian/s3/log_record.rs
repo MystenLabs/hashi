@@ -31,6 +31,7 @@ use serde::Serialize;
 use serde::de::Error as _;
 use serde_json::Value;
 use std::time::Duration;
+use std::time::SystemTime;
 
 /// Routing context and versioned payload carried by a [`LogRecord`].
 ///
@@ -361,9 +362,14 @@ impl LogRecord {
         Ok(self.into_entry_unchecked())
     }
 
-    /// Return the object-lock duration selected for the message type.
-    pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
-        self.log_type().object_lock_duration(policy)
+    /// Return the fixed object-lock expiry used for reads and every PUT attempt.
+    pub fn object_lock_expiry(&self, policy: S3ObjectLockPolicy) -> SystemTime {
+        let record_timestamp = Duration::from_millis(self.timestamp_ms());
+        let retention = self.log_type().object_lock_duration(policy);
+        SystemTime::UNIX_EPOCH
+            .checked_add(record_timestamp)
+            .and_then(|timestamp| timestamp.checked_add(retention))
+            .expect("object-lock expiry must fit in SystemTime")
     }
 
     /// Consume the record and extract its entry without validation.
@@ -1391,8 +1397,10 @@ mod tests {
             "kp-shares/00000000000000000007/00000000000000000003-session-d.json"
         );
         assert_eq!(
-            log.object_lock_duration(TESTNET_S3_OBJECT_LOCK_POLICY),
-            TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
+            log.object_lock_expiry(TESTNET_S3_OBJECT_LOCK_POLICY),
+            SystemTime::UNIX_EPOCH
+                + Duration::from_millis(1_700_000_000_000)
+                + TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
         );
     }
 
@@ -1419,8 +1427,10 @@ mod tests {
 
         assert_eq!(log.object_key(), "kp-shares/proposed/session-proposal.json");
         assert_eq!(
-            log.object_lock_duration(TESTNET_S3_OBJECT_LOCK_POLICY),
-            TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
+            log.object_lock_expiry(TESTNET_S3_OBJECT_LOCK_POLICY),
+            SystemTime::UNIX_EPOCH
+                + Duration::from_millis(1_700_000_000_000)
+                + TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
         );
     }
 
@@ -1447,8 +1457,10 @@ mod tests {
         assert_eq!(log.object_key(), GenesisLogMessage::object_key());
         assert_eq!(log.object_key(), "genesis/record.json");
         assert_eq!(
-            log.object_lock_duration(MAINNET_S3_OBJECT_LOCK_POLICY),
-            MAINNET_S3_OBJECT_LOCK_POLICY.long_lived
+            log.object_lock_expiry(MAINNET_S3_OBJECT_LOCK_POLICY),
+            SystemTime::UNIX_EPOCH
+                + Duration::from_millis(1_700_000_000_000)
+                + MAINNET_S3_OBJECT_LOCK_POLICY.long_lived
         );
     }
 
