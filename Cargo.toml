@@ -89,8 +89,8 @@ aws-credential-types = "1"
 aws-sdk-s3 = "1.12.0"
 
 # fastcrypto — pinned to the branch for the error-correcting aggregation, not yet on `main`.
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "e1ed2f0abd107cc099088facd84a6159c49fb54f" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "e1ed2f0abd107cc099088facd84a6159c49fb54f" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "19800c41a24fad61955be36f665cc58a2f733ab9" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "19800c41a24fad61955be36f665cc58a2f733ab9" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
