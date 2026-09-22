@@ -305,6 +305,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_latest_success_bucket_rejects_deleted_latest_hour() {
+        let s3 = crate::test_utils::mock_logger_with_deleted_layout(
+            [withdraw_success_key(2024, 3, 15, 13, 5)],
+            [withdraw_success_key(2024, 3, 15, 14, 7)],
+        );
+        let err = find_latest_success_bucket(&s3).await.unwrap_err();
+        assert!(matches!(
+            err,
+            GuardianError::S3Error(message)
+                if message == "Delete marker found under prefix withdraw/2024/03/15/14/success-"
+        ));
+    }
+
+    #[tokio::test]
     async fn find_latest_success_bucket_skips_latest_hour_with_only_failures() {
         let keys = vec![
             withdraw_failure_key(2024, 3, 15, 14, 0xdead_beef),

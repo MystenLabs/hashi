@@ -37,6 +37,7 @@ pub mod storage;
 pub mod sui_rpc_client;
 pub mod sui_tx_executor;
 pub mod tls;
+pub mod trm;
 pub mod utxo_pool;
 pub mod withdrawals;
 
@@ -65,7 +66,7 @@ pub struct Hashi {
     signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
-    screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
+    trm_client: Option<trm::TrmClient>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
@@ -89,6 +90,8 @@ impl Hashi {
             .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new_default());
+        let trm_client = trm::TrmClient::from_config(&config)?;
+        metrics.trm_enabled.set(i64::from(trm_client.is_some()));
         Ok(Arc::new(Self {
             server_version,
             config_path,
@@ -100,7 +103,7 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
-            screener_client: OnceLock::new(),
+            trm_client,
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -123,6 +126,8 @@ impl Hashi {
             .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new(registry));
+        let trm_client = trm::TrmClient::from_config(&config)?;
+        metrics.trm_enabled.set(i64::from(trm_client.is_some()));
         Ok(Arc::new(Self {
             server_version,
             config_path,
@@ -134,7 +139,7 @@ impl Hashi {
             signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
-            screener_client: OnceLock::new(),
+            trm_client,
             guardian_client: OnceLock::new(),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
@@ -248,8 +253,8 @@ impl Hashi {
         self.mpc_handle.get()
     }
 
-    pub fn screener_client(&self) -> Option<&grpc::screener_client::ScreenerClient> {
-        self.screener_client.get().and_then(|opt| opt.as_ref())
+    pub fn trm_client(&self) -> Option<&trm::TrmClient> {
+        self.trm_client.as_ref()
     }
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
@@ -384,7 +389,11 @@ impl Hashi {
         epoch: u64,
         write_backup: bool,
     ) -> anyhow::Result<Option<PathBuf>> {
-        match crate::backup::cleanup_old_backups(&self.config.backup_dir, jiff::Timestamp::now()) {
+        match crate::backup::cleanup_old_backups(
+            &self.config.backup_dir,
+            jiff::Timestamp::now(),
+            write_backup && self.config_path.is_some(),
+        ) {
             Ok(stats) => tracing::info!(
                 epoch,
                 write_backup,
@@ -818,34 +827,6 @@ impl Hashi {
     }
 
     pub async fn start(self: Arc<Self>) -> anyhow::Result<Service> {
-        let screener = if let Some(endpoint) = self.config.screener_endpoint() {
-            match grpc::screener_client::ScreenerClient::new(endpoint) {
-                Ok(client) => {
-                    tracing::info!("Screener client configured for {}", client.endpoint());
-                    Some(client)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to configure screener client for {}: {}",
-                        endpoint,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            tracing::warn!("No screener endpoint configured; AML screening will be skipped");
-            None
-        };
-
-        self.metrics
-            .screener_enabled
-            .set(if screener.is_some() { 1 } else { 0 });
-
-        self.screener_client
-            .set(screener)
-            .map_err(|_| anyhow!("Screener client already initialized"))?;
-
         // Verify Sui RPC is on the expected chain before loading any state,
         // then that the chain pair is one the protocol deploys.
         self.verify_sui_chain_id().await?;
@@ -1654,6 +1635,69 @@ mod test {
         );
     }
 
+    fn archive_name_days_ago(days: i64) -> String {
+        jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_hours(days * 24))
+            .unwrap()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .strftime("hashi-backup-%Y%m%dT%H%M%SZ.tar.asc")
+            .to_string()
+    }
+
+    #[test]
+    fn automatic_backup_expires_the_last_archive_when_no_save_can_follow() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let backup_dir = tmpdir.path().join("backups");
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().join("db"));
+        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_dir = backup_dir.clone();
+        let hashi = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            None,
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let stale = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&stale, b"stale archive").unwrap();
+
+        assert_eq!(
+            hashi.maintain_backups_after_epoch_change(6, true).unwrap(),
+            None
+        );
+
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn automatic_backup_spares_the_last_archive_when_the_save_that_follows_fails() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let backup_dir = tmpdir.path().join("backups");
+        let config_path = tmpdir.path().join("config.toml");
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().join("db"));
+        config.backup_pgp_cert = mock_pgp_cert();
+        config.backup_dir = backup_dir.clone();
+        config.save(&config_path).unwrap();
+        let hashi = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            Some(config_path.clone()),
+            config,
+            &prometheus::Registry::new(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let stale = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        std::fs::write(&stale, b"stale archive").unwrap();
+        std::fs::remove_file(&config_path).unwrap();
+
+        assert!(hashi.maintain_backups_after_epoch_change(6, true).is_err());
+
+        assert_eq!(std::fs::read(&stale).unwrap(), b"stale archive");
+    }
+
     #[test]
     fn automatic_backup_expires_archives_without_losing_recovery_after_failed_save() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
@@ -1676,9 +1720,9 @@ mod test {
         )
         .unwrap();
         std::fs::create_dir_all(&backup_dir).unwrap();
-        let expired = backup_dir.join("hashi-backup-20000101T000000Z.tar.asc");
+        let expired = backup_dir.join(archive_name_days_ago(20));
         std::fs::write(&expired, b"old archive").unwrap();
-        let older = backup_dir.join("hashi-backup-19990101T000000Z.tar.asc");
+        let older = backup_dir.join(archive_name_days_ago(25));
         std::fs::write(&older, b"older archive").unwrap();
         std::fs::remove_file(&config_path).unwrap();
 
@@ -1693,7 +1737,6 @@ mod test {
             .expect("backup should run");
 
         assert!(output.is_file());
-        // The pre-save sweep keeps the previous recovery archive even after a successful save.
         assert_eq!(std::fs::read(&expired).unwrap(), b"old archive");
 
         std::fs::remove_file(config_path).unwrap();
@@ -1703,7 +1746,7 @@ mod test {
     }
 
     #[test]
-    fn automatic_backup_cleanup_only_preserves_recovery_without_writing() {
+    fn automatic_backup_cleanup_expires_the_last_archive_once_it_is_stale() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let config_path = tmpdir.path().join("config.toml");
         let backup_dir = tmpdir.path().join("backups");
@@ -1731,12 +1774,12 @@ mod test {
         );
 
         assert!(!older.exists());
-        assert_eq!(std::fs::read(&newest).unwrap(), b"last recovery archive");
+        assert!(!newest.exists());
         let remaining = std::fs::read_dir(&backup_dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect::<Vec<_>>();
-        assert_eq!(remaining, vec![newest]);
+        assert!(remaining.is_empty(), "{remaining:?}");
     }
 
     #[test]

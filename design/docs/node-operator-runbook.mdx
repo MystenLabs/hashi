@@ -144,6 +144,7 @@ A Hashi node depends on two external services that you provide:
   - `txindex=1` (Hashi calls `getrawtransaction` on arbitrary deposit txids)
   - `blockfilterindex=1` + `peerblockfilters=1` (BIP-157/158 compact block filter serving for the embedded light client)
   - `server=1` plus RPC auth
+  - transaction relay left on (no `blocksonly=1`, which disables `estimatesmartfee`); without a fee estimate the node won't build or sign withdrawals
 - **Sui fullnode serving the gRPC v2 API** (`sui.rpc.v2` services, including the `SubscribeCheckpoints` stream). The public fullnode works out of the box, or self-host one if you want isolation; see [1.4](#14-sui-rpc).
 
 > Run both dependencies on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others.
@@ -479,8 +480,8 @@ backup-dir = "/var/lib/hashi/backups"
 
 # ── Optional Integrations ─────────────────────────────────────────────
 
-# Screener gRPC endpoint for AML/sanctions checking (when unset, screening is skipped)
-# screener-endpoint = "https://screener.example.com"
+# TRM Labs API key for AML screening on mainnet (when unset, screening is skipped)
+# trm-api-key = "<your TRM Labs API key>"
 
 # Guardian gRPC endpoint (when unset, the guardian integration is bypassed)
 # guardian-endpoint = "https://hashi-guardian.example.com"
@@ -499,7 +500,7 @@ backup-dir = "/var/lib/hashi/backups"
 # Max unconfirmed transaction chain depth (default: 5)
 # max-mempool-chain-depth = 5
 
-# Fee estimation confirmation target in blocks (default: 3)
+# Fee estimation confirmation target in blocks (default: 3, max: 12)
 # withdrawal-fee-conf-target = 3
 
 # Concurrency for per-input withdrawal signing (default: 25)
@@ -1336,10 +1337,6 @@ Waiting for bitcoind to reach start height 300000; it is at 214173
 ## 12. Coming soon
 
 The following capabilities are planned but not yet available.
-
-### Screener setup
-
-> **Coming soon:** Guidance on AML/sanctions screening. The `screener-endpoint` config field points to a gRPC screener service; when unset, screening is skipped. Setup instructions to follow.
 
 ### Metrics push service
 

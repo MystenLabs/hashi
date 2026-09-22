@@ -77,13 +77,15 @@ async fn main() -> Result<()> {
     // One roster cache, shared: the relay authorizes submissions against it and
     // a cert rotation through the forwarder invalidates it.
     let roster = Arc::new(RosterCache::new(log_store.clone()));
-    let relay_svc = Relay::new(relay_channel, roster.clone());
+    let relay_svc = Relay::new(relay_channel.clone(), roster.clone());
     let info_state = info::InfoState::new(
         GuardianServiceClient::new(channel.clone()),
         config.info_cache_ttl,
     );
+    // KPs confirm a ceremony to the guardian they are provisioning, so that
+    // RPC follows the relay's backend.
     let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel, roster),
+        Forwarding::new(channel, relay_channel, roster),
         log_store,
         config.btc_network,
         metrics.clone(),

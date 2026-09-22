@@ -5,8 +5,10 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::DepositConfirmError;
 use crate::btc_monitor::monitor::DepositConfirmation;
 use crate::leader::RetryPolicy;
+use crate::metrics;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::trm;
 use anyhow::Context;
 use anyhow::anyhow;
 use bitcoin::ScriptBuf;
@@ -45,43 +47,47 @@ impl Hashi {
         Ok(())
     }
 
-    /// Run AML/Sanctions checks for the deposit request.
-    /// If no screener client is configured, checks are skipped.
     #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn screen_deposit(
         &self,
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
-        let Some(screener) = self.screener_client() else {
-            tracing::debug!("AML checks skipped: no screener configured");
+        let Some(trm) = self.trm_client() else {
             return Ok(());
         };
-
-        // bitcoin
-        let source_tx_hash = deposit_request.utxo.id.txid.to_string();
-        let bitcoin_chain_id = self.config.bitcoin_chain_id().to_string();
-
-        // sui
-        let destination_address = deposit_request.id.to_string();
-        let sui_chain_id = self.config.sui_chain_id().to_string();
-
-        let approved = screener
-            .approve_deposit(
-                &source_tx_hash,
-                &destination_address,
-                &bitcoin_chain_id,
-                &sui_chain_id,
-            )
-            .await
-            .map_err(|e| UnapprovedDepositError::AmlServiceError(anyhow!(e)))?;
-
-        if !approved {
-            return Err(UnapprovedDepositError::AmlRejected(anyhow!(
-                "AML checks failed for source tx {source_tx_hash}, destination {destination_address}, bitcoin chain {bitcoin_chain_id}, sui chain {sui_chain_id}"
-            )));
+        let deposit_address = self
+            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
+            .map_err(UnapprovedDepositError::AmlServiceError)?;
+        let screening = trm::DepositScreening::new(deposit_request, deposit_address.to_string());
+        let started = std::time::Instant::now();
+        let result = trm.screen_deposit(&screening).await;
+        self.metrics.record_trm_screening(
+            metrics::TRM_FLOW_DEPOSIT,
+            &result,
+            started.elapsed().as_secs_f64(),
+        );
+        match result {
+            Ok(trm::Verdict::Approved) => Ok(()),
+            Ok(trm::Verdict::Pending) => Err(UnapprovedDepositError::AmlServiceError(anyhow!(
+                "TRM is still screening deposit transaction {}",
+                deposit_request.utxo.id.txid
+            ))),
+            Ok(trm::Verdict::Rejected(reason)) => {
+                tracing::warn!(
+                    deposit_id = %deposit_request.id,
+                    "TRM rejected deposit: {reason}"
+                );
+                Err(UnapprovedDepositError::AmlRejected(anyhow!(reason)))
+            }
+            Err(trm::TrmError::Transient(e)) => Err(UnapprovedDepositError::AmlServiceError(e)),
+            Err(trm::TrmError::Permanent(e)) => {
+                tracing::warn!(
+                    deposit_id = %deposit_request.id,
+                    "TRM could not screen deposit: {e:#}"
+                );
+                Err(UnapprovedDepositError::AmlRejected(e))
+            }
         }
-
-        Ok(())
     }
 
     /// Validate that the deposit request exists on Sui
@@ -434,7 +440,7 @@ pub enum UnapprovedDepositError {
     #[error("Bitcoin deposit is not yet confirmed: {0}")]
     BitcoinNotConfirmed(#[source] anyhow::Error),
 
-    #[error("Screener service error: {0}")]
+    #[error("AML service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
     #[error("Invalid on-chain deposit request: {0}")]

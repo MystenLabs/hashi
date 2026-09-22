@@ -4,11 +4,6 @@ on:
   pull_request:
   workflow_call:
     inputs:
-      hashi_only:
-        description: Only build and verify the hashi binary
-        type: boolean
-        required: false
-        default: false
       source_sha:
         description: Source commit to build (defaults to the workflow commit)
         type: string
@@ -25,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-22.04]
-        image: ${{ fromJSON(inputs.hashi_only && '[{"name":"hashi","dir":"hashi"}]' || '[{"name":"hashi","dir":"hashi"},{"name":"hashi-screener","dir":"hashi-screener"}]') }}
+        image: [{ name: hashi, dir: hashi }]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -67,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ${{ fromJSON(inputs.hashi_only && '["hashi"]' || '["hashi","hashi-screener"]') }}
+        image: [hashi]
     steps:
       - name: Download ubuntu-latest hash
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1

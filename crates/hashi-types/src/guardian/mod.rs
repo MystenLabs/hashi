@@ -49,7 +49,6 @@ use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
-use crate::pgp::PgpPublicCert;
 use ::serde::Deserialize;
 use ::serde::Serialize;
 use bitcoin::Network;
@@ -267,7 +266,7 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
 pub struct ProvisionerRotateCertRequest {
     expected_session_id: SessionID,
     expected_cert_seq: u64,
-    new_kp_pgp_cert: PgpPublicCert,
+    new_kp_pgp_cert: AttestedKpCert,
     encrypted_share: GuardianEncryptedShare,
 }
 
@@ -843,7 +842,7 @@ impl ProvisionerRotateCertRequest {
     pub fn new<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        new_kp_pgp_cert: PgpPublicCert,
+        new_kp_pgp_cert: AttestedKpCert,
         share: &Share,
         enclave_pub_key: &EncPubKey,
         rng: &mut R,
@@ -860,7 +859,7 @@ impl ProvisionerRotateCertRequest {
     pub(crate) fn from_encrypted_share(
         expected_session_id: SessionID,
         expected_cert_seq: u64,
-        new_kp_pgp_cert: PgpPublicCert,
+        new_kp_pgp_cert: AttestedKpCert,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self {
@@ -875,7 +874,7 @@ impl ProvisionerRotateCertRequest {
         self.encrypted_share.id
     }
 
-    pub fn new_kp_pgp_cert(&self) -> &PgpPublicCert {
+    pub fn new_kp_pgp_cert(&self) -> &AttestedKpCert {
         &self.new_kp_pgp_cert
     }
 
@@ -895,7 +894,7 @@ impl ProvisionerRotateCertRequest {
         self.expected_cert_seq
     }
 
-    pub fn into_parts(self) -> (SessionID, u64, PgpPublicCert, GuardianEncryptedShare) {
+    pub fn into_parts(self) -> (SessionID, u64, AttestedKpCert, GuardianEncryptedShare) {
         (
             self.expected_session_id,
             self.expected_cert_seq,
@@ -1126,7 +1125,7 @@ impl From<&ActivationState> for ActivationStateRepr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pgp::test_utils::mock_pgp_certs;
+    use crate::guardian::test_utils::mock_attested_kp_certs;
 
     #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {
@@ -1183,7 +1182,7 @@ mod tests {
 
     #[test]
     fn provisioner_rotate_kp_set_request_rejects_wrong_cert_count() {
-        let mut cert_sets = mock_pgp_certs(5);
+        let mut cert_sets = mock_attested_kp_certs(5);
         cert_sets.pop();
         let certs_roster = KpCertRoster::new(cert_sets).unwrap();
         assert!(matches!(
@@ -1208,7 +1207,7 @@ mod tests {
 
     #[test]
     fn kp_certs_roster_rejects_duplicate_certs() {
-        let mut cert_sets = mock_pgp_certs(5);
+        let mut cert_sets = mock_attested_kp_certs(5);
         cert_sets[1] = cert_sets[0].clone();
         assert!(matches!(
             KpCertRoster::new(cert_sets).unwrap_err(),
@@ -1218,8 +1217,8 @@ mod tests {
 
     #[test]
     fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
-        let cert_sets = mock_pgp_certs(5);
-        let reversed: Vec<PgpPublicCert> = cert_sets.iter().rev().cloned().collect();
+        let cert_sets = mock_attested_kp_certs(5);
+        let reversed: Vec<AttestedKpCert> = cert_sets.iter().rev().cloned().collect();
         let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap();
         let encrypted_old_share = GuardianEncryptedShare {
             id: ShareID::new(1).unwrap(),

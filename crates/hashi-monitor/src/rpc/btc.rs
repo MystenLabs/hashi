@@ -61,6 +61,26 @@ struct RawBlockHeader {
     time: u64,
 }
 
+#[derive(Deserialize)]
+struct BlockchainInfo {
+    blocks: u64,
+    headers: u64,
+    initialblockdownload: bool,
+}
+
+impl BlockchainInfo {
+    fn ensure_synced(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.initialblockdownload && self.blocks >= self.headers,
+            "bitcoind is not synced: initialblockdownload={}, blocks={}, headers={}",
+            self.initialblockdownload,
+            self.blocks,
+            self.headers
+        );
+        Ok(())
+    }
+}
+
 impl RawTransactionInfo {
     fn sufficiently_confirmed_block_hash(self, txid: Txid) -> anyhow::Result<Option<BlockHash>> {
         let Some(block_hash) = self.blockhash else {
@@ -88,10 +108,32 @@ impl BtcRpcClient {
         Ok(Self {
             transport: HttpJsonRpcTransport {
                 rpc_url: cfg.btc.resolve_rpc_url()?,
-                headers: cfg.btc.http_headers.clone(),
+                headers: cfg.btc.resolve_http_headers()?,
             },
             confirmation_cache: RefCell::new(HashMap::new()),
         })
+    }
+
+    /// Fail while bitcoind lags its peers: a lagging node reports recent
+    /// transactions as unconfirmed, which reads as a missing Bitcoin event.
+    pub fn ensure_synced(&self) -> anyhow::Result<()> {
+        let response = self
+            .transport
+            .call("getblockchaininfo", serde_json::json!([]))?;
+        if let Some(error) = response.error {
+            anyhow::bail!(
+                "bitcoin getblockchaininfo failed: {} ({})",
+                error.message,
+                error.code
+            );
+        }
+        let info: BlockchainInfo = serde_json::from_value(
+            response
+                .result
+                .context("bitcoin getblockchaininfo response is missing its result")?,
+        )
+        .context("failed to parse bitcoin blockchain info")?;
+        info.ensure_synced()
     }
 
     /// Start a fresh lookup cycle. Confirmed and unconfirmed results are shared
@@ -161,9 +203,12 @@ impl HttpJsonRpcTransport {
                 continue;
             }
 
-            let response_body: Value = response
-                .json()
-                .context("failed to decode bitcoin JSON-RPC response")?;
+            let response_body: Value = response.json().with_context(|| {
+                format!(
+                    "failed to decode bitcoin JSON-RPC response (HTTP {})",
+                    response.status_code
+                )
+            })?;
             if json_rpc_rate_limited(&response_body) {
                 Self::wait_before_rate_limit_retry(attempt)?;
                 continue;
@@ -415,6 +460,11 @@ fn response_index(response: &JsonRpcEnvelope, batch_len: usize) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io::BufRead as _;
+    use std::io::BufReader;
+    use std::io::Read as _;
+    use std::io::Write as _;
+    use std::net::TcpListener;
     use std::sync::Once;
 
     use anyhow::Result;
@@ -428,7 +478,9 @@ mod tests {
     use e2e_tests::bitcoin_node::RPC_USER;
     use tempfile::TempDir;
 
+    use super::BlockchainInfo;
     use super::BtcRpcClient;
+    use super::HttpJsonRpcTransport;
     use super::MIN_CONFIRMATIONS;
     use crate::config::BtcConfig;
     use crate::config::Config;
@@ -500,6 +552,7 @@ mod tests {
             .await?;
         let cfg = test_config(node.rpc_url().to_string());
         let btc_rpc_client = BtcRpcClient::new(&cfg)?;
+        btc_rpc_client.ensure_synced()?;
 
         let unknown_txid = Txid::from_slice(&[7u8; 32])?;
         let unknown = btc_rpc_client.lookup_confirmation(unknown_txid)?;
@@ -530,5 +583,112 @@ mod tests {
         assert!(confirmed.is_some(), "expected confirmed transaction");
 
         Ok(())
+    }
+
+    #[test]
+    fn undecodable_response_error_names_the_http_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let rpc_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let line = line.to_ascii_lowercase();
+                if let Some(value) = line.strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            reader
+                .into_inner()
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let transport = HttpJsonRpcTransport {
+            rpc_url,
+            headers: BTreeMap::new(),
+        };
+
+        let error = transport
+            .call("getblockchaininfo", serde_json::json!([]))
+            .err()
+            .expect("an empty 401 body is not JSON");
+
+        server.join().unwrap();
+        assert!(format!("{error:#}").contains("HTTP 401"), "{error:#}");
+    }
+
+    // `getblockchaininfo` from Bitcoin Core v31.1.0 regtest right after startup,
+    // and after mining one block.
+    const BLOCKCHAIN_INFO_IN_IBD: &str = r#"{
+  "chain": "regtest",
+  "blocks": 0,
+  "headers": 0,
+  "bestblockhash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+  "bits": "207fffff",
+  "target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+  "difficulty": 4.656542373906925e-10,
+  "time": 1296688602,
+  "mediantime": 1296688602,
+  "verificationprogress": 2.029297116700384e-06,
+  "initialblockdownload": true,
+  "chainwork": "0000000000000000000000000000000000000000000000000000000000000002",
+  "size_on_disk": 293,
+  "pruned": false,
+  "warnings": [
+  ]
+}"#;
+    const BLOCKCHAIN_INFO_SYNCED: &str = r#"{
+  "chain": "regtest",
+  "blocks": 1,
+  "headers": 1,
+  "bestblockhash": "319d7684f104511d0353185c4da1728474caf9181af97e99ddac6d6b84d8149a",
+  "bits": "207fffff",
+  "target": "7fffff0000000000000000000000000000000000000000000000000000000000",
+  "difficulty": 4.656542373906925e-10,
+  "time": 1789469064,
+  "mediantime": 1789469064,
+  "verificationprogress": 1,
+  "initialblockdownload": false,
+  "chainwork": "0000000000000000000000000000000000000000000000000000000000000004",
+  "size_on_disk": 590,
+  "pruned": false,
+  "warnings": [
+  ]
+}"#;
+
+    fn blockchain_info(json: &str) -> BlockchainInfo {
+        serde_json::from_str(json).expect("valid getblockchaininfo result")
+    }
+
+    #[test]
+    fn node_in_initial_block_download_is_not_synced() {
+        let error = blockchain_info(BLOCKCHAIN_INFO_IN_IBD)
+            .ensure_synced()
+            .expect_err("a node in initial block download is not synced");
+        assert!(
+            error.to_string().contains("initialblockdownload=true"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn caught_up_node_is_synced() {
+        blockchain_info(BLOCKCHAIN_INFO_SYNCED)
+            .ensure_synced()
+            .unwrap();
+    }
+
+    #[test]
+    fn node_behind_its_best_header_is_not_synced() {
+        let mut info = blockchain_info(BLOCKCHAIN_INFO_SYNCED);
+        info.headers = info.blocks + 1;
+        assert!(info.ensure_synced().is_err());
     }
 }

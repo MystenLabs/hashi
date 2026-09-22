@@ -1548,32 +1548,20 @@ fn test_cpfp_no_deficit_for_well_paying_ancestor() {
 
 #[test]
 fn test_cpfp_deficit_exhausts_fee_cap() {
-    // A very low-fee, very heavy ancestor creates a CPFP deficit that
-    // exceeds max_fee_per_request.
-    let heavy_low_fee = UtxoCandidate {
-        id: make_utxo_id(1),
-        amount: 5_000_000,
-        confirmation_age_blocks: None,
-        spend_path: SpendPath::TaprootScriptPath2of2,
-        status: UtxoStatus::Pending {
-            chain: vec![AncestorTx {
-                id: ancestor_id(1, 0),
-                confirmations: 0,
-                tx_weight: Weight::from_wu(400_000), // huge ancestor
-                tx_fee: 1,                           // almost zero fee
-            }],
-        },
-    };
-
-    let requests = vec![make_request(1, 100_000, 0)];
+    // Each ancestor owes a 5,000 sat deficit that fits the cap on its own,
+    // but the request needs both inputs and their combined deficit does not.
+    let underpaid = |n| pending_utxo_mixed(n, 600_000, &[(0, 4_000, 0)]);
+    let requests = vec![make_request(1, 1_000_000, 0)];
     let params = CoinSelectionParams {
-        max_fee_per_request: 5_000, // tight budget
-        // Leave the package budget out of it: this covers the fee cap,
-        // and the default would filter the heavy ancestor out first.
-        max_ancestor_package_weight: Weight::from_wu(800_000),
+        max_fee_per_request: 7_000,
         ..default_params()
     };
-    let result = select_coins(&[heavy_low_fee], &requests, &params, default_fee_rate());
+    let result = select_coins(
+        &[underpaid(1), underpaid(2)],
+        &requests,
+        &params,
+        default_fee_rate(),
+    );
 
     let Err(CoinSelectionError::FeeExceedsCap {
         transaction_fee,
@@ -1587,10 +1575,10 @@ fn test_cpfp_deficit_exhausts_fee_cap() {
         panic!("expected FeeExceedsCap, got {result:?}");
     };
     assert!(transaction_fee > 0);
-    assert!(cpfp_deficit > 0);
-    assert_eq!(selected_inputs, 1);
-    assert_eq!(pending_inputs, 1);
-    assert_eq!(unconfirmed_ancestors, 1);
+    assert_eq!(cpfp_deficit, 10_000);
+    assert_eq!(selected_inputs, 2);
+    assert_eq!(pending_inputs, 2);
+    assert_eq!(unconfirmed_ancestors, 2);
 }
 
 #[test]
@@ -2145,6 +2133,50 @@ fn test_candidate_filter_includes_complete_transaction_weight() {
 
     assert_eq!(result.inputs.len(), 1);
     assert_eq!(result.inputs[0].id, make_utxo_id(2));
+    assert_conservation(&result);
+}
+
+/// Largest-first would re-pick a stalled parent's change on every retry, so
+/// until enough requests share its CPFP deficit it must be skipped.
+#[test]
+fn test_unaffordable_cpfp_candidate_is_skipped_not_fatal() {
+    // A 40-request settlement (400 inputs) that paid 3 sat/vB, now at 30.
+    let stalled_weight = 34 + 12 + 4 + 400 * 432 + 41 * 172;
+    let stalled_fee = FeeRate::from_sat_per_vb_unchecked(3)
+        .fee_wu(Weight::from_wu(stalled_weight))
+        .unwrap()
+        .to_sat();
+    let stalled = pending_utxo_mixed(1, 500_000_000, &[(0, stalled_weight, stalled_fee)]);
+    let usable = confirmed_utxo(2, 100_000_000);
+    let fee_rate = FeeRate::from_sat_per_vb_unchecked(30);
+    let params = CoinSelectionParams {
+        max_fee_per_request: 30_000 - 546,
+        ..default_params()
+    };
+    let requests = |count: u8| {
+        (0..count)
+            .map(|n| make_request(n, 1_000_000, n.into()))
+            .collect::<Vec<_>>()
+    };
+
+    let result = select_coins(
+        &[stalled.clone(), usable.clone()],
+        &requests(40),
+        &params,
+        fee_rate,
+    )
+    .expect("the confirmed UTXO should still fund the batch");
+    assert_eq!(result.inputs.len(), 1);
+    assert_eq!(result.inputs[0].id, make_utxo_id(2));
+    assert_conservation(&result);
+
+    let result = select_coins(&[stalled, usable], &requests(60), &params, fee_rate)
+        .expect("60 requests can share the deficit");
+    assert_eq!(
+        result.inputs[0].id,
+        make_utxo_id(1),
+        "the batch should rescue the stalled parent"
+    );
     assert_conservation(&result);
 }
 

@@ -5,6 +5,7 @@ use clap::Parser;
 use clap::Subcommand;
 use std::path::PathBuf;
 
+mod ceremony;
 mod config;
 mod fetch_info;
 mod guardian_info;
@@ -12,9 +13,12 @@ mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
 mod kp_rotate_cert;
+mod kp_rotate_kp_set;
 mod operator_activate;
 mod operator_ceremony;
 mod operator_provision;
+mod operator_rotate_kp_set;
+mod submission;
 
 #[derive(Parser)]
 #[command(name = "hashi-guardian-init")]
@@ -66,6 +70,36 @@ enum OperatorCommand {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Re-deal the ceremony key to a new KP set on a fresh ceremony-mode guardian.
+    RotateKpSet {
+        #[command(subcommand)]
+        command: OperatorRotateKpSetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OperatorRotateKpSetCommand {
+    /// Operator-initialize the ceremony guardian the current KPs will sign for.
+    Init {
+        /// Path to operator YAML config file (with new_kp_roster).
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Submit the current KPs' signed submissions, then wait for every new KP to confirm.
+    Submit {
+        /// Path to operator YAML config file (with new_kp_roster).
+        #[arg(long)]
+        config: PathBuf,
+        /// A current KP's submission file (key-provisioner rotate-kp-set); repeat per KP.
+        #[arg(long = "submission", required = true)]
+        submissions: Vec<PathBuf>,
+    },
+    /// Resume an interrupted submit: wait for every new KP to confirm.
+    Wait {
+        /// Path to operator YAML config file (with new_kp_roster).
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -97,6 +131,15 @@ enum KeyProvisionerCommand {
         #[arg(long)]
         do_genesis: bool,
     },
+    /// Sign this KP's share of a proposed KP-set rotation into a submission file.
+    RotateKpSet {
+        /// Path to key-provisioner YAML config file (with new_kp_roster).
+        #[arg(long)]
+        config: PathBuf,
+        /// Path at which to write the signed submission for the operator.
+        #[arg(long)]
+        submission_path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -105,6 +148,19 @@ enum ToolsCommand {
     FetchInfo {
         #[command(flatten)]
         args: fetch_info::Args,
+    },
+    /// Verify a KP's cert and attestation files, then print its primary-key fingerprint.
+    VerifyKpCert {
+        /// Path to the KP's armored OpenPGP public cert, with its attestation files beside it.
+        #[arg(long)]
+        kp_pgp_cert_path: PathBuf,
+    },
+    /// Write a dev KP's attestation files from a software device, in place of a YubiKey.
+    #[cfg(feature = "non-enclave-dev")]
+    DevAttest {
+        /// Path to the dev KP's armored OpenPGP public cert.
+        #[arg(long)]
+        kp_pgp_cert_path: PathBuf,
     },
 }
 
@@ -130,6 +186,23 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = config::Config::load_yaml(&config)?;
                 operator_activate::run(cfg).await?;
             }
+            OperatorCommand::RotateKpSet { command } => match command {
+                OperatorRotateKpSetCommand::Init { config } => {
+                    let cfg = config::Config::load_yaml(&config)?;
+                    operator_rotate_kp_set::init(cfg).await?;
+                }
+                OperatorRotateKpSetCommand::Submit {
+                    config,
+                    submissions,
+                } => {
+                    let cfg = config::Config::load_yaml(&config)?;
+                    operator_rotate_kp_set::submit(cfg, &submissions).await?;
+                }
+                OperatorRotateKpSetCommand::Wait { config } => {
+                    let cfg = config::Config::load_yaml(&config)?;
+                    operator_rotate_kp_set::wait(cfg).await?;
+                }
+            },
         },
         Command::KeyProvisioner { command } => match command {
             KeyProvisionerCommand::Ceremony {
@@ -150,9 +223,24 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = config::Config::load_yaml(&config)?;
                 kp_rotate_cert::run(cfg, new_kp_pgp_cert_path).await?;
             }
+            KeyProvisionerCommand::RotateKpSet {
+                config,
+                submission_path,
+            } => {
+                let cfg = config::Config::load_yaml(&config)?;
+                kp_rotate_kp_set::run(cfg, &submission_path).await?;
+            }
         },
         Command::Tools { command } => match command {
             ToolsCommand::FetchInfo { args } => fetch_info::run(args).await?,
+            ToolsCommand::VerifyKpCert { kp_pgp_cert_path } => {
+                let cert = hashi_guardian_init::load_attested_kp_cert(&kp_pgp_cert_path)?;
+                println!("{}", cert.fingerprint().to_hex());
+            }
+            #[cfg(feature = "non-enclave-dev")]
+            ToolsCommand::DevAttest { kp_pgp_cert_path } => {
+                hashi_guardian_init::write_dev_attestations(&kp_pgp_cert_path)?
+            }
         },
     }
     Ok(())
@@ -219,5 +307,124 @@ mod tests {
 
         assert!(help.contains("--new-kp-pgp-cert-path"), "{help}");
         assert!(!help.contains("--target-kp-pgp-fingerprint"), "{help}");
+    }
+
+    #[test]
+    fn operator_rotate_kp_set_submit_collects_repeated_submissions() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "operator",
+            "rotate-kp-set",
+            "submit",
+            "--config",
+            "config.yaml",
+            "--submission",
+            "kp1.rotation",
+            "--submission",
+            "kp3.rotation",
+        ])
+        .unwrap();
+
+        let Command::Operator {
+            command:
+                OperatorCommand::RotateKpSet {
+                    command:
+                        OperatorRotateKpSetCommand::Submit {
+                            config,
+                            submissions,
+                        },
+                },
+        } = cli.command
+        else {
+            panic!("expected operator rotate-kp-set submit command");
+        };
+        assert_eq!(config, PathBuf::from("config.yaml"));
+        assert_eq!(
+            submissions,
+            vec![PathBuf::from("kp1.rotation"), PathBuf::from("kp3.rotation")]
+        );
+    }
+
+    #[test]
+    fn operator_rotate_kp_set_submit_requires_a_submission() {
+        let result = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "operator",
+            "rotate-kp-set",
+            "submit",
+            "--config",
+            "config.yaml",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn operator_rotate_kp_set_wait_takes_no_submissions() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "operator",
+            "rotate-kp-set",
+            "wait",
+            "--config",
+            "config.yaml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Operator {
+                command: OperatorCommand::RotateKpSet {
+                    command: OperatorRotateKpSetCommand::Wait { .. }
+                }
+            }
+        ));
+
+        let result = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "operator",
+            "rotate-kp-set",
+            "wait",
+            "--config",
+            "config.yaml",
+            "--submission",
+            "kp1.rotation",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn key_provisioner_rotate_kp_set_requires_submission_path() {
+        let result = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "key-provisioner",
+            "rotate-kp-set",
+            "--config",
+            "config.yaml",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tools_verify_kp_cert_requires_cert_path() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "tools",
+            "verify-kp-cert",
+            "--kp-pgp-cert-path",
+            "kp1.asc",
+        ])
+        .unwrap();
+
+        let Command::Tools {
+            command: ToolsCommand::VerifyKpCert { kp_pgp_cert_path },
+        } = cli.command
+        else {
+            panic!("expected tools verify-kp-cert command");
+        };
+        assert_eq!(kp_pgp_cert_path, PathBuf::from("kp1.asc"));
+
+        let result = Cli::try_parse_from(["hashi-guardian-init", "tools", "verify-kp-cert"]);
+        assert!(result.is_err());
     }
 }

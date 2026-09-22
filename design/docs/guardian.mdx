@@ -86,6 +86,21 @@ The main components are:
 
 ## Ceremony mode flow
 
+Before the ceremony, each KP provides its public OpenPGP certificate, fingerprint
+text file, and three matching PEM sidecars. See the
+[KP provisioning guide](https://github.com/MystenLabs/hashi/blob/main/key-provisioner/provision.md#setting-up-your-yubikey)
+for device requirements, output filenames, and attestation policy.
+
+Configuration still contains only `.asc` paths. All matching sidecars must be
+colocated on every certificate-loading host, including for signers and replacement
+certificates. The CLI verifies and sends bundles; the guardian independently
+rejects missing or invalid proofs on every certificate-bearing RPC.
+Signature verification, encryption, and recipient checks pin the actual attested
+keys, not merely a primary-key fingerprint. This preserves one certificate and
+one ciphertext per KP/share.
+YubiKey provenance checks are separate from the guardian's Nitro attestation
+in its S3 init log.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -97,13 +112,14 @@ sequenceDiagram
 
     Operator->>Guardian: OperatorInit(S3 config)
     Guardian->>S3: log(init attestation + GuardianInfo)
-    Operator->>Guardian: SetupNewKey(ordered KP PGP certs, n, t)
+    Operator->>Guardian: SetupNewKey(ordered KP attested bundles, n, t)
+    Guardian->>Guardian: Verify all YubiKey proofs and bind SIG/DEC keys
     Guardian->>S3: log(kp-shares/proposed/{session})
     Guardian-->>Operator: encrypted KP share state + guardian BTC pubkey
 
     KPs->>S3: Read init and the session's proposed ceremony
-    S3-->>KPs: One PGP-encrypted share addressed to this KP cert fingerprint
-    KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
+    S3-->>KPs: One PGP-encrypted share targeting this KP's attested DEC key
+    KPs->>KPs: Decrypt share and verify Nitro attestation, recipients, commitment
     KPs->>Guardian: Confirm proposed ceremony digest
     Guardian->>S3: Publish kp-shares state, then ceremony commit
 ```

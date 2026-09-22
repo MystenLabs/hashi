@@ -17,14 +17,13 @@ COPY . .
 # match it, so pin a stable local value both sides agree on.
 ARG GIT_REVISION=local
 ENV GIT_REVISION=${GIT_REVISION}
-# The guardian AND the init tooling need `non-enclave-dev`: the guardian stubs
-# the Nitro NSM attestation, and the init tooling must skip attestation
-# verification to talk to that mock-attestation guardian. The proxy doesn't
-# verify attestation (liveness-only), so it needs no feature — one invocation
-# builds all three and shares the dependency compile.
+# All three need `non-enclave-dev`: the guardian stubs the Nitro NSM
+# attestation, the init tooling accepts that mock attestation, and all three
+# accept the test KP keys' software attestations. One invocation builds all
+# three and shares the dependency compile.
 RUN cargo build --release \
       -p hashi-guardian -p hashi-guardian-init -p hashi-guardian-proxy \
-      --features hashi-guardian/non-enclave-dev,hashi-guardian-init/non-enclave-dev
+      --features hashi-guardian/non-enclave-dev,hashi-guardian-init/non-enclave-dev,hashi-guardian-proxy/non-enclave-dev
 
 FROM debian:bookworm-slim
 # socat: the vsock->TCP shims. gnupg: the test KP keys (`operator ceremony`

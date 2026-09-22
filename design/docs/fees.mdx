@@ -36,14 +36,13 @@ answer: >-
   Hashi deposits are free (subject to a configurable minimum). Withdrawals
   charge only the Bitcoin miner fee required for onchain confirmation, which
   is deducted from the withdrawal output amount. The fee depends on the
-  current network fee rate and transaction weight, with RBF and CPFP
-  mechanisms for handling stuck transactions.
+  current network fee rate and transaction weight, and stuck transactions
+  are bumped with CPFP rather than RBF.
 ---
 
-Hashi charges two kinds of fees: a flat **deposit fee** paid in `SUI`, and
-a **withdrawal fee** paid in `BTC`. Both are governance-configurable. In
-addition to the protocol fee, every withdrawal absorbs the Bitcoin
-**miner fee** required to get the transaction confirmed onchain.
+Hashi charges no protocol fee. Deposits are free, and every withdrawal
+pays only the Bitcoin **miner fee** required to get the transaction
+confirmed onchain.
 
 ## Deposits
 
@@ -91,8 +90,13 @@ the worst case, so the user receives more.
 Hashi obtains the current fee rate from the connected Bitcoin Core node
 through `estimatesmartfee` in `ECONOMICAL` mode, targeting confirmation
 within `withdrawal_fee_conf_target` blocks (default `3`, around 30
-minutes). Low-traffic chains like signet might need a higher target to
-route the estimator to its long-horizon bucket.
+minutes; at most `12`). Longer targets would read Core's day- and
+week-long estimation horizons, which lag the fee market.
+
+If Bitcoin Core has no estimate, for example while its estimator warms up
+after a restart, the leader doesn't build withdrawal transactions and
+validators don't sign them. Only regtest, which has no fee market, falls
+back to `1 sat/vB`.
 
 The estimated fee rate is then capped at a high fee rate threshold
 (30 sat/vB by default). This prevents a single fee spike from producing
@@ -126,13 +130,14 @@ budget. The difference stays in the user's output.
 ## Transaction validation fee bounds
 
 When validators verify a proposed withdrawal transaction, they check
-the fee from two directions:
+the fee against three bounds:
 
 - **Floor**: the fee must be at least `1 sat/vB` (the minimum relay fee),
   or the Bitcoin network does not propagate the transaction.
 - **Ceiling**: the fee must not exceed 3x the validator's own fee
-  estimate for the same transaction weight. This prevents a malicious
-  leader from overpaying fees to extract value from users.
+  estimate for the same transaction weight, including any CPFP deficit
+  its unconfirmed ancestors owe. This prevents a malicious leader from
+  overpaying fees to extract value from users.
 - **Per-user cap**: the per-user share of the miner fee must not exceed
   the worst-case network fee computed from the onchain config. This
   ensures the Move contract's upfront minimum calculation was

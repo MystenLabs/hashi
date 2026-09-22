@@ -78,6 +78,8 @@ cargo run -p hashi-monitor -- continuous \
   --config audit.sample.yaml \
   --start 2026-08-04T19:00:00Z
 ```
+Without `--start`, the audit resumes from the earliest time whose checks can
+still be pending, which is what a restarted service wants.
 
 ## Config
 See `audit.sample.yaml` for a complete batch/continuous example:
@@ -110,6 +112,7 @@ btc:
   rpc_url: "env:BITCOIN_RPC_URL"
   # http_headers:
   #   Origin: "https://example.com"
+  #   Authorization: "env:BITCOIN_RPC_AUTHORIZATION"
 ```
 
 ## Status

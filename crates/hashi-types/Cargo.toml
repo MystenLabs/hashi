@@ -43,12 +43,17 @@ time = "0.3"
 hex.workspace = true
 sequoia-openpgp.workspace = true
 tempfile.workspace = true
+x509-parser.workspace = true
+rcgen = { workspace = true, optional = true }
 
 [features]
 # Stub out enclave attestation verification so off-enclave consumers (e2e, dev)
-# accept the mock document the guardian emits outside a Nitro enclave. Do not
-# enable for prod builds. Mirrors hashi-guardian's `non-enclave-dev`.
+# accept the mock document the guardian emits outside a Nitro enclave, and KP
+# certificates attested by a self-signed software device instead of a YubiKey.
+# Do not enable for prod builds. Mirrors hashi-guardian's `non-enclave-dev`.
 non-enclave-dev = []
+# Generated, cryptographically checked KP fixtures; never changes production trust.
+test-utils = ["dep:rcgen"]
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
@@ -56,3 +61,4 @@ test-strategy.workspace = true
 proptest.workspace = true
 rand.workspace = true
 tokio.workspace = true
+rcgen.workspace = true

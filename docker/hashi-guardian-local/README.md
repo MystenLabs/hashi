@@ -3,8 +3,9 @@
 A Mac-local replica of the guardian's AWS Nitro topology (each `vsock` hop becomes
 a TCP hop between containers), wired to a native `hashi-localnet` for the on-chain
 side, so the full ceremony → provision → withdrawal flow runs locally — no devnet.
-The guardian runs `--features non-enclave-dev` (mock attestation), so this
-exercises the real ceremony/relay/provision/activation path, not PCR attestation.
+The guardian runs `--features non-enclave-dev` (mock attestation, software-attested
+KP keys), so this exercises the real ceremony/relay/provision/activation path, not
+PCR attestation or YubiKey provenance.
 
 ```mermaid
 flowchart LR
@@ -47,12 +48,18 @@ Needs Docker, plus `sui` and `bitcoind` on `PATH`.
 
 ```sh
 make up            # MinIO + withdraw guardian + proxy
-make ceremony      # KP roster + genesis ceremony: mints the BTC key, prints its pubkey
+make ceremony      # KP roster + genesis ceremony: mints the BTC key, every KP confirms, prints its pubkey
 make localnet-cmd  # prints the `hashi-localnet start …` to run NATIVELY (separate terminal)
 make provision     # operator provision, KP provision × threshold, then operator activate
 make smoke         # confirm the guardian is activated
+make rotate-kp-set # re-deal the key to a new KP set on a fresh ceremony guardian (NEW_NUM_SHARES/NEW_THRESHOLD)
+make reprovision   # fresh withdraw guardian, provisioned by the new set (no genesis), activated
 make down          # tear everything down
 ```
+
+The dealt KP set lives in the `work` volume (`roster.env`); a rotation mints
+the next `kp<N>` keys and replaces it, so `provision` and `reprovision` always
+run as the set that currently holds the shares.
 
 The relay rejects share submissions from unrostered signers; its roster is the
 recipient set of the ceremony's share log, read straight from MinIO — no config

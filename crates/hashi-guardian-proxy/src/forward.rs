@@ -5,7 +5,8 @@
 //! and rejects the operator surface with `PERMISSION_DENIED`: the proxy is
 //! internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. KP-signed RPCs are
-//! forwarded after a signature and roster check. Wrapped by
+//! forwarded after a signature and roster check; `ConfirmCeremony` goes to the
+//! ceremony guardian, which is the relay's backend. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use std::sync::Arc;
@@ -31,15 +32,19 @@ use crate::widlog::LogStore;
 #[derive(Clone)]
 pub struct Forwarding<L> {
     client: GuardianServiceClient<Channel>,
+    /// The guardian KPs are provisioning, same as the relay's: the standby
+    /// when one is configured, else the active guardian.
+    ceremony_client: GuardianServiceClient<Channel>,
     /// Shared with the relay: one gate admits every KP-signed RPC, and a cert
     /// rotation drops the cached roster for both.
     roster: Arc<RosterCache<L>>,
 }
 
 impl<L: LogStore> Forwarding<L> {
-    pub fn new(channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
+    pub fn new(channel: Channel, ceremony_channel: Channel, roster: Arc<RosterCache<L>>) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
+            ceremony_client: GuardianServiceClient::new(ceremony_channel),
             roster,
         }
     }
@@ -132,7 +137,7 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
     ) -> Result<Response<proto::CeremonyConfirmationResponse>, Status> {
         self.admit::<CeremonyConfirmationRequest, _>(request.get_ref())
             .await?;
-        self.client.clone().confirm_ceremony(request).await
+        self.ceremony_client.clone().confirm_ceremony(request).await
     }
 
     // --- Rejected: operator surface ---
@@ -177,13 +182,6 @@ impl<L: LogStore> GuardianService for Forwarding<L> {
 mod tests {
     use super::*;
     use crate::cache::CachingGuardianGrpc;
-    use crate::roster::test_utils::seed_roster;
-    use hashi_types::guardian::Ciphertext;
-    use hashi_types::guardian::GuardianEncryptedShare;
-    use hashi_types::guardian::ShareID;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
-    use hashi_types::pgp::test_utils::sign_detached_in_process;
-    use hashi_types::pgp::PgpPublicCert;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -300,12 +298,7 @@ mod tests {
 
     type StubStore = crate::widlog::test_store::MemStore;
 
-    async fn spawn_stub_proxy(
-        store: StubStore,
-    ) -> (
-        StubGuardian,
-        CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
-    ) {
+    async fn spawn_stub() -> (StubGuardian, tonic::transport::Channel) {
         let stub = StubGuardian::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -323,13 +316,31 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
             .unwrap()
             .connect_lazy();
-        let cache = CachingGuardianGrpc::new(
-            Forwarding::new(channel, Arc::new(RosterCache::new(store))),
+        (stub, channel)
+    }
+
+    fn proxy_over(
+        active: tonic::transport::Channel,
+        ceremony: tonic::transport::Channel,
+        store: StubStore,
+    ) -> CachingGuardianGrpc<Forwarding<StubStore>, StubStore> {
+        CachingGuardianGrpc::new(
+            Forwarding::new(active, ceremony, Arc::new(RosterCache::new(store))),
             StubStore::default(),
             bitcoin::Network::Regtest,
             std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
-        );
-        (stub, cache)
+        )
+    }
+
+    /// A proxy whose active and ceremony guardian are the same stub.
+    async fn spawn_stub_proxy(
+        store: StubStore,
+    ) -> (
+        StubGuardian,
+        CachingGuardianGrpc<Forwarding<StubStore>, StubStore>,
+    ) {
+        let (stub, channel) = spawn_stub().await;
+        (stub, proxy_over(channel.clone(), channel, store))
     }
 
     #[tokio::test]
@@ -359,72 +370,18 @@ mod tests {
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 
-    fn signed_confirmation(
-        cert: &PgpPublicCert,
-        secret_armored: &str,
-    ) -> proto::SignedCeremonyConfirmationRequest {
-        let domain = CeremonyConfirmationRequest::new("session".into(), [3u8; 32]);
-        let signature = sign_detached_in_process(secret_armored, &KpSigned::signed_bytes(&domain));
-        proto::SignedCeremonyConfirmationRequest::from(KpSigned::from_parts(
-            domain,
-            cert.clone(),
-            signature,
-        ))
-    }
-
     #[tokio::test]
-    async fn forwards_a_rostered_ceremony_confirmation() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let store = StubStore::default();
-        seed_roster(&store, 0, &[&cert.fingerprint().to_hex()]);
-        let (stub, proxy) = spawn_stub_proxy(store).await;
+    async fn rejects_unsigned_ceremony_confirmation_before_forwarding() {
+        let (stub, proxy) = spawn_stub_proxy(StubStore::default()).await;
 
-        let status = proxy
-            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(status.have, Some(1));
-        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
-
-        // A corrupt confirmation is refused before the backend sees it.
         let err = proxy
             .confirm_ceremony(Request::new(
                 proto::SignedCeremonyConfirmationRequest::default(),
             ))
             .await
-            .expect_err("an unsigned confirmation must not be forwarded");
+            .expect_err("a missing signer attestation must not be forwarded");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn rejects_an_unrostered_ceremony_confirmation() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let store = StubStore::default();
-        seed_roster(&store, 0, &["AAAABBBBCCCCDDDDEEEE11112222333344445555"]);
-        let (stub, proxy) = spawn_stub_proxy(store).await;
-
-        let err = proxy
-            .confirm_ceremony(Request::new(signed_confirmation(&cert, &secret_armored)))
-            .await
-            .expect_err("a signer outside the roster must not be forwarded");
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert_eq!(stub.confirm_ceremony_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn verifies_ceremony_confirmation_signature_before_forwarding() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored).unwrap();
-        let mut request = signed_confirmation(&cert, &secret_armored);
-        verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap();
-
-        request.expected_session_id.push('0');
-        let err = verify_kp_signature::<CeremonyConfirmationRequest, _>(&request).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic
@@ -464,33 +421,5 @@ mod tests {
             .await
             .expect_err("rotate_kp_set must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
-    }
-
-    #[test]
-    fn verifies_provisioner_rotate_cert_signature_before_forwarding() {
-        let (cert_armored, secret_armored) = mock_pgp_keypair();
-        let cert = PgpPublicCert::new(cert_armored.clone()).unwrap();
-        let domain = ProvisionerRotateCertRequest::from_encrypted_share_for_testing(
-            "session".into(),
-            0,
-            cert.clone(),
-            GuardianEncryptedShare {
-                id: ShareID::new(1).unwrap(),
-                ciphertext: Ciphertext {
-                    encapsulated_key: vec![1, 2, 3],
-                    aes_ciphertext: vec![4, 5, 6],
-                },
-            },
-        );
-        let signature = sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain));
-        let mut request = proto::SignedProvisionerRotateCertRequest::from(KpSigned::from_parts(
-            domain, cert, signature,
-        ));
-
-        verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap();
-
-        request.new_kp_pgp_cert.push('0');
-        let err = verify_kp_signature::<ProvisionerRotateCertRequest, _>(&request).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

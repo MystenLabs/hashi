@@ -104,18 +104,12 @@ impl SigningEpochConfig {
         (sigs.len() > owned).then_some((sigs.len(), owned))
     }
 
-    fn retain_owned(&self, peer: &Address, sigs: Vec<Eval<S>>) -> (Vec<Eval<S>>, u64) {
-        let mut seen = HashSet::with_capacity(sigs.len());
-        let mut dropped = 0u64;
-        let kept = sigs
-            .into_iter()
-            .filter(|e| {
-                let ok = self.share_owners.get(&e.index) == Some(peer) && seen.insert(e.index);
-                dropped += u64::from(!ok);
-                ok
-            })
-            .collect();
-        (kept, dropped)
+    fn retain_owned(&self, peer: &Address, mut sigs: Vec<Eval<S>>) -> (Vec<Eval<S>>, u64) {
+        let before = sigs.len();
+        let mut seen = HashSet::with_capacity(before);
+        sigs.retain(|e| self.share_owners.get(&e.index) == Some(peer) && seen.insert(e.index));
+        let dropped = (before - sigs.len()) as u64;
+        (sigs, dropped)
     }
 }
 

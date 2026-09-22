@@ -76,9 +76,9 @@ public fun request_withdrawal(
 
 The protocol enforces a minimum withdrawal amount to guarantee that every
 request can produce a valid Bitcoin transaction even under worst-case fee
-conditions. This minimum covers the flat protocol fee, the worst-case miner
-fee (which pays for both the user's transaction weight and opportunistic UTXO
-pool consolidation), and the dust threshold for the user's output. See
+conditions. This minimum covers the worst-case miner fee (which pays for
+both the user's transaction weight and opportunistic UTXO pool
+consolidation) and the dust threshold for the user's output. See
 [Fees](fees.mdx) for the full breakdown.
 
 The full `hBTC` amount is stored with the request and placed in a queue with a
@@ -99,11 +99,11 @@ must have sufficient capacity. If the request would exceed the current limit it
 remains in the queue until capacity is replenished. Requests are generally
 processed in FIFO order, but this is not a strict requirement.
 
-Each committee member independently screens the destination address against
-its configured sanctions-checking endpoint (see
-[Handling Sanctioned Addresses](sanctions.mdx)). A member that considers
-the address sanctioned does not vote to approve the request. If a quorum
-still approves, all members must assist in completing the withdrawal.
+Each committee member independently screens the Bitcoin destination address
+and the requesting Sui address with its own TRM Labs account (see
+[Handling Sanctioned Addresses](sanctions.mdx)). A member that rejects the
+request does not vote to approve it. If a quorum still approves, all members
+must assist in completing the withdrawal.
 
 Committee members communicate with each other to collect signatures to approve
 the request. After a quorum is reached, one member submits the certificate

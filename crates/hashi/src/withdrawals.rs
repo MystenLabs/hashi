@@ -26,6 +26,7 @@ use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::btc_monitor::monitor::UtxoHeightSnapshot;
 use crate::leader::RetryPolicy;
+use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
@@ -33,6 +34,7 @@ use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::onchain::types::WithdrawalRequest;
 use crate::onchain::types::WithdrawalTransaction;
+use crate::trm;
 use crate::utxo_pool;
 use crate::utxo_pool::AncestorTx;
 use crate::utxo_pool::CoinSelectionParams;
@@ -51,7 +53,7 @@ use thiserror::Error;
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fee rate tolerance multiplier for validation.
-const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
+const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 3;
 
 /// Max drift between the leader-supplied `timestamp_secs` and the follower's
 /// own latest checkpoint timestamp before signing a guardian request.
@@ -1598,47 +1600,53 @@ impl Hashi {
         }
     }
 
-    /// Run AML/Sanctions checks for a withdrawal request.
-    /// If no screener client is configured, checks are skipped.
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id))]
     pub(crate) async fn screen_withdrawal(
         &self,
         request: &WithdrawalRequest,
     ) -> Result<(), WithdrawalApprovalError> {
-        let Some(screener) = self.screener_client() else {
-            tracing::debug!("AML checks skipped: no screener configured");
+        let Some(trm) = self.trm_client() else {
             return Ok(());
         };
-
-        // Source: Sui tx digest (base58 string)
-        let source_tx_hash = request.sui_tx_digest.to_string();
-
-        // Destination: Bitcoin address (raw witness bytes -> bech32 string)
-        let destination_address = hashi_bitcoin::address_string_from_witness_program(
+        let bitcoin_address = hashi_bitcoin::address_string_from_witness_program(
             &request.bitcoin_address,
             self.config.bitcoin_network(),
         )
         .map_err(WithdrawalApprovalError::NeverRetry)?;
-
-        let approved = screener
-            .approve_withdrawal(
-                &source_tx_hash,
-                &destination_address,
-                self.config.sui_chain_id(),
-                self.config.bitcoin_chain_id(),
-            )
-            .await
-            .map_err(|e| WithdrawalApprovalError::AmlServiceError(anyhow!(e)))?;
-
-        if !approved {
-            return Err(WithdrawalApprovalError::NeverRetry(anyhow!(
-                "AML checks failed for withdrawal request {:?} to {}",
-                request.id,
-                destination_address,
-            )));
+        let started = std::time::Instant::now();
+        let result = trm
+            .screen_withdrawal(&bitcoin_address, request.sender)
+            .await;
+        self.metrics.record_trm_screening(
+            metrics::TRM_FLOW_WITHDRAWAL,
+            &result,
+            started.elapsed().as_secs_f64(),
+        );
+        match result {
+            Ok(trm::Verdict::Approved) => Ok(()),
+            Ok(trm::Verdict::Pending) => Err(WithdrawalApprovalError::AmlServiceError(anyhow!(
+                "TRM has not finished screening withdrawal request {}",
+                request.id
+            ))),
+            Ok(trm::Verdict::Rejected(reason)) => {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "TRM rejected withdrawal request: {reason}"
+                );
+                Err(WithdrawalApprovalError::NeverRetry(anyhow!(
+                    "AML screening rejected withdrawal request {}: {reason}",
+                    request.id
+                )))
+            }
+            Err(trm::TrmError::Transient(e)) => Err(WithdrawalApprovalError::AmlServiceError(e)),
+            Err(trm::TrmError::Permanent(e)) => {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "TRM could not screen withdrawal request: {e:#}"
+                );
+                Err(WithdrawalApprovalError::NeverRetry(e))
+            }
         }
-
-        Ok(())
     }
 }
 
@@ -1682,7 +1690,7 @@ impl RetryPolicy for WithdrawalApprovalErrorKind {
 
 #[derive(Debug, Error)]
 pub enum WithdrawalApprovalError {
-    #[error("Screener service error: {0}")]
+    #[error("AML service error: {0}")]
     AmlServiceError(#[source] anyhow::Error),
 
     #[error("Never retry: {0}")]

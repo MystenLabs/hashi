@@ -411,31 +411,32 @@ impl GuardianS3Client {
     // S3 Reads
     // ========================================================================
 
-    /// Lists immediate subdirectories under `prefix` (S3 `CommonPrefixes`,
-    /// returned by `list_objects_v2` with `delimiter='/'`). Used to tree-walk
-    /// the hour-partitioned withdraw layout (`withdraw/YYYY/MM/DD/HH/`)
-    /// without paginating every object key. Returned prefixes are unique and
-    /// sorted lexicographically.
+    /// Lists immediate subdirectories using S3 version history, including prefixes
+    /// whose objects are hidden by delete markers. Uses `delimiter='/'` to walk
+    /// the hour-partitioned withdraw layout without paginating every object key.
+    /// Returned prefixes are unique and sorted lexicographically.
     pub async fn list_common_prefixes(&self, prefix: &str) -> GuardianResult<Vec<String>> {
-        let mut continuation_token: Option<String> = None;
-        let mut out: BTreeSet<String> = BTreeSet::new();
+        let mut key_marker: Option<String> = None;
+        let mut version_id_marker: Option<String> = None;
+        let mut out = BTreeSet::new();
         loop {
-            let mut req = self
+            let response = self
                 .client
-                .list_objects_v2()
+                .list_object_versions()
                 .bucket(self.config.bucket_name())
                 .prefix(prefix)
-                .delimiter("/");
-            if let Some(ref token) = continuation_token {
-                req = req.continuation_token(token);
-            }
-            let response = req.send().await.map_err(|e| {
-                S3Error(format!(
-                    "Failed to list common prefixes under {}: {}",
-                    prefix,
-                    DisplayErrorContext(&e)
-                ))
-            })?;
+                .delimiter("/")
+                .set_key_marker(key_marker)
+                .set_version_id_marker(version_id_marker)
+                .send()
+                .await
+                .map_err(|e| {
+                    S3Error(format!(
+                        "Failed to list common prefixes under {}: {}",
+                        prefix,
+                        DisplayErrorContext(&e)
+                    ))
+                })?;
             for cp in response.common_prefixes() {
                 if let Some(p) = cp.prefix() {
                     out.insert(p.to_string());
@@ -444,13 +445,14 @@ impl GuardianS3Client {
             if response.is_truncated() != Some(true) {
                 break;
             }
-            let Some(token) = response.next_continuation_token() else {
+            let Some(marker) = response.next_key_marker() else {
                 return Err(S3Error(format!(
-                    "Truncated response but no next_continuation_token for prefix {}",
+                    "Truncated response but no next_key_marker for prefix {}",
                     prefix
                 )));
             };
-            continuation_token = Some(token.to_string());
+            key_marker = Some(marker.to_string());
+            version_id_marker = response.next_version_id_marker().map(str::to_owned);
         }
         Ok(out.into_iter().collect())
     }

@@ -200,6 +200,7 @@ impl AuditorCore {
         &mut self,
         window: &impl AuditWindow,
     ) -> anyhow::Result<Vec<MonitorFinding>> {
+        self.btc_client.ensure_synced()?;
         self.btc_client.clear_confirmation_cache();
         let withdrawal_count = self
             .pending_withdrawals
