@@ -468,7 +468,7 @@ mod tests {
         SecretSharingInstance::new(commitments, 2, 2, sharing_seq).unwrap()
     }
 
-    fn dummy_log_messages() -> Vec<(&'static str, LogMessage)> {
+    fn dummy_log_messages() -> Vec<LogMessage> {
         let signing_key = fixture_signing_key();
         let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
             .x_only_public_key()
@@ -487,138 +487,93 @@ mod tests {
         committee_1.epoch = 1;
 
         vec![
-            (
-                "heartbeat/heartbeat",
-                LogMessage::Heartbeat(HeartbeatLogMessage::new(1)),
-            ),
-            (
-                "init/oi-attestation-unsigned",
-                LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
-                    attestation: NitroAttestation::new(vec![1, 2, 3]),
-                    signing_public_key: signing_key.verification_key(),
-                })),
-            ),
-            (
-                "init/oi-guardian-info",
-                LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
-                    guardian_info,
-                )))),
-            ),
-            (
-                "init/pi-enclave-fully-initialized",
-                LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
-                    sharing_seq: 0,
-                    share_ids: vec![NonZeroU16::new(1).unwrap()],
-                    enclave_btc_pubkey: btc_master_pubkey,
-                })),
-            ),
-            (
-                "init/oa-activated",
-                LogMessage::Init(Box::new(InitLogMessage::OAActivated {
-                    state_hash: [1; 32],
-                    config_hash: [2; 32],
-                    sharing_seq: 0,
-                    committee_epoch: 0,
-                    limiter_state: LimiterState {
-                        num_tokens_available: 10,
-                        last_updated_at: 20,
-                        next_seq: 30,
-                    },
-                })),
-            ),
-            (
-                "withdrawal/success",
-                LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
-                    txid: Txid::from_slice(&[3; 32]).unwrap(),
-                    request_data: request_data.clone(),
-                    request_sign: request_sign.clone(),
-                    response,
-                    post_state: LimiterState {
-                        num_tokens_available: 10,
-                        last_updated_at: 20,
-                        next_seq: request_data.seq + 1,
-                    },
-                })),
-            ),
-            (
-                "withdrawal/failure",
-                LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
-                    request_data,
-                    request_sign: request_sign.clone(),
-                    error: GuardianError::RateLimitExceeded.to_string(),
-                })),
-            ),
-            (
-                "ceremony/new-key",
-                LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(1)),
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                attestation: NitroAttestation::new(vec![1, 2, 3]),
+                signing_public_key: signing_key.verification_key(),
+            })),
+            LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                guardian_info,
+            )))),
+            LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+                sharing_seq: 0,
+                share_ids: vec![NonZeroU16::new(1).unwrap()],
+                enclave_btc_pubkey: btc_master_pubkey,
+            })),
+            LogMessage::Init(Box::new(InitLogMessage::OAActivated {
+                state_hash: [1; 32],
+                config_hash: [2; 32],
+                sharing_seq: 0,
+                committee_epoch: 0,
+                limiter_state: LimiterState {
+                    num_tokens_available: 10,
+                    last_updated_at: 20,
+                    next_seq: 30,
+                },
+            })),
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+                txid: Txid::from_slice(&[3; 32]).unwrap(),
+                request_data: request_data.clone(),
+                request_sign: request_sign.clone(),
+                response,
+                post_state: LimiterState {
+                    num_tokens_available: 10,
+                    last_updated_at: 20,
+                    next_seq: request_data.seq + 1,
+                },
+            })),
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+                request_data,
+                request_sign: request_sign.clone(),
+                error: GuardianError::RateLimitExceeded.to_string(),
+            })),
+            LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+                instance: instance_0.clone(),
+                btc_master_pubkey,
+            })),
+            LogMessage::Ceremony(Box::new(CeremonyLogMessage::Rotate {
+                old_instance: instance_0.clone(),
+                new_instance: instance_1.clone(),
+                btc_master_pubkey,
+            })),
+            LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
+                CeremonyLogMessage::NewKey {
                     instance: instance_0.clone(),
                     btc_master_pubkey,
-                })),
-            ),
-            (
-                "ceremony/rotate",
-                LogMessage::Ceremony(Box::new(CeremonyLogMessage::Rotate {
-                    old_instance: instance_0.clone(),
-                    new_instance: instance_1.clone(),
+                },
+                encrypted_shares.clone(),
+            ))),
+            LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
+                CeremonyLogMessage::Rotate {
+                    old_instance: instance_0,
+                    new_instance: instance_1,
                     btc_master_pubkey,
-                })),
-            ),
-            (
-                "ceremony-proposal/new-key",
-                LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
-                    CeremonyLogMessage::NewKey {
-                        instance: instance_0.clone(),
-                        btc_master_pubkey,
-                    },
-                    encrypted_shares.clone(),
-                ))),
-            ),
-            (
-                "ceremony-proposal/rotate",
-                LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
-                    CeremonyLogMessage::Rotate {
-                        old_instance: instance_0,
-                        new_instance: instance_1,
-                        btc_master_pubkey,
-                    },
-                    encrypted_shares.clone(),
-                ))),
-            ),
-            (
-                "kp-share-state/kp-share-state",
-                LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
-                    0,
-                    0,
-                    encrypted_shares,
-                ))),
-            ),
-            (
-                "committee-update/success",
-                LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
-                    from_epoch: 0,
-                    new_committee: committee_1.clone(),
-                    request_sign: request_sign.clone(),
-                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-                })),
-            ),
-            (
-                "committee-update/failure",
-                LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
-                    from_epoch: 0,
-                    new_committee: committee_1,
-                    request_sign,
-                    error: GuardianError::InvalidInputs("test failure".into()).to_string(),
-                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-                })),
-            ),
-            (
-                "genesis/genesis",
-                LogMessage::Genesis(Box::new(GenesisLogMessage {
-                    committee: committee_0,
-                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-                    mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
-                })),
-            ),
+                },
+                encrypted_shares.clone(),
+            ))),
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
+                0,
+                0,
+                encrypted_shares,
+            ))),
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
+                from_epoch: 0,
+                new_committee: committee_1.clone(),
+                request_sign: request_sign.clone(),
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+            })),
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+                from_epoch: 0,
+                new_committee: committee_1,
+                request_sign,
+                error: GuardianError::InvalidInputs("test failure".into()).to_string(),
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+            })),
+            LogMessage::Genesis(Box::new(GenesisLogMessage {
+                committee: committee_0,
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+                mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
+            })),
         ]
     }
 
@@ -687,7 +642,8 @@ mod tests {
     #[test]
     #[ignore = "writes dummy fixtures; run explicitly when updating the log schema"]
     fn regenerate_log_fixtures() {
-        for (name, message) in dummy_log_messages() {
+        for message in dummy_log_messages() {
+            let name = fixture_name(&message);
             let record = dummy_log_record(message);
             let json = serde_json::to_string_pretty(&record).unwrap();
             let path = fixture_path(name);
@@ -700,8 +656,8 @@ mod tests {
     #[test]
     fn dummy_log_fixtures_round_trip_and_verify() {
         let signing_key = fixture_signing_key();
-        for (name, message) in dummy_log_messages() {
-            assert_eq!(fixture_name(&message), name);
+        for message in dummy_log_messages() {
+            let name = fixture_name(&message);
             let expected = dummy_log_record(message);
             let json = std::fs::read_to_string(fixture_path(name)).unwrap();
             let decoded: LogRecord = serde_json::from_str(&json)
@@ -729,7 +685,8 @@ mod tests {
     fn every_log_message_json_round_trips_and_verifies() {
         let signing_key = fixture_signing_key();
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
-        for (name, message) in dummy_log_messages() {
+        for message in dummy_log_messages() {
+            let name = fixture_name(&message);
             let record = LogRecord::new_at_timestamp(
                 session_id.clone(),
                 message,

@@ -99,47 +99,33 @@ trait LogMessageSchema {
     fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern;
 }
 
-macro_rules! impl_log_message_schema {
-    ($schema:ty $(, $proposal_variant:ident)?) => {
-        impl LogMessageSchema for $schema {
-            fn log_type(&self) -> LogType {
-                match self {
-                    Self::Heartbeat(..) => LogType::Heartbeat,
-                    Self::Init(..) => LogType::Init,
-                    Self::Withdrawal(..) => LogType::Withdrawal,
-                    Self::Ceremony(..) => LogType::CeremonyCompleted,
-                    Self::KpShareState(..) => LogType::KpShareState,
-                    Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
-                    Self::Genesis(..) => LogType::Genesis,
-                    $(Self::$proposal_variant(..) => LogType::CeremonyProposal,)?
-                }
-            }
-
-            fn object_key_pattern(
-                &self,
-                session_id: &str,
-                timestamp_ms: UnixMillis,
-            ) -> ObjectKeyPattern {
-                match self {
-                    Self::Heartbeat(message) => {
-                        message.object_key_pattern(session_id, timestamp_ms)
-                    }
-                    Self::Init(message) => message.object_key_pattern(session_id),
-                    Self::Withdrawal(message) => {
-                        message.object_key_pattern(session_id, timestamp_ms)
-                    }
-                    Self::Ceremony(message) => message.object_key_pattern(session_id),
-                    Self::KpShareState(message) => message.object_key_pattern(session_id),
-                    Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
-                    Self::Genesis(message) => message.object_key_pattern(),
-                    $(Self::$proposal_variant(message) => message.object_key_pattern(session_id),)?
-                }
-            }
+impl LogMessageSchema for LogMessageV1 {
+    fn log_type(&self) -> LogType {
+        match self {
+            Self::Heartbeat(..) => LogType::Heartbeat,
+            Self::Init(..) => LogType::Init,
+            Self::Withdrawal(..) => LogType::Withdrawal,
+            Self::Ceremony(..) => LogType::CeremonyCompleted,
+            Self::KpShareState(..) => LogType::KpShareState,
+            Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
+            Self::Genesis(..) => LogType::Genesis,
+            Self::CeremonyProposal(..) => LogType::CeremonyProposal,
         }
-    };
-}
+    }
 
-impl_log_message_schema!(LogMessageV1, CeremonyProposal);
+    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern {
+        match self {
+            Self::Heartbeat(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Init(message) => message.object_key_pattern(session_id),
+            Self::Withdrawal(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Ceremony(message) => message.object_key_pattern(session_id),
+            Self::KpShareState(message) => message.object_key_pattern(session_id),
+            Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
+            Self::Genesis(message) => message.object_key_pattern(),
+            Self::CeremonyProposal(message) => message.object_key_pattern(session_id),
+        }
+    }
+}
 
 impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;
@@ -153,7 +139,7 @@ impl VersionedLogMessage {
     pub fn as_attestation_log(&self) -> Option<&InitLogMessage> {
         let init = match self {
             Self::V1(LogMessageV1::Init(init)) => init.as_ref(),
-            _ => return None,
+            Self::V1(_) => return None,
         };
         matches!(init, InitLogMessage::OIAttestationUnsigned { .. }).then_some(init)
     }
