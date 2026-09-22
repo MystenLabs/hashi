@@ -6408,13 +6408,9 @@ fn select_rotation_indices(
         .collect()
 }
 
-/// Map a failure of `complete_dkg` or `complete_key_rotation` onto an [MpcError], given the
-/// operands that produced it.
-///
-/// Most of these come back as a bare `InvalidInput`, which does not say which case it was, so the
-/// operands in `context` are the only diagnosis. A shortfall is mapped to `NotEnoughApprovals`
-/// instead, because it heals on retry, while `ProtocolFailed` makes
-/// [MpcManager::classify_reconstruction] treat the epoch as suspicious.
+/// Map a failure of `complete_dkg` or `complete_key_rotation` onto an [MpcError]. Most arrive as a
+/// bare `InvalidInput`, so `context` carries the operands. A shortfall heals on retry, unlike the
+/// `ProtocolFailed` that [MpcManager::classify_reconstruction] treats as suspicious.
 fn classify_completion_failure(context: String, got: usize, e: FastCryptoError) -> MpcError {
     match e {
         FastCryptoError::NotEnoughWeight(needed) | FastCryptoError::InputLengthWrong(needed) => {
