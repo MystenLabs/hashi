@@ -4181,15 +4181,21 @@ impl MpcManager {
             .map(|o| o.my_shares.weight())
             .collect::<Vec<_>>();
         let dealers = outputs.len();
+        // The weight `complete_dkg` compares against its threshold.
+        let dealer_weight = self
+            .mpc_config
+            .nodes
+            .total_weight_of(outputs.keys())
+            .unwrap_or(0);
         let combined_output =
             avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs).map_err(
                 |e| {
                     classify_completion_failure(
                         format!(
                             "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
-                             share counts={share_counts:?})"
+                             dealer weight={dealer_weight}, share counts={share_counts:?})"
                         ),
-                        dealers,
+                        dealer_weight as usize,
                         e,
                     )
                 },
@@ -6411,6 +6417,9 @@ fn select_rotation_indices(
 /// Map a failure of `complete_dkg` or `complete_key_rotation` onto an [MpcError]. Most arrive as a
 /// bare `InvalidInput`, so `context` carries the operands. A shortfall heals on retry, unlike the
 /// `ProtocolFailed` that [MpcManager::classify_reconstruction] treats as suspicious.
+///
+/// `got` is what fell short, in the unit the callee counts in: weight for `complete_dkg`, outputs
+/// for `complete_key_rotation`. It is only read for a shortfall.
 fn classify_completion_failure(context: String, got: usize, e: FastCryptoError) -> MpcError {
     match e {
         FastCryptoError::NotEnoughWeight(needed) | FastCryptoError::InputLengthWrong(needed) => {
