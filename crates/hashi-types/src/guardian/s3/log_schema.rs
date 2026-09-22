@@ -23,8 +23,10 @@ use std::time::Duration;
 /// as the record's sibling `schema_version` field rather than as an additional
 /// JSON enum layer.
 ///
-/// Readers match these variants exhaustively at their consumption boundary so
-/// adding a schema version requires each reader to opt in explicitly.
+/// Each `into_<message_kind>()` extractor returns the natural payload type for
+/// that message kind, independently of the record's schema version. Its return
+/// type can evolve to represent payload differences explicitly. Version dispatch
+/// remains exhaustive inside the extractor, without implicit payload conversion.
 #[derive(Debug)]
 pub enum VersionedLogMessage {
     V1(LogMessageV1),
@@ -133,6 +135,70 @@ impl VersionedLogMessage {
     pub fn schema_version(&self) -> u64 {
         match self {
             Self::V1(_) => Self::SCHEMA_VERSION_V1,
+        }
+    }
+
+    /// Consume a heartbeat payload, or return `None` for another message kind.
+    pub fn into_heartbeat(self) -> Option<HeartbeatLogMessage> {
+        match self {
+            Self::V1(LogMessageV1::Heartbeat(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume an init payload, or return `None` for another message kind.
+    pub fn into_init(self) -> Option<Box<InitLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Init(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a withdrawal payload, or return `None` for another message kind.
+    pub fn into_withdrawal(self) -> Option<Box<WithdrawalLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Withdrawal(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a ceremony payload, or return `None` for another message kind.
+    pub fn into_ceremony(self) -> Option<Box<CeremonyLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Ceremony(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a KP share state payload, or return `None` for another message kind.
+    pub fn into_kp_share_state(self) -> Option<Box<KpShareStateLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::KpShareState(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a committee update payload, or return `None` for another message kind.
+    pub fn into_committee_update(self) -> Option<Box<CommitteeUpdateLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::CommitteeUpdate(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a genesis payload, or return `None` for another message kind.
+    pub fn into_genesis(self) -> Option<Box<GenesisLogMessageV1>> {
+        match self {
+            Self::V1(LogMessageV1::Genesis(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a ceremony proposal payload, or return `None` for another message kind.
+    pub fn into_ceremony_proposal(self) -> Option<Box<CeremonyProposalLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::CeremonyProposal(message)) => Some(message),
+            Self::V1(_) => None,
         }
     }
 
