@@ -9,7 +9,7 @@ use serde::Serialize;
 /// Current first-deploy committee written at `genesis/record.json` once
 /// KP-authorized PI reaches threshold.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct GenesisLogMessageV1 {
+pub struct GenesisLogMessage {
     pub committee: crate::move_types::Committee,
     /// The Hashi shared-object id this guardian was bootstrapped for.
     pub hashi_object_id: sui_sdk_types::Address,
@@ -18,10 +18,7 @@ pub struct GenesisLogMessageV1 {
     pub mpc_master_g: crate::bitcoin::HashiMasterG,
 }
 
-/// Writer-facing alias for the current genesis log schema.
-pub type GenesisLogMessage = GenesisLogMessageV1;
-
-impl GenesisLogMessageV1 {
+impl GenesisLogMessage {
     /// The slash-terminated prefix containing the genesis record.
     pub fn object_key_dir() -> String {
         format!("{S3_DIR_GENESIS}/")

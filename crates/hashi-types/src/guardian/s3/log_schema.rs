@@ -9,7 +9,7 @@ use super::log_layout::ObjectKeyPattern;
 use super::log_messages::CeremonyLogMessage;
 use super::log_messages::CeremonyProposalLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
-use super::log_messages::GenesisLogMessageV1;
+use super::log_messages::GenesisLogMessage;
 use super::log_messages::HeartbeatLogMessage;
 use super::log_messages::InitLogMessage;
 use super::log_messages::KpShareStateLogMessage;
@@ -62,7 +62,7 @@ pub enum LogMessageV1 {
     Ceremony(Box<CeremonyLogMessage>),
     KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
-    Genesis(Box<GenesisLogMessageV1>),
+    Genesis(Box<GenesisLogMessage>),
     CeremonyProposal(Box<CeremonyProposalLogMessage>),
 }
 
@@ -187,7 +187,7 @@ impl VersionedLogMessage {
     }
 
     /// Consume a genesis payload, or return `None` for another message kind.
-    pub fn into_genesis(self) -> Option<Box<GenesisLogMessageV1>> {
+    pub fn into_genesis(self) -> Option<Box<GenesisLogMessage>> {
         match self {
             Self::V1(LogMessageV1::Genesis(message)) => Some(message),
             Self::V1(_) => None,
