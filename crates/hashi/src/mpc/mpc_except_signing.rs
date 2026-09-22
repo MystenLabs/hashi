@@ -4184,7 +4184,7 @@ impl MpcManager {
         let combined_output =
             avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs).map_err(
                 |e| {
-                    classify_combination_failure(
+                    classify_completion_failure(
                         format!(
                             "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
                              share counts={share_counts:?})"
@@ -4837,7 +4837,7 @@ impl MpcManager {
         )
         .map_err(|e| {
             let indices = indexed_outputs.iter().map(|o| o.index).collect::<Vec<_>>();
-            classify_combination_failure(
+            classify_completion_failure(
                 format!(
                     "complete_key_rotation failed (threshold={threshold}, \
                      outputs={}, indices={indices:?})",
@@ -5176,7 +5176,7 @@ impl MpcManager {
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
                 .map_err(|e| {
-                    classify_combination_failure(
+                    classify_completion_failure(
                         format!(
                             "complete_dkg failed (threshold={}, dealers={dealers}, \
                              dealer weight={dealer_weight_sum}, share counts={share_counts:?})",
@@ -5386,7 +5386,7 @@ impl MpcManager {
             &indexed_outputs,
         )
         .map_err(|e| {
-            classify_combination_failure(
+            classify_completion_failure(
                 format!(
                     "complete_key_rotation failed (threshold={}, outputs={}, indices={used_indices:?})",
                     context.input_threshold,
@@ -6408,13 +6408,14 @@ fn select_rotation_indices(
         .collect()
 }
 
-/// Map a failure to combine dealings onto an [MpcError], given the operands that produced it.
+/// Map a failure of `complete_dkg` or `complete_key_rotation` onto an [MpcError], given the
+/// operands that produced it.
 ///
 /// Most of these come back as a bare `InvalidInput`, which does not say which case it was, so the
 /// operands in `context` are the only diagnosis. A shortfall is mapped to `NotEnoughApprovals`
 /// instead, because it heals on retry, while `ProtocolFailed` makes
 /// [MpcManager::classify_reconstruction] treat the epoch as suspicious.
-fn classify_combination_failure(context: String, got: usize, e: FastCryptoError) -> MpcError {
+fn classify_completion_failure(context: String, got: usize, e: FastCryptoError) -> MpcError {
     match e {
         FastCryptoError::NotEnoughWeight(needed) | FastCryptoError::InputLengthWrong(needed) => {
             MpcError::NotEnoughApprovals { needed, got }
