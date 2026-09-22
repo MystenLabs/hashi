@@ -13,7 +13,6 @@ use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::S3ObjectLockPolicy;
 use hashi_types::guardian::UnresolvedS3Config;
 use std::collections::BTreeSet;
-use std::sync::Once;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -34,10 +33,6 @@ use tracing::warn;
 /// Maximum attempts the AWS SDK makes for reads and control-plane operations.
 /// Log PUTs override this because the Guardian log writer owns their retries.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
-// TODO(testnet-wipe): Remove this escape hatch after the planned testnet wipe.
-/// Temporary testnet escape hatch for logs whose legacy seven-day locks expired.
-const SKIP_S3_OBJECT_LOCK_CHECK_ENV: &str = "HASHI_SKIP_S3_OBJECT_LOCK_CHECK";
-static SKIP_S3_OBJECT_LOCK_CHECK_WARNING: Once = Once::new();
 
 /// Resolve explicit credentials or, when both are omitted, use AWS's default
 /// provider chain.
@@ -560,8 +555,7 @@ impl GuardianS3Client {
         Ok(seen_keys.into_iter().collect())
     }
 
-    /// Batch read with prefix-history and object-lock validation. The temporary
-    /// process-wide testnet override skips only the object-lock validation.
+    /// Batch read with prefix-history and object-lock validation.
     ///
     /// Each returned record's signed object key is checked against the actual
     /// S3 key from which it was read.
@@ -583,8 +577,7 @@ impl GuardianS3Client {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // The prefix history was checked above. Immutable batch logs also
-            // require an unexpired Compliance lock unless the temporary
-            // process-wide testnet override is set.
+            // require an unexpired Compliance lock.
             out.push(
                 self.get_log_record_inner(&key, ImmutabilityCheck::MutationAlreadyChecked)
                     .await?,
@@ -628,7 +621,6 @@ impl GuardianS3Client {
             })?;
 
         if !matches!(immutability_check, ImmutabilityCheck::Skipped)
-            && !skip_s3_object_lock_check()
             && !has_unexpired_compliance_lock(
                 response.object_lock_mode(),
                 response.object_lock_retain_until_date(),
@@ -665,7 +657,6 @@ impl GuardianS3Client {
     }
 
     /// Read an immutable-log object with history and Compliance-lock checks.
-    /// The temporary process-wide testnet override skips only the lock check.
     pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
         self.get_log_record_inner(key, ImmutabilityCheck::Required)
             .await
@@ -682,19 +673,6 @@ fn has_unexpired_compliance_lock(
 ) -> bool {
     mode == Some(&ObjectLockMode::Compliance)
         && retain_until.is_some_and(|retain_until| *retain_until > DateTime::from(now))
-}
-
-fn skip_s3_object_lock_check() -> bool {
-    let skip = std::env::var_os(SKIP_S3_OBJECT_LOCK_CHECK_ENV).is_some();
-    if skip {
-        SKIP_S3_OBJECT_LOCK_CHECK_WARNING.call_once(|| {
-            warn!(
-                env = SKIP_S3_OBJECT_LOCK_CHECK_ENV,
-                "S3 object-lock validation is disabled for this process"
-            );
-        });
-    }
-    skip
 }
 
 #[cfg(test)]
