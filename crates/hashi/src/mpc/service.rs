@@ -125,6 +125,9 @@ pub struct MpcService {
     refill_rx: watch::Receiver<u32>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
     next_batch_repair: Mutex<Option<(u64, u32, tokio::time::Instant)>>,
+    /// Earliest next attempt to restore the current epoch's `MpcManager`
+    /// after a failed one, keyed by epoch; see `restore_current_manager`.
+    next_manager_restore: Mutex<Option<(u64, tokio::time::Instant)>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
 }
@@ -144,6 +147,14 @@ fn repair_rate_limited(
     now: tokio::time::Instant,
 ) -> bool {
     matches!(gate, Some((e, b, not_before)) if e == epoch && b == batch_index && now < not_before)
+}
+
+fn restore_rate_limited(
+    gate: Option<(u64, tokio::time::Instant)>,
+    epoch: u64,
+    now: tokio::time::Instant,
+) -> bool {
+    matches!(gate, Some((e, not_before)) if e == epoch && now < not_before)
 }
 
 fn walk_step(size: Option<usize>, batch_start: u64, num_consumed: u64) -> WalkStep {
@@ -181,6 +192,7 @@ impl MpcService {
             refill_rx,
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             next_batch_repair: Mutex::new(None),
+            next_manager_restore: Mutex::new(None),
             backup_handle,
             replacement_keys_target_epoch: Mutex::new(None),
         };
@@ -1106,9 +1118,16 @@ impl MpcService {
     /// survived the whole time, which is exactly why `sync_if_stale` rebuilds
     /// nothing, yet presignature refill and batch repair both run through
     /// `ensure_manager_epoch` and fail against the dead manager, so the pool
-    /// could not refill until the next `end_reconfig` landed. A fresh manager
-    /// is all they need: the recovery path builds the same one from scratch.
-    fn restore_current_manager(&self, epoch: u64) {
+    /// could not refill until the next `end_reconfig` landed.
+    ///
+    /// The rebuild is the startup recovery path, not a bare setup: a fresh
+    /// manager carries no MPC outputs, and peers ask this node for the
+    /// epoch's public output (a new member does, during the replacement
+    /// rotation), which only the reconstruction from local certificates puts
+    /// back. A failed attempt is not retried before `RETRY_INTERVAL` has
+    /// passed, the same pacing `handle_reconfig` gives the setup it retries,
+    /// since this runs on every checkpoint. Runs under the reconcile guard.
+    async fn restore_current_manager(&self, epoch: u64) {
         let pinned = self
             .inner
             .mpc_manager()
@@ -1116,30 +1135,31 @@ impl MpcService {
         if !manager_needs_restore(pinned, epoch, self.get_pending_epoch_change()) {
             return;
         }
-        let result = if self.inner.onchain_state().is_key_rotation_epoch(epoch) {
-            self.setup_key_rotation(epoch)
-        } else {
-            self.setup_initial_dkg(epoch)
-        };
-        match result {
-            Ok(()) => info!(
-                "sync_if_stale: restored the MpcManager for epoch {epoch}; a reconfiguration \
-                 that did not complete had left it on {pinned:?}"
-            ),
-            Err(e) => error!(
-                "sync_if_stale: failed to restore the MpcManager for epoch {epoch} (left on \
-                 {pinned:?} by a reconfiguration that did not complete): {e}"
-            ),
+        let now = tokio::time::Instant::now;
+        if restore_rate_limited(*self.next_manager_restore.lock().unwrap(), epoch, now()) {
+            return;
+        }
+        match self.recover_mpc_state().await {
+            Ok(_) => {
+                *self.next_manager_restore.lock().unwrap() = None;
+                info!(
+                    "sync_if_stale: restored the MpcManager for epoch {epoch}; a \
+                     reconfiguration that did not complete had left it on {pinned:?}"
+                );
+            }
+            Err(e) => {
+                *self.next_manager_restore.lock().unwrap() = Some((epoch, now() + RETRY_INTERVAL));
+                error!(
+                    "sync_if_stale: failed to restore the MpcManager for epoch {epoch} (left \
+                     on {pinned:?} by a reconfiguration that did not complete), next attempt \
+                     in {RETRY_INTERVAL:?}: {e}"
+                );
+            }
         }
     }
 
     async fn sync_if_stale(&self) {
         if self.is_awaiting_genesis() || !self.inner.is_in_current_committee() {
-            return;
-        }
-        let epoch = self.inner.onchain_state().epoch();
-        if self.inner.signing_manager_for(epoch).is_some() {
-            self.restore_current_manager(epoch);
             return;
         }
         let _guard = match self.reconciling.try_lock() {
@@ -1148,6 +1168,7 @@ impl MpcService {
         };
         let epoch = self.inner.onchain_state().epoch();
         if self.inner.signing_manager_for(epoch).is_some() {
+            self.restore_current_manager(epoch).await;
             return;
         }
         info!("sync_if_stale: rebuilding SigningManager for epoch {epoch}");
@@ -2687,6 +2708,25 @@ mod repair_gate_tests {
         assert!(!repair_rate_limited(Some((7, 4, deadline)), 7, 3, now));
         assert!(!repair_rate_limited(Some((8, 3, deadline)), 7, 3, now));
         assert!(!repair_rate_limited(None, 7, 3, now));
+    }
+}
+
+#[cfg(test)]
+mod restore_gate_tests {
+    use super::restore_rate_limited;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn only_the_same_epoch_before_the_deadline_is_limited() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(10);
+        assert!(restore_rate_limited(Some((6, deadline)), 6, now));
+        // The deadline itself is open.
+        assert!(!restore_rate_limited(Some((6, now)), 6, now));
+        // A gate left by another epoch never holds this one back.
+        assert!(!restore_rate_limited(Some((5, deadline)), 6, now));
+        assert!(!restore_rate_limited(None, 6, now));
     }
 }
 
