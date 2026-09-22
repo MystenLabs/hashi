@@ -5187,8 +5187,6 @@ impl MpcManager {
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
                 .map_err(|e| match e {
-                    // Same shortfall the weight check above reports, and it heals on retry, unlike
-                    // the `ProtocolFailed` that `classify_reconstruction` treats as suspicious.
                     FastCryptoError::NotEnoughWeight(needed) => MpcError::NotEnoughApprovals {
                         needed,
                         got: dealer_weight_sum as usize,
@@ -5399,7 +5397,6 @@ impl MpcManager {
             &indexed_outputs,
         )
         .map_err(|e| match e {
-            // As in `reconstruct_dkg`: a shortfall must stay retryable.
             FastCryptoError::InputLengthWrong(needed) if indexed_outputs.len() < needed => {
                 MpcError::NotEnoughApprovals {
                     needed,
