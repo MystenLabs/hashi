@@ -130,6 +130,9 @@ jobs:
       - name: clippy
         run: make clippy
 
+      - name: clippy (real attestation arm)
+        run: make clippy-enclave
+
       - run: make buf-lint
       - run: make proto
 

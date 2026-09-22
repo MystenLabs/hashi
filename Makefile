@@ -44,6 +44,13 @@ proto: ## Build proto files
 clippy: ## run cargo clippy
 	cargo clippy --workspace --all-features --all-targets
 
+# Two invocations: cargo unifies features across -p, and hashi-guardian-init's
+# deps would enable features the EIF's `-p hashi-guardian` build doesn't get.
+.PHONY: clippy-enclave
+clippy-enclave: ## clippy the guardian crates' real attestation path, which --all-features skips
+	cargo clippy -p hashi-guardian -p hashi-types
+	cargo clippy -p hashi-guardian-init
+
 .PHONY: doc
 doc: ## Generate documentation
 	RUSTDOCFLAGS="-Dwarnings --cfg=doc_cfg -Zunstable-options --generate-link-to-definition" RUSTC_BOOTSTRAP=1 cargo doc --workspace --all-features --no-deps
