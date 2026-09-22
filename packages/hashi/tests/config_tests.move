@@ -25,6 +25,24 @@ fun test_withdrawal_minimum_with_defaults() {
 }
 
 #[test]
+fun test_reconfig_hold_defaults_to_false() {
+    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
+    let hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+
+    assert!(!config::reconfig_hold(hashi.config()));
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_reconfig_hold_reads_false_when_absent() {
+    // A deployment published before the key existed has no entry; the
+    // accessor must not abort on it.
+    let config = config::empty();
+    assert!(!config::reconfig_hold(&config));
+}
+
+#[test]
 fun test_deposit_minimum_with_defaults() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);

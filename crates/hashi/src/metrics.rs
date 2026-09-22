@@ -104,6 +104,7 @@ pub struct Metrics {
     /// reconfiguration stalled for a whole Sui epoch.
     pub reconfig_aborted_total: IntCounter,
     paused: IntGauge,
+    reconfig_hold: IntGauge,
     deposit_queue_size: IntGauge,
     pub deposit_outpoint_confirmations: IntGaugeVec,
     withdrawal_queue_size: IntGaugeVec,
@@ -768,6 +769,13 @@ impl Metrics {
             paused: register_int_gauge_with_registry!(
                 "hashi_paused",
                 "whether the system is paused (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            reconfig_hold: register_int_gauge_with_registry!(
+                "hashi_reconfig_hold",
+                "whether governance holds reconfiguration via the onchain reconfig_hold config \
+                 flag (1) or not (0); while set, start_reconfig is refused on chain",
                 registry,
             )
             .unwrap(),
@@ -1640,6 +1648,8 @@ impl Metrics {
                 0
             });
         self.paused.set(if hashi.config.paused() { 1 } else { 0 });
+        self.reconfig_hold
+            .set(if hashi.config.reconfig_hold() { 1 } else { 0 });
         self.deposit_queue_size
             .set(hashi.bitcoin().deposit_queue.requests().len() as i64);
         // Four mirrored withdrawal-request states. With deferred archival a

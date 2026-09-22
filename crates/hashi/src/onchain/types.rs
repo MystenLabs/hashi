@@ -785,6 +785,18 @@ impl Config {
         matches!(self.config.get("paused"), Some(ConfigValue::Bool(true)))
     }
 
+    /// The `reconfig_hold` instant-config flag. While it is set the chain
+    /// refuses `start_reconfig`, so nodes do not submit it and the last
+    /// committed committee keeps serving until an update-config proposal
+    /// clears the flag. A pending reconfiguration is unaffected. Absent on a
+    /// deployment published before the key existed, which means no hold.
+    pub fn reconfig_hold(&self) -> bool {
+        matches!(
+            self.config.get("reconfig_hold"),
+            Some(ConfigValue::Bool(true))
+        )
+    }
+
     pub fn bitcoin_chain_id(&self) -> Option<Address> {
         match self.config.get("bitcoin_chain_id") {
             Some(ConfigValue::Address(v)) => Some(*v),
@@ -1041,6 +1053,27 @@ impl Coin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config_with(entries: &[(&str, ConfigValue)]) -> Config {
+        Config {
+            config: entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect(),
+            enabled_versions: BTreeSet::new(),
+            upgrade_cap: None,
+        }
+    }
+
+    #[test]
+    fn reconfig_hold_is_set_only_by_an_explicit_true() {
+        assert!(config_with(&[("reconfig_hold", ConfigValue::Bool(true))]).reconfig_hold());
+        assert!(!config_with(&[("reconfig_hold", ConfigValue::Bool(false))]).reconfig_hold());
+        // Absent on a deployment published before the key existed.
+        assert!(!config_with(&[]).reconfig_hold());
+        // The wrong type is a governance mistake, not a hold.
+        assert!(!config_with(&[("reconfig_hold", ConfigValue::U64(1))]).reconfig_hold());
+    }
 
     fn empty_committee(epoch: u64) -> Committee {
         Committee::new(vec![], epoch, 0, 5_000)

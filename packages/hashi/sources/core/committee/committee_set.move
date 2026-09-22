@@ -485,7 +485,9 @@ public(package) fun end_reconfig(
 /// under the last committed committee; at genesis there is no committee yet,
 /// so Hashi is back in its pre-genesis state. Either way a fresh
 /// `start_reconfig` can form a new committee from the now-current validator
-/// set.
+/// set, and nodes submit it as soon as they see the abort unless governance
+/// holds reconfiguration with the `reconfig_hold` config flag, in which case
+/// the last committed committee keeps serving until the flag is cleared.
 ///
 /// `start_reconfig` pins the pending committee's epoch to Sui's epoch at
 /// formation time, so a pending epoch that still equals Sui's epoch means the

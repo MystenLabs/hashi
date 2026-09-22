@@ -4,7 +4,15 @@
 #[test_only]
 module hashi::reconfig_tests;
 
-use hashi::{committee::CommitteeSignature, reconfig, test_utils};
+use hashi::{
+    committee::CommitteeSignature,
+    config,
+    config_value,
+    reconfig,
+    test_utils,
+    update_config
+};
+use sui::{clock, vec_map};
 
 const VOTER1: address = @0x1;
 const VOTER2: address = @0x2;
@@ -822,5 +830,73 @@ fun test_start_reconfig_succeeds_after_genesis_abort() {
     assert!(hashi.committee_set().get_committee(8).n_members() == 3);
     assert!(hashi.committee_set().epoch() == 0);
     assert!(hashi.committee_set().mpc_public_key().is_empty());
+    std::unit_test::destroy(hashi);
+}
+
+// ~~~~~~~ reconfig_hold ~~~~~~~
+
+/// Set or clear `reconfig_hold` the way governance does: an `update_config`
+/// proposal from the single voter, executed at once.
+fun set_reconfig_hold_by_proposal(
+    hashi: &mut hashi::hashi::Hashi,
+    hold: bool,
+    ctx: &mut TxContext,
+) {
+    let clock = clock::create_for_testing(ctx);
+    let mut entries = vec_map::empty();
+    entries.insert(b"reconfig_hold".to_string(), config_value::new_bool(hold));
+    let proposal_id = update_config::propose(hashi, VOTER1, entries, vec_map::empty(), &clock, ctx);
+    update_config::execute(hashi, proposal_id, &clock);
+    clock::destroy_for_testing(clock);
+}
+
+#[test]
+fun test_start_reconfig_gate_passes_by_default() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+
+    reconfig::assert_reconfig_not_held(&hashi);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = reconfig::EReconfigHeld)]
+fun test_start_reconfig_gate_rejects_while_held_by_governance() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    set_reconfig_hold_by_proposal(&mut hashi, true, ctx);
+    assert!(config::reconfig_hold(hashi.config()));
+
+    reconfig::assert_reconfig_not_held(&hashi);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_start_reconfig_gate_passes_once_governance_clears_the_hold() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    set_reconfig_hold_by_proposal(&mut hashi, true, ctx);
+    set_reconfig_hold_by_proposal(&mut hashi, false, ctx);
+    assert!(!config::reconfig_hold(hashi.config()));
+
+    reconfig::assert_reconfig_not_held(&hashi);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// Only forming a committee is gated: a reconfiguration that overran its
+/// window can still be torn down while the hold is set, which is exactly
+/// the sequence an operator uses to stay on the last committed committee.
+fun test_abort_reconfig_allowed_while_held() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = hashi_with_pending_reconfig(ctx);
+    config::upsert(hashi.config_mut(), b"reconfig_hold", config_value::new_bool(true));
+    let late = &test_utils::new_tx_context(VOTER1, 2);
+
+    reconfig::abort_reconfig_for_testing(&mut hashi, 1, late);
+
+    assert!(!hashi.committee_set().is_reconfiguring());
+    assert!(hashi.committee_set().epoch() == 0);
+    assert!(config::reconfig_hold(hashi.config()));
     std::unit_test::destroy(hashi);
 }
