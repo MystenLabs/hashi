@@ -114,12 +114,14 @@ sequenceDiagram
     Guardian->>S3: log(init attestation + GuardianInfo)
     Operator->>Guardian: SetupNewKey(ordered KP attested bundles, n, t)
     Guardian->>Guardian: Verify all YubiKey proofs and bind SIG/DEC keys
-    Guardian->>S3: log(ceremony/NewKey + kp-shares state)
+    Guardian->>S3: log(kp-shares/proposed/{session})
     Guardian-->>Operator: encrypted KP share state + guardian BTC pubkey
 
-    KPs->>S3: Read init, ceremony, and kp-shares logs
+    KPs->>S3: Read init and the session's proposed ceremony
     S3-->>KPs: One PGP-encrypted share targeting this KP's attested DEC key
     KPs->>KPs: Decrypt share and verify Nitro attestation, recipients, commitment
+    KPs->>Guardian: Confirm proposed ceremony digest
+    Guardian->>S3: Publish kp-shares state, then ceremony commit
 ```
 
 ## Withdraw-mode provisioning flow

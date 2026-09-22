@@ -162,7 +162,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     )?;
     live.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
     guardian
-        .verify_published(&live, new_kp_set.num_shares, new_kp_set.threshold)
+        .verify_proposal(&live, new_kp_set.num_shares, new_kp_set.threshold)
         .await?;
 
     guardian.wait_for_confirmations().await?;
@@ -170,7 +170,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// Resume an interrupted `submit`: the accepted batch is committed in S3, so
+/// Resume an interrupted `submit`: the accepted batch is proposed in S3, so
 /// only the wait for every new KP's confirmation remains.
 pub async fn wait(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
@@ -185,19 +185,12 @@ pub async fn wait(cfg: Config) -> Result<()> {
         "guardian lifecycle is operator_initialized: nothing has been submitted to it \
          (operator rotate-kp-set submit)"
     );
-    // The latest logs must be the pinned guardian's own deal, or this would
-    // report another ceremony guardian's lifecycle for them.
-    let (logged, dealer) = guardian
+    // Read the pinned guardian's own proposal, which is available before
+    // every KP has confirmed and the finalized logs have been published.
+    let logged = guardian
         .reader
-        .read_latest_ceremony_state_with_dealer()
+        .read_live_ceremony_proposal(&guardian.session_id)
         .await?;
-    ensure!(
-        dealer == guardian.session_id,
-        "the latest ceremony (sharing_seq {}) was dealt by guardian session {dealer}, not by \
-         the pinned session {}: guardian_endpoint must be the guardian that dealt it",
-        logged.secret_sharing_instance.sharing_seq(),
-        guardian.session_id
-    );
     logged.validate_sharing_params(new_kp_set.num_shares, new_kp_set.threshold)?;
     logged
         .encrypted_shares

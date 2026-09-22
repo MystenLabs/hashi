@@ -7,6 +7,7 @@
 use super::config::S3ObjectLockPolicy;
 use super::log_layout::ObjectKeyPattern;
 use super::log_messages::CeremonyLogMessage;
+use super::log_messages::CeremonyProposalLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
 use super::log_messages::GenesisLogMessageV1;
 use super::log_messages::GenesisLogMessageV2;
@@ -84,6 +85,7 @@ pub enum LogMessageV2 {
     KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessageV2>),
+    CeremonyProposal(Box<CeremonyProposalLogMessage>),
 }
 
 /// Writer-facing alias for the log-message schema emitted by guardians.
@@ -95,7 +97,8 @@ pub enum LogType {
     Heartbeat,
     Init,
     Withdrawal,
-    Ceremony,
+    CeremonyCompleted,
+    CeremonyProposal,
     KpShareState,
     CommitteeUpdate,
     Genesis,
@@ -104,10 +107,10 @@ pub enum LogType {
 impl LogType {
     pub(super) const fn object_lock_duration(self, policy: S3ObjectLockPolicy) -> Duration {
         match self {
-            Self::Heartbeat | Self::KpShareState => policy.short_lived,
+            Self::Heartbeat | Self::CeremonyProposal | Self::KpShareState => policy.short_lived,
             Self::Init
             | Self::Withdrawal
-            | Self::Ceremony
+            | Self::CeremonyCompleted
             | Self::CommitteeUpdate
             | Self::Genesis => policy.long_lived,
         }
@@ -121,17 +124,18 @@ trait LogMessageSchema {
 }
 
 macro_rules! impl_log_message_schema {
-    ($schema:ty) => {
+    ($schema:ty $(, $proposal_variant:ident)?) => {
         impl LogMessageSchema for $schema {
             fn log_type(&self) -> LogType {
                 match self {
                     Self::Heartbeat(..) => LogType::Heartbeat,
                     Self::Init(..) => LogType::Init,
                     Self::Withdrawal(..) => LogType::Withdrawal,
-                    Self::Ceremony(..) => LogType::Ceremony,
+                    Self::Ceremony(..) => LogType::CeremonyCompleted,
                     Self::KpShareState(..) => LogType::KpShareState,
                     Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
                     Self::Genesis(..) => LogType::Genesis,
+                    $(Self::$proposal_variant(..) => LogType::CeremonyProposal,)?
                 }
             }
 
@@ -152,6 +156,7 @@ macro_rules! impl_log_message_schema {
                     Self::KpShareState(message) => message.object_key_pattern(session_id),
                     Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
                     Self::Genesis(message) => message.object_key_pattern(),
+                    $(Self::$proposal_variant(message) => message.object_key_pattern(session_id),)?
                 }
             }
         }
@@ -159,7 +164,7 @@ macro_rules! impl_log_message_schema {
 }
 
 impl_log_message_schema!(LogMessageV1);
-impl_log_message_schema!(LogMessageV2);
+impl_log_message_schema!(LogMessageV2, CeremonyProposal);
 
 impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;

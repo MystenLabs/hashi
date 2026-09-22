@@ -7,8 +7,8 @@
 //! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
 //! share's recipient roster matches its expected KP cert set and every
 //! ciphertext targets its keyed cert (without decrypting) -> cross-check the
-//! guardian's `ceremony/` audit log and `kp-shares/` recovery log -> wait for
-//! every KP to confirm successful recovery.
+//! guardian's session-scoped `kp-shares/proposed/` record -> wait for every KP
+//! to confirm successful recovery and commit the finalized logs.
 //!
 //! [`OperatorInit`]: hashi_types::guardian::OperatorInitRequest
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
@@ -136,10 +136,10 @@ pub async fn run(cfg: Config) -> Result<()> {
         "all returned PGP-encrypted shares verified against expected KP certificates",
     );
 
-    // 7. Cross-check the latest guardian ceremony/ and kp-shares/ logs, then
+    // 7. Cross-check this session's proposed ceremony state, then
     //    wait for every KP's confirmation.
     guardian
-        .verify_published(&live, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)
+        .verify_proposal(&live, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)
         .await?;
     guardian.wait_for_confirmations().await?;
 

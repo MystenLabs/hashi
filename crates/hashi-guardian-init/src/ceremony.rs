@@ -177,9 +177,9 @@ impl CeremonyGuardian {
         Ok(status)
     }
 
-    /// Require the latest `ceremony/` + `kp-shares/` logs, from the current
+    /// Require this session's `kp-shares/proposed/` record, from the current
     /// build, to equal the state the guardian returned.
-    pub async fn verify_published(
+    pub async fn verify_proposal(
         &mut self,
         live: &CeremonyState,
         expected_n: usize,
@@ -187,20 +187,20 @@ impl CeremonyGuardian {
     ) -> Result<()> {
         info!(
             phase = "log cross-check",
-            "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
+            "cross-checking this guardian session's ceremony proposal",
         );
         let logged = self
             .reader
-            .read_latest_ceremony_state_from_current_build()
+            .read_live_ceremony_proposal(&self.session_id)
             .await?;
         logged.validate_sharing_params(expected_n, expected_t)?;
         ensure!(
             logged == *live,
-            "ceremony/ and kp-shares/ logs differ from the guardian's response"
+            "ceremony proposal differs from the guardian's response"
         );
         info!(
             phase = "log cross-check",
-            "ceremony/ and kp-shares/ logs match the guardian's response",
+            "ceremony proposal matches the guardian's response",
         );
         Ok(())
     }
@@ -212,7 +212,7 @@ impl CeremonyGuardian {
         const POLLS_PER_PROGRESS_LINE: u32 = 12;
         info!(
             phase = "KP confirmations",
-            "ceremony state published; waiting for every key provisioner to run key-provisioner ceremony",
+            "ceremony proposal published; waiting for every key provisioner to run key-provisioner ceremony",
         );
         let started = Instant::now();
         let mut polls = 0u32;

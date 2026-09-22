@@ -51,17 +51,19 @@ default credential chain.
 The production guardian key ceremony — genesis setup, run once by the operator.
 
 One S3 bucket is involved: the guardian's **log bucket** (object-lock enabled).
-The guardian writes its `init/` attestation, `ceremony/` audit log, and
-`kp-shares/` encrypted-share recovery log here. The operator and key provisioner
-ceremony commands both read it.
+The guardian writes its `init/` attestation and a session-addressed
+`kp-shares/proposed/` record here. The operator and key provisioner ceremony
+commands both verify that proposal. Once every KP confirms, the guardian
+publishes the finalized `kp-shares/` recovery state and `ceremony/` audit log.
 
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
 setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
 `setup_new_key` → verifies the response signature and shape → confirms each
 share's recipient matches its expected KP cert and its PGP-encrypted ciphertext
-targets that cert (parsed without decrypting) → cross-checks the guardian's
-`ceremony/` audit log and `kp-shares/` recovery log.
-It then waits for every KP to confirm successful share recovery.
+targets that cert (parsed without decrypting) →
+cross-checks the guardian's `kp-shares/proposed/` record. It then waits for every
+KP to confirm successful share recovery and for the finalized `kp-shares/` and
+`ceremony/` records to be published.
 
 `kp_roster.kp_pgp_cert_paths` lists one certificate per KP, in any order.
 New ceremonies assign share IDs by fingerprint order; existing assignments
@@ -77,24 +79,25 @@ command uses `guardian_endpoint`, `hashi`, and `kp_roster`.
 
 ## key-provisioner ceremony
 
-Confirms a KP can fetch and decrypt their share from the latest setup or
-rotation ceremony. Trust is anchored to the guardian's S3 attestation log: it
-discovers the latest ceremony and KP-share state from S3, verifies each record
-against its writing session's attested signing pubkey and the expected `n`/`t`,
-and confirms each share's recipient and PGP-encrypted ciphertext match the
-expected KP cert. It then uses `kp_pgp_cert_path` to identify and decrypt this
-KP's share and verifies its commitment. After verification it saves the full
-ceremony state, including every KP's encrypted share and the public ceremony
-data, to the requested path, then
+Confirms a KP can fetch and decrypt their share from the live setup or rotation
+ceremony. Trust is anchored to the guardian's S3 attestation log: it verifies
+the live guardian, reads that session's exact `kp-shares/proposed/` record, and
+checks the proposal against the live secret-sharing instance and expected
+`n`/`t`. It then confirms each share's recipient and PGP-encrypted ciphertext
+match the expected KP cert, uses `kp_pgp_cert_path` to identify and decrypt this
+KP's share, and verifies its commitment. After verification it saves the full
+proposed ceremony state, including every KP's encrypted share and the public
+ceremony data, then
 signs and submits a confirmation to the live guardian. The guardian completes
-the ceremony only after all KP/share entries have confirmed. For rotations,
+the ceremony and publishes the finalized `kp-shares/` and `ceremony/` records
+only after all KP/share entries have confirmed. For rotations,
 the ceremony guardian must keep running after `RotateKpSet` returns until
 every new KP has confirmed; `operator rotate-kp-set submit` (or `wait`) waits
 for that.
 
 Both ceremony commands verify live guardian info and Nitro attestation against
-the configured current build. The KP additionally anchors the ceremony and
-share logs to their writing session's S3 `init/` attestation. Through the
+the configured current build. The KP additionally anchors the proposal to its
+writing session's S3 `init/` attestation. Through the
 proxy, the KP's `guardian_endpoint` answers with the guardian KPs are
 provisioning (`GetProvisioningTargetInfo`): the standby during a KP-set
 rotation, else the active guardian. A bare guardian endpoint answers for
@@ -258,8 +261,8 @@ guardian is then provisioned by the new set (`operator provision` without
 guardian is stopped, activated.
 Rotating the set changes who can provision future guardians. It also changes
 who the serving guardian and the proxy accept KP-signed calls from: both
-resolve the roster from the latest committed `kp-shares/`, so once `submit`
-commits, the old certs can no longer `rotate-cert`. The old set's encrypted
+resolve the roster from the latest committed `kp-shares/`, so once every new
+KP confirms and the rotation commits, the old certs can no longer `rotate-cert`. The old set's encrypted
 shares remain in earlier `kp-shares/` entries.
 
 Like a new ceremony, the rotation deals share ids in fingerprint order, so
@@ -277,16 +280,15 @@ pinned session, each signer's share assignment, one submission per share,
 agreement with this config's `new_kp_roster` and PCR allowlist, the dealt
 set's threshold), calls `RotateKpSet` in one batch, verifies the guardian-
 signed response (`sharing_seq + 1`, every share encrypted to the new certs)
-and the `ceremony/` + `kp-shares/` logs it wrote, then waits for every new
-KP's `key-provisioner ceremony` confirmation. The enclave completes only once
+and its session-scoped `kp-shares/proposed/` record, then waits for every new
+KP's `key-provisioner ceremony` confirmation. The enclave publishes finalized
+`kp-shares/{seq+1}/` and `ceremony/{seq+1}` records and completes only once
 all `n` new KPs have confirmed, and the wait has no timeout. Interrupting it
-is safe once the batch was accepted: `wait` requires the pinned guardian to
-have dealt the latest logs, verifies them against `new_kp_roster` and resumes
-the wait, while `submit` refuses a guardian that already dealt. An accepted
-batch is committed in S3 (`ceremony/{seq+1}` + `kp-shares/{seq+1}/`) whether
-or not the confirmations complete: if the ceremony guardian dies first, the
-new set can still provision, and each new KP first decrypts its share during
-`key-provisioner provision` instead.
+is safe once the batch was accepted: `wait` reads the pinned guardian's own
+proposal, verifies it against `new_kp_roster` and resumes the wait, while
+`submit` refuses a guardian that already dealt. The ceremony guardian must
+keep running until confirmation and publication complete; until then, the
+previous finalized KP set remains authoritative.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator rotate-kp-set init --config guardian-init.sample.yaml

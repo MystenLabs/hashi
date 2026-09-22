@@ -397,6 +397,7 @@ impl LogRecord {
 mod tests {
     use super::*;
     use crate::guardian::CeremonyLogMessage;
+    use crate::guardian::CeremonyProposalLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
     use crate::guardian::GuardianError;
@@ -565,10 +566,21 @@ mod tests {
             (
                 "ceremony rotate",
                 LogMessage::Ceremony(Box::new(CeremonyLogMessage::Rotate {
-                    old_instance: instance_0,
-                    new_instance: instance_1,
+                    old_instance: instance_0.clone(),
+                    new_instance: instance_1.clone(),
                     btc_master_pubkey,
                 })),
+            ),
+            (
+                "ceremony proposal",
+                LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
+                    CeremonyLogMessage::Rotate {
+                        old_instance: instance_0,
+                        new_instance: instance_1,
+                        btc_master_pubkey,
+                    },
+                    encrypted_shares.clone(),
+                ))),
             ),
             (
                 "KP share state",
@@ -743,6 +755,7 @@ mod tests {
             LogMessageV2::Init(message) => init_shape(message),
             LogMessageV2::Withdrawal(message) => withdrawal_shape(message),
             LogMessageV2::Ceremony(message) => ceremony_shape(message),
+            LogMessageV2::CeremonyProposal(..) => "ceremony-proposal",
             LogMessageV2::KpShareState(..) => "kp-share-state",
             LogMessageV2::CommitteeUpdate(message) => committee_update_shape(message),
             LogMessageV2::Genesis(..) => "genesis",
@@ -1377,6 +1390,34 @@ mod tests {
             log.object_key(),
             "kp-shares/00000000000000000007/00000000000000000003-session-d.json"
         );
+        assert_eq!(
+            log.object_lock_duration(TESTNET_S3_OBJECT_LOCK_POLICY),
+            TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
+        );
+    }
+
+    #[test]
+    fn object_key_and_lock_for_ceremony_proposal() {
+        let session_id: SessionID = "session-proposal".into();
+        let signing_key = GuardianSignKeyPair::from([14u8; 32]);
+        let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[4u8; 32])
+            .x_only_public_key()
+            .0;
+        let proposal = CeremonyProposalLogMessage::new(
+            CeremonyLogMessage::NewKey {
+                instance: test_sharing_instance(0),
+                btc_master_pubkey,
+            },
+            RotateKpSetResponse::mock_for_testing().encrypted_shares,
+        );
+        let log = LogRecord::new_at_timestamp(
+            session_id,
+            LogMessage::CeremonyProposal(Box::new(proposal)),
+            &signing_key,
+            1_700_000_000_000,
+        );
+
+        assert_eq!(log.object_key(), "kp-shares/proposed/session-proposal.json");
         assert_eq!(
             log.object_lock_duration(TESTNET_S3_OBJECT_LOCK_POLICY),
             TESTNET_S3_OBJECT_LOCK_POLICY.short_lived

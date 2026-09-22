@@ -3,7 +3,9 @@
 
 use super::super::log_layout::ObjectKeyPattern;
 use super::super::log_layout::S3_DIR_CEREMONY;
+use super::super::log_layout::S3_DIR_KP_SHARES;
 use crate::bitcoin::BitcoinPubkey;
+use crate::guardian::KpEncryptedShareRoster;
 use crate::guardian::SecretSharingInstance;
 use serde::Deserialize;
 use serde::Serialize;
@@ -82,5 +84,34 @@ impl CeremonyLogMessage {
 
     pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
         ObjectKeyPattern::Fixed(self.object_key(session_id))
+    }
+}
+
+/// A ceremony attempt awaiting confirmation from every key provisioner.
+///
+/// The proposal carries the ceremony metadata and encrypted shares that will
+/// become authoritative only after every key provisioner confirms.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CeremonyProposalLogMessage {
+    pub ceremony: CeremonyLogMessage,
+    pub encrypted_shares: KpEncryptedShareRoster,
+}
+
+impl CeremonyProposalLogMessage {
+    pub fn new(ceremony: CeremonyLogMessage, encrypted_shares: KpEncryptedShareRoster) -> Self {
+        Self {
+            ceremony,
+            encrypted_shares,
+        }
+    }
+
+    /// `kp-shares/proposed/{session_id}.json` — one proposal per ceremony
+    /// enclave session.
+    pub fn object_key(session_id: &str) -> String {
+        format!("{S3_DIR_KP_SHARES}/proposed/{session_id}.json")
+    }
+
+    pub fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(Self::object_key(session_id))
     }
 }
