@@ -57,19 +57,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(phase = "s3 connect", "connected to guardian log bucket");
 
     info!(
-        phase = "sui connect",
-        sui_rpc = %cfg.hashi.sui_rpc,
-        package_id = %cfg.hashi.hashi_ids.package_id,
-        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
-        "connecting to Sui RPC for Hashi on-chain state",
-    );
-    let onchain_state = cfg.hashi.onchain_state().await?;
-    info!(phase = "sui connect", "connected to Sui RPC");
-
-    let master_g = onchain_state.onchain_verifying_key_g()?;
-    info!(phase = "setup", master_g = ?master_g, "fetched on-chain MPC master G");
-
-    info!(
         phase = "committee",
         "checking latest committee-update/genesis record before operator_init",
     );
@@ -84,6 +71,8 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
             None
         }
         (true, None) => {
+            let onchain_state = cfg.hashi.onchain_state().await?;
+            let master_g = onchain_state.onchain_verifying_key_g()?;
             let committee = onchain_state
                 .current_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
@@ -165,12 +154,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "ceremony instance and KP share state verified against expected roster",
     );
 
-    let init_config = InitConfig::new(
-        cfg.limiter_config,
-        master_g,
-        cfg.deployment.clone(),
-        cfg.hashi.hashi_ids.hashi_object_id,
-    );
+    let init_config = InitConfig::new(cfg.limiter_config, cfg.deployment.clone());
     let config_hash = init_config.digest();
     let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
     info!(
@@ -340,9 +324,6 @@ fn verify_initialized_info(
     let limiter_config = info
         .limiter_config
         .context("Guardian info missing limiter config")?;
-    let mpc_master_g = info
-        .mpc_master_g
-        .context("Guardian info missing MPC master G")?;
 
     ensure!(
         instance == *expected_instance,
@@ -385,12 +366,6 @@ fn verify_initialized_info(
     ensure!(
         info.current_committee_epoch.is_none(),
         "Guardian has committee epoch before operator activation"
-    );
-    ensure!(
-        mpc_master_g == expected_config.hashi_btc_master_pubkey(),
-        "Guardian MPC master G mismatch: expected {:?}, got {:?}",
-        expected_config.hashi_btc_master_pubkey(),
-        mpc_master_g
     );
     Ok(())
 }

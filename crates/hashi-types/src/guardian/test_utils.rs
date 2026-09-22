@@ -58,8 +58,6 @@ use super::WithdrawalID;
 
 use crate::bitcoin::BTC_LIB;
 use crate::bitcoin::BitcoinAddress;
-use crate::bitcoin::BitcoinKeypair;
-use crate::bitcoin::HashiMasterG;
 use crate::bitcoin::InputUTXO;
 use crate::bitcoin::OutputUTXOWire;
 use crate::bitcoin::TxUTXOs;
@@ -246,7 +244,7 @@ impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
 
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
-        let config = InitConfig::mock_for_testing(None);
+        let config = InitConfig::mock_for_testing();
         OperatorInitRequest::new_withdraw_mode(
             S3Credentials::mock_for_testing(),
             config,
@@ -257,11 +255,11 @@ impl OperatorInitRequest {
 
 impl GenesisState {
     pub fn mock_for_testing() -> Self {
-        let config = InitConfig::mock_for_testing(None);
+        let kp = create_btc_keypair_for_test(&[1u8; 32]);
         Self::new(
             mock_committee_with_one_member(0),
-            config.hashi_object_id(),
-            config.hashi_btc_master_pubkey(),
+            TEST_HASHI_OBJECT_ID,
+            hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0),
         )
     }
 }
@@ -369,49 +367,25 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
 }
 
 impl InitConfig {
-    pub fn from_parts_for_testing(
-        limiter_config: LimiterConfig,
-        hashi_btc_master_pubkey: HashiMasterG,
-        network: super::Network,
-        hashi_object_id: SuiAddress,
-    ) -> Self {
+    pub fn from_parts_for_testing(limiter_config: LimiterConfig, network: super::Network) -> Self {
         InitConfig::new(
             limiter_config,
-            hashi_btc_master_pubkey,
             crate::guardian::DeploymentConfig {
                 pcr_allowlist: mock_pcr_allowlist(),
                 bucket_info: S3BucketInfo::mock_for_testing(),
                 retention_environment: super::S3RetentionEnvironment::Testnet,
                 bitcoin_network: network,
             },
-            hashi_object_id,
         )
     }
 
-    pub fn mock_for_testing(kp: Option<BitcoinKeypair>) -> Self {
-        let kp = kp.unwrap_or(create_btc_keypair_for_test(&[1u8; 32]));
-        let max_capacity = 1000;
-
-        // Convert the bitcoin-lib keypair's x-only pubkey to a raw `G` point.
-        // The bitcoin Keypair always signs against its even-y projection, so
-        // Building `G` from the x-only bytes with even-y gives the parent that
-        // matches what the keypair signs against.
-        let hashi_btc_master_pubkey =
-            hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
-
-        InitConfig::new(
+    pub fn mock_for_testing() -> Self {
+        Self::from_parts_for_testing(
             LimiterConfig {
                 refill_rate: 10,
-                max_bucket_capacity: max_capacity,
+                max_bucket_capacity: 1000,
             },
-            hashi_btc_master_pubkey,
-            crate::guardian::DeploymentConfig {
-                pcr_allowlist: mock_pcr_allowlist(),
-                bucket_info: S3BucketInfo::mock_for_testing(),
-                retention_environment: super::S3RetentionEnvironment::Testnet,
-                bitcoin_network: super::Network::Regtest,
-            },
-            TEST_HASHI_OBJECT_ID,
+            super::Network::Regtest,
         )
     }
 }
