@@ -12479,7 +12479,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
-    // Confirmers {0..4}, decoder = node 5. The Vote cert needs W−f weight.
+    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=4 shards; the Vote cert needs W−f=5.
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
@@ -12512,6 +12512,14 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
     }
     let avid_vote = avid_vote.unwrap();
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(
+            &fx.confirmers[0].mpc_config.nodes,
+            fx.confirmers[0].mpc_config.max_faulty,
+        ),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
 
     // Form and verify the W−f Vote cert over H(AvidVote).
     let vote_target = AvidVoteMessagesHash {
@@ -15535,6 +15543,7 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
 fn test_decoded_shares_match_optimistic_shares() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
+    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=4 shards; the Vote cert needs W−f=5.
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
@@ -15566,6 +15575,14 @@ fn test_decoded_shares_match_optimistic_shares() {
         echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
     }
     let avid_vote = avid_vote.unwrap();
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(
+            &fx.confirmers[0].mpc_config.nodes,
+            fx.confirmers[0].mpc_config.max_faulty,
+        ),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
     let vote_target = AvidVoteMessagesHash {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&avid_vote),
