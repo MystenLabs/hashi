@@ -4194,7 +4194,6 @@ impl MpcManager {
                         needed,
                         got: dealer_weight as usize,
                     },
-                    // The rest are a bare `InvalidInput`, so the operands are the only diagnosis.
                     e => MpcError::ProtocolFailed(format!(
                         "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
                          dealer weight={dealer_weight}, share counts={share_counts:?}): {e}"
