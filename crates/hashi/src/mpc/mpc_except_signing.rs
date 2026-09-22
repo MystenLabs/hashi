@@ -4181,7 +4181,6 @@ impl MpcManager {
             .map(|o| o.my_shares.weight())
             .collect::<Vec<_>>();
         let dealers = outputs.len();
-        // The weight `complete_dkg` compares against its threshold.
         let dealer_weight = self
             .mpc_config
             .nodes
