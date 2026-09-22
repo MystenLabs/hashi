@@ -461,16 +461,23 @@ impl MpcService {
         self.wait_for_pending_clear_visibility(epoch).await;
     }
 
-    /// Wait (bounded) for the object mirror to reflect that `epoch` is no
-    /// longer pending: another node's `end_reconfig` activated it, or an
-    /// abort tore it down. The lossless watcher applies the winning
-    /// transaction as a root object write within a few checkpoints; clock
-    /// ticks pace the re-checks.
+    /// Wait (bounded) for the mirror to reflect that `epoch` is no longer
+    /// pending: another node's `end_reconfig` activated it, or an abort tore
+    /// it down.
     async fn wait_for_pending_clear_visibility(&self, epoch: u64) {
-        const VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        self.wait_for_mirror(|| self.get_pending_epoch_change() != Some(epoch))
+            .await;
+    }
+
+    /// Wait (bounded) for the object mirror to catch up with a transaction
+    /// this node just saw land, i.e. until `caught_up` holds. The lossless
+    /// watcher applies the winning transaction as a root object write within
+    /// a few checkpoints; clock ticks pace the re-checks.
+    async fn wait_for_mirror(&self, caught_up: impl Fn() -> bool) {
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(60);
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let _ = tokio::time::timeout(VISIBILITY_TIMEOUT, async {
-            while self.get_pending_epoch_change() == Some(epoch) {
+            while !caught_up() {
                 if checkpoint_rx.changed().await.is_err() {
                     break;
                 }
@@ -1786,6 +1793,13 @@ impl MpcService {
             };
             match result.await {
                 Ok(()) => {
+                    // The chain has the pending change before the mirror
+                    // does, and every caller checks for it next. Without
+                    // this wait the startup loop came straight back here
+                    // and submitted a duplicate, which the chain rejects
+                    // but still charges for.
+                    self.wait_for_mirror(|| self.get_pending_epoch_change().is_some())
+                        .await;
                     return;
                 }
                 Err(e) => {
