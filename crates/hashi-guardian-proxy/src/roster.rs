@@ -8,11 +8,9 @@
 //! writes and this gate is DoS-tier, with the enclave still verifying every
 //! KP-signed request against its own roster.
 //!
-//! Two layouts are in flight (#779 migrates the first to the second):
-//!   `shares/{sharing_seq:020}-{session}.json` (message `Shares`)
-//!   `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session}.json` (`KpShareState`)
-//! The reader prefers `kp-shares/` and parses only the fields it needs while
-//! retaining the already-scalar legacy `shares/` fallback.
+//! Shares are stored at
+//! `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session}.json` (`KpShareState`).
+//! The reader parses only the fields it needs.
 //!
 //! Which `sharing_seq` is current comes from `ceremony/`, not from the newest
 //! `kp-shares/` dir: a ceremony publishes its shares before its `ceremony/`
@@ -35,10 +33,6 @@ use tonic::Status;
 use tracing::warn;
 
 use crate::widlog::LogStore;
-
-/// The pre-#779 layout, read-only: hashi-types no longer models it, so unlike
-/// the current prefixes this one has no constructor to borrow.
-const LEGACY_SHARES_PREFIX: &str = "shares/";
 
 /// The committed roster only changes at a ceremony, a re-deal, or a cert
 /// rotation — and rotation invalidates explicitly — so a minute of staleness
@@ -194,9 +188,6 @@ pub async fn latest_kp_roster<L: LogStore>(log: &L) -> anyhow::Result<Option<Vec
 /// Key of the share-state record the latest completed ceremony committed: the
 /// lex-greatest `cert_seq` under that ceremony's `sharing_seq` dir. Zero-padded
 /// seqs make lex order the seq order throughout.
-///
-/// Pre-#779 buckets have no `ceremony/` records at all; there the lex-greatest
-/// flat `shares/` key is the whole story.
 async fn latest_share_log_key<L: LogStore>(log: &L) -> anyhow::Result<Option<String>> {
     let Some(ceremony_key) = log
         .list_keys(&CeremonyLogMessage::object_key_dir())
@@ -204,7 +195,7 @@ async fn latest_share_log_key<L: LogStore>(log: &L) -> anyhow::Result<Option<Str
         .into_iter()
         .max()
     else {
-        return Ok(log.list_keys(LEGACY_SHARES_PREFIX).await?.into_iter().max());
+        return Ok(None);
     };
     let sharing_seq = ceremony_sharing_seq(&ceremony_key)?;
     log.list_keys(&KpShareStateLogMessage::object_key_dir(sharing_seq))
@@ -231,7 +222,7 @@ fn ceremony_sharing_seq(key: &str) -> anyhow::Result<u64> {
 }
 
 /// Just the fields the roster needs, tolerant of everything else. Any record
-/// under a share prefix carries one of these two message shapes; anything else
+/// under the share prefix carries a `KpShareState` message; anything else
 /// is a poisoned log and fails closed upstream.
 #[derive(Deserialize)]
 struct ShareLogRecord {
@@ -240,7 +231,6 @@ struct ShareLogRecord {
 
 #[derive(Deserialize)]
 enum ShareLogMessage {
-    Shares(ShareState),
     KpShareState(ShareState),
 }
 
@@ -249,8 +239,7 @@ struct ShareState {
     encrypted_shares: Vec<LabeledShare>,
 }
 
-/// Both the legacy `Shares` envelope and versioned `KpShareState` envelope
-/// contain exactly one required recipient fingerprint per encrypted share.
+/// Each encrypted share contains exactly one required recipient fingerprint.
 /// Removed map-shaped payloads intentionally fail deserialization.
 #[derive(Deserialize)]
 struct LabeledShare {
@@ -259,7 +248,7 @@ struct LabeledShare {
 
 fn parse_roster(bytes: &[u8]) -> anyhow::Result<Vec<Fingerprint>> {
     let record: ShareLogRecord = serde_json::from_slice(bytes)?;
-    let (ShareLogMessage::Shares(state) | ShareLogMessage::KpShareState(state)) = record.message;
+    let ShareLogMessage::KpShareState(state) = record.message;
     state
         .encrypted_shares
         .iter()
@@ -306,23 +295,6 @@ mod tests {
             .collect()
     }
 
-    /// A pre-#779 `shares/` record. Hand-rolled at the JSON layer the parser
-    /// sees: hashi-types no longer models this layout, and binding the fixture
-    /// to the current enum is what the tolerant parse exists to avoid.
-    fn legacy_shares_record(sharing_seq: u64, fingerprints: &[&str]) -> (String, Vec<u8>) {
-        let record = serde_json::json!({
-            "session_id": "test-session",
-            "timestamp_ms": 0,
-            "message": { "Shares": {
-                "sharing_seq": sharing_seq,
-                "encrypted_shares": single_cert_shares(fingerprints),
-            }},
-            "signature": null,
-        });
-        let key = format!("shares/{sharing_seq:020}-test-session.json");
-        (key, serde_json::to_vec(&record).unwrap())
-    }
-
     /// Mark `sharing_seq` as completed. Only the key matters — the reader takes
     /// the seq from there and never opens a ceremony record.
     fn complete_ceremony(store: &MemStore, sharing_seq: u64) {
@@ -352,41 +324,6 @@ mod tests {
         });
         let key = format!("kp-shares/{sharing_seq:020}/{cert_seq:020}-test-session.json");
         (key, serde_json::to_vec(&record).unwrap())
-    }
-
-    #[tokio::test]
-    async fn reads_the_legacy_shares_layout() {
-        let store = MemStore::default();
-        let (key, bytes) = legacy_shares_record(0, &[FP_A, FP_B]);
-        store.insert(key, bytes);
-
-        let roster = latest_kp_roster(&store).await.unwrap().unwrap();
-        assert_eq!(roster, vec![fp(FP_A), fp(FP_B)]);
-    }
-
-    #[tokio::test]
-    async fn latest_sharing_seq_wins_in_the_legacy_layout() {
-        let store = MemStore::default();
-        let (key0, bytes0) = legacy_shares_record(0, &[FP_A]);
-        let (key1, bytes1) = legacy_shares_record(1, &[FP_B]);
-        store.insert(key0, bytes0);
-        store.insert(key1, bytes1);
-
-        let roster = latest_kp_roster(&store).await.unwrap().unwrap();
-        assert_eq!(roster, vec![fp(FP_B)]);
-    }
-
-    #[tokio::test]
-    async fn kp_shares_layout_is_preferred_over_legacy() {
-        let store = MemStore::default();
-        let (legacy_key, legacy_bytes) = legacy_shares_record(0, &[FP_A]);
-        let (key, bytes) = kp_shares_record(0, 0, &[FP_B]);
-        store.insert(legacy_key, legacy_bytes);
-        store.insert(key, bytes);
-        complete_ceremony(&store, 0);
-
-        let roster = latest_kp_roster(&store).await.unwrap().unwrap();
-        assert_eq!(roster, vec![fp(FP_B)]);
     }
 
     #[tokio::test]
@@ -463,41 +400,15 @@ mod tests {
         assert!(latest_kp_roster(&store).await.is_err());
     }
 
-    /// The shape the guardian deployed on testnet writes: a `kp-shares/` record
-    /// whose shares name one cert each via a scalar `recipient_fingerprint`
-    /// (`schema_version: 1`). Fingerprints are the real gen-3 roster; the
-    /// ciphertexts are elided because the roster read never decrypts.
-    ///
-    /// Regression: the relay parsed only one share shape, so against a real
-    /// bucket it failed closed with "KP roster unavailable" and no KP could
-    /// submit a share.
     #[tokio::test]
-    async fn deployed_testnet_single_cert_shares_parse() {
-        const DEPLOYED: &[&str] = &[
-            "010AFFD5514AE454CA0D56DAA40FE24388998D2A",
-            "69A798B4CD1FE3F7C827381BC56DF2575EC846C3",
-            "8D798722C24B2A15C15036A1DEFA2C01C4350A31",
-        ];
-        let record = serde_json::json!({
-            "schema_version": 1,
-            "session_id": "916c711a5e81c2b0",
-            "timestamp_ms": 1784219535816u64,
-            "message": { "KpShareState": {
-                "sharing_seq": 0,
-                "cert_seq": 0,
-                "encrypted_shares": single_cert_shares(DEPLOYED),
-            }},
-            "signature": null,
-        });
+    async fn reads_current_share_roster() {
         let store = MemStore::default();
-        store.insert(
-            "kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json".to_string(),
-            serde_json::to_vec(&record).unwrap(),
-        );
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A, FP_B]);
+        store.insert(key, bytes);
         complete_ceremony(&store, 0);
 
         let roster = latest_kp_roster(&store).await.unwrap().unwrap();
-        assert_eq!(roster, DEPLOYED.iter().map(|f| fp(f)).collect::<Vec<_>>());
+        assert_eq!(roster, vec![fp(FP_A), fp(FP_B)]);
     }
 
     /// Removed map-shaped records must not authorize any fingerprint.
@@ -512,7 +423,7 @@ mod tests {
             },
         }]);
         let record = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": hashi_types::guardian::VersionedLogMessage::SCHEMA_VERSION_V1,
             "session_id": "test-session",
             "timestamp_ms": 0,
             "message": { "KpShareState": {
@@ -540,8 +451,9 @@ mod tests {
     #[tokio::test]
     async fn store_failure_is_an_error_not_a_miss() {
         let store = MemStore::default();
-        let (key, bytes) = legacy_shares_record(0, &[FP_A]);
+        let (key, bytes) = kp_shares_record(0, 0, &[FP_A]);
         store.insert(key, bytes);
+        complete_ceremony(&store, 0);
         store
             .fail_lists
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -555,8 +467,9 @@ mod tests {
         // falling back past a garbled newest record could authorize a
         // rotated-out roster — so a parse failure is an error.
         let store = MemStore::default();
-        let (key, _) = legacy_shares_record(0, &[FP_A]);
+        let (key, _) = kp_shares_record(0, 0, &[FP_A]);
         store.insert(key, b"not json".to_vec());
+        complete_ceremony(&store, 0);
 
         assert!(latest_kp_roster(&store).await.is_err());
     }
@@ -564,8 +477,9 @@ mod tests {
     #[tokio::test]
     async fn bad_fingerprint_label_fails_closed() {
         let store = MemStore::default();
-        let (key, bytes) = legacy_shares_record(0, &["ABCD"]);
+        let (key, bytes) = kp_shares_record(0, 0, &["ABCD"]);
         store.insert(key, bytes);
+        complete_ceremony(&store, 0);
 
         assert!(latest_kp_roster(&store).await.is_err());
     }
