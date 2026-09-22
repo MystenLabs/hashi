@@ -20,6 +20,7 @@ use sui::vec_map::{Self, VecMap};
 // ~~~~~~~ Constants ~~~~~~~
 
 const PAUSED_KEY: vector<u8> = b"paused";
+const RECONFIG_HOLD_KEY: vector<u8> = b"reconfig_hold";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
 const GUARDIAN_BTC_PUBLIC_KEY_KEY: vector<u8> = b"guardian_btc_public_key";
 const GUARDIAN_BTC_PUBLIC_KEY_LEN: u64 = 32;
@@ -50,6 +51,7 @@ public(package) fun create(): Config {
 
     // Core defaults
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
+    config.upsert(RECONFIG_HOLD_KEY, config_value::new_bool(false));
     config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(500));
     config.upsert(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(6667));
 
@@ -118,6 +120,15 @@ public(package) fun paused(self: &Config): bool {
 
 public(package) fun set_paused(self: &mut Config, paused: bool) {
     self.upsert(PAUSED_KEY, config_value::new_bool(paused))
+}
+
+/// Whether governance holds reconfiguration: while set, `start_reconfig`
+/// refuses to form a new committee and the last committed committee keeps
+/// serving. A pending reconfiguration is unaffected. Set and cleared through
+/// `update_config`; absent (a deployment published before the key existed)
+/// means no hold.
+public(package) fun reconfig_hold(self: &Config): bool {
+    self.try_get(RECONFIG_HOLD_KEY).map!(|v| v.as_bool()).destroy_or!(false)
 }
 
 public(package) fun guardian_url(self: &Config): Option<String> {

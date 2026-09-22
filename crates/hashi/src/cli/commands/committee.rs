@@ -211,10 +211,16 @@ pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<(
     print_detail(&format!(
         "  Effect: the pending committee is discarded and Hashi stays at epoch {} under its \
          current committee. Running nodes abort an overrun reconfiguration themselves at the \
-         Sui epoch boundary, so this is the manual fallback; either way, nodes that observe \
-         the abort submit a fresh start_reconfig right away. If no node is running, the \
-         replacement starts when one comes up.",
+         Sui epoch boundary, so this is the manual fallback.",
         client.fetch_epoch()
+    ));
+    print_detail(&replacement_note(
+        client
+            .onchain_state()
+            .state()
+            .hashi()
+            .config
+            .reconfig_hold(),
     ));
 
     if !prompt_continue("abort the pending reconfiguration", tx_opts).await? {
@@ -228,19 +234,41 @@ pub async fn abort_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<(
     Ok(())
 }
 
-/// Refuse a `start_reconfig` the chain would reject, mirroring the asserts in
-/// `committee_set::start_reconfig_from_voting_powers` in order: a
-/// reconfiguration is already pending, a committee already exists for Sui's
-/// current epoch, or Hashi is already on Sui's epoch (genesis at epoch 0 is
-/// the one case the chain lets through with equal epochs). The launch switch
-/// is not mirrored: a genesis start the chain refuses for that reason fails
-/// with `EGenesisNotAuthorized`, and `hashi launch --status` shows why.
+/// What happens to the replacement reconfiguration after an abort, given the
+/// on-chain `reconfig_hold` flag.
+fn replacement_note(reconfig_hold: bool) -> String {
+    if reconfig_hold {
+        "  Replacement: governance holds reconfiguration (reconfig_hold is set), so the chain \
+         refuses start_reconfig and no node submits one; the current committee keeps serving \
+         until an update-config proposal clears the flag."
+            .to_string()
+    } else {
+        "  Replacement: nodes that observe the abort submit a fresh start_reconfig right away. \
+         If no node is running, the replacement starts when one comes up. To stay on the \
+         current committee instead, have governance set reconfig_hold first (update-config)."
+            .to_string()
+    }
+}
+
+/// Refuse a `start_reconfig` the chain would reject, mirroring its asserts
+/// in order: governance holds reconfiguration (`reconfig::EReconfigHeld`),
+/// a reconfiguration is already pending, a committee already exists for
+/// Sui's current epoch, or Hashi is already on Sui's epoch (genesis at epoch
+/// 0 is the one case the chain lets through with equal epochs). The launch
+/// switch is not mirrored: a genesis start the chain refuses for that reason
+/// fails with `EGenesisNotAuthorized`, and `hashi launch --status` shows why.
 pub fn refuse_unstartable_reconfig(
+    reconfig_hold: bool,
     pending_epoch: Option<u64>,
     hashi_epoch: u64,
     sui_epoch: u64,
     committee_exists_for_sui_epoch: bool,
 ) -> Result<()> {
+    anyhow::ensure!(
+        !reconfig_hold,
+        "governance holds reconfiguration (the reconfig_hold config flag is set); the chain \
+         refuses start_reconfig until an update-config proposal clears it"
+    );
     if let Some(pending_epoch) = pending_epoch {
         anyhow::bail!(
             "a reconfiguration to epoch {pending_epoch} is already in progress; if it has \
@@ -268,20 +296,23 @@ pub fn refuse_unstartable_reconfig(
 /// Start a reconfiguration by hand (`reconfig::start_reconfig`).
 /// Permissionless: any funded signer may send it. Running nodes submit it
 /// themselves whenever Hashi lags Sui with nothing pending, so this is the
-/// fallback for when no node is doing so.
+/// fallback for when no node is doing so. Refused, like on chain, while
+/// governance holds reconfiguration with the `reconfig_hold` config flag.
 pub async fn start_reconfig(config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     let mut client = HashiClient::new(config).await?;
     let sui_epoch = client.fetch_sui_epoch().await?;
     let hashi_epoch = client.fetch_epoch();
-    let (pending_epoch, committee_exists_for_sui_epoch) = {
+    let (reconfig_hold, pending_epoch, committee_exists_for_sui_epoch) = {
         let state = client.onchain_state().state();
-        let committees = &state.hashi().committees;
+        let hashi = state.hashi();
         (
-            committees.pending_epoch_change(),
-            committees.committees().contains_key(&sui_epoch),
+            hashi.config.reconfig_hold(),
+            hashi.committees.pending_epoch_change(),
+            hashi.committees.committees().contains_key(&sui_epoch),
         )
     };
     refuse_unstartable_reconfig(
+        reconfig_hold,
         pending_epoch,
         hashi_epoch,
         sui_epoch,

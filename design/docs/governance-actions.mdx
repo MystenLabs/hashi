@@ -111,4 +111,7 @@ invalidate derived deposit addresses.
 Aborting a stuck reconfiguration is deliberately **not** a proposal: the
 committees that could vote on one are the parties a stalled reconfiguration
 puts in doubt. It is a permissionless entry function gated on onchain state
-instead; see [Abort Reconfig](reconfiguration.mdx#abort-reconfig).
+instead; see [Abort Reconfig](reconfiguration.mdx#abort-reconfig). Holding
+off the replacement that would otherwise follow is an `UpdateConfig` setting
+[`reconfig_hold`](config.mdx#reconfig_hold), passed by the committee that is
+still in service.

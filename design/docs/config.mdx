@@ -128,6 +128,23 @@ When `true`, the protocol pauses processing of deposits and withdrawals.
 Requests already in the queue remain queued and resume processing when the
 system is unpaused. Reconfiguration and governance actions are not affected.
 
+### `reconfig_hold`
+
+| | |
+|---|---|
+| **Type** | `bool` |
+| **Default** | `false` |
+
+When `true`, `start_reconfig` aborts on chain, so no new committee can form.
+This is how governance keeps the last committed committee serving after an
+[abort](reconfiguration.mdx#abort-reconfig) or a missed Sui epoch boundary,
+for example while the cause of a stall is fixed so the replacement does not
+stall the same way. Only forming a committee is gated: a reconfiguration
+already pending still completes or aborts as usual, and deposits and
+withdrawals are unaffected. Nodes read the flag and do not submit
+`start_reconfig` while it is set; they report it as `hashi_reconfig_hold`.
+Set and cleared with an `UpdateConfig` proposal.
+
 ### `withdrawal_cancellation_cooldown_ms`
 
 | | |

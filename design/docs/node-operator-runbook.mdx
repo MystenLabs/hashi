@@ -1013,6 +1013,7 @@ Notes:
 | `hashi_reconfig_in_progress` | gauge | 1 during reconfiguration. Extended periods = problem. |
 | `hashi_reconfig_aborted_total` | counter | Reconfigurations torn down by `abort_reconfig`, whoever submitted it. Each one means a reconfiguration stalled for a whole Sui epoch. |
 | `hashi_paused` | gauge | 1 when the onchain `paused` config flag is set (governance emergency pause). Healthy: `0`. This tracks the governance flag only. The separate pause that occurs during reconfiguration is reflected by `hashi_reconfig_in_progress`, not here. |
+| `hashi_reconfig_hold` | gauge | 1 when the onchain `reconfig_hold` config flag is set: the chain refuses `start_reconfig`, so Hashi stays behind Sui's epoch on its current committee until governance clears it (section 9.3). Healthy: `0`. |
 | `hashi_presig_pool_remaining` | gauge | Presignatures available. Should not reach 0. |
 | `hashi_is_leader` | gauge | 1 when this node is the current leader. |
 | `hashi_kyoto_synced` | gauge | 1 when the Bitcoin light client is synced. Healthy: `1` in steady state. |
@@ -1101,6 +1102,14 @@ hashi committee start-reconfig
 ```
 
 The chain accepts it only while nothing is pending and Hashi's epoch lags Sui's; the command checks both up front and refuses otherwise. Every running node then drives the new reconfiguration as usual.
+
+To stay on the previous committee instead, for example while the cause of the stall is fixed so the replacement does not stall the same way, have governance set the `reconfig_hold` config flag before the abort lands:
+
+```bash
+hashi proposal create update-config reconfig_hold bool:true
+```
+
+Once the proposal executes, `start_reconfig` aborts on chain, nodes stop submitting it (`hashi_reconfig_hold` reads `1`), and the previous committee keeps serving deposits and withdrawals. The overrun reconfiguration is still aborted as usual, and a reconfiguration already pending still completes. Clear the flag with another `update-config` proposal (`bool:false`) and the nodes start the replacement at once.
 
 ---
 

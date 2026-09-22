@@ -44,6 +44,9 @@ const EInitialReconfig: vector<u8> =
 #[error]
 const EGenesisNotAuthorized: vector<u8> =
     b"Genesis is locked until the publisher sends finish_publish (the launch switch)";
+#[error]
+const EReconfigHeld: vector<u8> =
+    b"Reconfiguration is held by governance (the reconfig_hold config flag is set)";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -85,6 +88,7 @@ entry fun start_reconfig(
     ctx: &TxContext,
 ) {
     self.versioning().assert_version_enabled();
+    assert_reconfig_not_held(self);
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
     assert_genesis_launch_authorized(self);
@@ -235,6 +239,17 @@ entry fun abort_reconfig(self: &mut Hashi, epoch: u64, ctx: &TxContext) {
 }
 
 // ~~~~~~~ Package Functions ~~~~~~~
+
+/// Governance can hold reconfiguration with the `reconfig_hold` config flag
+/// (an `update_config` proposal): while it is set no new committee may form,
+/// so after an abort, or a missed Sui epoch boundary, the last committed
+/// committee keeps serving until the flag is cleared. Only forming a
+/// committee is gated: a reconfiguration already pending still completes or
+/// aborts as usual. Nodes read the flag and do not submit while it is set;
+/// this assert is what makes the hold binding on anyone else.
+public(package) fun assert_reconfig_not_held(self: &Hashi) {
+    assert!(!self.config().reconfig_hold(), EReconfigHeld);
+}
 
 /// At genesis bootstrap (no MPC key yet) the initial committee may only form
 /// after the publisher hands the package `UpgradeCap` into on-chain custody

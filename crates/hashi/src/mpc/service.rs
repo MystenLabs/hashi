@@ -499,6 +499,18 @@ impl MpcService {
         self.inner.is_awaiting_genesis()
     }
 
+    /// Whether governance holds reconfiguration (`reconfig_hold`). The chain
+    /// refuses `start_reconfig` while it is set, so submitting one would only
+    /// burn gas; a pending reconfiguration is unaffected.
+    fn reconfig_held(&self) -> bool {
+        self.inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .config
+            .reconfig_hold()
+    }
+
     /// Wait for enough validators to register, then submit `start_reconfig`
     /// to form the initial committee. Blocks until a pending epoch change
     /// appears (either from our own submission or another node's).
@@ -506,6 +518,11 @@ impl MpcService {
         loop {
             if self.get_pending_epoch_change().is_some() {
                 return;
+            }
+            if self.reconfig_held() {
+                debug!("Genesis start_reconfig is held by governance (reconfig_hold); waiting");
+                tokio::time::sleep(RETRY_INTERVAL).await;
+                continue;
             }
             match self.inner.next_reconfig_epoch().await {
                 Ok(target) => {
@@ -1768,6 +1785,16 @@ impl MpcService {
             .committees
             .epoch();
         if hashi_epoch >= sui_epoch {
+            return;
+        }
+        if self.reconfig_held() {
+            // The last committed committee keeps serving until governance
+            // clears the flag; the aborted target above was still torn
+            // down, since only forming a committee is gated.
+            warn!(
+                "Hashi epoch {hashi_epoch} lags Sui epoch {sui_epoch} but reconfiguration is \
+                 held by governance (reconfig_hold); not submitting start_reconfig"
+            );
             return;
         }
         if self.is_awaiting_genesis() {

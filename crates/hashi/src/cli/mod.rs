@@ -259,7 +259,8 @@ pub enum CreateProposalCommands {
     ///   bitcoin_deposit_minimum (u64),
     ///   bitcoin_withdrawal_minimum (u64),
     ///   bitcoin_confirmation_threshold (u64),
-    ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool)
+    ///   withdrawal_cancellation_cooldown_ms (u64), paused (bool),
+    ///   reconfig_hold (bool)
     ///
     /// The MPC parameters live in the epoch config: see `update-epoch-config`
     /// and `update-mpc-config`.
@@ -452,13 +453,15 @@ pub enum CommitteeCommands {
     /// epoch is no longer Sui's current epoch, i.e. the reconfiguration has
     /// overrun the Sui epoch it was formed for. The current committee stays
     /// in place and a fresh reconfiguration can then start from the current
-    /// validator set.
+    /// validator set; running nodes submit it themselves unless governance
+    /// holds reconfiguration with the `reconfig_hold` config flag.
     AbortReconfig,
 
     /// Start a reconfiguration by hand. Permissionless: the chain accepts it
     /// only while nothing is pending and Hashi's epoch lags Sui's (or at
     /// genesis, once the launch switch is flipped). Running nodes submit it
-    /// themselves, so this is the fallback for when no node is doing so.
+    /// themselves, so this is the fallback for when no node is doing so. The
+    /// chain refuses it while the `reconfig_hold` config flag is set.
     StartReconfig,
 }
 
