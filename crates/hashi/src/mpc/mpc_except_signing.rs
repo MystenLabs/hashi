@@ -4184,7 +4184,7 @@ impl MpcManager {
         let combined_output =
             avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs).map_err(
                 |e| {
-                    combine_dealings_error(
+                    classify_combination_failure(
                         format!(
                             "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
                              share counts={share_counts:?})"
@@ -4837,7 +4837,7 @@ impl MpcManager {
         )
         .map_err(|e| {
             let indices = indexed_outputs.iter().map(|o| o.index).collect::<Vec<_>>();
-            combine_dealings_error(
+            classify_combination_failure(
                 format!(
                     "complete_key_rotation failed (threshold={threshold}, \
                      outputs={}, indices={indices:?})",
@@ -5176,7 +5176,7 @@ impl MpcManager {
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
                 .map_err(|e| {
-                    combine_dealings_error(
+                    classify_combination_failure(
                         format!(
                             "complete_dkg failed (threshold={}, dealers={dealers}, \
                              dealer weight={dealer_weight_sum}, share counts={share_counts:?})",
@@ -5386,7 +5386,7 @@ impl MpcManager {
             &indexed_outputs,
         )
         .map_err(|e| {
-            combine_dealings_error(
+            classify_combination_failure(
                 format!(
                     "complete_key_rotation failed (threshold={}, outputs={}, indices={used_indices:?})",
                     context.input_threshold,
@@ -6414,7 +6414,7 @@ fn select_rotation_indices(
 /// operands in `context` are the only diagnosis. A shortfall is mapped to `NotEnoughApprovals`
 /// instead, because it heals on retry, while `ProtocolFailed` makes
 /// [MpcManager::classify_reconstruction] treat the epoch as suspicious.
-fn combine_dealings_error(context: String, got: usize, e: FastCryptoError) -> MpcError {
+fn classify_combination_failure(context: String, got: usize, e: FastCryptoError) -> MpcError {
     match e {
         FastCryptoError::NotEnoughWeight(needed) | FastCryptoError::InputLengthWrong(needed) => {
             MpcError::NotEnoughApprovals { needed, got }
