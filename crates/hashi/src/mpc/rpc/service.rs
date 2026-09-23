@@ -149,9 +149,9 @@ impl MpcService for HttpService {
                 PreparedComplaint::Verify {
                     cache_key,
                     epoch,
-                    verify,
+                    check,
                 } => {
-                    let result = verify();
+                    let result = check.run();
                     mpc_manager
                         .write()
                         .unwrap()

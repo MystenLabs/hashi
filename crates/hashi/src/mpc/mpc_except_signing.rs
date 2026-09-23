@@ -81,6 +81,7 @@ use fastcrypto::groups::HashToGroupElement;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto_tbls::ecies_v1::Ciphertext;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::ecies_v1::PublicKey;
 use fastcrypto_tbls::nodes::Node;
@@ -735,11 +736,11 @@ impl MpcManager {
                     reason: "AVID complaints require the nonce-generation protocol type".into(),
                 });
             }
-            let verify = self.prepare_avid_nonce_complaint(caller, request)?;
+            let check = self.prepare_avid_nonce_complaint(caller, request)?;
             return Ok(PreparedComplaint::Verify {
                 cache_key,
                 epoch: request.epoch,
-                verify,
+                check,
             });
         }
         if request.protocol_type == ProtocolTypeIndicator::NonceGeneration {
@@ -769,7 +770,7 @@ impl MpcManager {
             };
             from_db.ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?
         };
-        let verify: Box<dyn FnOnce() -> MpcResult<ComplaintResponse>> = match messages {
+        let check = match messages {
             Messages::Dkg(message) => {
                 let (nodes, party_id, params) = self.config_for_epoch(request.epoch)?;
                 let accuser_id = self.accuser_party_id(request.epoch, &caller)?;
@@ -798,16 +799,13 @@ impl MpcManager {
                         reason: "DKG complaint requires an AVSS complaint".into(),
                     });
                 };
-                let complaint = complaint.clone();
-                Box::new(move || {
-                    let complaint_response = receiver.handle_complaint(
-                        &message,
-                        accuser_id,
-                        &complaint,
-                        &partial_output,
-                    )?;
-                    Ok(ComplaintResponse::Dkg(complaint_response))
-                })
+                ComplaintCheck::Dkg {
+                    receiver,
+                    message,
+                    accuser_id,
+                    complaint: complaint.clone(),
+                    output: partial_output,
+                }
             }
             Messages::Rotation(rotation_messages) => {
                 let complained_share_index =
@@ -854,16 +852,13 @@ impl MpcManager {
                         reason: "Rotation complaint requires an AVSS complaint".into(),
                     });
                 };
-                let complaint = complaint.clone();
-                Box::new(move || {
-                    let response = receiver.handle_complaint(
-                        &complained_message,
-                        accuser_id,
-                        &complaint,
-                        &complained_output,
-                    )?;
-                    Ok(ComplaintResponse::Rotation(response))
-                })
+                ComplaintCheck::Rotation {
+                    receiver,
+                    message: complained_message,
+                    accuser_id,
+                    complaint: complaint.clone(),
+                    output: complained_output,
+                }
             }
             Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
                 return Err(MpcError::ProtocolFailed(
@@ -874,7 +869,7 @@ impl MpcManager {
         Ok(PreparedComplaint::Verify {
             cache_key,
             epoch: request.epoch,
-            verify,
+            check,
         })
     }
 
@@ -911,9 +906,9 @@ impl MpcManager {
             PreparedComplaint::Verify {
                 cache_key,
                 epoch,
-                verify,
+                check,
             } => {
-                let result = verify();
+                let result = check.run();
                 self.commit_complaint_outcome(epoch, cache_key, result)
             }
         }
@@ -2526,7 +2521,7 @@ impl MpcManager {
         &mut self,
         caller: Address,
         request: &ComplainRequest,
-    ) -> MpcResult<Box<dyn FnOnce() -> MpcResult<ComplaintResponse>>> {
+    ) -> MpcResult<ComplaintCheck> {
         if request.epoch != self.mpc_config.epoch {
             return Err(MpcError::NotFound(
                 "AVID complaints serve the current epoch only".into(),
@@ -2553,10 +2548,12 @@ impl MpcManager {
         let receiver = self.create_avid_nonce_receiver(request.dealer, batch_index)?;
         let verified_common = self.avid_round_verified_common(request.dealer, batch_index)?;
         let own_ciphertext = state.own_ciphertext;
-        let complaint = request.complaint.clone();
-        let dealer = request.dealer;
-        let blame_cert = match &request.complaint {
-            ProtocolComplaint::AvidBlame { vote_cert, .. } => {
+        let evidence = match &request.complaint {
+            ProtocolComplaint::AvidReveal(complaint) => AvidEvidence::Reveal(complaint.clone()),
+            ProtocolComplaint::AvidBlame {
+                complaint,
+                vote_cert,
+            } => {
                 let (held_vote, _, _) = self
                     .try_get_avid_held_echoes(batch_index, &request.dealer)?
                     .ok_or_else(|| {
@@ -2588,58 +2585,33 @@ impl MpcManager {
                          AvidVote bar {required}"
                     )));
                 }
-                Some(AvidCertificate::vote(
-                    self.hashi_object_id,
-                    vote_cert.clone(),
-                    held_vote,
-                    Arc::new(self.committee.clone()),
-                )?)
+                AvidEvidence::Blame {
+                    complaint: complaint.clone(),
+                    cert: AvidCertificate::vote(
+                        self.hashi_object_id,
+                        vote_cert.clone(),
+                        held_vote,
+                        Arc::new(self.committee.clone()),
+                    )?,
+                }
             }
-            _ => None,
+            ProtocolComplaint::Avss(_) => {
+                return Err(MpcError::InvalidMessage {
+                    sender: caller,
+                    reason: "not an AVID complaint".into(),
+                });
+            }
         };
-        Ok(Box::new(move || {
-            let mut rng = rand::thread_rng();
-            let response = match &complaint {
-                ProtocolComplaint::AvidReveal(complaint) => receiver
-                    .handle_avss_complaint(
-                        complaint,
-                        accuser_id,
-                        &verified_common,
-                        own_ciphertext,
-                        &mut rng,
-                    )
-                    .map_err(|e| MpcError::CryptoError(e.to_string()))?,
-                ProtocolComplaint::AvidBlame { complaint, .. } => {
-                    let cert = blame_cert
-                        .expect("blame path always builds its cert")
-                        .to_verified()
-                        .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-                    receiver
-                        .handle_avid_complaint(
-                            complaint,
-                            accuser_id,
-                            &verified_common,
-                            &cert,
-                            own_ciphertext,
-                            &mut rng,
-                        )
-                        .map_err(|e| MpcError::CryptoError(e.to_string()))?
-                }
-                ProtocolComplaint::Avss(_) => unreachable!("routed by the AVID complaint check"),
-            };
-            tracing::info!(
-                "AVID nonce complaint answered: accuser {:?}, dealer {:?}, \
-                 batch_index={batch_index}, kind {}",
-                caller,
-                dealer,
-                match &complaint {
-                    ProtocolComplaint::AvidReveal(_) => "reveal",
-                    ProtocolComplaint::AvidBlame { .. } => "blame",
-                    _ => unreachable!("routed by the AVID complaint check"),
-                }
-            );
-            Ok(ComplaintResponse::NonceGenerationAvid(response))
-        }))
+        Ok(ComplaintCheck::Avid {
+            receiver,
+            verified_common,
+            own_ciphertext,
+            caller,
+            accuser_id,
+            dealer: request.dealer,
+            batch_index,
+            evidence,
+        })
     }
 
     fn ensure_avid_nonce_output(
@@ -6688,8 +6660,118 @@ pub(crate) enum PreparedComplaint {
     Verify {
         cache_key: ComplaintResponsesKey,
         epoch: u64,
-        verify: Box<dyn FnOnce() -> MpcResult<ComplaintResponse>>,
+        check: ComplaintCheck,
     },
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum ComplaintCheck {
+    Dkg {
+        receiver: avss::Receiver,
+        message: avss::Message,
+        accuser_id: PartyId,
+        complaint: avss::Complaint,
+        output: avss::AvssOutput,
+    },
+    Rotation {
+        receiver: avss::Receiver,
+        message: avss::Message,
+        accuser_id: PartyId,
+        complaint: avss::Complaint,
+        output: avss::AvssOutput,
+    },
+    Avid {
+        receiver: batch_avss_avid::Receiver,
+        verified_common: batch_avss_avid::VerifiedAvssCommonMessage,
+        own_ciphertext: Ciphertext,
+        caller: Address,
+        accuser_id: PartyId,
+        dealer: Address,
+        batch_index: u32,
+        evidence: AvidEvidence,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum AvidEvidence {
+    Reveal(batch_avss_avid::AvssComplaint),
+    Blame {
+        complaint: batch_avss_avid::AvidComplaint,
+        cert: AvidCertificate<batch_avss_avid::AvidVote>,
+    },
+}
+
+impl ComplaintCheck {
+    pub(crate) fn run(self) -> MpcResult<ComplaintResponse> {
+        match self {
+            Self::Dkg {
+                receiver,
+                message,
+                accuser_id,
+                complaint,
+                output,
+            } => Ok(ComplaintResponse::Dkg(
+                receiver.handle_complaint(&message, accuser_id, &complaint, &output)?,
+            )),
+            Self::Rotation {
+                receiver,
+                message,
+                accuser_id,
+                complaint,
+                output,
+            } => Ok(ComplaintResponse::Rotation(
+                receiver.handle_complaint(&message, accuser_id, &complaint, &output)?,
+            )),
+            Self::Avid {
+                receiver,
+                verified_common,
+                own_ciphertext,
+                caller,
+                accuser_id,
+                dealer,
+                batch_index,
+                evidence,
+            } => {
+                let mut rng = rand::thread_rng();
+                let (kind, response) = match evidence {
+                    AvidEvidence::Reveal(complaint) => (
+                        "reveal",
+                        receiver.handle_avss_complaint(
+                            &complaint,
+                            accuser_id,
+                            &verified_common,
+                            own_ciphertext,
+                            &mut rng,
+                        ),
+                    ),
+                    AvidEvidence::Blame { complaint, cert } => {
+                        let cert = cert
+                            .to_verified()
+                            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                        (
+                            "blame",
+                            receiver.handle_avid_complaint(
+                                &complaint,
+                                accuser_id,
+                                &verified_common,
+                                &cert,
+                                own_ciphertext,
+                                &mut rng,
+                            ),
+                        )
+                    }
+                };
+                let response = response.map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                tracing::info!(
+                    "AVID nonce complaint answered: accuser {:?}, dealer {:?}, \
+                     batch_index={batch_index}, kind {kind}",
+                    caller,
+                    dealer,
+                );
+                Ok(ComplaintResponse::NonceGenerationAvid(response))
+            }
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
