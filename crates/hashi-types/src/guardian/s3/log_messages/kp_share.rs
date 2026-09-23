@@ -10,8 +10,8 @@ use serde::Serialize;
 /// Current encrypted KP share state for a secret-sharing instance. The initial
 /// ceremony writes `cert_seq = 0`; later individual KP cert rotations can write
 /// higher `cert_seq` entries for the same `sharing_seq` without changing the
-/// `ceremony/` instance. Both S3 schema versions use this scalar-recipient
-/// payload so deployed V1 signing preimages remain unchanged.
+/// `ceremony/` instance. Each encrypted share has one recipient fingerprint and
+/// one ciphertext.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct KpShareStateLogMessage {
     pub sharing_seq: u64,

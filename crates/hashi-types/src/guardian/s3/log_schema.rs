@@ -9,8 +9,7 @@ use super::log_layout::ObjectKeyPattern;
 use super::log_messages::CeremonyLogMessage;
 use super::log_messages::CeremonyProposalLogMessage;
 use super::log_messages::CommitteeUpdateLogMessage;
-use super::log_messages::GenesisLogMessageV1;
-use super::log_messages::GenesisLogMessageV2;
+use super::log_messages::GenesisLogMessage;
 use super::log_messages::HeartbeatLogMessage;
 use super::log_messages::InitLogMessage;
 use super::log_messages::KpShareStateLogMessage;
@@ -24,23 +23,18 @@ use std::time::Duration;
 /// as the record's sibling `schema_version` field rather than as an additional
 /// JSON enum layer.
 ///
-/// Readers match these variants exhaustively at their consumption boundary so
-/// adding a schema version requires each reader to opt in explicitly.
+/// Each `into_<message_kind>()` extractor returns the natural payload type for
+/// that message kind, independently of the record's schema version. Its return
+/// type can evolve to represent payload differences explicitly. Version dispatch
+/// remains exhaustive inside the extractor, without implicit payload conversion.
 #[derive(Debug)]
 pub enum VersionedLogMessage {
     V1(LogMessageV1),
-    V2(LogMessageV2),
 }
 
 impl From<LogMessageV1> for VersionedLogMessage {
     fn from(message: LogMessageV1) -> Self {
         Self::V1(message)
-    }
-}
-
-impl From<LogMessageV2> for VersionedLogMessage {
-    fn from(message: LogMessageV2) -> Self {
-        Self::V2(message)
     }
 }
 
@@ -51,16 +45,16 @@ impl Serialize for VersionedLogMessage {
     {
         match self {
             Self::V1(message) => message.serialize(serializer),
-            Self::V2(message) => message.serialize(serializer),
         }
     }
 }
 
-/// Schema-version-1 log messages.
+/// Schema-version-1 log messages emitted by the guardian enclave.
+/// Uses an enum discriminator for automatic domain separation between variants.
 ///
-/// Separate V1 and V2 types force readers to handle each deployed version
-/// explicitly. Most variants share their payload types; genesis retains its
-/// deployed V1 committee-only payload while V2 also binds the Hashi object id.
+/// Add dummy fixtures for every new schema version and optional-field addition.
+/// After deployment, preserve existing fixtures and their signatures; incompatible
+/// changes require a new schema version. See `fixtures/README.md`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
@@ -69,27 +63,12 @@ pub enum LogMessageV1 {
     Ceremony(Box<CeremonyLogMessage>),
     KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
-    Genesis(Box<GenesisLogMessageV1>),
-}
-
-/// Schema-version-2 log messages emitted by the guardian enclave.
-/// Uses an enum discriminator for automatic domain separation between variants.
-// TODO(testnet-wipe): Collapse the V1/V2 compatibility layer into a single log
-// schema once existing testnet records no longer need to be read.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum LogMessageV2 {
-    Heartbeat(HeartbeatLogMessage),
-    Init(Box<InitLogMessage>),
-    Withdrawal(Box<WithdrawalLogMessage>),
-    Ceremony(Box<CeremonyLogMessage>),
-    KpShareState(Box<KpShareStateLogMessage>),
-    CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
-    Genesis(Box<GenesisLogMessageV2>),
+    Genesis(Box<GenesisLogMessage>),
     CeremonyProposal(Box<CeremonyProposalLogMessage>),
 }
 
 /// Writer-facing alias for the log-message schema emitted by guardians.
-pub type LogMessage = LogMessageV2;
+pub type LogMessage = LogMessageV1;
 
 /// Schema-independent category of a Guardian log payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,66 +102,111 @@ trait LogMessageSchema {
     fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern;
 }
 
-macro_rules! impl_log_message_schema {
-    ($schema:ty $(, $proposal_variant:ident)?) => {
-        impl LogMessageSchema for $schema {
-            fn log_type(&self) -> LogType {
-                match self {
-                    Self::Heartbeat(..) => LogType::Heartbeat,
-                    Self::Init(..) => LogType::Init,
-                    Self::Withdrawal(..) => LogType::Withdrawal,
-                    Self::Ceremony(..) => LogType::CeremonyCompleted,
-                    Self::KpShareState(..) => LogType::KpShareState,
-                    Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
-                    Self::Genesis(..) => LogType::Genesis,
-                    $(Self::$proposal_variant(..) => LogType::CeremonyProposal,)?
-                }
-            }
-
-            fn object_key_pattern(
-                &self,
-                session_id: &str,
-                timestamp_ms: UnixMillis,
-            ) -> ObjectKeyPattern {
-                match self {
-                    Self::Heartbeat(message) => {
-                        message.object_key_pattern(session_id, timestamp_ms)
-                    }
-                    Self::Init(message) => message.object_key_pattern(session_id),
-                    Self::Withdrawal(message) => {
-                        message.object_key_pattern(session_id, timestamp_ms)
-                    }
-                    Self::Ceremony(message) => message.object_key_pattern(session_id),
-                    Self::KpShareState(message) => message.object_key_pattern(session_id),
-                    Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
-                    Self::Genesis(message) => message.object_key_pattern(),
-                    $(Self::$proposal_variant(message) => message.object_key_pattern(session_id),)?
-                }
-            }
+impl LogMessageSchema for LogMessageV1 {
+    fn log_type(&self) -> LogType {
+        match self {
+            Self::Heartbeat(..) => LogType::Heartbeat,
+            Self::Init(..) => LogType::Init,
+            Self::Withdrawal(..) => LogType::Withdrawal,
+            Self::Ceremony(..) => LogType::CeremonyCompleted,
+            Self::KpShareState(..) => LogType::KpShareState,
+            Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
+            Self::Genesis(..) => LogType::Genesis,
+            Self::CeremonyProposal(..) => LogType::CeremonyProposal,
         }
-    };
-}
+    }
 
-impl_log_message_schema!(LogMessageV1);
-impl_log_message_schema!(LogMessageV2, CeremonyProposal);
+    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern {
+        match self {
+            Self::Heartbeat(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Init(message) => message.object_key_pattern(session_id),
+            Self::Withdrawal(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Ceremony(message) => message.object_key_pattern(session_id),
+            Self::KpShareState(message) => message.object_key_pattern(session_id),
+            Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
+            Self::Genesis(message) => message.object_key_pattern(),
+            Self::CeremonyProposal(message) => message.object_key_pattern(session_id),
+        }
+    }
+}
 
 impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;
-    pub const SCHEMA_VERSION_V2: u64 = 2;
 
     pub fn schema_version(&self) -> u64 {
         match self {
             Self::V1(_) => Self::SCHEMA_VERSION_V1,
-            Self::V2(_) => Self::SCHEMA_VERSION_V2,
+        }
+    }
+
+    /// Consume a heartbeat payload, or return `None` for another message kind.
+    pub fn into_heartbeat(self) -> Option<HeartbeatLogMessage> {
+        match self {
+            Self::V1(LogMessageV1::Heartbeat(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume an init payload, or return `None` for another message kind.
+    pub fn into_init(self) -> Option<Box<InitLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Init(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a withdrawal payload, or return `None` for another message kind.
+    pub fn into_withdrawal(self) -> Option<Box<WithdrawalLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Withdrawal(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a ceremony payload, or return `None` for another message kind.
+    pub fn into_ceremony(self) -> Option<Box<CeremonyLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Ceremony(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a KP share state payload, or return `None` for another message kind.
+    pub fn into_kp_share_state(self) -> Option<Box<KpShareStateLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::KpShareState(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a committee update payload, or return `None` for another message kind.
+    pub fn into_committee_update(self) -> Option<Box<CommitteeUpdateLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::CommitteeUpdate(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a genesis payload, or return `None` for another message kind.
+    pub fn into_genesis(self) -> Option<Box<GenesisLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::Genesis(message)) => Some(message),
+            Self::V1(_) => None,
+        }
+    }
+
+    /// Consume a ceremony proposal payload, or return `None` for another message kind.
+    pub fn into_ceremony_proposal(self) -> Option<Box<CeremonyProposalLogMessage>> {
+        match self {
+            Self::V1(LogMessageV1::CeremonyProposal(message)) => Some(message),
+            Self::V1(_) => None,
         }
     }
 
     pub fn as_attestation_log(&self) -> Option<&InitLogMessage> {
         let init = match self {
-            Self::V1(LogMessageV1::Init(init)) | Self::V2(LogMessageV2::Init(init)) => {
-                init.as_ref()
-            }
-            _ => return None,
+            Self::V1(LogMessageV1::Init(init)) => init.as_ref(),
+            Self::V1(_) => return None,
         };
         matches!(init, InitLogMessage::OIAttestationUnsigned { .. }).then_some(init)
     }
@@ -194,7 +218,6 @@ impl VersionedLogMessage {
     pub fn log_type(&self) -> LogType {
         match self {
             Self::V1(message) => message.log_type(),
-            Self::V2(message) => message.log_type(),
         }
     }
 
@@ -205,7 +228,6 @@ impl VersionedLogMessage {
     ) -> ObjectKeyPattern {
         match self {
             Self::V1(message) => message.object_key_pattern(session_id, timestamp_ms),
-            Self::V2(message) => message.object_key_pattern(session_id, timestamp_ms),
         }
     }
 }

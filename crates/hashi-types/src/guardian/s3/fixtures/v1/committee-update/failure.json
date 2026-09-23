@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "object_key": "committee-update/failure-00000000000000000001-d54207da194977dc-00000000000000000000000000000000.json",
+  "session_id": "d54207da194977dc",
+  "timestamp_ms": 1700000000000,
+  "message": {
+    "CommitteeUpdate": {
+      "Failure": {
+        "from_epoch": 0,
+        "new_committee": {
+          "epoch": 1,
+          "members": [
+            {
+              "validator_address": "0x0101010101010101010101010101010101010101010101010101010101010101",
+              "public_key": [
+                12,
+                145,
+                64,
+                141,
+                25,
+                124,
+                17,
+                102,
+                161,
+                125,
+                56,
+                234,
+                239,
+                84,
+                68,
+                155,
+                79,
+                86,
+                9,
+                230,
+                110,
+                185,
+                119,
+                79,
+                21,
+                226,
+                239,
+                186,
+                27,
+                211,
+                198,
+                23,
+                234,
+                172,
+                50,
+                190,
+                64,
+                108,
+                120,
+                5,
+                137,
+                2,
+                208,
+                1,
+                136,
+                76,
+                117,
+                236,
+                15,
+                7,
+                0,
+                188,
+                39,
+                206,
+                188,
+                2,
+                73,
+                173,
+                233,
+                13,
+                64,
+                175,
+                95,
+                110,
+                104,
+                124,
+                9,
+                52,
+                170,
+                72,
+                152,
+                88,
+                55,
+                150,
+                170,
+                107,
+                32,
+                70,
+                49,
+                178,
+                55,
+                218,
+                102,
+                185,
+                164,
+                2,
+                251,
+                4,
+                136,
+                188,
+                63,
+                49,
+                160,
+                139,
+                148,
+                53
+              ],
+              "encryption_public_key": [
+                62,
+                68,
+                4,
+                105,
+                160,
+                152,
+                3,
+                109,
+                137,
+                255,
+                178,
+                215,
+                122,
+                69,
+                66,
+                146,
+                143,
+                47,
+                116,
+                194,
+                181,
+                118,
+                157,
+                167,
+                72,
+                7,
+                54,
+                172,
+                232,
+                41,
+                220,
+                16
+              ],
+              "weight": 10
+            }
+          ],
+          "total_weight": 10,
+          "config": [
+            [
+              "mpc_weight_reduction_allowed_delta",
+              {
+                "U64": 800
+              }
+            ],
+            [
+              "mpc_max_faulty_in_basis_points",
+              {
+                "U64": 3333
+              }
+            ],
+            [
+              "mpc_nonce_accumulation_window_ms",
+              {
+                "U64": 0
+              }
+            ]
+          ]
+        },
+        "request_sign": {
+          "epoch": 0,
+          "signature": "j9INLrDB64BD+8u271tbwmszSdAOuzyCMfTs1UtlF7NSxC7HNDoFeE+QkdOWkiwICX134wuVDCDl5oYsw6tazzSYj2sq8Rv5eplA7NQ8HJH/JqAap8zhxNLVcHkKM1uy",
+          "signers_bitmap": {
+            "bitmap": [
+              128
+            ]
+          }
+        },
+        "error": "InvalidInputs: test failure",
+        "hashi_object_id": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  "signature": "e6c007dcb78096df988eba38b885f9dfa93b15baa3000f082e9b3bf60d17e4dca75f4e0ee207d6065ff05efd46d9221eb35527b1e0e040fc02f909f0cab04303"
+}

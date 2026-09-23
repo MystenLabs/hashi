@@ -14,7 +14,6 @@ use super::config::S3ObjectLockPolicy;
 use super::log_layout::ObjectKeyPattern;
 use super::log_schema::LogMessage;
 use super::log_schema::LogMessageV1;
-use super::log_schema::LogMessageV2;
 use super::log_schema::LogType;
 use super::log_schema::VersionedLogMessage;
 use crate::guardian::GuardianError::InvalidS3Log;
@@ -243,7 +242,7 @@ impl LogRecord {
         signing_key: &GuardianSignKeyPair,
         timestamp_ms: UnixMillis,
     ) -> Self {
-        let message = VersionedLogMessage::V2(message);
+        let message = VersionedLogMessage::V1(message);
         let object_key = message
             .object_key_pattern(&session_id, timestamp_ms)
             .finalize();
@@ -264,11 +263,6 @@ impl LogRecord {
                 serde_json::from_value::<LogMessageV1>(raw.message)
                     .map(VersionedLogMessage::V1)
                     .map_err(|e| InvalidS3Log(format!("invalid V1 log message: {e}")))?
-            }
-            VersionedLogMessage::SCHEMA_VERSION_V2 => {
-                serde_json::from_value::<LogMessageV2>(raw.message)
-                    .map(VersionedLogMessage::V2)
-                    .map_err(|e| InvalidS3Log(format!("invalid V2 log message: {e}")))?
             }
             version => {
                 return Err(InvalidS3Log(format!(
@@ -474,10 +468,8 @@ mod tests {
         SecretSharingInstance::new(commitments, 2, 2, sharing_seq).unwrap()
     }
 
-    #[test]
-    fn every_log_message_json_round_trips_and_verifies() {
-        let signing_key = GuardianSignKeyPair::from([21u8; 32]);
-        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+    fn dummy_log_messages() -> Vec<LogMessage> {
+        let signing_key = fixture_signing_key();
         let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
             .x_only_public_key()
             .0;
@@ -494,132 +486,207 @@ mod tests {
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;
 
-        let cases = vec![
-            (
-                "heartbeat",
-                LogMessage::Heartbeat(HeartbeatLogMessage::new(1)),
-            ),
-            (
-                "init OI attestation",
-                LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
-                    attestation: NitroAttestation::new(vec![1, 2, 3]),
-                    signing_public_key: signing_key.verification_key(),
-                })),
-            ),
-            (
-                "init OI guardian info",
-                LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
-                    guardian_info,
-                )))),
-            ),
-            (
-                "init PI complete",
-                LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
-                    sharing_seq: 0,
-                    share_ids: vec![NonZeroU16::new(1).unwrap()],
-                    enclave_btc_pubkey: btc_master_pubkey,
-                })),
-            ),
-            (
-                "init OA activated",
-                LogMessage::Init(Box::new(InitLogMessage::OAActivated {
-                    state_hash: [1; 32],
-                    config_hash: [2; 32],
-                    sharing_seq: 0,
-                    committee_epoch: 0,
-                    limiter_state: LimiterState {
-                        num_tokens_available: 10,
-                        last_updated_at: 20,
-                        next_seq: 30,
-                    },
-                })),
-            ),
-            (
-                "withdrawal success",
-                LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
-                    txid: Txid::from_slice(&[3; 32]).unwrap(),
-                    request_data: request_data.clone(),
-                    request_sign: request_sign.clone(),
-                    response,
-                    post_state: LimiterState {
-                        num_tokens_available: 10,
-                        last_updated_at: 20,
-                        next_seq: request_data.seq + 1,
-                    },
-                })),
-            ),
-            (
-                "withdrawal failure",
-                LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
-                    request_data,
-                    request_sign: request_sign.clone(),
-                    error: GuardianError::RateLimitExceeded.to_string(),
-                })),
-            ),
-            (
-                "ceremony new key",
-                LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+        vec![
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(1)),
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                attestation: NitroAttestation::new(vec![1, 2, 3]),
+                signing_public_key: signing_key.verification_key(),
+            })),
+            LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                guardian_info,
+            )))),
+            LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+                sharing_seq: 0,
+                share_ids: vec![NonZeroU16::new(1).unwrap()],
+                enclave_btc_pubkey: btc_master_pubkey,
+            })),
+            LogMessage::Init(Box::new(InitLogMessage::OAActivated {
+                state_hash: [1; 32],
+                config_hash: [2; 32],
+                sharing_seq: 0,
+                committee_epoch: 0,
+                limiter_state: LimiterState {
+                    num_tokens_available: 10,
+                    last_updated_at: 20,
+                    next_seq: 30,
+                },
+            })),
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+                txid: Txid::from_slice(&[3; 32]).unwrap(),
+                request_data: request_data.clone(),
+                request_sign: request_sign.clone(),
+                response,
+                post_state: LimiterState {
+                    num_tokens_available: 10,
+                    last_updated_at: 20,
+                    next_seq: request_data.seq + 1,
+                },
+            })),
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+                request_data,
+                request_sign: request_sign.clone(),
+                error: GuardianError::RateLimitExceeded.to_string(),
+            })),
+            LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+                instance: instance_0.clone(),
+                btc_master_pubkey,
+            })),
+            LogMessage::Ceremony(Box::new(CeremonyLogMessage::Rotate {
+                old_instance: instance_0.clone(),
+                new_instance: instance_1.clone(),
+                btc_master_pubkey,
+            })),
+            LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
+                CeremonyLogMessage::NewKey {
                     instance: instance_0.clone(),
                     btc_master_pubkey,
-                })),
-            ),
-            (
-                "ceremony rotate",
-                LogMessage::Ceremony(Box::new(CeremonyLogMessage::Rotate {
-                    old_instance: instance_0.clone(),
-                    new_instance: instance_1.clone(),
+                },
+                encrypted_shares.clone(),
+            ))),
+            LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
+                CeremonyLogMessage::Rotate {
+                    old_instance: instance_0,
+                    new_instance: instance_1,
                     btc_master_pubkey,
-                })),
-            ),
-            (
-                "ceremony proposal",
-                LogMessage::CeremonyProposal(Box::new(CeremonyProposalLogMessage::new(
-                    CeremonyLogMessage::Rotate {
-                        old_instance: instance_0,
-                        new_instance: instance_1,
-                        btc_master_pubkey,
-                    },
-                    encrypted_shares.clone(),
-                ))),
-            ),
-            (
-                "KP share state",
-                LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
-                    0,
-                    0,
-                    encrypted_shares,
-                ))),
-            ),
-            (
-                "committee update success",
-                LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
-                    from_epoch: 0,
-                    new_committee: committee_1.clone(),
-                    request_sign: request_sign.clone(),
-                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-                })),
-            ),
-            (
-                "committee update failure",
-                LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
-                    from_epoch: 0,
-                    new_committee: committee_1,
-                    request_sign,
-                    error: GuardianError::InvalidInputs("test failure".into()).to_string(),
-                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-                })),
-            ),
-            (
-                "genesis",
-                LogMessage::Genesis(Box::new(GenesisLogMessage {
-                    committee: committee_0,
-                    hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
-                    mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
-                })),
-            ),
-        ];
+                },
+                encrypted_shares.clone(),
+            ))),
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
+                0,
+                0,
+                encrypted_shares,
+            ))),
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
+                from_epoch: 0,
+                new_committee: committee_1.clone(),
+                request_sign: request_sign.clone(),
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+            })),
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+                from_epoch: 0,
+                new_committee: committee_1,
+                request_sign,
+                error: GuardianError::InvalidInputs("test failure".into()).to_string(),
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+            })),
+            LogMessage::Genesis(Box::new(GenesisLogMessage {
+                committee: committee_0,
+                hashi_object_id: sui_sdk_types::Address::new([0xAA; 32]),
+                mpc_master_g: crate::bitcoin::HashiMasterG::generator(),
+            })),
+        ]
+    }
 
-        for (name, message) in cases {
+    /// Keep these matches exhaustive: every new log variant needs dummy data.
+    fn fixture_name(message: &LogMessage) -> &'static str {
+        match message {
+            LogMessage::Heartbeat(_) => "heartbeat/heartbeat",
+            LogMessage::Init(message) => match message.as_ref() {
+                InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
+                InitLogMessage::OIGuardianInfo(_) => "init/oi-guardian-info",
+                InitLogMessage::PIEnclaveFullyInitialized { .. } => {
+                    "init/pi-enclave-fully-initialized"
+                }
+                InitLogMessage::OAActivated { .. } => "init/oa-activated",
+            },
+            LogMessage::Withdrawal(message) => match message.as_ref() {
+                WithdrawalLogMessage::Success { .. } => "withdrawal/success",
+                WithdrawalLogMessage::Failure { .. } => "withdrawal/failure",
+            },
+            LogMessage::Ceremony(message) => match message.as_ref() {
+                CeremonyLogMessage::NewKey { .. } => "ceremony/new-key",
+                CeremonyLogMessage::Rotate { .. } => "ceremony/rotate",
+            },
+            LogMessage::CeremonyProposal(message) => match &message.ceremony {
+                CeremonyLogMessage::NewKey { .. } => "ceremony-proposal/new-key",
+                CeremonyLogMessage::Rotate { .. } => "ceremony-proposal/rotate",
+            },
+            LogMessage::KpShareState(_) => "kp-share-state/kp-share-state",
+            LogMessage::CommitteeUpdate(message) => match message.as_ref() {
+                CommitteeUpdateLogMessage::Success { .. } => "committee-update/success",
+                CommitteeUpdateLogMessage::Failure { .. } => "committee-update/failure",
+            },
+            LogMessage::Genesis(_) => "genesis/genesis",
+        }
+    }
+
+    fn fixture_signing_key() -> GuardianSignKeyPair {
+        GuardianSignKeyPair::from([21u8; 32])
+    }
+
+    /// Fix the normally random failure suffix before signing fixture records.
+    fn dummy_log_record(message: LogMessage) -> LogRecord {
+        let message = VersionedLogMessage::V1(message);
+        let signing_key = fixture_signing_key();
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let timestamp_ms = 1_700_000_000_000;
+        let object_key = match message.object_key_pattern(&session_id, timestamp_ms) {
+            ObjectKeyPattern::Fixed(key) => key,
+            ObjectKeyPattern::RandomSuffix(prefix) => format!("{prefix}{:032x}.json", 0),
+        };
+        let is_unsigned = message.is_unsigned();
+        let entry = LogEntry::new(session_id, object_key, message, timestamp_ms).unwrap();
+        if is_unsigned {
+            LogRecord::Unsigned(entry)
+        } else {
+            LogRecord::Signed(GuardianSigned::sign(entry, &signing_key))
+        }
+    }
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/guardian/s3/fixtures/v1")
+            .join(format!("{name}.json"))
+    }
+
+    #[test]
+    #[ignore = "writes dummy fixtures; run explicitly when updating the log schema"]
+    fn regenerate_log_fixtures() {
+        for message in dummy_log_messages() {
+            let name = fixture_name(&message);
+            let record = dummy_log_record(message);
+            let json = serde_json::to_string_pretty(&record).unwrap();
+            let path = fixture_path(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("{json}\n")).unwrap();
+            println!("{}:\n{json}", path.display());
+        }
+    }
+
+    #[test]
+    fn dummy_log_fixtures_round_trip_and_verify() {
+        let signing_key = fixture_signing_key();
+        for message in dummy_log_messages() {
+            let name = fixture_name(&message);
+            let expected = dummy_log_record(message);
+            let json = std::fs::read_to_string(fixture_path(name)).unwrap();
+            let decoded: LogRecord = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("{name} failed to deserialize: {error}"));
+            assert_eq!(decoded.data().schema_version(), 1, "{name}");
+            assert_eq!(
+                serde_json::to_string_pretty(&decoded).unwrap(),
+                json.trim_end(),
+                "{name}"
+            );
+            assert_eq!(
+                serde_json::to_string_pretty(&expected).unwrap(),
+                json.trim_end(),
+                "{name} changed its wire format"
+            );
+            let signing_pubkey =
+                (!decoded.message().is_unsigned()).then(|| signing_key.verification_key());
+            decoded
+                .validate(signing_pubkey.as_ref())
+                .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
+        }
+    }
+
+    #[test]
+    fn every_log_message_json_round_trips_and_verifies() {
+        let signing_key = fixture_signing_key();
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        for message in dummy_log_messages() {
+            let name = fixture_name(&message);
             let record = LogRecord::new_at_timestamp(
                 session_id.clone(),
                 message,
@@ -654,275 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn deployed_v1_kp_share_state_verifies_and_is_retained() {
-        let fixture = include_str!("fixtures/v1/kp-share-state/kp-share-state.json").trim_end();
-        let record: LogRecord = serde_json::from_str(fixture).unwrap();
-        assert!(matches!(
-            record.message(),
-            VersionedLogMessage::V1(LogMessageV1::KpShareState(..))
-        ));
-        assert_eq!(serde_json::to_string_pretty(&record).unwrap(), fixture);
-        let signing_pubkey =
-            hex::decode("916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca")
-                .unwrap();
-        let signing_pubkey = GuardianPubKey::try_from(signing_pubkey.as_slice()).unwrap();
-        record
-            .validate(Some(&signing_pubkey))
-            .expect("the deployed V1 signature must verify");
-        let entry = record.into_entry_unchecked();
-        assert_eq!(entry.session_id().as_str(), "916c711a5e81c2b0");
-        assert_eq!(entry.timestamp_ms(), 1_784_219_535_816);
-        let VersionedLogMessage::V1(LogMessageV1::KpShareState(message)) = entry.into_message()
-        else {
-            panic!("expected the exact V1 KP share state");
-        };
-        let message = *message;
-        assert_eq!(message.sharing_seq, 0);
-        assert_eq!(message.cert_seq, 0);
-        assert_eq!(message.encrypted_shares.share_count(), 6);
-        let share = message
-            .encrypted_shares
-            .find_by_fingerprint("010AFFD5514AE454CA0D56DAA40FE24388998D2A")
-            .expect("deployed ciphertext must be retained");
-        assert_eq!(share.id.get(), 1);
-        assert!(
-            share
-                .armored_ciphertext
-                .starts_with("-----BEGIN PGP MESSAGE-----")
-        );
-    }
-
-    struct DeployedLogFixture {
-        name: &'static str,
-        json: &'static str,
-        schema_version: u64,
-        shape: &'static str,
-        signing_pubkey: Option<&'static str>,
-    }
-
-    const V1_SIGNING_PUBKEY: &str =
-        "8e6e6767497fe1aec80e94405aab18c8cbd97cc57cc5709cdcced90ca90d74ee";
-    const V1_CEREMONY_SIGNING_PUBKEY: &str =
-        "916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca";
-    const V2_SIGNING_PUBKEY: &str =
-        "a37c0e391ca0afabb4decccf301ea8e233c5936f843d785ae3c4e37e650e1d5e";
-
-    fn init_shape(message: &InitLogMessage) -> &'static str {
-        match message {
-            InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
-            InitLogMessage::OIGuardianInfo(..) => "init/oi-guardian-info",
-            InitLogMessage::PIEnclaveFullyInitialized { .. } => "init/pi-enclave-fully-initialized",
-            InitLogMessage::OAActivated { .. } => "init/oa-activated",
-        }
-    }
-
-    fn withdrawal_shape(message: &WithdrawalLogMessage) -> &'static str {
-        match message {
-            WithdrawalLogMessage::Success { .. } => "withdrawal/success",
-            WithdrawalLogMessage::Failure { .. } => "withdrawal/failure",
-        }
-    }
-
-    fn ceremony_shape(message: &CeremonyLogMessage) -> &'static str {
-        match message {
-            CeremonyLogMessage::NewKey { .. } => "ceremony/new-key",
-            CeremonyLogMessage::Rotate { .. } => "ceremony/rotate",
-        }
-    }
-
-    fn committee_update_shape(message: &CommitteeUpdateLogMessage) -> &'static str {
-        match message {
-            CommitteeUpdateLogMessage::Success { .. } => "committee-update/success",
-            CommitteeUpdateLogMessage::Failure { .. } => "committee-update/failure",
-        }
-    }
-
-    fn v1_shape(message: &LogMessageV1) -> &'static str {
-        match message {
-            LogMessageV1::Heartbeat(..) => "heartbeat",
-            LogMessageV1::Init(message) => init_shape(message),
-            LogMessageV1::Withdrawal(message) => withdrawal_shape(message),
-            LogMessageV1::Ceremony(message) => ceremony_shape(message),
-            LogMessageV1::KpShareState(..) => "kp-share-state",
-            LogMessageV1::CommitteeUpdate(message) => committee_update_shape(message),
-            LogMessageV1::Genesis(..) => "genesis",
-        }
-    }
-
-    fn v2_shape(message: &LogMessageV2) -> &'static str {
-        match message {
-            LogMessageV2::Heartbeat(..) => "heartbeat",
-            LogMessageV2::Init(message) => init_shape(message),
-            LogMessageV2::Withdrawal(message) => withdrawal_shape(message),
-            LogMessageV2::Ceremony(message) => ceremony_shape(message),
-            LogMessageV2::CeremonyProposal(..) => "ceremony-proposal",
-            LogMessageV2::KpShareState(..) => "kp-share-state",
-            LogMessageV2::CommitteeUpdate(message) => committee_update_shape(message),
-            LogMessageV2::Genesis(..) => "genesis",
-        }
-    }
-
-    fn deployed_log_shape(message: &VersionedLogMessage) -> &'static str {
-        match message {
-            VersionedLogMessage::V1(message) => v1_shape(message),
-            VersionedLogMessage::V2(message) => v2_shape(message),
-        }
-    }
-
-    #[test]
-    fn deployed_log_fixtures_remain_compatible() {
-        let fixtures = [
-            DeployedLogFixture {
-                name: "V1 heartbeat",
-                json: include_str!("fixtures/v1/heartbeat/heartbeat.json"),
-                schema_version: 1,
-                shape: "heartbeat",
-                signing_pubkey: Some(V1_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 init OI attestation",
-                json: include_str!("fixtures/v1/init/oi-attestation-unsigned.json"),
-                schema_version: 1,
-                shape: "init/oi-attestation-unsigned",
-                signing_pubkey: None,
-            },
-            DeployedLogFixture {
-                name: "V1 init OI GuardianInfo",
-                json: include_str!("fixtures/v1/init/oi-guardian-info.json"),
-                schema_version: 1,
-                shape: "init/oi-guardian-info",
-                signing_pubkey: Some(V1_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 init PI complete",
-                json: include_str!("fixtures/v1/init/pi-enclave-fully-initialized.json"),
-                schema_version: 1,
-                shape: "init/pi-enclave-fully-initialized",
-                signing_pubkey: Some(V1_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 init OA activated",
-                json: include_str!("fixtures/v1/init/oa-activated.json"),
-                schema_version: 1,
-                shape: "init/oa-activated",
-                signing_pubkey: Some(V1_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 withdrawal success",
-                json: include_str!("fixtures/v1/withdrawal/success.json"),
-                schema_version: 1,
-                shape: "withdrawal/success",
-                signing_pubkey: Some(V1_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 ceremony new key",
-                json: include_str!("fixtures/v1/ceremony/new-key.json"),
-                schema_version: 1,
-                shape: "ceremony/new-key",
-                signing_pubkey: Some(V1_CEREMONY_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 KP share state",
-                json: include_str!("fixtures/v1/kp-share-state/kp-share-state.json"),
-                schema_version: 1,
-                shape: "kp-share-state",
-                signing_pubkey: Some(V1_CEREMONY_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V1 genesis",
-                json: include_str!("fixtures/v1/genesis/genesis.json"),
-                schema_version: 1,
-                shape: "genesis",
-                signing_pubkey: Some(V1_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V2 heartbeat",
-                json: include_str!("fixtures/v2/heartbeat/heartbeat.json"),
-                schema_version: 2,
-                shape: "heartbeat",
-                signing_pubkey: Some(V2_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V2 init OI attestation",
-                json: include_str!("fixtures/v2/init/oi-attestation-unsigned.json"),
-                schema_version: 2,
-                shape: "init/oi-attestation-unsigned",
-                signing_pubkey: None,
-            },
-            DeployedLogFixture {
-                name: "V2 init OI GuardianInfo",
-                json: include_str!("fixtures/v2/init/oi-guardian-info.json"),
-                schema_version: 2,
-                shape: "init/oi-guardian-info",
-                signing_pubkey: Some(V2_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V2 init PI complete",
-                json: include_str!("fixtures/v2/init/pi-enclave-fully-initialized.json"),
-                schema_version: 2,
-                shape: "init/pi-enclave-fully-initialized",
-                signing_pubkey: Some(V2_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V2 init OA activated",
-                json: include_str!("fixtures/v2/init/oa-activated.json"),
-                schema_version: 2,
-                shape: "init/oa-activated",
-                signing_pubkey: Some(V2_SIGNING_PUBKEY),
-            },
-            DeployedLogFixture {
-                name: "V2 withdrawal success",
-                json: include_str!("fixtures/v2/withdrawal/success.json"),
-                schema_version: 2,
-                shape: "withdrawal/success",
-                signing_pubkey: Some(V2_SIGNING_PUBKEY),
-            },
-        ];
-
-        for fixture in fixtures {
-            let json = fixture.json.trim_end();
-            let record: LogRecord = serde_json::from_str(json)
-                .unwrap_or_else(|error| panic!("{} did not deserialize: {error}", fixture.name));
-            assert_eq!(
-                record.data().schema_version(),
-                fixture.schema_version,
-                "{} has the wrong schema version",
-                fixture.name
-            );
-            assert_eq!(
-                deployed_log_shape(record.message()),
-                fixture.shape,
-                "{} has the wrong message shape",
-                fixture.name
-            );
-            let reserialized = serde_json::to_string_pretty(&record).unwrap();
-            if json.starts_with("{\n") {
-                assert_eq!(
-                    reserialized, json,
-                    "{} did not reserialize canonically",
-                    fixture.name
-                );
-            } else {
-                assert_eq!(
-                    serde_json::from_str::<Value>(&reserialized).unwrap(),
-                    serde_json::from_str::<Value>(json).unwrap(),
-                    "{} did not round-trip",
-                    fixture.name
-                );
-            }
-
-            let signing_pubkey = fixture.signing_pubkey.map(|hex_pubkey| {
-                let bytes = hex::decode(hex_pubkey).unwrap();
-                GuardianPubKey::try_from(bytes.as_slice()).unwrap()
-            });
-            record
-                .validate(signing_pubkey.as_ref())
-                .unwrap_or_else(|error| panic!("{} did not validate: {error}", fixture.name));
-        }
-    }
-
-    #[test]
-    fn v2_kp_share_state_uses_scalar_recipient_and_round_trips() {
+    fn kp_share_state_uses_scalar_recipient_and_round_trips() {
         let signing_key = GuardianSignKeyPair::from([22u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let encrypted_shares = KpEncryptedShareRoster::new(vec![KpEncryptedShare {
@@ -955,7 +754,7 @@ mod tests {
         let decoded: LogRecord = serde_json::from_value(json).unwrap();
         assert!(matches!(
             decoded.message(),
-            VersionedLogMessage::V2(LogMessageV2::KpShareState(..))
+            VersionedLogMessage::V1(LogMessageV1::KpShareState(..))
         ));
         decoded
             .validate(Some(&signing_key.verification_key()))
@@ -963,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_kp_share_state_rejects_removed_fingerprint_map() {
+    fn kp_share_state_rejects_removed_fingerprint_map() {
         let signing_key = GuardianSignKeyPair::from([23u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let encrypted_shares = KpEncryptedShareRoster::new(vec![KpEncryptedShare {
@@ -1058,7 +857,7 @@ mod tests {
         assert_eq!(log.timestamp_ms(), 1_700_000_000_000);
         assert!(matches!(
             log.message(),
-            VersionedLogMessage::V2(LogMessageV2::Heartbeat(HeartbeatLogMessage { seq: 42 }))
+            VersionedLogMessage::V1(LogMessageV1::Heartbeat(HeartbeatLogMessage { seq: 42 }))
         ));
     }
 
@@ -1066,7 +865,7 @@ mod tests {
     fn object_key_is_signed_and_serialized() {
         let (object_key, log, signing_key) = signed_heartbeat(1_700_000_000_000);
         let json = serde_json::to_value(&log).unwrap();
-        assert_eq!(json.get("schema_version").unwrap(), 2);
+        assert_eq!(json.get("schema_version").unwrap(), 1);
         assert_eq!(json.get("object_key").unwrap(), &object_key);
         let signature = json["signature"].as_str().unwrap();
         assert_eq!(signature.len(), 128);
@@ -1086,9 +885,9 @@ mod tests {
     }
 
     #[test]
-    fn signed_log_preserves_deployed_signing_preimage() {
+    fn signed_log_uses_expected_signing_preimage() {
         #[derive(Serialize)]
-        struct DeployedLogSigningPayload<'a> {
+        struct LogSigningPayload<'a> {
             schema_version: u64,
             session_id: &'a SessionID,
             object_key: &'a str,
@@ -1097,7 +896,7 @@ mod tests {
 
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
         let data = log.data();
-        let payload = DeployedLogSigningPayload {
+        let payload = LogSigningPayload {
             schema_version: data.schema_version,
             session_id: &data.session_id,
             object_key: &data.object_key,
@@ -1120,13 +919,14 @@ mod tests {
     fn unsupported_schema_version_is_rejected() {
         let (_, log, _) = signed_heartbeat(1_700_000_000_000);
         let mut json = serde_json::to_value(log).unwrap();
-        json["schema_version"] = serde_json::json!(3);
-
-        let err = serde_json::from_value::<LogRecord>(json).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unsupported log schema version: 3")
-        );
+        for version in [0, 2, 3] {
+            json["schema_version"] = serde_json::json!(version);
+            let err = serde_json::from_value::<LogRecord>(json.clone()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("unsupported log schema version: {version}"))
+            );
+        }
     }
 
     #[test]

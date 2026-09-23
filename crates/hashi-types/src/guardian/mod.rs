@@ -121,7 +121,6 @@ pub struct GuardianInfo {
     /// The Hashi shared-object id this guardian serves (set after
     /// operator_init). Certificates verified by this enclave must be bound
     /// to it; operators/KPs match it against their expected deployment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hashi_object_id: Option<sui_sdk_types::Address>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
@@ -129,12 +128,7 @@ pub struct GuardianInfo {
     pub mpc_master_g: Option<HashiMasterG>,
     /// Digest of the optional genesis state pinned during operator init. KPs
     /// independently derive and bind it into their signed PI submissions.
-    /// Trailing and omitted when absent to preserve pre-genesis signing bytes.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::guardian::serde::option_hex_32"
-    )]
+    #[serde(with = "crate::guardian::serde::option_hex_32")]
     pub genesis_state_hash: Option<[u8; 32]>,
 }
 
@@ -155,7 +149,7 @@ pub struct WithdrawOperatorInitRequest {
 /// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
 /// and that the enclave exposes via `GuardianInfo`.
 // TODO(testnet-wipe): Load the immutable Hashi object id and MPC master G from
-// the verified V2 genesis record, then remove their duplicate operator-supplied
+// the verified genesis record, then remove their duplicate operator-supplied
 // fields from InitConfig.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitConfig {

@@ -251,7 +251,7 @@ mod tests {
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::GuardianError::Unauthenticated;
-    use hashi_types::guardian::LogMessageV2;
+    use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
@@ -444,9 +444,9 @@ mod tests {
             "expected a proposed KP-share key, got {key}"
         );
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let VersionedLogMessage::V2(LogMessageV2::CeremonyProposal(proposal)) = record.message()
+        let VersionedLogMessage::V1(LogMessageV1::CeremonyProposal(proposal)) = record.message()
         else {
-            panic!("expected V2 CeremonyProposal variant");
+            panic!("expected V1 CeremonyProposal variant");
         };
         let CeremonyLogMessage::Rotate {
             old_instance,

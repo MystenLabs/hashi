@@ -1,21 +1,18 @@
 {
   "schema_version": 1,
-  "object_key": "init/8e6e6767497fe1ae/03-pi-enclave-fully-initialized.json",
-  "session_id": "8e6e6767497fe1ae",
-  "timestamp_ms": 1784233684521,
+  "object_key": "init/d54207da194977dc/03-pi-enclave-fully-initialized.json",
+  "session_id": "d54207da194977dc",
+  "timestamp_ms": 1700000000000,
   "message": {
     "Init": {
       "PIEnclaveFullyInitialized": {
         "sharing_seq": 0,
         "share_ids": [
-          1,
-          3,
-          4,
-          6
+          1
         ],
-        "enclave_btc_pubkey": "41c404498b384691bda6804fb491142b1d6d0867fc617c498d58337b02498995"
+        "enclave_btc_pubkey": "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"
       }
     }
   },
-  "signature": "4b210a1101a0121381762d2e45e9fae75d6743c68f762f5f5fdaedc612066726c65ac83694096c3ea5bd0a0e4dff29c504656cb4cfaecdc6596d1eede82d2c06"
+  "signature": "381423db00328c62bb80dd128cb3f7c5ce49ce22961fa1b228df292af56de9f08bee6d57b1dd7a5e174d92540fd60e7798a007db00fcc2b208d4290d6510ea07"
 }

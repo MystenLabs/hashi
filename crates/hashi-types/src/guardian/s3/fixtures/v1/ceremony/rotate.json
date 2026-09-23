@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "object_key": "ceremony/00000000000000000001-d54207da194977dc.json",
+  "session_id": "d54207da194977dc",
+  "timestamp_ms": 1700000000000,
+  "message": {
+    "Ceremony": {
+      "Rotate": {
+        "old_instance": {
+          "commitments": {
+            "1": "010101010101010101010101010101010101010101010101010101010101010101",
+            "2": "020202020202020202020202020202020202020202020202020202020202020202"
+          },
+          "params": {
+            "num_shares": 2,
+            "threshold": 2
+          },
+          "sharing_seq": 0
+        },
+        "new_instance": {
+          "commitments": {
+            "1": "010101010101010101010101010101010101010101010101010101010101010101",
+            "2": "020202020202020202020202020202020202020202020202020202020202020202"
+          },
+          "params": {
+            "num_shares": 2,
+            "threshold": 2
+          },
+          "sharing_seq": 1
+        },
+        "btc_master_pubkey": "531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337"
+      }
+    }
+  },
+  "signature": "0571bdae3fc274199c3e8c6ed4c833da8fe376d03ae07d593463771f4555244c99ea102eceb59c23354e86699e5d8387183de4dbf5c473a40b83f84e64c8b907"
+}

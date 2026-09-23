@@ -9,9 +9,6 @@ use crate::domain::WithdrawalEventType;
 use crate::domain::utc_timestamp;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::VerifiedLogRecord;
-use hashi_types::guardian::LogMessageV1;
-use hashi_types::guardian::LogMessageV2;
-use hashi_types::guardian::VersionedLogMessage;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3::S3HourScopedDirectory;
 use hashi_types::guardian::time::UnixSeconds;
@@ -24,13 +21,10 @@ impl TryFrom<VerifiedLogRecord> for MonitorWithdrawalEvent {
     fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
         let entry = log.into_entry();
         let timestamp_ms = entry.timestamp_ms();
-        let withdrawal_message = match entry.into_message() {
-            VersionedLogMessage::V1(LogMessageV1::Withdrawal(message)) => message,
-            VersionedLogMessage::V2(LogMessageV2::Withdrawal(message)) => message,
-            VersionedLogMessage::V1(_) | VersionedLogMessage::V2(_) => {
-                anyhow::bail!("non-withdrawal logs found");
-            }
-        };
+        let withdrawal_message = entry
+            .into_message()
+            .into_withdrawal()
+            .ok_or_else(|| anyhow::anyhow!("non-withdrawal logs found"))?;
 
         match *withdrawal_message {
             WithdrawalLogMessage::Success {
