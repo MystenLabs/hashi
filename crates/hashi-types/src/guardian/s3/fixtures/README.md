@@ -22,9 +22,11 @@ cargo test -p hashi-types regenerate_log_fixtures -- --ignored --nocapture
 The ignored generator uses the same dummy messages as the writer round-trip
 test. `dummy_log_fixtures_round_trip_and_verify` checks the checked-in JSON
 against those messages, round-trips it, and verifies Guardian signatures.
-Regenerate only for an intentional schema change and review the resulting diff.
-Keep files pretty-printed with a final newline, organized by log type under
-`v1/`.
+The testnet wipe establishes a fresh V1 baseline: pre-wipe records and signatures
+need not remain readable. Regeneration is allowed while establishing this baseline.
+After deployment, preserve the existing fixtures and signatures as described below.
+Keep files pretty-printed with a final newline, organized by log type under the
+corresponding schema-version directory.
 
 ## Corpus maintenance policy
 
@@ -33,15 +35,22 @@ records. Cover every supported `VersionedLogMessage` schema, each of its
 log-message variants, and every variant of its nested log-message enums,
 including success/failure and new-key/rotation cases.
 
-Whenever a log field is added, removed, renamed, or changes type, or its Serde/BCS
-representation changes:
+After this baseline is deployed:
 
-1. Update `dummy_log_messages` with representative values for the changed fields
-   and add cases for any new variants.
-2. Update the exhaustive `fixture_name` matches when variants change.
-3. Run the Rust generator and commit the regenerated corpus with the code change.
-4. Review the JSON and signature changes as part of the schema change. CI checks
-   the corpus against the Rust types and verifies the signed records.
+1. Preserve existing fixtures and their signatures unchanged. Do not regenerate
+   them to accommodate a change that breaks reading or verifying existing records.
+2. Add a separate fixture corpus for every new schema version, covering all of
+   its log-message variants, while retaining fixtures for supported older versions.
+3. Whenever an optional field is added, add fixtures covering both its absence
+   and a populated value. An optional field can stay within the same schema only
+   if existing records still deserialize and their original signatures verify;
+   JSON optionality alone does not establish this compatibility.
+4. For changes to fields, variants, or Serde/BCS representations that cannot
+   preserve that compatibility, introduce a new schema version and its fixtures.
+5. Update the Rust dummy cases and exhaustive variant coverage in the same change.
+   Generate new cases at distinct paths and review the diff to ensure existing
+   fixtures remain unchanged. Extend the fixture checks to read and verify both
+   the retained records and the new cases.
 
 Generation is deliberate: ordinary test runs must only read the corpus, so an
 accidental schema change fails instead of silently rewriting the baseline.

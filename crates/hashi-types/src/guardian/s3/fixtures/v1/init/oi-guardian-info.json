@@ -21,9 +21,11 @@
         "limiter_state": null,
         "limiter_config": null,
         "current_committee_epoch": null,
-        "mpc_master_g": null
+        "hashi_object_id": null,
+        "mpc_master_g": null,
+        "genesis_state_hash": null
       }
     }
   },
-  "signature": "643c6582c5ce0557685387abb3bc60f982cc5f88a018ba99a170d7f54ffaf7dc22a866d4bf139785ab9313216b5b9d0508a50670a3f669e3e60b5ecf32047b0f"
+  "signature": "2cdb1328a926ae37528958310412e9cf4fea61550aba8dc7d0f5d076c42b549486357ac0b6257f4002b43ef86c96c779cdb996627a5d7ca773cce68764605e05"
 }

@@ -52,8 +52,9 @@ impl Serialize for VersionedLogMessage {
 /// Schema-version-1 log messages emitted by the guardian enclave.
 /// Uses an enum discriminator for automatic domain separation between variants.
 ///
-/// When variants, payload fields, or serialization change, update the dummy
-/// corpus and its coverage in `log_record::tests`; see `fixtures/README.md`.
+/// Add dummy fixtures for every new schema version and optional-field addition.
+/// After deployment, preserve existing fixtures and their signatures; incompatible
+/// changes require a new schema version. See `fixtures/README.md`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
