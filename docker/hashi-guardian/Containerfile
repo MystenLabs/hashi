@@ -4,46 +4,19 @@
 # This containerfile uses StageX (https://stagex.tools) images, which provide a
 # full source bootstrapped, deterministic, and hermetic build toolchain
 
-FROM stagex/core-binutils@sha256:96be7ac627c6929ff40d99c6bbf28b5a5173f576bc6a72aade6026df0f40a6fa AS core-binutils
 FROM stagex/core-ca-certificates@sha256:8390dff73a4502614411e2b2ecb4e4e33b6cc10dc26cf2c6a46e5df71f4c4b03 AS core-ca-certificates
-FROM stagex/core-gcc@sha256:7bccb77b1b97b3b84ac6db30b6dd90107682817b67e55df10abda6bbbf0a0d80 AS core-gcc
-FROM stagex/core-git@sha256:ecd1de421f467072a76de5a38fce61dd0afb2ddd2c48d73c21effb5ad76342fb AS core-git
-FROM stagex/core-zlib@sha256:5a21327b58c2ceeb3283a960540e19d9c35944961c68a7254e36056bf6f7d2d9 AS core-zlib
-FROM stagex/core-libffi@sha256:ac6ee80753f981ac6d664846d2d59d5a4cbdb80142e4838902eb7e17201a3f9b AS core-libffi
-FROM stagex/core-llvm@sha256:b7aaaad0bf89754f1426d2cd6d97f95d1703e32dd8a27eb6572d1c46bfd45ba0 AS core-llvm
-FROM stagex/core-openssl@sha256:04a0d15071ca64b6f4855bb7790a306caa33b6259b522c44898a41975a67562e AS core-openssl
-FROM stagex/core-rust@sha256:bc728fd2094793f5b0fa70780902078c41d248cf9ce7361f46881571f197889e AS core-rust
 FROM stagex/core-musl@sha256:42fd2ed18ac4d6336f08f1b6345e0bb7bc5570450a40e7255b6da79868bd2d6b AS core-musl
-FROM stagex/core-libunwind@sha256:08cd9e229ef1b4f547c25436d06a2f893f252fc1c1d8b86affbaa91b0be05cef AS core-libunwind
-FROM stagex/core-pkgconf@sha256:7107047cb102ce609e25445138b36d53d0a99bbb387f53988c1b2187662233b5 AS core-pkgconf
 FROM stagex/core-busybox@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735fca9a9701ce49db04c6c181 AS core-busybox
-FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS core-libzstd
 FROM stagex/user-eif_build@sha256:8bbd8fb500322e719063645460f3942d04ca99048089adea237026443c9517b7 AS user-eif_build
-FROM stagex/user-gen_initramfs@sha256:1c957893705011044a1b11aefbcffd80dc0797f439b997bfbfe87df0a4a3756e AS user-gen_initramfs
 FROM stagex/user-cpio@sha256:46ca4a247908c502e31a26842925b02cc7133fec619b19e0d5c3833f6d073d8e AS user-cpio
 FROM stagex/user-socat@sha256:70b21dec5de83d366babfa90215ce510118df88b798d4106f429bde3bf55973a AS user-socat
-FROM stagex/user-jq@sha256:1b2dddde7a2a35395430ebd99e07117bbc48fa29a0dba8a6b18d6d74bf762368 AS user-jq
 # Use the published Nitro kernel and its matching config, pinned independently
 # of the Rust toolchain.
 FROM stagex/user-linux-nitro@sha256:edc0a74392d7b3ca904fa0e999307aabbe4a84ad780328439a2def6bdee55189 AS user-linux-nitro
 
-FROM scratch AS base
-COPY --from=core-busybox . /
-COPY --from=core-musl . /
-COPY --from=core-libunwind . /
-COPY --from=core-openssl . /
-COPY --from=core-zlib . /
-COPY --from=core-ca-certificates . /
-COPY --from=core-libzstd . /
-COPY --from=core-binutils . /
-COPY --from=core-pkgconf . /
-COPY --from=core-git . /
-COPY --from=core-rust . /
-COPY --from=user-gen_initramfs . /
+# StageX's Rust 1.96 pallet supplies the compiler and supporting build tools.
+FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS base
 COPY --from=user-eif_build . /
-COPY --from=core-llvm . /
-COPY --from=core-libffi . /
-COPY --from=core-gcc . /
 COPY --from=user-cpio . /
 
 # Only the guardian's dependency closure goes in: hashi-guardian, hashi-types,
@@ -122,13 +95,11 @@ COPY --from=user-linux-nitro /bzImage /bzImage
 COPY --from=user-linux-nitro /linux.config /kernel.config
 
 WORKDIR /build_cpio
-ENV KBUILD_BUILD_TIMESTAMP=1
 RUN mkdir -p initramfs/proc initramfs/sys initramfs/dev initramfs/tmp
 COPY --from=core-busybox . initramfs
 COPY --from=core-musl . initramfs
 COPY --from=core-ca-certificates /etc/ssl/certs initramfs
 COPY --from=core-busybox /bin/sh initramfs/sh
-COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
 RUN cp /target/${TARGET}/release/hashi-guardian initramfs/guardian
 # run.sh is the enclave init: the kernel execs /init as PID 1.
