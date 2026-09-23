@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::communication::ChannelResult;
+use crate::config::{AllowedDealer, ComplaintResponsePolicy};
 use crate::metrics::Metrics;
 
 async fn run_nonce_generation_for_test(
@@ -288,6 +289,7 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap()
@@ -1030,6 +1032,7 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
@@ -1063,6 +1066,7 @@ fn test_mpc_manager_new_succeeds_for_non_member_without_identity() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("non-member must construct rather than panic");
@@ -1090,6 +1094,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("member must construct");
@@ -1109,6 +1114,7 @@ fn test_this_node_deals_nothing_only_for_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("non-member must construct");
@@ -1149,6 +1155,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("non-member must construct");
@@ -1171,6 +1178,7 @@ fn test_send_messages_entry_point_rejects_only_a_non_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("member must construct");
@@ -1228,6 +1236,7 @@ fn test_role_predicates_separate_a_departing_node_from_a_never_member() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .expect("a non-member must construct")
@@ -1293,6 +1302,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     );
 
@@ -1326,6 +1336,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     );
 
@@ -1412,6 +1423,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1497,6 +1509,7 @@ fn test_epoch_lookups_reject_neither_current_nor_previous() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1601,6 +1614,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .expect(
@@ -4446,6 +4460,143 @@ fn test_handle_complain_request_caches_response() {
     assert_eq!(party2_manager.complaint_responses.len(), 1);
 }
 
+#[test]
+#[tracing_test::traced_test]
+fn test_handle_complain_request_withholds_valid_complaint_outside_policy() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_addr = setup.address(0);
+    let cheating_message = Messages::Dkg(create_cheating_message(&setup, 0, 1, &mut rng));
+    let config = setup.dkg_config();
+    let receiver1 = avss::Receiver::new(
+        config.nodes.clone(),
+        1,
+        Parameters {
+            t: config.threshold,
+            f: config.max_faulty,
+        },
+        setup.session_id().dealer_session_id(&dealer_addr).to_vec(),
+        None,
+        setup.encryption_keys[1].inner().clone(),
+    )
+    .unwrap();
+    let Messages::Dkg(inner_msg) = &cheating_message else {
+        unreachable!()
+    };
+    let Ok(avss::ProcessedMessage::Complaint(complaint)) =
+        receiver1.process_message(inner_msg, &mut rand::thread_rng())
+    else {
+        panic!("expected a complaint");
+    };
+    let mut manager = setup.create_manager(2);
+    receive_dealer_messages(&mut manager, &cheating_message, dealer_addr).unwrap();
+    let epoch = manager.mpc_config.epoch;
+    let request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch,
+    };
+
+    // Neither the default policy nor entries for another epoch or dealer
+    // release the response. It is verified and cached on the first attempt;
+    // the cache hit that answers the later ones is gated just the same.
+    for dealers in [
+        vec![],
+        vec![AllowedDealer {
+            epoch: epoch + 1,
+            dealer: dealer_addr,
+        }],
+        vec![AllowedDealer {
+            epoch,
+            dealer: setup.address(3),
+        }],
+    ] {
+        manager.complaint_response_policy = ComplaintResponsePolicy::AllowList { dealers };
+        let result = manager.handle_complain_request(setup.address(1), &request);
+        assert!(
+            matches!(
+                result,
+                Err(MpcError::ComplaintWithheld { epoch: e, dealer: d })
+                    if e == epoch && d == dealer_addr
+            ),
+            "expected the complaint to be withheld, got {result:?}"
+        );
+        assert_eq!(manager.complaint_responses.len(), 1);
+    }
+
+    // Allow-listing the (epoch, dealer) pair releases it.
+    manager.complaint_response_policy = ComplaintResponsePolicy::AllowList {
+        dealers: vec![AllowedDealer {
+            epoch,
+            dealer: dealer_addr,
+        }],
+    };
+    manager
+        .handle_complain_request(setup.address(1), &request)
+        .unwrap();
+    assert_eq!(manager.complaint_responses.len(), 1);
+
+    // The one verification logged the exact request and dealer message it
+    // checked, decodable from the log alone; cache hits are not re-verified.
+    let expected_request = bcs::to_bytes(&request).unwrap();
+    let expected_message = bcs::to_bytes(&cheating_message).unwrap();
+    logs_assert(|lines: &[&str]| {
+        let logged: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("Verified complaint from"))
+            .collect();
+        if logged.len() != 1 {
+            return Err(format!(
+                "expected 1 verified complaint, got {}",
+                logged.len()
+            ));
+        }
+        for line in logged {
+            let field = |name: &str| {
+                let hex_str = line.split(name).nth(1).unwrap().split(',').next().unwrap();
+                hex::decode(hex_str.trim()).unwrap()
+            };
+            let logged_request = field("request (bcs) ");
+            let logged_message = field("dealer message (bcs) ");
+            bcs::from_bytes::<ComplainRequest>(&logged_request).unwrap();
+            bcs::from_bytes::<Messages>(&logged_message).unwrap();
+            if logged_request != expected_request || logged_message != expected_message {
+                return Err(format!("logged complaint does not match: {line}"));
+            }
+        }
+        Ok(())
+    });
+}
+
+#[test]
+fn test_handle_complain_request_rejects_invalid_complaint_before_policy() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let (dealer_address, dealer_messages, complaint) =
+        create_dealer_message_and_complaint(&setup, &mut rng);
+    let mut manager = setup.create_manager(1);
+    manager.complaint_response_policy = ComplaintResponsePolicy::AllowList { dealers: vec![] };
+    if let Messages::Dkg(msg) = dealer_messages {
+        manager.current_dkg_messages.insert(dealer_address, msg);
+    }
+    let request = ComplainRequest {
+        dealer: dealer_address,
+        share_index: None,
+        batch_index: None,
+        complaint: ProtocolComplaint::Avss(complaint),
+        protocol_type: ProtocolTypeIndicator::Dkg,
+        epoch: manager.mpc_config.epoch,
+    };
+
+    // An invalid complaint fails verification rather than being counted as a
+    // valid complaint that was withheld.
+    let result = manager.handle_complain_request(setup.address(1), &request);
+    assert!(matches!(result, Err(MpcError::CryptoError(_))));
+}
+
 #[tokio::test]
 async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
     let mut rng = rand::thread_rng();
@@ -6314,6 +6465,7 @@ impl RotationTestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -7890,6 +8042,7 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -9992,6 +10145,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10174,6 +10328,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10308,6 +10463,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10337,6 +10493,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10443,6 +10600,7 @@ fn test_recover_current_dkg() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap()
@@ -10615,6 +10773,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10706,6 +10865,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -10740,6 +10900,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -10848,6 +11009,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();
@@ -10937,6 +11099,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -11016,6 +11179,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap()
@@ -11203,6 +11367,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            ComplaintResponsePolicy::AllowAll,
             &test_metrics(),
         )
         .unwrap();
@@ -11284,6 +11449,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        ComplaintResponsePolicy::AllowAll,
         &test_metrics(),
     )
     .unwrap();

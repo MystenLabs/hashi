@@ -986,6 +986,9 @@ pub enum MpcError {
 
     #[error("Protocol failed: {0}")]
     ProtocolFailed(String),
+
+    #[error("Complaint about dealer {dealer} in epoch {epoch} withheld")]
+    ComplaintWithheld { epoch: u64, dealer: Address },
 }
 
 impl From<FastCryptoError> for MpcError {

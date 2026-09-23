@@ -116,3 +116,18 @@ groups:
             This node owned share indices in the previous committee but entered
             the rotation with none to reshare, so its weight did not reach the
             new key.
+
+      - alert: HashiValidComplaintReceived
+        expr: increase(hashi_mpc_complaints_received_total{outcome=~"withheld|served"}[1h]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "received a valid MPC complaint ({{ $labels.outcome }})"
+          description: >-
+            A peer sent a complaint that verified, so some dealer sent it a
+            corrupt share. Honest nodes should never trigger this. `withheld`:
+            the dealer is outside this node's complaint-response-policy and the
+            peer cannot recover its share; the warning log names the epoch and
+            dealer. If the dealer is confirmed faulty, add the pair to
+            complaint-response-policy and restart the node. `served`: this
+            node released its response for an allow-listed dealer.

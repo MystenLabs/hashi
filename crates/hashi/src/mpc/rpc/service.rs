@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
+use crate::metrics::MPC_LABEL_DKG;
+use crate::metrics::MPC_LABEL_KEY_ROTATION;
+use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
@@ -128,25 +131,39 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let label = match internal_request.protocol_type {
+            types::ProtocolTypeIndicator::Dkg => MPC_LABEL_DKG,
+            types::ProtocolTypeIndicator::KeyRotation => MPC_LABEL_KEY_ROTATION,
+            types::ProtocolTypeIndicator::NonceGeneration => MPC_LABEL_NONCE_GENERATION,
+        };
         let mpc_manager = self.mpc_manager()?;
-        let response = spawn_blocking(move || -> Result<_, Status> {
-            let complaint = {
-                let mut mgr = mpc_manager.write().unwrap();
-                validate_epoch_current_or_previous(
-                    mgr.mpc_config.epoch,
-                    mgr.previous_epoch,
-                    internal_request.epoch,
-                )?;
-                mgr.handle_complain_request(caller, &internal_request)
-                    .map_err(|e| {
-                        tracing::warn!("complain failed: {e}");
-                        mpc_error_to_status(e)
-                    })?
-            };
-            Ok(ComplainResponse::from(&complaint))
+        let result = spawn_blocking(move || -> Result<_, Status> {
+            let mut mgr = mpc_manager.write().unwrap();
+            validate_epoch_current_or_previous(
+                mgr.mpc_config.epoch,
+                mgr.previous_epoch,
+                internal_request.epoch,
+            )?;
+            Ok(mgr.handle_complain_request(caller, &internal_request))
         })
         .await?;
-        Ok(tonic::Response::new(response))
+        let outcome = match &result {
+            Ok(_) => "served",
+            Err(MpcError::ComplaintWithheld { .. }) => "withheld",
+            Err(_) => "failed",
+        };
+        self.metrics()
+            .mpc_complaints_received_total
+            .with_label_values(&[label, outcome])
+            .inc();
+        let complaint = result.map_err(|e| {
+            // A withheld complaint is logged in full by the manager.
+            if outcome == "failed" {
+                tracing::warn!("complain failed: {e}");
+            }
+            mpc_error_to_status(e)
+        })?;
+        Ok(tonic::Response::new(ComplainResponse::from(&complaint)))
     }
 
     #[tracing::instrument(skip(self, request))]
@@ -282,6 +299,7 @@ fn mpc_error_to_status(err: MpcError) -> Status {
         | InvalidConfig(_)
         | NotReady(_) => Status::failed_precondition(err.to_string()),
         NotFound(_) => Status::not_found(err.to_string()),
+        ComplaintWithheld { .. } => Status::permission_denied(err.to_string()),
         _ => Status::internal(err.to_string()),
     }
 }
