@@ -264,11 +264,10 @@ mod tests {
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::ResolvedS3Config;
+    use hashi_types::guardian::S3ObjectLockPolicy;
     use hashi_types::guardian::SessionID;
     use hashi_types::guardian::SetupNewKeyResponse;
     use hashi_types::guardian::ShareID;
-    use std::time::Duration;
-    use std::time::SystemTime;
 
     fn bucket_info(bucket: &str, region: &str) -> S3BucketInfo {
         S3BucketInfo {
@@ -318,13 +317,11 @@ mod tests {
             .build()
     }
 
-    fn locked_record(body: Vec<u8>) -> GetObjectOutput {
+    fn locked_record(record: &LogRecord, policy: S3ObjectLockPolicy) -> GetObjectOutput {
         GetObjectOutput::builder()
             .object_lock_mode(ObjectLockMode::Compliance)
-            .object_lock_retain_until_date(DateTime::from(
-                SystemTime::now() + Duration::from_secs(60),
-            ))
-            .body(ByteStream::from(body))
+            .object_lock_retain_until_date(DateTime::from(record.object_lock_expiry(policy)))
+            .body(ByteStream::from(serde_json::to_vec(record).unwrap()))
             .build()
     }
 
@@ -371,7 +368,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([8u8; 32]);
         let signing_pubkey = signing_key.verification_key();
         let session_id = SessionID::from_signing_pubkey(&signing_pubkey);
-        let pi_log = LogRecord::new_at_timestamp(
+        let pi_log = LogRecord::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
@@ -381,9 +378,8 @@ mod tests {
                     .0,
             })),
             &signing_key,
-            0,
         );
-        let oa_log = LogRecord::new_at_timestamp(
+        let oa_log = LogRecord::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                 state_hash: [1; 32],
@@ -397,12 +393,11 @@ mod tests {
                 },
             })),
             &signing_key,
-            0,
         );
         let pi_key = pi_log.object_key().to_string();
-        let pi_body = serde_json::to_vec(&pi_log).unwrap();
         let oa_key = oa_log.object_key().to_string();
-        let oa_body = serde_json::to_vec(&oa_log).unwrap();
+        let s3_config = ResolvedS3Config::mock_for_testing();
+        let policy = S3ObjectLockPolicy::for_environment(s3_config.retention_environment);
 
         let list_logs = mock!(Client::list_object_versions)
             .sequence()
@@ -411,12 +406,11 @@ mod tests {
             .build();
         let get_logs = mock!(Client::get_object)
             .sequence()
-            .output(move || locked_record(pi_body.clone()))
-            .output(move || locked_record(oa_body.clone()))
+            .output(move || locked_record(&pi_log, policy))
+            .output(move || locked_record(&oa_log, policy))
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
-        let s3 =
-            GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client);
+        let s3 = GuardianS3Client::from_client_for_tests(s3_config, client);
         let mut session_info = session_info_ready_for_activation(signing_pubkey);
 
         session_info

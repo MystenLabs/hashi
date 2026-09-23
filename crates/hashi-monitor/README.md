@@ -50,7 +50,6 @@ credential chain and keep the Signet provider URI in the environment:
 
 ```bash
 export AWS_PROFILE=guardian-s3-testnet
-export HASHI_SKIP_S3_OBJECT_LOCK_CHECK=1
 export HASHI_BITCOIN_RPC_URL="https://your-signet-json-rpc-endpoint"
 
 cargo run -p hashi-monitor -- continuous \
@@ -59,8 +58,7 @@ cargo run -p hashi-monitor -- continuous \
 ```
 
 Run this from `crates/hashi-monitor`, or prefix the configuration path with
-`crates/hashi-monitor/` when running from the repository root. The object-lock
-bypass is temporary and is described below.
+`crates/hashi-monitor/` when running from the repository root.
 
 ### Batch audit
 ```bash
@@ -122,11 +120,3 @@ btc:
   - Guardian S3 withdrawal log polling with attestation and signature verification.
   - Checkpoint-bounded, resumable Sui polling for withdrawal and deposit events.
   - Batched BTC confirmation lookup over HTTP JSON-RPC.
-
-## Temporary testnet object-lock bypass
-
-Setting `HASHI_SKIP_S3_OBJECT_LOCK_CHECK` disables S3 object-lock metadata
-validation for the process. Signature, PCR, signed object-key, and S3 version
-history checks remain enabled. This escape hatch exists only for legacy testnet
-logs written before long-lived retention was configured and should be removed
-after the planned testnet wipe.
