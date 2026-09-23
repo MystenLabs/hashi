@@ -216,7 +216,6 @@ pub struct MpcManager {
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
-    pub complaint_rejections: HashSet<(Address, ComplaintResponsesKey)>,
     pub public_messages_store: Arc<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
@@ -510,7 +509,6 @@ impl MpcManager {
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
-            complaint_rejections: HashSet::new(),
             public_messages_store: public_message_store,
             chain_id: chain_id.to_string(),
             hashi_object_id,
@@ -727,14 +725,6 @@ impl MpcManager {
         {
             return Ok(PreparedComplaint::Ready(cached_response.clone()));
         }
-        let reject_key = (caller, cache_key);
-        if cache_is_current && self.complaint_rejections.contains(&reject_key) {
-            return Err(MpcError::InvalidMessage {
-                sender: caller,
-                reason: "a complaint from this accuser for this dealer already failed verification"
-                    .into(),
-            });
-        }
         if matches!(
             request.complaint,
             ProtocolComplaint::AvidReveal(_) | ProtocolComplaint::AvidBlame { .. }
@@ -748,7 +738,6 @@ impl MpcManager {
             let verify = self.prepare_avid_nonce_complaint(caller, request)?;
             return Ok(PreparedComplaint::Verify {
                 cache_key,
-                reject_key,
                 epoch: request.epoch,
                 verify,
             });
@@ -884,7 +873,6 @@ impl MpcManager {
         };
         Ok(PreparedComplaint::Verify {
             cache_key,
-            reject_key,
             epoch: request.epoch,
             verify,
         })
@@ -901,33 +889,15 @@ impl MpcManager {
         }
     }
 
-    pub(crate) fn record_complaint_rejection(
-        &mut self,
-        epoch: u64,
-        reject_key: (Address, ComplaintResponsesKey),
-    ) {
-        if epoch == self.mpc_config.epoch {
-            self.complaint_rejections.insert(reject_key);
-        }
-    }
-
     pub(crate) fn commit_complaint_outcome(
         &mut self,
         epoch: u64,
         cache_key: ComplaintResponsesKey,
-        reject_key: (Address, ComplaintResponsesKey),
         result: MpcResult<ComplaintResponse>,
     ) -> MpcResult<ComplaintResponse> {
-        match result {
-            Ok(response) => {
-                self.cache_complaint_response(epoch, cache_key, response.clone());
-                Ok(response)
-            }
-            Err(e) => {
-                self.record_complaint_rejection(epoch, reject_key);
-                Err(e)
-            }
-        }
+        let response = result?;
+        self.cache_complaint_response(epoch, cache_key, response.clone());
+        Ok(response)
     }
 
     #[cfg(test)]
@@ -940,12 +910,11 @@ impl MpcManager {
             PreparedComplaint::Ready(response) => Ok(response),
             PreparedComplaint::Verify {
                 cache_key,
-                reject_key,
                 epoch,
                 verify,
             } => {
                 let result = verify();
-                self.commit_complaint_outcome(epoch, cache_key, reject_key, result)
+                self.commit_complaint_outcome(epoch, cache_key, result)
             }
         }
     }
@@ -4095,10 +4064,6 @@ impl MpcManager {
             ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
         });
-        mgr.complaint_rejections.retain(|(_, k)| match k {
-            ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
-            _ => true,
-        });
     }
 
     fn process_certified_dkg_message(&mut self, dealer: Address) -> MpcResult<()> {
@@ -6722,7 +6687,6 @@ pub(crate) enum PreparedComplaint {
     Ready(ComplaintResponse),
     Verify {
         cache_key: ComplaintResponsesKey,
-        reject_key: (Address, ComplaintResponsesKey),
         epoch: u64,
         verify: Box<dyn FnOnce() -> MpcResult<ComplaintResponse>>,
     },

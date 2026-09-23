@@ -148,7 +148,6 @@ impl MpcService for HttpService {
                 PreparedComplaint::Ready(response) => response,
                 PreparedComplaint::Verify {
                     cache_key,
-                    reject_key,
                     epoch,
                     verify,
                 } => {
@@ -156,7 +155,7 @@ impl MpcService for HttpService {
                     mpc_manager
                         .write()
                         .unwrap()
-                        .commit_complaint_outcome(epoch, cache_key, reject_key, result)
+                        .commit_complaint_outcome(epoch, cache_key, result)
                         .map_err(|e| {
                             tracing::warn!("complain failed: {e}");
                             mpc_error_to_status(e)
