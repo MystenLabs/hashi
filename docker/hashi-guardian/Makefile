@@ -14,7 +14,7 @@ default: out/nitro.eif
 out:
 	mkdir -p out
 
-# The EIF's inputs. .github/workflows/guardian-enclave.yml builds main pushes
+# Build-context inputs. .github/workflows/guardian-enclave.yml builds main pushes
 # that touch this list; a path added here must be added there too.
 out/nitro.eif: $(shell git ls-files ../../Cargo.toml ../../Cargo.lock ../../.dockerignore ../../crates .) | out
 	docker build \

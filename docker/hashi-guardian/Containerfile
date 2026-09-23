@@ -28,6 +28,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo fetch --locked
 
+# Compile Guardian and its dependencies from the full workspace. Only the
+# resulting binary and the runtime files selected below enter the app ramdisk.
 FROM resolve AS build
 ARG BUCKET_NAME
 ARG AWS_REGION=us-east-1
@@ -85,9 +87,8 @@ RUN <<-EOF
 EOF
 
 WORKDIR /build_eif
-# The Nitro loader unpacks the ramdisk as an initramfs and execs /init, so the
-# cmdline carries no initrd=/root= (an old-style ramdisk-root cmdline panics the
-# kernel with "Cannot open root device").
+# The Linux kernel unpacks the ramdisk as an initramfs and execs /init.
+# This does not need initrd=/root= arguments for an old-style ramdisk root.
 RUN eif_build \
 	--kernel /bzImage \
 	--kernel_config /kernel.config \
