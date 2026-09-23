@@ -754,13 +754,22 @@ impl SigningManager {
         metrics: &Metrics,
     ) -> bool {
         let share_owners = &self.config.share_owners;
-        let owners: HashSet<Address> = match blame {
+
+        // Whose partial signatures to skip. Both verdicts name contributors to leave out.
+        let owners: HashSet<Address> = match &blame {
             Blame::Nobody => return false,
+            Blame::Certain(indices) | Blame::Inconclusive(indices) => indices
+                .iter()
+                .filter_map(|idx| share_owners.get(idx).copied())
+                .collect(),
+        };
+
+        // What to report. Counting an index against its owner is a claim about them.
+        match &blame {
+            Blame::Nobody => {}
             Blame::Certain(indices) => {
-                // Counting an index against its owner is a claim about them, so only the certain
-                // case is counted.
                 let mut per_owner: HashMap<Address, u64> = HashMap::new();
-                for idx in &indices {
+                for idx in indices {
                     if let Some(owner) = share_owners.get(idx) {
                         *per_owner.entry(*owner).or_default() += 1;
                     }
@@ -783,13 +792,9 @@ impl SigningManager {
                          corrupt"
                     );
                 }
-                per_owner.into_keys().collect()
             }
-            Blame::Inconclusive(indices) => indices
-                .iter()
-                .filter_map(|idx| share_owners.get(idx).copied())
-                .collect(),
-        };
+            Blame::Inconclusive(_) => {}
+        }
         let before = flagged.len();
         flagged.extend(
             share_owners
