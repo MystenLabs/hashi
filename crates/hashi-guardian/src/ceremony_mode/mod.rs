@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Ceremony-mode flows (enabled when CEREMONY_MODE=true): one-time key setup
+//! Ceremony-mode flows (selected by operator initialization): one-time key setup
 //! (`setup_new_key`) and rotation (`rotate_kp_set`). The shared `operator_init`
 //! and `get_guardian_info` live at the crate root.
 

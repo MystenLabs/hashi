@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package sui.hashi.v1alpha;
 
+
 import "sui/hashi/v1alpha/signature.proto";
 import "sui/hashi/v1alpha/utxo.proto";
 
@@ -74,7 +75,7 @@ message SignedGuardianInfo {
 
 enum CeremonyStage {
   CEREMONY_STAGE_UNSPECIFIED = 0;
-  CEREMONY_STAGE_UNINITIALIZED = 1;
+  reserved 1;
   CEREMONY_STAGE_OPERATOR_INITIALIZED = 2;
   CEREMONY_STAGE_AWAITING_KEY_PROVISIONER_CONFIRMATIONS = 3;
   CEREMONY_STAGE_COMPLETED = 4;
@@ -82,7 +83,7 @@ enum CeremonyStage {
 
 enum WithdrawStage {
   WITHDRAW_STAGE_UNSPECIFIED = 0;
-  WITHDRAW_STAGE_UNINITIALIZED = 1;
+  reserved 1;
   WITHDRAW_STAGE_OPERATOR_INITIALIZED = 2;
   WITHDRAW_STAGE_PROVISIONER_INITIALIZED = 3;
   WITHDRAW_STAGE_ACTIVATED = 4;
@@ -119,7 +120,7 @@ message GuardianInfoData {
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 9;
 
-  // Signed enclave mode and its current lifecycle stage.
+  // Signed enclave mode and stage; absent until operator initialization commits.
   oneof lifecycle {
     CeremonyStage ceremony = 10;
     WithdrawStage withdraw = 11;

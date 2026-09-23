@@ -6,7 +6,6 @@ use hashi_guardian::rpc::GuardianGrpc;
 use hashi_guardian::withdraw_mode::heartbeat::HeartbeatWriter;
 use hashi_guardian::Enclave;
 use hashi_guardian::HEARTBEAT_INTERVAL;
-use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -14,11 +13,7 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 
-/// Enclave initialization.
-/// `setup_new_key` and `rotate_kp_set` are gated to CEREMONY_MODE=true;
-/// `provisioner_init` and `standard_withdrawal` are gated to CEREMONY_MODE=false.
-/// Everything else (operator_init, get_guardian_info, …) is available in
-/// both modes. See the per-route gates in `rpc.rs`.
+/// Boot an uninitialized enclave; OperatorInit selects its session mode.
 #[tokio::main]
 async fn main() -> Result<()> {
     hashi_types::telemetry::TelemetryConfig::new()
@@ -28,21 +23,10 @@ async fn main() -> Result<()> {
 
     abort_on_panic();
 
-    // Check if CEREMONY_MODE is enabled (defaults to false)
-    let ceremony_mode = std::env::var("CEREMONY_MODE")
-        .ok()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(false);
-    let mode = if ceremony_mode {
-        EnclaveMode::Ceremony
-    } else {
-        EnclaveMode::Withdraw
-    };
-
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, mode));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
     // The StandardWithdrawal idempotency cache now lives out-of-enclave in
     // `hashi-guardian-proxy`; the enclave serves the bare handler.
@@ -53,14 +37,10 @@ async fn main() -> Result<()> {
     let addr = "0.0.0.0:3000".parse()?;
     info!("gRPC server listening on {}.", addr);
 
-    // Don't emit heartbeats in ceremony mode: their primary function is
-    // to allow KPs to detect old sessions that might still be running
-    // in order to bypass limiter. Not a concern for ceremony mode.
-    if !ceremony_mode {
-        drop(tokio::spawn(
-            HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
-        ));
-    }
+    // The writer is idle until withdraw operator initialization completes.
+    drop(tokio::spawn(
+        HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
+    ));
 
     Server::builder()
         .add_service(GuardianServiceServer::new(svc))

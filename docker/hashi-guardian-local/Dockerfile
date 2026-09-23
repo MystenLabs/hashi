@@ -15,8 +15,6 @@ COPY . .
 # Baked into the guardian at build time (option_env!) and reported as
 # `untrusted_git_revision`; the init config's `current_build.git_revision` must
 # match it, so pin a stable local value both sides agree on.
-ARG GIT_REVISION=local
-ENV GIT_REVISION=${GIT_REVISION}
 # All three need `non-enclave-dev`: the guardian stubs the Nitro NSM
 # attestation, the init tooling accepts that mock attestation, and all three
 # accept the test KP keys' software attestations. One invocation builds all

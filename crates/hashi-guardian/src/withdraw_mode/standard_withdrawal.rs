@@ -250,8 +250,8 @@ mod tests {
         assert!(matches!(
             result,
             Err(GuardianError::LifecycleMismatch {
-                expected: EnclaveLifecycle::Withdraw(WithdrawStage::Activated),
-                actual: EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized),
+                expected: Some(EnclaveLifecycle::Withdraw(WithdrawStage::Activated)),
+                actual: None,
             })
         ));
     }

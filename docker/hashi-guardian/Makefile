@@ -1,11 +1,6 @@
 REGISTRY := local
-BUCKET_NAME ?= guardian-test-bucket
-AWS_REGION ?= us-east-1
-GIT_REVISION ?= $(shell git -C ../.. describe --always --exclude '*' --dirty --abbrev=8)
 # Extra cargo features; empty = the real enclave build (see Containerfile).
 FEATURES ?=
-# Enclave boot mode; empty = withdraw, "true" = ceremony (see Containerfile).
-CEREMONY_MODE ?=
 
 .DEFAULT_GOAL :=
 .PHONY: default
@@ -24,11 +19,7 @@ out/nitro.eif: $(shell git ls-files ../../Cargo.toml ../../Cargo.lock ../../.doc
 		--platform linux/amd64 \
 		--provenance=false \
 		--output type=local,rewrite-timestamp=true,dest=out \
-		--build-arg BUCKET_NAME=$(BUCKET_NAME) \
-		--build-arg AWS_REGION=$(AWS_REGION) \
-		--build-arg GIT_REVISION=$(GIT_REVISION) \
 		--build-arg FEATURES=$(FEATURES) \
-		--build-arg CEREMONY_MODE=$(CEREMONY_MODE) \
 		-f Containerfile \
 		../..
 

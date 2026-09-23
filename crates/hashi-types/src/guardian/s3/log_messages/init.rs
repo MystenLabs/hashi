@@ -533,7 +533,7 @@ mod tests {
         live.deployment_info = Some(oi.deployment.summary());
         live.encryption_pubkey = oi.encryption_pubkey.clone();
         oi.match_post_oi_guardian_info(&live).unwrap();
-        live.lifecycle = CeremonyStage::Uninitialized.into();
+        live.lifecycle = None;
         assert!(oi.match_post_oi_guardian_info(&live).is_err());
         live.lifecycle = CeremonyStage::OperatorInitialized.into();
         live.config_hash = Some([2; 32]);

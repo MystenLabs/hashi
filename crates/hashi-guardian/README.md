@@ -15,6 +15,34 @@ carry one recipient fingerprint and one ciphertext per share. The
 `VersionedLogMessage` wrapper retains explicit version dispatch for future
 schema changes.
 
+## Initialization and build identity
+
+The EIF contains no bucket, region, mode, or Git revision label. A fresh enclave
+reports no lifecycle or deployment summary until operator initialization.
+Operator tooling verifies its attestation and approved PCR before sending
+`OperatorInit`. The request chooses ceremony or withdraw mode and supplies the
+shared `DeploymentConfig` plus separate S3 credentials. Its current-build
+allowlist entry supplies the revision label; there is no separate revision input.
+
+Initialization checks its own PCR against the proposed current build, validates
+S3 connectivity, and prepares the mode-specific state,
+then writes the attestation and signed, operator-initialized GuardianInfo logs.
+Only after those logs are durable does the live lifecycle advance. Mode and the full deployment configuration are fixed for that session. Heartbeats remain idle until
+withdraw initialization completes. Tooling verifies the same session and expected
+configuration afterward. A revision label is only a lookup key into an
+independently approved revision-to-PCR mapping; it never proves the source by
+itself. Both modes use the same image and revision label, without a `-ceremony`
+suffix.
+
+The enclave S3 client resolves its configured S3 names to the three existing
+loopback/VSOCK forwarders. HTTPS still authenticates the real S3 hostnames. The
+parent's forwarding destinations must match the operator-supplied bucket/region;
+parent user-data remains deployment-specific. Host-side tools and local dev
+clients use their existing networking.
+
+These lifecycle, signing, and OI-log changes require the coordinated testnet wipe
+and matching new enclave/tooling deployment. Pre-wipe OI records are not supported.
+
 ## Heartbeat write fencing
 
 Every Guardian S3 log write is serialized. After the first successful

@@ -31,19 +31,10 @@ RUN cargo fetch --locked
 # Compile Guardian and its dependencies from the full workspace. Only the
 # resulting binary and the runtime files selected below enter the app ramdisk.
 FROM resolve AS build
-ARG BUCKET_NAME
-ARG AWS_REGION=us-east-1
-ARG GIT_REVISION
 # Extra cargo features for the guardian build. Empty (the default) is the real
 # enclave build — leave it empty for anything whose PCR0 must match provenance.
 # Dev deploys pass `non-enclave-dev` so a runner-local mock ceremony verifies.
 ARG FEATURES=""
-# Enclave boot mode, baked into run.sh below (see guardian main.rs). Empty (the
-# default) => withdraw; "true" => ceremony. A ceremony enclave is intentionally a
-# distinct, separately-attested EIF with its own PCR0.
-ARG CEREMONY_MODE=""
-RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
-ENV GIT_REVISION=${GIT_REVISION}
 ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
@@ -63,7 +54,6 @@ COPY --from=user-socat /bin/socat . initramfs
 RUN cp /workspace/target/${TARGET}/release/hashi-guardian initramfs/guardian
 # run.sh is the enclave init: the kernel execs /init as PID 1.
 COPY docker/hashi-guardian/run.sh initramfs/init
-RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g; s/\${CEREMONY_MODE}/${CEREMONY_MODE}/g" initramfs/init
 RUN chmod 755 initramfs/init
 
 COPY <<-EOF initramfs/etc/environment
