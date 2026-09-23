@@ -116,7 +116,6 @@ use sui_sdk_types::Address;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
-const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
@@ -4177,9 +4176,29 @@ impl MpcManager {
                 Ok((dealer_party_id, output))
             })
             .collect::<Result<_, MpcError>>()?;
+        let share_counts = outputs
+            .values()
+            .map(|o| o.my_shares.weight())
+            .collect::<Vec<_>>();
+        let dealers = outputs.len();
+        let dealer_weight = self
+            .mpc_config
+            .nodes
+            .total_weight_of(outputs.keys())
+            .unwrap_or(0);
         let combined_output =
-            avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs)
-                .expect(EXPECT_THRESHOLD_MET);
+            avss::DkOutput::complete_dkg(threshold, &self.mpc_config.nodes, outputs).map_err(
+                |e| match e {
+                    FastCryptoError::NotEnoughWeight(needed) => MpcError::NotEnoughApprovals {
+                        needed,
+                        got: dealer_weight as usize,
+                    },
+                    e => MpcError::ProtocolFailed(format!(
+                        "complete_dkg failed (threshold={threshold}, dealers={dealers}, \
+                         dealer weight={dealer_weight}, share counts={share_counts:?}): {e}"
+                    )),
+                },
+            )?;
         tracing::info!(
             "complete_dkg: epoch={}, result vk={}",
             self.mpc_config.epoch,
@@ -4821,7 +4840,22 @@ impl MpcManager {
             &self.mpc_config.nodes,
             &indexed_outputs,
         )
-        .expect(EXPECT_THRESHOLD_MET);
+        .map_err(|e| match e {
+            FastCryptoError::InputLengthWrong(needed) if indexed_outputs.len() < needed => {
+                MpcError::NotEnoughApprovals {
+                    needed,
+                    got: indexed_outputs.len(),
+                }
+            }
+            e => {
+                let indices = indexed_outputs.iter().map(|o| o.index).collect::<Vec<_>>();
+                MpcError::ProtocolFailed(format!(
+                    "complete_key_rotation failed (threshold={threshold}, outputs={}, \
+                     indices={indices:?}): {e}",
+                    indexed_outputs.len(),
+                ))
+            }
+        })?;
         tracing::info!(
             "complete_key_rotation: epoch={}, result vk={}, matches_previous={}",
             self.mpc_config.epoch,
@@ -5143,9 +5177,24 @@ impl MpcManager {
             dealer_ids,
             context.output_threshold,
         );
+        let share_counts = outputs
+            .values()
+            .map(|o| o.my_shares.weight())
+            .collect::<Vec<_>>();
+        let dealers = outputs.len();
         let combined_output =
             avss::DkOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
-                .expect(EXPECT_THRESHOLD_MET);
+                .map_err(|e| match e {
+                    FastCryptoError::NotEnoughWeight(needed) => MpcError::NotEnoughApprovals {
+                        needed,
+                        got: dealer_weight_sum as usize,
+                    },
+                    e => MpcError::ProtocolFailed(format!(
+                        "complete_dkg failed (threshold={}, dealers={dealers}, \
+                         dealer weight={dealer_weight_sum}, share counts={share_counts:?}): {e}",
+                        context.output_threshold,
+                    )),
+                })?;
         tracing::info!(
             "reconstruct_dkg: result vk={}",
             hex::encode(combined_output.vk.to_byte_array()),
@@ -5345,7 +5394,20 @@ impl MpcManager {
             context.nodes,
             &indexed_outputs,
         )
-        .expect(EXPECT_THRESHOLD_MET);
+        .map_err(|e| match e {
+            FastCryptoError::InputLengthWrong(needed) if indexed_outputs.len() < needed => {
+                MpcError::NotEnoughApprovals {
+                    needed,
+                    got: indexed_outputs.len(),
+                }
+            }
+            e => MpcError::ProtocolFailed(format!(
+                "complete_key_rotation failed (threshold={}, outputs={}, \
+                 indices={used_indices:?}): {e}",
+                context.input_threshold,
+                indexed_outputs.len(),
+            )),
+        })?;
         tracing::info!(
             "reconstruct_rotation: result vk={}",
             hex::encode(combined.vk.to_byte_array()),
