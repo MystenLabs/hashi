@@ -50,8 +50,7 @@ run-debug: out/nitro.eif
 		--debug-mode \
 		--attach-console
 
-# Resolve the complete workspace with the committed lock in the enclave
-# toolchain. CI runs this stage on its own (guardian-enclave-resolve).
+# Resolve dependencies in the enclave toolchain without compiling the EIF.
 .PHONY: resolve-check
 resolve-check:
 	docker build \

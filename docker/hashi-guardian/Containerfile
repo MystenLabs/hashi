@@ -22,7 +22,6 @@ COPY --from=user-cpio . /
 # Keep Cargo's dependency cache outside the workspace. A manifest at / makes
 # Cargo misidentify excluded crates in git dependencies (including Sui's Move
 # crates). Resolve the complete workspace so the root lock stays unchanged.
-# No build args: CI (guardian-enclave-resolve) runs just this stage.
 FROM base AS resolve
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./

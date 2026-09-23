@@ -1,8 +1,8 @@
 name: Guardian Enclave Build
 
 # Measures the guardian EIF for a deployment when dispatched. PRs that change
-# the build recipe, and pushes to main that change any EIF input, build it with
-# canonical inputs to check that it still builds reproducibly.
+# Guardian sources, dependencies, or the recipe, and pushes to main that change
+# any EIF input, build it with canonical inputs to check reproducibility.
 #
 # PCR0 is a hash of the built image, and the build takes BUCKET_NAME, AWS_REGION
 # and CEREMONY_MODE as inputs — they are substituted into run.sh, which goes in
@@ -22,11 +22,14 @@ name: Guardian Enclave Build
 # runners would have them compare the same bytes.
 
 on:
-  # Source and dependency changes are checked on every PR by
-  # guardian-enclave-resolve and clippy-enclave, and build here once merged.
+  # Build and compare EIFs before merging changes to Guardian or its inputs.
   pull_request:
     paths:
       - docker/hashi-guardian/**
+      - crates/hashi-guardian/**
+      - crates/hashi-types/**
+      - Cargo.toml
+      - Cargo.lock
       - .dockerignore
       - .github/workflows/guardian-enclave.yml
   # Hosts build main commits. Same list as out/nitro.eif's prerequisites in
