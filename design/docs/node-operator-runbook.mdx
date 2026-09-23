@@ -1109,7 +1109,13 @@ To stay on the previous committee instead, for example while the cause of the st
 hashi proposal create update-config reconfig_hold bool:true
 ```
 
-Once the proposal executes, `start_reconfig` aborts on chain, nodes stop submitting it (`hashi_reconfig_hold` reads `1`), and the previous committee keeps serving deposits and withdrawals. The overrun reconfiguration is still aborted as usual, and a reconfiguration already pending still completes. Clear the flag with another `update-config` proposal (`bool:false`) and the nodes start the replacement at once.
+Once the proposal executes, `start_reconfig` aborts on chain, nodes stop submitting it (`hashi_reconfig_hold` reads `1`), and the previous committee keeps serving deposits and withdrawals. The overrun reconfiguration is still aborted as usual, and a reconfiguration already pending still completes.
+
+Clear the flag with another `update-config` proposal (`bool:false`). Clearing it does not itself start anything: nodes submit `start_reconfig` when they see a Sui epoch change, an abort, or on startup, and nothing watches the config for this. So after clearing, the replacement waits for the next Sui epoch change unless an operator starts it by hand:
+
+```bash
+hashi committee start-reconfig
+```
 
 ---
 
