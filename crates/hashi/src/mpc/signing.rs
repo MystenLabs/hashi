@@ -756,42 +756,41 @@ impl SigningManager {
         flagged: &mut HashSet<ShareIndex>,
         metrics: &Metrics,
     ) -> bool {
-        let (mismatched, certain) = match blame {
-            Blame::Nobody => return false,
-            Blame::Certain(indices) => (indices, true),
-            Blame::Inconclusive(indices) => (indices, false),
-        };
-        if mismatched.is_empty() {
-            return false;
-        }
         let share_owners = &self.config.share_owners;
-        let mut per_owner: HashMap<Address, u64> = HashMap::new();
-        for idx in &mismatched {
-            if let Some(owner) = share_owners.get(idx) {
-                *per_owner.entry(*owner).or_default() += 1;
+        let owners: HashSet<Address> = match blame {
+            Blame::Nobody => return false,
+            Blame::Certain(indices) => {
+                let mut per_owner: HashMap<Address, u64> = HashMap::new();
+                for idx in &indices {
+                    if let Some(owner) = share_owners.get(idx) {
+                        *per_owner.entry(*owner).or_default() += 1;
+                    }
+                }
+                for (owner, count) in &per_owner {
+                    metrics
+                        .mpc_partial_sig_mismatch_total
+                        .with_label_values(&[&owner.to_string()])
+                        .inc_by(*count);
+                }
+                let local: Vec<ShareIndex> = indices
+                    .iter()
+                    .copied()
+                    .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
+                    .collect();
+                if !local.is_empty() {
+                    tracing::warn!(
+                        "Locally generated partial signatures at share indices {local:?} disagree \
+                         with the RS-recovered polynomial, so the local presig or key state may be \
+                         corrupt"
+                    );
+                }
+                per_owner.into_keys().collect()
             }
-        }
-        if certain {
-            for (owner, count) in &per_owner {
-                metrics
-                    .mpc_partial_sig_mismatch_total
-                    .with_label_values(&[&owner.to_string()])
-                    .inc_by(*count);
-            }
-            let local: Vec<ShareIndex> = mismatched
+            Blame::Inconclusive(indices) => indices
                 .iter()
-                .copied()
-                .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
-                .collect();
-            if !local.is_empty() {
-                tracing::warn!(
-                    "Locally generated partial signatures at share indices {local:?} disagree \
-                     with the RS-recovered polynomial, so the local presig or key state may be \
-                     corrupt"
-                );
-            }
-        }
-        let owners: HashSet<Address> = per_owner.into_keys().collect();
+                .filter_map(|idx| share_owners.get(idx).copied())
+                .collect(),
+        };
         let before = flagged.len();
         flagged.extend(
             share_owners
