@@ -744,11 +744,10 @@ impl SigningManager {
     /// Flag every share index whose owner `blame` names, so the rest of this call skips their
     /// partial signatures. Returns whether anything new was flagged.
     ///
-    /// Only [Blame::Certain] is counted in `mpc_partial_sig_mismatch_total`, since counting an
-    /// index against its owner is a claim about them. Flagging uses [Blame::Inconclusive] as well,
-    /// because it only picks which partial signatures to try next and a wrong guess costs one more
-    /// attempt, and because the first decode runs on `t + 2` partial signatures, usually too few
-    /// for certainty.
+    /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
+    /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
+    /// The first decode runs on `t + 2` partial signatures, usually too few for certainty, so
+    /// flagging on the certain ones alone would rarely do anything.
     fn flag_mismatched(
         &self,
         blame: Blame,
@@ -759,6 +758,8 @@ impl SigningManager {
         let owners: HashSet<Address> = match blame {
             Blame::Nobody => return false,
             Blame::Certain(indices) => {
+                // Counting an index against its owner is a claim about them, so only the certain
+                // case is counted.
                 let mut per_owner: HashMap<Address, u64> = HashMap::new();
                 for idx in &indices {
                     if let Some(owner) = share_owners.get(idx) {
