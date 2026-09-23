@@ -133,10 +133,9 @@ jobs:
         working-directory: docker/hashi-guardian
         run: cat out/nitro.pcrs
 
-      # PCR0 covers everything, so a mismatch between runners says only "the
-      # build moved". These say which half: rootfs.cpio is the app ramdisk
-      # (PCR2), bzImage the kernel (PCR1). Plus the host facts a from-source
-      # kernel build can leak — core count reaches it through `make -j$(nproc)`.
+      # Record the EIF inputs and runner details to diagnose measurement
+      # mismatches: the app ramdisk is built here, while the kernel and its
+      # config come from a digest-pinned StageX image.
       - name: Provenance of the build inputs
         working-directory: docker/hashi-guardian
         run: |

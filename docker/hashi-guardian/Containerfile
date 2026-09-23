@@ -23,100 +23,9 @@ FROM stagex/user-gen_initramfs@sha256:1c957893705011044a1b11aefbcffd80dc0797f439
 FROM stagex/user-cpio@sha256:46ca4a247908c502e31a26842925b02cc7133fec619b19e0d5c3833f6d073d8e AS user-cpio
 FROM stagex/user-socat@sha256:70b21dec5de83d366babfa90215ce510118df88b798d4106f429bde3bf55973a AS user-socat
 FROM stagex/user-jq@sha256:1b2dddde7a2a35395430ebd99e07117bbc48fa29a0dba8a6b18d6d74bf762368 AS user-jq
-# Kept only for its kernel config; its prebuilt bzImage is clang-linked and does
-# not boot on Nitro, so we build the kernel ourselves (see the kernel stage).
+# Use the published Nitro kernel and its matching config, pinned independently
+# of the Rust toolchain.
 FROM stagex/user-linux-nitro@sha256:edc0a74392d7b3ca904fa0e999307aabbe4a84ad780328439a2def6bdee55189 AS user-linux-nitro
-
-# Toolchain for building the enclave kernel from source (see the kernel stage).
-FROM stagex/core-gmp@sha256:f90653ed07062074363542a77e26a2d16a142f9be5ebf6900b53f4ab8a82d39d AS core-gmp
-FROM stagex/core-mpfr@sha256:894c11d709646f4589541a6e49181aabaac843bbf429578acf767fabf5a40838 AS core-mpfr
-FROM stagex/core-mpc@sha256:6151912722b77722863de0e2784897f864bce2cc362cc8e4d777872536d060e4 AS core-mpc
-FROM stagex/core-isl@sha256:2f1b39d0339a5c8ba26b6d83d7dd1fa67047c385a521f14b27aee0fe79c994f5 AS core-isl
-FROM stagex/core-make@sha256:739a3d4989618d41885fb837dd04acb9dc4a3dee6a22edea33b2b5ddf33ecf91 AS core-make
-FROM stagex/core-flex@sha256:62722524f7b7d9aee3274ffab8a5886fb0fdc047dd7665e2decde3aae6d2c66b AS core-flex
-FROM stagex/core-bison@sha256:558021a4d87a37e11ae6283c60049596cf5692e6aa05066c68c45ab1c75a1a90 AS core-bison
-FROM stagex/core-m4@sha256:21c1b1d495b7826e22e929f0945ee3027da9357c113c23dde0ad98fc659e12c0 AS core-m4
-FROM stagex/core-bc@sha256:bc781a4e60608bed540dac7afb0745aeb8491402531723cf20637b414f71ee0f AS core-bc
-FROM stagex/core-perl@sha256:8fd254741399dba7904bd2a6b8b028f8f49cbe7e2af2024a538f8f52e8aa2e14 AS core-perl
-FROM stagex/core-gawk@sha256:ed94e9f4cb1efa95f707d65d5c70df6cf4d085cf9dffb27a38713dcec4c4cd7e AS core-gawk
-FROM stagex/core-sed@sha256:d8881e3578a6e0e7d73b41e0a23735adca7c459cf8727ae1ae366c6a92b60741 AS core-sed
-FROM stagex/core-grep@sha256:13e9c0240695c2a183322b453d53ec9f362e477e012b777ec2a6777631840464 AS core-grep
-FROM stagex/core-diffutils@sha256:84db3ff630c4f8ae163abf3af358805357710822daa5734385688f42e986038e AS core-diffutils
-FROM stagex/core-findutils@sha256:be0c14da166f313c890e26d666795b29b2432f8290e0de784544c6d649244e26 AS core-findutils
-FROM stagex/core-gettext@sha256:7900f37849f401a6bcf8a8aeaeee01ea34485c00561c8d2a58087c30892e0a1e AS core-gettext
-FROM stagex/core-xz@sha256:dfb8a0242af8592479c8b95cc308a5c82b3b8d6581e6c2ba7b514ec3efbd49a4 AS core-xz
-FROM stagex/user-elfutils@sha256:4b92a003113aad14c240afdea42cc7f490a30da87d7c4b8d79d47dbb9e72af21 AS user-elfutils
-FROM stagex/core-linux-headers@sha256:889417d635e16a308ce86b13c8073970646ef162bfeb9b7f1bce18d005c2b938 AS core-linux-headers
-FROM stagex/core-python@sha256:c11c35b6d3a2a907d14735c9f515c3644d1a13abe85bdb39c16939354b05d1e9 AS core-python
-
-# Kernel build toolchain root.
-FROM scratch AS kernel-toolchain
-COPY --from=core-busybox . /
-COPY --from=core-musl . /
-COPY --from=core-gcc . /
-COPY --from=core-binutils . /
-COPY --from=core-gmp . /
-COPY --from=core-mpfr . /
-COPY --from=core-mpc . /
-COPY --from=core-isl . /
-COPY --from=core-make . /
-COPY --from=core-flex . /
-COPY --from=core-bison . /
-COPY --from=core-m4 . /
-COPY --from=core-bc . /
-COPY --from=core-perl . /
-COPY --from=core-gawk . /
-COPY --from=core-sed . /
-COPY --from=core-grep . /
-COPY --from=core-diffutils . /
-COPY --from=core-findutils . /
-COPY --from=core-gettext . /
-COPY --from=core-xz . /
-COPY --from=core-openssl . /
-COPY --from=core-zlib . /
-COPY --from=core-libzstd . /
-COPY --from=user-elfutils . /
-COPY --from=core-linux-headers . /
-COPY --from=core-python . /
-
-# Build the Nitro enclave kernel from upstream source with gcc.
-#
-# We build the kernel here rather than using stagex/user-linux-nitro's prebuilt
-# bzImage because that one is clang/LLD-linked and does not execute under the AWS
-# Nitro hypervisor (empty console, VsockTimeout); a gcc build of the same config
-# boots. The config is that image's own kernel config (NSM + vsock + initramfs);
-# its toolchain-identity lines are dropped so olddefconfig re-derives them for
-# gcc. The objtool patch enlarges its SIGSTKSZ alt-stack, which musl sizes below
-# this host's runtime minimum (host tool only; no effect on the kernel image).
-FROM kernel-toolchain AS kernel
-ADD --checksum=sha256:de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98 \
-	https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.14.tar.xz /linux.tar.xz
-COPY --from=user-linux-nitro /linux.config /config
-# KBUILD_BUILD_TIMESTAMP must be something `date -d` PARSES, not just a fixed
-# string. usr/Makefile forwards it to gen_initramfs.sh, which does
-# `timestamp="$(date -d"$1" +%s || :)"` — and that `|| :` means an unparseable
-# value is silently dropped, leaving gen_init_cpio to stamp the built-in
-# initramfs with the wall clock. `1` does not parse (this toolchain's date is
-# busybox: `date: invalid date '1'`), so every build embedded its own build
-# time, which is what made PCR0 differ between two identical builds. `@1` parses
-# and is timezone-proof, unlike a bare `1970-01-01 00:00:00`.
-ENV SOURCE_DATE_EPOCH=1 KBUILD_BUILD_TIMESTAMP=@1 KBUILD_BUILD_USER=stagex KBUILD_BUILD_HOST=stagex
-RUN <<-EOF
-	set -eux
-	# gen_initramfs.sh drops an unparseable -d on the floor (`|| :`) and stamps
-	# the built-in initramfs with the wall clock instead, so the only symptom of
-	# getting this wrong is a PCR0 that quietly differs per build. Fail loudly.
-	date -d"$KBUILD_BUILD_TIMESTAMP" +%s
-	tar -xf /linux.tar.xz
-	cd linux-7.0.14
-	cp /config .config
-	sed -i "/CONFIG_CC_IS_CLANG/d; /CONFIG_LD_IS_LLD/d; /CONFIG_AS_IS_LLVM/d; /CONFIG_CC_VERSION_TEXT/d; /CONFIG_GCC_/d; /CONFIG_CLANG_/d; /CONFIG_LD_VERSION/d; /CONFIG_LLD_VERSION/d" .config
-	sed -i "s/\bSIGSTKSZ\b/65536/g" tools/objtool/signal.c
-	make olddefconfig
-	make bzImage -j"$(nproc)"
-	cp arch/x86/boot/bzImage /bzImage
-	cp .config /kernel.config
-EOF
 
 FROM scratch AS base
 COPY --from=core-busybox . /
@@ -208,10 +117,9 @@ ENV TARGET=x86_64-unknown-linux-musl
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 RUN --network=none cargo build --frozen --no-default-features --release --target "$TARGET" -p hashi-guardian ${FEATURES:+--features "$FEATURES"}
 
-# Kernel artifacts join after the cargo build: the resolve stage stays
-# kernel-free for CI, and the two builds run concurrently.
-COPY --from=kernel /bzImage /bzImage
-COPY --from=kernel /kernel.config /kernel.config
+# Keep the resolve stage kernel-free; use the published kernel directly.
+COPY --from=user-linux-nitro /bzImage /bzImage
+COPY --from=user-linux-nitro /linux.config /kernel.config
 
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
@@ -265,11 +173,8 @@ WORKDIR /rootfs
 COPY --from=build /nitro.eif .
 COPY --from=build /nitro.pcrs .
 COPY --from=build /build_cpio/rootfs.cpio .
-# Exported for provenance triage only — none of these is an EIF input, they are
-# the inputs eif_build consumed. When two builds of one commit disagree on PCR0,
-# hashing these says WHICH half moved: rootfs.cpio is PCR2 (the app), bzImage is
-# PCR1 (the kernel), and the kernel is the half we compile rather than pull from
-# a digest-pinned image.
+# Export the kernel and its config alongside rootfs.cpio for provenance triage.
+# Comparing these inputs helps locate differences between EIF builds.
 COPY --from=build /bzImage .
 COPY --from=build /kernel.config .
 
