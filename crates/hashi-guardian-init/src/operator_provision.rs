@@ -171,7 +171,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         master_g,
         cfg.deployment_config(),
         cfg.hashi.hashi_ids.hashi_object_id,
-    )?;
+    );
     let config_hash = init_config.digest();
     let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
     info!(
@@ -284,7 +284,7 @@ fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
         "guardian already has a secret-sharing instance"
     );
     ensure!(
-        info.deployment.is_none(),
+        info.deployment_info.is_none(),
         "guardian already has deployment configuration"
     );
     ensure!(
@@ -333,7 +333,7 @@ fn verify_initialized_info(
         .secret_sharing_instance
         .context("Guardian info missing secret-sharing instance")?;
     let deployment = info
-        .deployment
+        .deployment_info
         .context("Guardian info missing deployment")?;
     let config_hash = info
         .config_hash

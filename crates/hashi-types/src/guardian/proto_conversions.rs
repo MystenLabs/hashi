@@ -619,12 +619,12 @@ impl TryFrom<pb::InitConfig> for InitConfig {
             })?;
         let hashi_object_id = sui_sdk_types::Address::new(hashi_object_id_arr);
 
-        InitConfig::new(
+        Ok(InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
             deployment,
             hashi_object_id,
-        )
+        ))
     }
 }
 
@@ -790,10 +790,12 @@ pub fn operator_init_request_to_pb(
         OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
             deployment,
             s3_credentials,
-        }) => pb::operator_init_request::Request::Ceremony(pb::CeremonyOperatorInitRequest {
-            deployment: Some(deployment_config_to_pb(deployment)?),
-            s3_credentials: Some(s3_credentials.into()),
-        }),
+        }) => pb::operator_init_request::Request::Ceremony(Box::new(
+            pb::CeremonyOperatorInitRequest {
+                deployment: Some(deployment_config_to_pb(deployment)?),
+                s3_credentials: Some(s3_credentials.into()),
+            },
+        )),
         OperatorInitRequest::Withdraw(request) => {
             let WithdrawOperatorInitRequest {
                 s3_credentials,
@@ -1205,8 +1207,8 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             .map(SecretSharingInstance::try_from)
             .transpose()?;
 
-        let deployment = data
-            .deployment
+        let deployment_info = data
+            .deployment_info
             .map(DeploymentConfigSummary::try_from)
             .transpose()?;
 
@@ -1265,7 +1267,7 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
         Ok(Self {
             lifecycle,
             secret_sharing_instance,
-            deployment,
+            deployment_info,
             encryption_pubkey,
             config_hash,
             genesis_state_hash,
@@ -1294,7 +1296,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .secret_sharing_instance
             .as_ref()
             .map(secret_sharing_instance_to_pb),
-        deployment: info.deployment.map(deployment_summary_to_pb),
+        deployment_info: info.deployment_info.map(deployment_summary_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         config_hash: info.config_hash.map(|h| h.to_vec().into()),
         genesis_state_hash: info.genesis_state_hash.map(|h| h.to_vec().into()),
@@ -1886,7 +1888,7 @@ mod tests {
             lifecycle: WithdrawStage::ProvisionerInitialized.into(),
             hashi_object_id: None,
             secret_sharing_instance: None,
-            deployment: None,
+            deployment_info: None,
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
             genesis_state_hash: None,

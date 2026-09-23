@@ -588,7 +588,9 @@ mod tests {
         let info = GuardianInfo {
             lifecycle: hashi_types::guardian::WithdrawStage::Activated.into(),
             secret_sharing_instance: None,
-            deployment: Some(hashi_types::guardian::DeploymentConfig::mock_for_testing().summary()),
+            deployment_info: Some(
+                hashi_types::guardian::DeploymentConfig::mock_for_testing().summary(),
+            ),
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
             genesis_state_hash: None,

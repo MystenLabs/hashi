@@ -641,7 +641,7 @@ impl Enclave {
             secret_sharing_instance: temporary_init_state
                 .as_ref()
                 .map(|state| state.ceremony_state.secret_sharing_instance.clone()),
-            deployment: self.config.deployment.get().map(DeploymentConfig::summary),
+            deployment_info: self.config.deployment.get().map(DeploymentConfig::summary),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             config_hash: temporary_init_state.as_ref().map(|state| state.config_hash),
             genesis_state_hash: temporary_init_state

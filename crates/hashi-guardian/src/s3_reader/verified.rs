@@ -116,14 +116,16 @@ impl VerifiedSessionInfo {
         //    reported build. This replays a logged attestation whose short-lived
         //    leaf cert has typically expired, so the chain is checked at the
         //    document's own signed timestamp, not now.
-        let build_pcrs = allowlist.resolve(&info.deployment()?.git_revision)?.clone();
+        let build_pcrs = allowlist
+            .resolve(&info.deployment_info()?.git_revision)?
+            .clone();
         attestation
             .verify_replay(&signing_pubkey, &build_pcrs)
             .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
 
         ensure_bucket_info_matches(
             session_id,
-            Some(&info.deployment()?.bucket_info),
+            Some(&info.deployment_info()?.bucket_info),
             s3.bucket_info(),
         )?;
 

@@ -99,7 +99,7 @@ pub struct GuardianInfo {
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// Public summary of the installed deployment configuration, absent before OI.
-    pub deployment: Option<DeploymentConfigSummary>,
+    pub deployment_info: Option<DeploymentConfigSummary>,
     /// Encryption key. Used by KPs to encrypt their shares.
     #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
@@ -149,7 +149,7 @@ pub struct WithdrawOperatorInitRequest {
 // TODO(testnet-wipe): Load the immutable Hashi object id and MPC master G from
 // the verified genesis record, then remove their duplicate operator-supplied
 // fields from InitConfig.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InitConfig {
     /// Limiter config.
     limiter_config: LimiterConfig,
@@ -564,13 +564,13 @@ impl InitConfig {
         hashi_btc_master_pubkey: HashiMasterG,
         deployment: DeploymentConfig,
         hashi_object_id: sui_sdk_types::Address,
-    ) -> GuardianResult<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             limiter_config,
             hashi_btc_master_pubkey,
             deployment,
             hashi_object_id,
-        })
+        }
     }
 
     pub fn into_parts(
@@ -608,7 +608,7 @@ impl InitConfig {
 
     /// The config hash KPs authenticate, including the entire deployment policy.
     pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(&InitConfigRepr::from(self)).expect("serialization should work");
+        let bytes = bcs::to_bytes(self).expect("serialization should work");
         Blake2b::<U32>::digest(bytes).into()
     }
 }
@@ -937,7 +937,7 @@ impl GetGuardianInfoResponse {
             .clone();
         // Before OI only the independently pinned attestation is available.
         // Once installed, the signed deployment label must agree as well.
-        if let Some(deployment) = &info.deployment
+        if let Some(deployment) = &info.deployment_info
             && deployment.git_revision != expected_build.git_revision()
         {
             return Err(CryptoVerificationError::new(format!(
@@ -982,15 +982,6 @@ pub struct StandardWithdrawalRequestWire {
 pub struct SignedStandardWithdrawalRequestWire {
     pub data: StandardWithdrawalRequestWire,
     pub signature: crate::move_types::CommitteeSignature,
-}
-
-/// Serializable representation of InitConfig. Used for computing its digest.
-#[derive(Serialize)]
-struct InitConfigRepr {
-    pub limiter_config: LimiterConfig,
-    pub hashi_btc_master_pubkey: HashiMasterG,
-    pub deployment: DeploymentConfig,
-    pub hashi_object_id: sui_sdk_types::Address,
 }
 
 /// Serializable representation of ActivationState. Used for computing its digest.
@@ -1046,19 +1037,6 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
             utxos: m.utxos.into(),
             timestamp_secs: m.timestamp_secs,
             seq: m.seq,
-        }
-    }
-}
-
-impl From<&InitConfig> for InitConfigRepr {
-    fn from(config: &InitConfig) -> Self {
-        let (limiter_config, hashi_btc_master_pubkey, deployment, hashi_object_id) =
-            config.clone().into_parts();
-        Self {
-            limiter_config,
-            hashi_btc_master_pubkey,
-            deployment,
-            hashi_object_id,
         }
     }
 }

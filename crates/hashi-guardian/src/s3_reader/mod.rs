@@ -290,7 +290,7 @@ impl GuardianReader {
             .sessions
             .get(dealer.as_str())
             .expect("verified dealer was loaded");
-        ensure_ceremony_network(session.info().deployment()?, network)?;
+        ensure_ceremony_network(session.info().deployment_info()?, network)?;
         Ok(state)
     }
 

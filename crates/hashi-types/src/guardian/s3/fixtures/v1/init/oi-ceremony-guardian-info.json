@@ -10,7 +10,7 @@
           "ceremony": "uninitialized"
         },
         "secret_sharing_instance": null,
-        "deployment": {
+        "deployment_info": {
           "bucket_info": {
             "bucket": "bucket",
             "region": "us-east-1"

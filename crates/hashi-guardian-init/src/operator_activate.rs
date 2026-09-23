@@ -302,7 +302,7 @@ fn verify_provisioned_standby_info(
         .secret_sharing_instance
         .clone()
         .context("Guardian info missing secret-sharing instance")?;
-    let deployment = info.deployment()?;
+    let deployment = info.deployment_info()?;
     let config_hash = info
         .config_hash
         .context("Guardian info missing config_hash")?;
@@ -346,7 +346,7 @@ fn verify_provisioned_standby_info(
         *master_g,
         cfg.deployment_config(),
         cfg.hashi.hashi_ids.hashi_object_id,
-    )?;
+    );
     let expected_config_hash = init_config.digest();
     ensure!(
         expected_config_hash == config_hash,
@@ -392,7 +392,7 @@ fn verify_oi_info_matches_provisioned_standby(
         "OI GuardianInfo secret-sharing instance differs from live standby GuardianInfo"
     );
     ensure!(
-        oi_info.deployment == live_info.deployment,
+        oi_info.deployment_info == live_info.deployment_info,
         "OI GuardianInfo deployment differs from live standby GuardianInfo"
     );
     ensure!(

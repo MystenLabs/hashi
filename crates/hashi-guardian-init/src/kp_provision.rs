@@ -162,7 +162,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let GuardianInfo {
         lifecycle,
         secret_sharing_instance,
-        deployment,
+        deployment_info: deployment,
         encryption_pubkey: enclave_enc_pubkey_bytes,
         config_hash,
         genesis_state_hash,
@@ -305,7 +305,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         master_g,
         cfg.deployment_config(),
         cfg.hashi.hashi_ids.hashi_object_id,
-    )?;
+    );
     let config_hash = expected_config.digest();
     anyhow::ensure!(
         config_hash == enclave_config_hash,

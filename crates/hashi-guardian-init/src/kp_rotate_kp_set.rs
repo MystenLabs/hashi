@@ -77,11 +77,12 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         "guardian lifecycle is {:?}; expected ceremony/operator_initialized (run `operator rotate-kp-set init`)",
         target.info.lifecycle
     );
+    let deployment = cfg.deployment_config();
     ensure!(
-        target.info.deployment()? == &cfg.deployment_config().summary(),
+        target.info.deployment_info()? == &deployment.summary(),
         "guardian deployment mismatch: expected {:?}, got {:?}",
-        cfg.deployment_config().summary(),
-        target.info.deployment
+        deployment.summary(),
+        target.info.deployment_info
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(&target.info.encryption_pubkey).map_err(anyhow::Error::msg)?;
@@ -120,7 +121,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let share_id = decrypted.id;
     let request = ProvisionerRotateKpSetRequest::build_from_share(
         session_id.clone(),
-        cfg.deployment_config(),
+        deployment,
         &decrypted,
         &guardian_pub_key,
         new_certs_roster,

@@ -105,7 +105,7 @@ impl GuardianInfo {
         Self {
             lifecycle: WithdrawStage::OperatorInitialized.into(),
             secret_sharing_instance: None,
-            deployment: Some(
+            deployment_info: Some(
                 super::DeploymentConfig {
                     bucket_info: S3BucketInfo {
                         bucket: "bucket".into(),
@@ -387,7 +387,6 @@ impl InitConfig {
             },
             hashi_object_id,
         )
-        .expect("valid InitConfig")
     }
 
     pub fn mock_for_testing(kp: Option<BitcoinKeypair>) -> Self {
@@ -415,7 +414,6 @@ impl InitConfig {
             },
             TEST_HASHI_OBJECT_ID,
         )
-        .expect("valid InitConfig")
     }
 }
 

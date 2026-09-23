@@ -18,32 +18,11 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// Complete operator-init state ready for its fail-stop commit.
-pub struct OIInstall {
-    deployment: DeploymentConfig,
-    logger: GuardianS3Client,
-    withdraw_mode: Option<OIWithdrawModeInstall>,
-}
-
 /// Withdraw-mode arming state built from `InitConfig` and the ceremony logs.
 pub struct OIWithdrawModeInstall {
     init_config: InitConfig,
     ceremony_state: CeremonyState,
     genesis_state: Option<GenesisState>,
-}
-
-impl OIInstall {
-    fn new(
-        deployment: DeploymentConfig,
-        logger: GuardianS3Client,
-        withdraw_mode: Option<OIWithdrawModeInstall>,
-    ) -> Self {
-        Self {
-            deployment,
-            logger,
-            withdraw_mode,
-        }
-    }
 }
 
 impl OIWithdrawModeInstall {
@@ -192,36 +171,20 @@ pub async fn operator_init(
         }
         None => None,
     };
-    let install = OIInstall::new(deployment, logger, withdraw_mode);
-
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing S3 logger and mode-specific initialization state.");
-    commit_operator_init(&enclave, install).await;
+    commit_operator_init(&enclave, deployment, logger, withdraw_mode).await;
 
     info!("Operator initialization complete.");
     Ok(())
 }
 
-/// This precursor retains build-time deployment selection. The runtime-config
-/// follow-up removes these comparisons together with the corresponding build inputs.
+/// This precursor retains the compiled revision. The runtime-config follow-up
+/// removes this comparison together with the corresponding build input.
 fn validate_deployment(enclave: &Enclave, deployment: &DeploymentConfig) -> GuardianResult<()> {
     if deployment.pcr_allowlist.current_build().git_revision() != enclave.reported_git_revision() {
         return Err(InvalidInputs(
             "deployment revision does not match the compiled build".into(),
-        ));
-    }
-    if option_env!("GUARDIAN_BUCKET_NAME")
-        .is_some_and(|bucket| deployment.bucket_info.bucket != bucket)
-    {
-        return Err(InvalidInputs(
-            "deployment bucket does not match the built-in S3 route".into(),
-        ));
-    }
-    if option_env!("GUARDIAN_AWS_REGION")
-        .is_some_and(|region| deployment.bucket_info.region != region)
-    {
-        return Err(InvalidInputs(
-            "deployment region does not match the built-in S3 route".into(),
         ));
     }
     Ok(())
@@ -231,13 +194,12 @@ fn validate_deployment(enclave: &Enclave, deployment: &DeploymentConfig) -> Guar
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and the I/O steps
 /// (attestation, S3 logging) panic on failure rather than return.
-async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
-    let OIInstall {
-        deployment,
-        logger,
-        withdraw_mode,
-    } = install;
-
+async fn commit_operator_init(
+    enclave: &Enclave,
+    deployment: DeploymentConfig,
+    logger: GuardianS3Client,
+    withdraw_mode: Option<OIWithdrawModeInstall>,
+) {
     enclave
         .config
         .set_s3_logger(logger)
@@ -325,13 +287,12 @@ mod tests {
         ));
 
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let install = match mode {
+        let (deployment, withdraw_mode) = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
                 let args = crate::test_utils::OperatorInitTestArgs::default();
-                OIInstall::new(
+                (
                     config.deployment().clone(),
-                    logger,
                     Some(OIWithdrawModeInstall::from_parts(
                         config,
                         args.ceremony_state,
@@ -339,12 +300,10 @@ mod tests {
                     )),
                 )
             }
-            EnclaveMode::Ceremony => {
-                OIInstall::new(DeploymentConfig::mock_for_testing(), logger, None)
-            }
+            EnclaveMode::Ceremony => (DeploymentConfig::mock_for_testing(), None),
         };
 
-        commit_operator_init(&enclave, install).await;
+        commit_operator_init(&enclave, deployment, logger, withdraw_mode).await;
         (enclave, captures)
     }
 

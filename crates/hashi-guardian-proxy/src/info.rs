@@ -269,7 +269,10 @@ fn project(
 ) -> GuardianInfoView {
     GuardianInfoView {
         limiter: limiter_view(info.limiter_state, info.limiter_config),
-        git_revision: info.deployment.as_ref().map(|d| d.git_revision.clone()),
+        git_revision: info
+            .deployment_info
+            .as_ref()
+            .map(|d| d.git_revision.clone()),
         committee_epoch: info.current_committee_epoch.map(|e| e.to_string()),
         btc_pubkey: info
             .enclave_btc_pubkey

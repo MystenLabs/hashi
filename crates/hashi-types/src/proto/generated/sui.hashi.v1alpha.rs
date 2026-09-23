@@ -1831,7 +1831,7 @@ pub struct GuardianInfoData {
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
     /// Installed deployment summary; absent before operator initialization.
     #[prost(message, optional, tag = "2")]
-    pub deployment: ::core::option::Option<DeploymentConfigSummary>,
+    pub deployment_info: ::core::option::Option<DeploymentConfigSummary>,
     /// Guardian encryption public key (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub encryption_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
@@ -2025,7 +2025,7 @@ pub mod operator_init_request {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Request {
         #[prost(message, tag = "1")]
-        Ceremony(super::CeremonyOperatorInitRequest),
+        Ceremony(::prost::alloc::boxed::Box<super::CeremonyOperatorInitRequest>),
         #[prost(message, tag = "2")]
         Withdraw(::prost::alloc::boxed::Box<super::WithdrawOperatorInitRequest>),
     }

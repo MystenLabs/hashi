@@ -40,16 +40,11 @@ impl DeploymentConfig {
             retention_environment: self.retention_environment,
         }
     }
-
-    /// Canonical commitment to all deployment settings, including previous builds.
-    pub fn digest(&self) -> [u8; 32] {
-        Blake2b::<U32>::digest(bcs::to_bytes(self).expect("serializable deployment config")).into()
-    }
 }
 
 impl GuardianInfo {
-    pub fn deployment(&self) -> GuardianResult<&DeploymentConfigSummary> {
-        self.deployment
+    pub fn deployment_info(&self) -> GuardianResult<&DeploymentConfigSummary> {
+        self.deployment_info
             .as_ref()
             .ok_or_else(|| InvalidInputs("Deployment is uninitialized".into()))
     }
@@ -91,7 +86,6 @@ mod tests {
         .unwrap();
         changes.push(changed);
         for changed in changes {
-            assert_ne!(changed.digest(), original.digest());
             assert_ne!(
                 state.confirmation_digest(&changed),
                 state.confirmation_digest(&original)
@@ -101,8 +95,7 @@ mod tests {
                 init.hashi_btc_master_pubkey(),
                 changed,
                 init.hashi_object_id(),
-            )
-            .unwrap();
+            );
             assert_ne!(changed_init.digest(), init.digest());
         }
     }
@@ -117,7 +110,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.summary(), updated.summary());
-        assert_ne!(config.digest(), updated.digest());
+        let state = CeremonyState::from(SetupNewKeyResponse::mock_for_testing());
+        assert_ne!(
+            state.confirmation_digest(&config),
+            state.confirmation_digest(&updated)
+        );
         let json = serde_json::to_value(config.summary()).unwrap();
         assert!(json.get("pcr_allowlist").is_none());
         assert_eq!(
@@ -125,7 +122,7 @@ mod tests {
             config.summary()
         );
         let mut info = GuardianInfo::mock_for_testing();
-        info.deployment = None;
+        info.deployment_info = None;
         assert_eq!(
             serde_json::from_str::<GuardianInfo>(&serde_json::to_string(&info).unwrap()).unwrap(),
             info

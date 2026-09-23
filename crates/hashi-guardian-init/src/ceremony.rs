@@ -124,10 +124,10 @@ impl CeremonyGuardian {
             verified.session_id
         );
         ensure!(
-            verified.info.deployment()? == &cfg.deployment_config().summary(),
+            verified.info.deployment_info()? == &cfg.deployment_config().summary(),
             "guardian deployment mismatch: expected {:?}, got {:?}",
             cfg.deployment_config().summary(),
-            verified.info.deployment
+            verified.info.deployment_info
         );
         info!(
             phase = "guardian info",

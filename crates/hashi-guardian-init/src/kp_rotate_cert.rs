@@ -83,7 +83,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     );
     let session_id = endpoint_verified.session_id;
     let signing_pub_key = endpoint_verified.signing_pub_key;
-    let endpoint_deployment = endpoint_verified.info.deployment()?;
+    let endpoint_deployment = endpoint_verified.info.deployment_info()?;
     anyhow::ensure!(
         endpoint_deployment == &cfg.deployment_config().summary(),
         "Guardian deployment differs from expected configuration"
@@ -94,7 +94,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     anyhow::ensure!(
-        verified_session.info().deployment()? == endpoint_deployment,
+        verified_session.info().deployment_info()? == endpoint_deployment,
         "guardian S3 session deployment differs from live GuardianInfo"
     );
     let endpoint_btc_pubkey = endpoint_verified

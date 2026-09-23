@@ -37,8 +37,8 @@ ceremony network to match the new deployment's Bitcoin network. Other settings,
 including the PCR allowlist, may change during an upgrade.
 
 This precursor retains the EIF's build-time revision, mode, and S3 routes. OI
-rejects a policy whose current revision or S3 destination differs from those
-inputs, or whose current PCR0 differs from the enclave's own Nitro attestation.
+rejects a policy whose current revision differs from the compiled revision,
+or whose current PCR0 differs from the enclave's own Nitro attestation.
 These checks run before initialization commits, leaving failed attempts retryable.
 The existing `non-enclave-dev`/test attestation stub remains in effect for local
 mock flows; real enclaves and external verifiers check real attestations.

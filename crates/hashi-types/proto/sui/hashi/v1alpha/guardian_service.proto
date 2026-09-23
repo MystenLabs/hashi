@@ -94,7 +94,7 @@ message GuardianInfoData {
   optional SecretSharingInstance secret_sharing_instance = 1;
 
   // Installed deployment summary; absent before operator initialization.
-  DeploymentConfigSummary deployment = 2;
+  DeploymentConfigSummary deployment_info = 2;
 
   // Guardian encryption public key (32 bytes).
   optional bytes encryption_pubkey = 3;

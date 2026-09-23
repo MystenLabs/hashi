@@ -104,7 +104,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     );
     let deployment = cfg.deployment_config();
     ensure!(
-        verified.info.deployment()? == &deployment.summary(),
+        verified.info.deployment_info()? == &deployment.summary(),
         "ceremony deployment differs from expected configuration"
     );
     let session_id = verified.session_id;
