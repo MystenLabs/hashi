@@ -2,7 +2,6 @@ syntax = "proto3";
 
 package sui.hashi.v1alpha;
 
-
 import "sui/hashi/v1alpha/signature.proto";
 import "sui/hashi/v1alpha/utxo.proto";
 
