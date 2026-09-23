@@ -1122,7 +1122,7 @@ impl AggregationContext {
             self.deriv,
             self.params,
         );
-        super::spawn_blocking(move || {
+        let (signature, excluded, can_blame) = super::spawn_blocking(move || {
             aggregate_signatures(
                 &message,
                 &nonce,
@@ -1133,7 +1133,17 @@ impl AggregationContext {
                 deriv.as_ref(),
             )
         })
-        .await
+        .await?;
+        if !can_blame {
+            // The decode lacked the margin to tell which contributions were wrong, so these are
+            // reported rather than counted against their owners.
+            tracing::warn!(
+                "aggregation excluded share indices {excluded:?}, but not by enough to attribute \
+                 them to their owners"
+            );
+            return Ok((signature, Vec::new()));
+        }
+        Ok((signature, excluded))
     }
 }
 
@@ -4041,7 +4051,7 @@ mod tests {
         data.partial_sigs[0].value = S::rand(&mut data.rng);
         let corrupted_index = data.partial_sigs[0].index;
 
-        let (sig, mismatched) = aggregate_signatures(
+        let (sig, mismatched, can_blame) = aggregate_signatures(
             message,
             &data.public_nonce,
             &data.beacon,
@@ -4056,6 +4066,7 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&data.vk, message, &sig);
+        assert!(can_blame, "six partials with one excluded clears t + f");
         assert_eq!(
             mismatched,
             vec![corrupted_index],
