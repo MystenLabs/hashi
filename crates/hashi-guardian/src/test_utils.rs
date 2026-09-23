@@ -382,16 +382,11 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
-    /// Enclave in the requested mode with fresh random keys.
-    pub fn create_with_random_keys_for_mode(mode: EnclaveMode) -> Arc<Self> {
+    /// Uninitialized enclave with fresh random keys.
+    pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(signing_keys, encryption_keys, mode))
-    }
-
-    /// Withdraw-mode enclave with fresh random keys.
-    pub fn create_with_random_keys() -> Arc<Self> {
-        Self::create_with_random_keys_for_mode(EnclaveMode::Withdraw)
+        Arc::new(Enclave::new(signing_keys, encryption_keys))
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().
@@ -429,7 +424,7 @@ impl Enclave {
     }
 
     pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
-        let enclave = Self::create_with_random_keys_for_mode(EnclaveMode::Ceremony);
+        let enclave = Self::create_with_random_keys();
         enclave
             .config
             .set_deployment(DeploymentConfig::mock_for_testing())

@@ -139,7 +139,6 @@ pub async fn update_committee_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_types::guardian::EnclaveMode;
     use hashi_types::guardian::GuardianEncKeyPair;
     use hashi_types::guardian::GuardianSignKeyPair;
     use std::time::Duration;
@@ -157,7 +156,6 @@ mod tests {
         Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
-            EnclaveMode::Withdraw,
         ))
     }
 

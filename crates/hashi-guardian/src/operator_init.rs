@@ -156,25 +156,17 @@ pub async fn operator_init(
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
-    let uninitialized = match enclave.mode() {
-        EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
-        EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
-    };
-    enclave.require_lifecycle(uninitialized)?;
-    info!("Lifecycle stage validated.");
+    enclave.require_lifecycle(None)?;
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
 
-    let (deployment, s3_credentials, withdraw_inputs) = match (enclave.mode(), request) {
-        (
-            EnclaveMode::Ceremony,
-            OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
-                deployment,
-                s3_credentials,
-            }),
-        ) => (deployment, s3_credentials, None),
-        (EnclaveMode::Withdraw, OperatorInitRequest::Withdraw(request)) => {
+    let (deployment, s3_credentials, withdraw_inputs) = match request {
+        OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
+            deployment,
+            s3_credentials,
+        }) => (deployment, s3_credentials, None),
+        OperatorInitRequest::Withdraw(request) => {
             let WithdrawOperatorInitRequest {
                 s3_credentials,
                 init_config,
@@ -186,18 +178,7 @@ pub async fn operator_init(
                 Some((init_config, genesis_state)),
             )
         }
-        (EnclaveMode::Ceremony, OperatorInitRequest::Withdraw(_)) => {
-            return Err(InvalidInputs(
-                "ceremony-mode guardian received a withdraw operator-init request".into(),
-            ));
-        }
-        (EnclaveMode::Withdraw, OperatorInitRequest::Ceremony(_)) => {
-            return Err(InvalidInputs(
-                "withdraw-mode guardian received a ceremony operator-init request".into(),
-            ));
-        }
     };
-    validate_deployment(&enclave, &deployment)?;
     let attestation = get_attestation(&enclave.signing_pubkey())?;
     attestation
         .verify_live(
@@ -205,7 +186,7 @@ pub async fn operator_init(
             deployment.pcr_allowlist.current_build(),
         )
         .map_err(|error| InvalidInputs(format!("deployment attestation check failed: {error}")))?;
-    let logger = GuardianS3Client::new(
+    let logger = GuardianS3Client::new_enclave(
         &deployment.bucket_info,
         deployment.retention_environment,
         &s3_credentials,
@@ -238,17 +219,6 @@ pub async fn operator_init(
     commit_operator_init(&enclave, install).await;
 
     info!("Operator initialization complete.");
-    Ok(())
-}
-
-/// This precursor retains the compiled revision. The runtime-config follow-up
-/// removes this comparison together with the corresponding build input.
-fn validate_deployment(enclave: &Enclave, deployment: &DeploymentConfig) -> GuardianResult<()> {
-    if deployment.pcr_allowlist.current_build().git_revision() != enclave.reported_git_revision() {
-        return Err(InvalidInputs(
-            "deployment revision does not match the compiled build".into(),
-        ));
-    }
     Ok(())
 }
 
@@ -290,6 +260,12 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
         .set_deployment(deployment)
         .expect("deployment is installed once");
 
+    let initialized = if withdraw_mode.is_some() {
+        WithdrawStage::OperatorInitialized.into()
+    } else {
+        CeremonyStage::OperatorInitialized.into()
+    };
+
     // A ceremony enclave has no withdraw-mode arming state.
     if let Some(withdraw_mode) = withdraw_mode {
         withdraw_mode.install_into(enclave);
@@ -314,10 +290,6 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
         .await
         .expect("S3 logger must be initialized to log operator initialization");
 
-    let initialized = match enclave.mode() {
-        EnclaveMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
-        EnclaveMode::Withdraw => WithdrawStage::OperatorInitialized.into(),
-    };
     enclave
         .advance_lifecycle_into(initialized)
         .expect("operator_init should advance an uninitialized enclave");
@@ -327,30 +299,6 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
 mod tests {
     use super::*;
     use crate::test_utils::CapturedPuts;
-
-    #[tokio::test]
-    async fn wrong_build_policy_leaves_initialization_retryable() {
-        let enclave = Arc::new(Enclave::new(
-            GuardianSignKeyPair::new(rand::thread_rng()),
-            GuardianEncKeyPair::random(&mut rand::thread_rng()),
-            EnclaveMode::Ceremony,
-        ));
-        let mut deployment = DeploymentConfig::mock_for_testing();
-        deployment.pcr_allowlist =
-            PcrAllowlist::new(BuildPcrs::new("other-build", vec![0]), []).unwrap();
-        let request =
-            OperatorInitRequest::new_ceremony_mode(deployment, S3Credentials::mock_for_testing());
-        assert!(operator_init(enclave.clone(), request)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("compiled build"));
-        assert_eq!(enclave.lifecycle(), CeremonyStage::Uninitialized.into());
-        assert!(enclave.config.deployment().is_err());
-        assert!(enclave.config.s3_logger().is_err());
-        let deployment = DeploymentConfig::mock_for_testing();
-        assert!(validate_deployment(&enclave, &deployment).is_ok());
-    }
 
     fn genesis_record(state: GenesisState, key: &GuardianSignKeyPair) -> LogRecord {
         let (committee, hashi_object_id, mpc_master_g) = state.into_parts();
@@ -396,7 +344,7 @@ mod tests {
             .set_deployment(install.init_config.deployment().clone())
             .unwrap();
         install.install_into(&enclave);
-        let info = enclave.info().await;
+        let info = enclave.info_for_lifecycle(WithdrawStage::OperatorInitialized.into());
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
         assert_eq!(info.genesis_state_hash, None);
@@ -425,7 +373,7 @@ mod tests {
             .set_deployment(install.init_config.deployment().clone())
             .unwrap();
         install.install_into(&enclave);
-        let info = enclave.info().await;
+        let info = enclave.info_for_lifecycle(WithdrawStage::OperatorInitialized.into());
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
         assert_eq!(info.genesis_state_hash, Some(expected_hash));
@@ -472,7 +420,6 @@ mod tests {
         let enclave = Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
-            mode,
         ));
 
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
@@ -576,5 +523,51 @@ mod tests {
             CeremonyStage::OperatorInitialized.into()
         );
         assert_operator_init_logs(&enclave, &captures, EnclaveMode::Ceremony).await;
+    }
+    #[tokio::test]
+    async fn initialized_sessions_reject_reinitialization_and_mode_switches() {
+        for mode in [EnclaveMode::Ceremony, EnclaveMode::Withdraw] {
+            let (enclave, _) = commit_for_mode(mode).await;
+            let before = enclave.info().await;
+            for request in [
+                OperatorInitRequest::mock_for_testing(),
+                OperatorInitRequest::new_ceremony_mode(
+                    DeploymentConfig::mock_for_testing(),
+                    S3Credentials::mock_for_testing(),
+                ),
+            ] {
+                assert!(matches!(
+                    crate::task_spawner::operator_init(enclave.clone(), request).await,
+                    Err(GuardianError::LifecycleMismatch { .. })
+                ));
+                assert_eq!(enclave.info().await, before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_configuration_is_hidden_until_lifecycle_is_published() {
+        let enclave = Enclave::create_with_random_keys();
+        let before = enclave.info().await;
+        assert_eq!(before.lifecycle, None);
+        assert!(before.deployment_info.is_none());
+        enclave
+            .config
+            .set_deployment(DeploymentConfig::mock_for_testing())
+            .unwrap();
+        enclave
+            .config
+            .set_s3_logger(crate::test_utils::mock_logger())
+            .unwrap();
+        assert_eq!(enclave.info().await, before);
+        let snapshot = enclave.info_for_lifecycle(CeremonyStage::OperatorInitialized.into());
+        assert_eq!(
+            snapshot.deployment_info,
+            Some(DeploymentConfig::mock_for_testing().summary())
+        );
+        enclave
+            .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+            .unwrap();
+        assert_eq!(enclave.info().await, snapshot);
     }
 }

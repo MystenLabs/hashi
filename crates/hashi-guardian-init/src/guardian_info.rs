@@ -27,6 +27,32 @@ pub async fn verified_live_guardian_info(
     verify_info_response(info_pb, current_build)
 }
 
+/// Authenticate an initialization target, which can also be an already initialized
+/// ceremony session being resumed. Only fresh sessions may omit a revision label.
+pub async fn verified_initialization_target_info(
+    client: &mut GuardianServiceClient<Channel>,
+    current_build: &BuildPcrs,
+) -> anyhow::Result<VerifiedGuardianInfo> {
+    let response = client
+        .get_guardian_info(pb::GetGuardianInfoRequest {})
+        .await
+        .context("GetGuardianInfo RPC failed")?
+        .into_inner();
+    let uninitialized = response
+        .signed_info
+        .as_ref()
+        .and_then(|s| s.data.as_ref())
+        .is_some_and(|info| info.lifecycle.is_none());
+    let response = GetGuardianInfoResponse::try_from(response)
+        .map_err(|e| anyhow!("decode GuardianInfo: {e:?}"))?;
+    if uninitialized {
+        response.verify_live_uninitialized(current_build)
+    } else {
+        response.verify_live(current_build)
+    }
+    .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e}"))
+}
+
 /// Like [`verified_live_guardian_info`], but over the relay's provisioning
 /// surface: `GetProvisioningTargetInfo` answers for the guardian KPs are
 /// provisioning (the proxy's standby backend when one is configured, else the
@@ -56,7 +82,7 @@ pub async fn verified_ceremony_guardian_info(
     let (info_pb, rpc) = ceremony_guardian_info_pb(endpoint).await?;
     let verified = verify_info_response(info_pb, current_build)?;
     ensure!(
-        matches!(verified.info.lifecycle, EnclaveLifecycle::Ceremony(_)),
+        matches!(verified.info.lifecycle, Some(EnclaveLifecycle::Ceremony(_))),
         "{rpc} at {endpoint} answers for a guardian in lifecycle {:?}, not a ceremony \
          guardian: a proxy must route GuardianRelayService and front the ceremony guardian \
          as its provisioning target; a bare endpoint must be the ceremony guardian itself",

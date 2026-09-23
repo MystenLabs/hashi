@@ -4,7 +4,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
+/// Which flows an enclave serves, selected once by operator initialization. A `Ceremony` enclave runs
 /// `setup_new_key`/`rotate_kp_set`; a `Withdraw` enclave runs `provisioner_init` +
 /// `standard_withdrawal`. `operator_init` and `get_guardian_info` are enabled
 /// in both modes.
@@ -54,7 +54,6 @@ impl From<WithdrawStage> for EnclaveLifecycle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CeremonyStage {
-    Uninitialized,
     OperatorInitialized,
     AwaitingKeyProvisionerConfirmations,
     Completed,
@@ -63,8 +62,7 @@ pub enum CeremonyStage {
 impl CeremonyStage {
     pub fn predecessor(self) -> Option<Self> {
         match self {
-            Self::Uninitialized => None,
-            Self::OperatorInitialized => Some(Self::Uninitialized),
+            Self::OperatorInitialized => None,
             Self::AwaitingKeyProvisionerConfirmations => Some(Self::OperatorInitialized),
             Self::Completed => Some(Self::AwaitingKeyProvisionerConfirmations),
         }
@@ -74,7 +72,6 @@ impl CeremonyStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WithdrawStage {
-    Uninitialized,
     OperatorInitialized,
     ProvisionerInitialized,
     Activated,
@@ -83,10 +80,21 @@ pub enum WithdrawStage {
 impl WithdrawStage {
     pub fn predecessor(self) -> Option<Self> {
         match self {
-            Self::Uninitialized => None,
-            Self::OperatorInitialized => Some(Self::Uninitialized),
+            Self::OperatorInitialized => None,
             Self::ProvisionerInitialized => Some(Self::OperatorInitialized),
             Self::Activated => Some(Self::ProvisionerInitialized),
         }
+    }
+}
+
+impl From<CeremonyStage> for Option<EnclaveLifecycle> {
+    fn from(stage: CeremonyStage) -> Self {
+        Some(stage.into())
+    }
+}
+
+impl From<WithdrawStage> for Option<EnclaveLifecycle> {
+    fn from(stage: WithdrawStage) -> Self {
+        Some(stage.into())
     }
 }

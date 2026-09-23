@@ -62,3 +62,6 @@ pub use test_utils::mock_logger_with_layout;
 pub use test_utils::FullyInitializedArgs;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::OperatorInitTestArgs;
+
+#[cfg(any(test, not(feature = "non-enclave-dev")))]
+mod s3_resolver;

@@ -4,19 +4,11 @@ name: Guardian Enclave Build
 # Guardian sources, dependencies, or the recipe, and pushes to main that change
 # any build-context input, build it with canonical inputs to check reproducibility.
 #
-# PCR0 is a hash of the built image, and the build takes BUCKET_NAME, AWS_REGION
-# and CEREMONY_MODE as inputs — they are substituted into run.sh, which goes in
-# the ramdisk the measurement covers. So a PCR0 only means something next to the
-# deployment it was built for: pass the same values that stack's enclave hosts
-# build with (pulumi/services/hashi-guardian-enclave/Pulumi.<stack>.yaml in
-# sui-operations, rendered into user-data by enclave.go), and dispatch this on
-# the commit the hosts pin. GIT_REVISION is compiled into the binary, and FEATURES
-# selects compile-time behavior; those inputs must match the deployment too.
-#
-# This is the ONLY sanctioned source for the eif-pcr0 / eif-pcr0-b /
-# ceremony-pcr0 config values and for the rotate workflow's hashi_pcr0 input.
-# Reading a measurement off the host being verified would make the check
-# circular: it would confirm the host runs whatever it runs.
+# PCRs identify the executable image. Bucket, region, mode, and the reported
+# revision label are supplied during operator initialization, outside the EIF.
+# The checked-out revision and feature selection identify the build recipe;
+# record them alongside its PCRs as the independently approved build mapping.
+# Never derive the expected PCR from the host being verified.
 #
 # Both runners must agree for the reproducibility check to pass. Keep their
 # build caches independent: restoring shared compiled layers would bypass the
@@ -46,28 +38,12 @@ on:
       - .github/workflows/guardian-enclave.yml
   workflow_dispatch:
     inputs:
-      bucket_name:
-        description: 'S3 bucket the guardian logs to (must match the target stack exactly)'
-        required: true
-        default: 'guardian-test-bucket'
-      aws_region:
-        description: 'Region of that bucket; must match the target stack. The Makefile defaults to us-east-1.'
-        required: true
-        default: 'us-west-2'
-      ceremony_mode:
-        description: 'Enclave boot mode: withdraw (serving) or ceremony (key setup or key-provider rotation, a different PCR0 at the same commit)'
-        type: choice
-        options:
-          - withdraw
-          - ceremony
-        required: true
-        default: withdraw
       features:
         description: 'Extra cargo features. Leave EMPTY for anything whose PCR0 is provenance; non-enclave-dev builds mock attestation.'
         required: false
         default: ''
       git_revision:
-        description: 'Commit to build and stamp. Defaults to the dispatched ref. Set it to measure a commit that predates this workflow — an already-deployed guardian, or the ceremony build an allowlist has to keep trusting.'
+        description: 'Source commit to build. Defaults to the dispatched ref; recorded as provenance, not embedded in the EIF.'
         required: false
         default: ''
 
@@ -87,21 +63,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
-      BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
-      AWS_REGION: ${{ inputs.aws_region || 'us-west-2' }}
-      CEREMONY_MODE_INPUT: ${{ inputs.ceremony_mode || 'withdraw' }}
       FEATURES: ${{ inputs.features || '' }}
     outputs:
       git_revision: ${{ steps.rev.outputs.git_revision }}
-      bucket_name: ${{ steps.rev.outputs.bucket_name }}
-      aws_region: ${{ steps.rev.outputs.aws_region }}
-      ceremony_mode: ${{ steps.rev.outputs.ceremony_mode }}
       features: ${{ steps.rev.outputs.features }}
 
     steps:
-      # The SOURCE measured is git_revision's, not the dispatched ref's — the
-      # ref only supplies this workflow file. GIT_REVISION is compiled into the
-      # guardian, so stamp the checked-out commit to identify the source used.
+      # Select the source independently of the ref supplying this workflow.
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
@@ -112,24 +80,14 @@ jobs:
         shell: bash
         run: |
           REV="$(git rev-parse HEAD)"
-          echo "GIT_REVISION=$REV" >> "$GITHUB_ENV"
           {
             echo "git_revision=$REV"
-            echo "bucket_name=$BUCKET_NAME"
-            echo "aws_region=$AWS_REGION"
-            echo "ceremony_mode=$CEREMONY_MODE_INPUT"
             echo "features=$FEATURES"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build enclave EIF
         working-directory: docker/hashi-guardian
-        env:
-          # The Makefile takes "true"/empty, not the friendlier input wording.
-          CEREMONY_MODE: ${{ env.CEREMONY_MODE_INPUT == 'ceremony' && 'true' || '' }}
-        run: |
-          make BUCKET_NAME="$BUCKET_NAME" AWS_REGION="$AWS_REGION" \
-               GIT_REVISION="$GIT_REVISION" FEATURES="$FEATURES" \
-               CEREMONY_MODE="$CEREMONY_MODE"
+        run: make FEATURES="$FEATURES"
 
       - name: Print PCRs
         working-directory: docker/hashi-guardian
@@ -207,21 +165,18 @@ jobs:
             echo ""
             echo "**Cross-runner check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04; both target linux/amd64)"
             echo ""
-            echo "**Trigger**: \`${{ github.event_name }}\`${{ github.event_name != 'workflow_dispatch' && ' — reproducibility check with canonical inputs, NOT a deployment measurement' || '' }}"
+            echo "**Trigger**: \`${{ github.event_name }}\`${{ github.event_name != 'workflow_dispatch' && ' — reproducibility check with canonical inputs, use the approved source/PCR mapping for deployment' || '' }}"
             echo ""
-            echo "Measured build — a PCR0 is only valid for this exact combination:"
+            echo "Build provenance — the source revision is not embedded in the EIF:"
             echo ""
             echo "| Input | Value |"
             echo "|-------|-------|"
             echo "| commit | \`${{ needs.build.outputs.git_revision }}\` |"
-            echo "| bucket | \`${{ needs.build.outputs.bucket_name }}\` |"
-            echo "| region | \`${{ needs.build.outputs.aws_region }}\` |"
-            echo "| mode | \`${{ needs.build.outputs.ceremony_mode }}\` |"
             echo "| features | \`${{ needs.build.outputs.features }}\`${{ needs.build.outputs.features == '' && ' (real attestation)' || ' — custom features, not the canonical production build' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Compare the exported eif_build inputs to narrow down a PCR mismatch.
-      # The ramdisk contains Guardian, runtime files, and deployment settings;
+      # The ramdisk contains Guardian and its runtime files;
       # the current recipe copies the kernel and config from a pinned image.
       - name: Download build inputs (only when the PCRs disagree)
         if: steps.compare.outputs.match != 'true'
@@ -249,7 +204,7 @@ jobs:
             fi
           done
           echo
-          echo "rootfs.cpio contains Guardian, runtime files, and deployment settings."
+          echo "rootfs.cpio contains Guardian and its runtime files."
           echo "With the published-kernel recipe, bzImage and kernel.config are copied"
           echo "from a pinned image; if they differ, check image/platform selection and export."
           exit 1

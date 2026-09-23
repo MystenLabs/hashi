@@ -31,6 +31,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::config::Config;
+use crate::guardian_info::verified_initialization_target_info;
 use crate::guardian_info::verified_live_guardian_info;
 
 fn is_transient_rpc_error(error: &anyhow::Error) -> bool {
@@ -80,9 +81,10 @@ impl CeremonyGuardian {
         let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
             .await
             .with_context(|| format!("connect to guardian at {}", cfg.guardian_endpoint))?;
-        let preflight = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
+        let preflight =
+            verified_initialization_target_info(&mut client, allowlist.current_build()).await?;
         match preflight.info.lifecycle {
-            lifecycle if lifecycle == CeremonyStage::Uninitialized.into() => {
+            None => {
                 ensure!(
                     operator_init,
                     "guardian is uninitialized: run operator rotate-kp-set init first"
@@ -107,7 +109,7 @@ impl CeremonyGuardian {
                     "operator_init complete; guardian S3 logger installed"
                 );
             }
-            EnclaveLifecycle::Ceremony(_) => info!(
+            Some(EnclaveLifecycle::Ceremony(_)) => info!(
                 phase = "operator_init",
                 "guardian is already operator-initialized; verifying it",
             ),
