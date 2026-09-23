@@ -3122,6 +3122,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tonic",
  "tower",
  "tracing",
  "tracing-subscriber",

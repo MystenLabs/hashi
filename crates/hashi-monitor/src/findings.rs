@@ -58,10 +58,6 @@ impl MonitorFinding {
                 EventRelation::Successor => FindingCategory::Liveness,
             },
             Self::ExpectedEventMissing { relation, .. } => match relation {
-                // TODO: Before treating a missing withdrawal predecessor as a
-                // definitive safety finding, perform a focused Sui history
-                // search. A too-small lookback can otherwise cause a false
-                // positive.
                 EventRelation::Predecessor => FindingCategory::Safety,
                 EventRelation::Successor => FindingCategory::Liveness,
             },

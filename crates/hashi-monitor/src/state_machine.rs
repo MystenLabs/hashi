@@ -96,6 +96,15 @@ impl WithdrawalStateMachine {
             .any(|(event, _, _)| *event == event_type)
     }
 
+    /// Is the Hashi approval still missing after the Sui cursor passed its deadline?
+    pub fn is_missing_hashi_approval(&self, cursors: &Cursors) -> bool {
+        self.expected_events
+            .iter()
+            .any(|(event_type, deadline, _)| {
+                *event_type == WithdrawalEventType::E1HashiApproved && *deadline <= cursors.sui
+            })
+    }
+
     /// Are any expected neighboring events still outstanding?
     ///
     /// This does not mean that no timing finding was emitted during ingestion.
@@ -634,6 +643,29 @@ mod tests {
                 cursor: 200,
             }
         );
+    }
+
+    #[test]
+    fn hashi_approval_is_missing_once_the_sui_cursor_passes_its_deadline() {
+        let cfg = cfg();
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E2GuardianApproved, 7, 100, 7),
+            &cfg,
+        );
+        let cursors = |sui| Cursors {
+            sui,
+            guardian: 1_000,
+        };
+
+        assert!(!sm.is_missing_hashi_approval(&cursors(109)));
+        assert!(sm.is_missing_hashi_approval(&cursors(110)));
+
+        assert!(
+            sm.add_event(event(WithdrawalEventType::E1HashiApproved, 7, 10, 7), &cfg)
+                .is_empty()
+        );
+        assert!(!sm.is_missing_hashi_approval(&cursors(1_000)));
+        assert!(sm.violations(&cursors(1_000)).is_empty());
     }
 
     #[test]

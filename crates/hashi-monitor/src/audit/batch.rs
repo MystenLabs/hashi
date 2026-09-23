@@ -61,6 +61,7 @@ impl AuditWindow for BatchAuditWindow {
 ///     - fetch withdrawal and deposit events from
 ///       `[t1 - withdrawal_predecessor_lookback, t2 + clock_skew]`
 ///     - fetch BTC data for in-scope withdrawals and deposits found in the Sui range
+///     - fetch each overdue Hashi approval missing from the Sui range by its withdrawal id
 /// Finally, it logs progress watermarks that identify a safe start for the next audit.
 ///
 /// Notes:
@@ -211,6 +212,15 @@ impl BatchAuditor {
         let btc_findings = self.inner.fetch_btc_info(&self.audit_window)?;
         log_findings("batch", "btc", &btc_findings);
         if !btc_findings.is_empty() {
+            self.violation_found = true;
+        }
+
+        let lookup_findings = self
+            .inner
+            .fetch_missing_hashi_approvals(&self.audit_window)
+            .await?;
+        log_findings("batch", "lookup", &lookup_findings);
+        if !lookup_findings.is_empty() {
             self.violation_found = true;
         }
 
