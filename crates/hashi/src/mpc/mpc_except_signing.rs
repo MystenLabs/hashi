@@ -2600,6 +2600,12 @@ impl MpcManager {
                         self.mpc_config.epoch,
                     )));
                 }
+                let signed = vote_cert.message();
+                if signed.dealer_address != request.dealer || signed.batch_index != batch_index {
+                    return Err(MpcError::InvalidCertificate(
+                        "blame vote cert was signed for a different dealer or batch".into(),
+                    ));
+                }
                 let (committee, nodes, params) =
                     self.cert_verification_context(vote_cert.epoch())?;
                 let claimed_weight = vote_cert
@@ -2783,6 +2789,13 @@ impl MpcManager {
                 confirm_cert,
                 optimistic_message,
             } => {
+                let signed = confirm_cert.message();
+                if signed.dealer_address != sender || signed.batch_index != batch_index {
+                    return Err(MpcError::InvalidMessage {
+                        sender,
+                        reason: "confirm cert was signed for a different dealer or batch".into(),
+                    });
+                }
                 match (
                     self.get_avid_round_state(batch_index, &sender)?,
                     optimistic_message,

@@ -12733,6 +12733,45 @@ fn test_handle_avid_dispersal_with_bundled_optimistic_lets_non_signer_vote() {
 }
 
 #[test]
+fn test_handle_avid_dispersal_refuses_a_confirm_cert_for_another_batch() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let other_batch = AvssVoteMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: fx.confirm_cert.message().messages_hash,
+        batch_index: batch_index + 1,
+    };
+    let mut agg =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), other_batch.clone());
+    for i in 0..5usize {
+        agg.add_signature(setup.signing_keys[i].sign(
+            TEST_HASHI_ID,
+            setup.epoch(),
+            setup.address(i),
+            &other_batch,
+        ))
+        .unwrap();
+    }
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, agg.finish().unwrap(), batch_index)
+        .unwrap();
+
+    let result = fx.confirmers[1].handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: dispersals[1].1.clone(),
+        },
+    );
+    assert!(
+        matches!(result, Err(MpcError::InvalidMessage { .. })),
+        "a confirm cert signed for another batch must be refused: {result:?}"
+    );
+    assert!(fx.confirmers[1].avid_held_echoes.is_empty());
+}
+
+#[test]
 fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
     let setup = TestSetup::new(6);
     let batch_index = 0u32;
@@ -15969,6 +16008,66 @@ fn test_avid_voter_state_survives_restart() {
             Err(MpcError::InvalidMessage { ref reason, .. }) if reason.contains("different dispersal")
         ),
         "double-vote across restart must be rejected: {result:?}"
+    );
+}
+
+#[test]
+fn test_avid_blame_refuses_a_vote_cert_for_another_batch() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let responder = &mut fx.confirmers[1];
+    responder
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .unwrap();
+    let (held_vote, _, _) = responder
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap()
+        .clone();
+    let other_batch = AvidVoteMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: hash_avid_vote(&held_vote),
+        batch_index: batch_index + 1,
+    };
+    let mut agg =
+        BlsSignatureAggregator::new(TEST_HASHI_ID, setup.committee(), other_batch.clone());
+    for i in 0..6usize {
+        agg.add_signature(setup.signing_keys[i].sign(
+            TEST_HASHI_ID,
+            setup.epoch(),
+            setup.address(i),
+            &other_batch,
+        ))
+        .unwrap();
+    }
+    let request = ComplainRequest {
+        dealer: fx.dealer_addr,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: agg.finish().unwrap(),
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = responder.handle_complain_request(setup.address(5), &request);
+    assert!(
+        matches!(result, Err(MpcError::InvalidCertificate(_))),
+        "a blame vote cert signed for another batch must be refused before verification: {result:?}"
     );
 }
 
