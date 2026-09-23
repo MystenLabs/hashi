@@ -742,14 +742,13 @@ impl SigningManager {
     }
 
     /// Flag every share index whose owner `blame` names, so the rest of this call skips their
-    /// partial signatures, and count the indices against those owners when `blame` is
-    /// [Blame::Certain]. Returns whether the flagged set grew.
+    /// partial signatures. Returns whether anything new was flagged.
     ///
-    /// Flagging takes the inconclusive indices too, because it only chooses which partial
-    /// signatures to try next: at the first decode there are `t + 2` of them, too few to reach
-    /// `t + f`, so waiting for certainty would leave flagging idle exactly when it helps most.
-    /// Counting an index against its owner is a claim about that owner, so that needs the
-    /// certainty.
+    /// Only [Blame::Certain] is counted in `mpc_partial_sig_mismatch_total`, since counting an
+    /// index against its owner is a claim about them. Flagging uses [Blame::Inconclusive] as well,
+    /// because it only picks which partial signatures to try next and a wrong guess costs one more
+    /// attempt, and because the first decode runs on `t + 2` partial signatures, usually too few
+    /// for certainty.
     fn flag_mismatched(
         &self,
         blame: Blame,
