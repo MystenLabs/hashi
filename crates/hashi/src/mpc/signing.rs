@@ -710,10 +710,10 @@ impl SigningManager {
                         exhausted.push(pending[i].signing_id);
                         i += 1;
                     }
-                    FinalizeOutcome::Done(sig, mismatched) => {
+                    FinalizeOutcome::Done(sig, blame) => {
                         let st = pending.swap_remove(i);
                         let _ = result_tx.send((st.signing_id, Ok(sig)));
-                        grew |= self.flag_mismatched(&mismatched, flagged, metrics);
+                        grew |= self.flag_mismatched(blame, flagged, metrics);
                     }
                     FinalizeOutcome::Failed(e) => {
                         let st = pending.swap_remove(i);
@@ -741,39 +741,53 @@ impl SigningManager {
         }
     }
 
+    /// Skip the owners of `blame`'s share indices for the rest of this call, and count the ones
+    /// it can stand behind.
+    ///
+    /// Flagging is only a hint for the next attempt, so it uses the inconclusive indices too: at
+    /// the first decode there are `t + 2` partial signatures, too few to reach `t + f`, so waiting
+    /// for certainty would leave it idle exactly when it is most useful. Counting an owner is a
+    /// claim about them, so only [Blame::Certain] does that.
     fn flag_mismatched(
         &self,
-        mismatched: &[ShareIndex],
+        blame: Blame,
         flagged: &mut HashSet<ShareIndex>,
         metrics: &Metrics,
     ) -> bool {
+        let (mismatched, certain) = match blame {
+            Blame::Nobody => return false,
+            Blame::Certain(indices) => (indices, true),
+            Blame::Inconclusive(indices) => (indices, false),
+        };
         if mismatched.is_empty() {
             return false;
         }
         let share_owners = &self.config.share_owners;
         let mut per_owner: HashMap<Address, u64> = HashMap::new();
-        for idx in mismatched {
+        for idx in &mismatched {
             if let Some(owner) = share_owners.get(idx) {
                 *per_owner.entry(*owner).or_default() += 1;
             }
         }
-        for (owner, count) in &per_owner {
-            metrics
-                .mpc_partial_sig_mismatch_total
-                .with_label_values(&[&owner.to_string()])
-                .inc_by(*count);
-        }
-        let local: Vec<ShareIndex> = mismatched
-            .iter()
-            .copied()
-            .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
-            .collect();
-        if !local.is_empty() {
-            tracing::warn!(
-                "Locally generated partial signatures at share indices {local:?} disagree with \
-                 the RS-recovered polynomial: local presig/key state may be corrupt, or the \
-                 decode was steered by other contributions"
-            );
+        if certain {
+            for (owner, count) in &per_owner {
+                metrics
+                    .mpc_partial_sig_mismatch_total
+                    .with_label_values(&[&owner.to_string()])
+                    .inc_by(*count);
+            }
+            let local: Vec<ShareIndex> = mismatched
+                .iter()
+                .copied()
+                .filter(|idx| share_owners.get(idx) == Some(&self.config.address))
+                .collect();
+            if !local.is_empty() {
+                tracing::warn!(
+                    "Locally generated partial signatures at share indices {local:?} disagree \
+                     with the RS-recovered polynomial, so the local presig or key state may be \
+                     corrupt"
+                );
+            }
         }
         let owners: HashSet<Address> = per_owner.into_keys().collect();
         let before = flagged.len();
@@ -1083,9 +1097,9 @@ impl InputSigningState {
 }
 
 enum FinalizeOutcome {
-    /// Aggregation succeeded. The second field lists the share indices whose
-    /// contributed values disagree with the recovered polynomial.
-    Done(SchnorrSignature, Vec<ShareIndex>),
+    /// Aggregation succeeded. The second field says which share indices disagreed with the
+    /// recovered polynomial, and whether their owners can be blamed for it.
+    Done(SchnorrSignature, Blame),
     NeedMore,
     /// No peer can still contribute and no attemptable candidate succeeded.
     Exhausted,
@@ -1110,7 +1124,7 @@ impl AggregationContext {
         &self,
         sigs: Vec<Eval<S>>,
         metrics: &Metrics,
-    ) -> Result<(SchnorrSignature, Vec<ShareIndex>), FastCryptoError> {
+    ) -> Result<(SchnorrSignature, Blame), FastCryptoError> {
         let _timer = metrics
             .mpc_sign_aggregation_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
@@ -1135,22 +1149,7 @@ impl AggregationContext {
             )
         })
         .await?;
-        Ok((
-            signature,
-            match blame {
-                Blame::Nobody => Vec::new(),
-                Blame::Certain(indices) => indices,
-                // The decoding lacked the margin to tell which contributions were wrong, so these
-                // are reported rather than counted against their owners.
-                Blame::Inconclusive(indices) => {
-                    tracing::warn!(
-                        "aggregation excluded share indices {indices:?}, but not by enough to \
-                         attribute them to their owners"
-                    );
-                    Vec::new()
-                }
-            },
-        ))
+        Ok((signature, blame))
     }
 }
 
@@ -1214,7 +1213,7 @@ async fn try_finalize_signature(
     if st.recovery_attemptable(t) {
         match ctx.aggregate(st.partials.clone(), metrics).await {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
-            Err(FastCryptoError::TooManyErrors(_) | FastCryptoError::InvalidSignature) => {}
+            Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
         st.required_full = next_rs_attempt_at(t, n);
@@ -1224,7 +1223,7 @@ async fn try_finalize_signature(
         st.erased_attempted = Some(key);
         match ctx.aggregate(unflagged, metrics).await {
             Ok((sig, mismatched)) => return FinalizeOutcome::Done(sig, mismatched),
-            Err(FastCryptoError::TooManyErrors(_) | FastCryptoError::InvalidSignature) => {}
+            Err(FastCryptoError::InvalidSignature) => {}
             Err(e) => return crypto_error(e),
         }
         st.required_erased = next_rs_attempt_at(t, n_unflagged);
@@ -2908,7 +2907,7 @@ mod tests {
         .await;
         match outcome {
             FinalizeOutcome::Done(sig, mismatched) => {
-                assert!(mismatched.is_empty(), "no share should mismatch");
+                assert_eq!(mismatched, Blame::Nobody, "no share should mismatch");
                 verify_schnorr(&setup.verifying_key, message, &sig);
                 let reported = G::from_byte_array(&signing_nonce_bytes(&public_nonce, &beacon))
                     .unwrap()
@@ -4033,7 +4032,7 @@ mod tests {
         match finalize_with(&data, message, garbage_first.clone(), &flags(&[4, 5])).await {
             FinalizeOutcome::Done(sig, mismatched) => {
                 verify_schnorr(&data.vk, message, &sig);
-                assert!(mismatched.is_empty());
+                assert_eq!(mismatched, Blame::Nobody);
             }
             _ => panic!("flagging the garbage indices must complete the input"),
         }
@@ -4052,8 +4051,8 @@ mod tests {
             FinalizeOutcome::Done(sig, mismatched) => {
                 verify_schnorr(&data.vk, message, &sig);
                 // The correction is right, but 5 partials with 1 excluded leaves 4 against the
-                // t + f = 5 the aggregation needs before it will name an index.
-                assert!(mismatched.is_empty());
+                // t + f = 5 needed to blame it, so it comes back for flagging only.
+                assert_eq!(mismatched, Blame::Inconclusive(vec![share_index(5)]));
             }
             _ => panic!("erasing the flagged index must let recovery correct the other"),
         }

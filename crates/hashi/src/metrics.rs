@@ -1103,8 +1103,9 @@ impl Metrics {
             .unwrap(),
             mpc_partial_sig_mismatch_total: register_int_counter_vec_with_registry!(
                 "hashi_mpc_partial_sig_mismatch_total",
-                "Partial signatures that disagreed with the RS-recovered polynomial, by owner \
-                 (does not establish which side is wrong; nobody is excluded)",
+                "Partial signatures the decoding could attribute to their owner, counted only \
+                 when enough honest shares were kept to rule out a steered decode; nobody is \
+                 excluded on this alone",
                 &["peer"],
                 registry,
             )
