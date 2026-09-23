@@ -568,7 +568,7 @@ impl GuardianS3Client {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // The prefix history was checked above. Immutable batch logs also
-            // require an unexpired Compliance lock matching their retention policy.
+            // require an unexpired Compliance lock covering their retention policy.
             out.push(
                 self.get_log_record_inner(&key, ImmutabilityCheck::MutationAlreadyChecked)
                     .await?,
@@ -668,7 +668,8 @@ fn has_valid_compliance_lock(
         return false;
     };
 
-    *expiry > DateTime::from(now) && *expiry == DateTime::from(record.object_lock_expiry(policy))
+    // Retention may be extended beyond the expiry originally requested by the writer.
+    *expiry > DateTime::from(now) && *expiry >= DateTime::from(record.object_lock_expiry(policy))
 }
 
 #[cfg(test)]
@@ -916,6 +917,16 @@ mod tests {
             &record,
             policy,
         ));
+
+        // An extension keeps the record readable beyond its original retention period.
+        let extended_expiry = DateTime::from(expiry_time + Duration::from_secs(2));
+        assert!(has_valid_compliance_lock(
+            Some(&ObjectLockMode::Compliance),
+            Some(&extended_expiry),
+            expiry_time + Duration::from_secs(1),
+            &record,
+            policy,
+        ));
     }
 
     #[tokio::test]
@@ -957,7 +968,7 @@ mod tests {
                 (
                     required_until + Duration::from_millis(1),
                     ImmutabilityCheck::MutationAlreadyChecked,
-                    false,
+                    true,
                 ),
                 (
                     required_until - Duration::from_millis(1),
