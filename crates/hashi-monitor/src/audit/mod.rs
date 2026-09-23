@@ -265,12 +265,12 @@ impl AuditorCore {
     }
 
     /// Fetches each overdue Hashi approval the Sui event scan never saw, such as
-    /// one made before the scan's lookback.
-    /// Returns domain findings and bubbles up infra errors.
+    /// one made before the scan's lookback. An approval whose lookup fails stays
+    /// missing, so it is still reported.
     pub async fn fetch_missing_hashi_approvals(
         &mut self,
         window: &impl AuditWindow,
-    ) -> anyhow::Result<Vec<MonitorFinding>> {
+    ) -> Vec<MonitorFinding> {
         let cursors = self.get_cursors();
         let wids = self
             .pending_withdrawals
@@ -278,19 +278,27 @@ impl AuditorCore {
             .filter(|sm| sm.is_in_audit_window(window) && sm.is_missing_hashi_approval(&cursors))
             .map(WithdrawalStateMachine::wid)
             .collect::<Vec<_>>();
-        // Ingest only after every lookup succeeds, so an error cannot drop findings.
         let mut approvals = Vec::new();
         for wid in wids {
-            if let Some(approval) = self.sui_poller.fetch_withdrawal_approval(wid).await? {
-                tracing::info!(
+            match self.sui_poller.fetch_withdrawal_approval(wid).await {
+                Ok(Some(approval)) => {
+                    tracing::info!(
+                        %wid,
+                        approved_at = %utc_timestamp(approval.timestamp_secs),
+                        "fetched Hashi approval missing from the Sui event scan"
+                    );
+                    approvals.push(MonitorEvent::Withdrawal(approval));
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    source = "sui",
                     %wid,
-                    approved_at = %utc_timestamp(approval.timestamp_secs),
-                    "fetched Hashi approval missing from the Sui event scan"
-                );
-                approvals.push(MonitorEvent::Withdrawal(approval));
+                    ?error,
+                    "Hashi approval lookup failed; reporting it missing"
+                ),
             }
         }
-        Ok(self.ingest_batch(approvals))
+        self.ingest_batch(approvals)
     }
 
     pub fn detect_violations(&self, window: &impl AuditWindow) -> Vec<MonitorFinding> {

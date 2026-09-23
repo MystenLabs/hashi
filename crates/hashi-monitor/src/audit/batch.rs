@@ -218,7 +218,7 @@ impl BatchAuditor {
         let lookup_findings = self
             .inner
             .fetch_missing_hashi_approvals(&self.audit_window)
-            .await?;
+            .await;
         log_findings("batch", "lookup", &lookup_findings);
         if !lookup_findings.is_empty() {
             self.violation_found = true;

@@ -145,13 +145,8 @@ impl ContinuousAuditor {
     }
 
     async fn tick_state_checks_and_gc(&mut self) {
-        match self.inner.fetch_missing_hashi_approvals(&self.window).await {
-            Ok(findings) => self.report_findings("lookup", &findings),
-            // Approvals that could not be fetched are still reported missing below.
-            Err(error) => {
-                tracing::warn!(source = "sui", ?error, "approval lookup failed; continuing")
-            }
-        }
+        let lookup_findings = self.inner.fetch_missing_hashi_approvals(&self.window).await;
+        self.report_findings("lookup", &lookup_findings);
         let violations = self.inner.detect_violations(&self.window);
         // TODO: If a violation is detected, we keep logging it on every call to this. Decide if that's the behavior we want.
         self.report_findings("violations", &violations);

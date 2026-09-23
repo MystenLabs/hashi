@@ -86,12 +86,12 @@ fn withdrawal_approval(
     wid: WithdrawalID,
     object: &Object,
 ) -> anyhow::Result<Option<MonitorWithdrawalEvent>> {
-    let object_type = object
+    let is_withdrawal_transaction = object
         .object_type_opt()
         .context("Sui object is missing its type")?
         .parse::<StructTag>()
-        .with_context(|| format!("Sui object {wid} is not a Move struct"))?;
-    if !WithdrawalTransaction::matches(package_versions, &object_type) {
+        .is_ok_and(|tag| WithdrawalTransaction::matches(package_versions, &tag));
+    if !is_withdrawal_transaction {
         return Ok(None);
     }
     let txn: WithdrawalTransaction = object
@@ -112,11 +112,11 @@ fn withdrawal_approval(
 }
 
 pub struct SuiEventsPoller {
-    /// Sui v2 gRPC client used for checkpoint and transaction requests.
+    /// Sui v2 gRPC client used for checkpoint, transaction and object requests.
     client: sui_rpc::Client,
-    /// Deployed package versions used to decode Hashi event BCS.
+    /// Deployed package versions used to identify Hashi event and object types.
     package_versions: PackageVersions,
-    /// Current Hashi package used to construct server-side transaction filters.
+    /// Original Hashi package used to construct server-side transaction filters.
     package_id: String,
     /// Latest timestamp through which the poller has completely scanned transactions.
     cursor_seconds: UnixSeconds,
@@ -297,8 +297,8 @@ impl SuiEventsPoller {
                 .context("Sui GetObject response is missing the object")?,
             Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
             Err(status) => {
-                return Err(anyhow::Error::new(status)
-                    .context(format!("failed to fetch withdrawal transaction {wid}")));
+                return Err(status)
+                    .with_context(|| format!("failed to fetch withdrawal transaction {wid}"));
             }
         };
         withdrawal_approval(&self.package_versions, wid, &object)
@@ -702,33 +702,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_or_foreign_object_is_no_approval() {
-        let mut missing = poller_for(OneObjectLedger {
+    async fn lookup_and_event_scan_build_the_same_approval() {
+        let txn = withdrawal_transaction(WID);
+        let poller = poller_for(OneObjectLedger {
             object: None,
             miss: tonic::Code::NotFound,
         })
         .await;
-        assert_eq!(missing.fetch_withdrawal_approval(WID).await.unwrap(), None);
+        // `WithdrawalPickedForProcessing` fields, in declaration order.
+        let mut contents = Bcs::serialize(&(
+            txn.id,
+            txn.txid,
+            txn.request_ids.clone(),
+            txn.inputs.clone(),
+            txn.withdrawal_outputs.clone(),
+            txn.change_outputs.clone(),
+            txn.created_timestamp_ms,
+            txn.randomness.clone(),
+        ))
+        .unwrap();
+        contents.name = Some(format!(
+            "{PACKAGE_ID}::withdrawal_queue::WithdrawalPickedForProcessing"
+        ));
+        let mut event = Event::default();
+        event.contents = Some(contents);
 
-        let foreign_package = Address::new([0x22; 32]);
-        let mut foreign = poller_for(OneObjectLedger {
-            object: Some(object_at_wid(foreign_package, &withdrawal_transaction(WID))),
-            miss: tonic::Code::NotFound,
-        })
-        .await;
-        assert_eq!(foreign.fetch_withdrawal_approval(WID).await.unwrap(), None);
+        let looked_up = withdrawal_approval(
+            &poller.package_versions,
+            WID,
+            &object_at_wid(PACKAGE_ID, &txn),
+        )
+        .unwrap();
+        assert_eq!(
+            poller.parse_event(event, 0).unwrap(),
+            looked_up.map(MonitorEvent::Withdrawal)
+        );
     }
 
     #[tokio::test]
-    async fn contents_for_another_withdrawal_are_an_error() {
-        let other = withdrawal_transaction(Address::new([0x3e; 32]));
-        let mut poller = poller_for(OneObjectLedger {
-            object: Some(object_at_wid(PACKAGE_ID, &other)),
-            miss: tonic::Code::NotFound,
-        })
-        .await;
+    async fn a_missing_or_foreign_object_is_no_approval() {
+        let foreign_type = object_at_wid(Address::new([0x22; 32]), &withdrawal_transaction(WID));
+        let mut package = object_at_wid(PACKAGE_ID, &withdrawal_transaction(WID));
+        package.object_type = Some("package".to_string());
 
-        assert!(poller.fetch_withdrawal_approval(WID).await.is_err());
+        for object in [None, Some(foreign_type), Some(package)] {
+            let mut poller = poller_for(OneObjectLedger {
+                object,
+                miss: tonic::Code::NotFound,
+            })
+            .await;
+            assert_eq!(poller.fetch_withdrawal_approval(WID).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_or_mismatched_contents_are_an_error() {
+        let another_withdrawal = object_at_wid(
+            PACKAGE_ID,
+            &withdrawal_transaction(Address::new([0x3e; 32])),
+        );
+        let mut undecodable = object_at_wid(PACKAGE_ID, &withdrawal_transaction(WID));
+        undecodable.contents = Some(Bcs::from(vec![1, 2, 3]));
+
+        for object in [another_withdrawal, undecodable] {
+            let mut poller = poller_for(OneObjectLedger {
+                object: Some(object),
+                miss: tonic::Code::NotFound,
+            })
+            .await;
+            assert!(poller.fetch_withdrawal_approval(WID).await.is_err());
+        }
     }
 
     #[tokio::test]
