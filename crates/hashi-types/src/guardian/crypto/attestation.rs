@@ -169,7 +169,7 @@ impl BuildPcrs {
 ///
 /// `current_build` is the current/live build. `prev_builds` contains older
 /// builds that may still appear in persisted logs during an upgrade or replay.
-/// Verification matches the signature-verified `untrusted_git_revision` to one
+/// Verification matches the signature-verified deployment revision to one
 /// entry, then checks PCR0 against that entry. Callers use the resolved
 /// `BuildPcrs` to enforce the policy for their context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -17,7 +17,6 @@ use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorActivateRequest;
-use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
@@ -106,8 +105,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let session_id = preflight.session_id.clone();
     let signing_pub_key = preflight.signing_pub_key;
     let pre_info = preflight.info.clone();
-    let standby =
-        verify_provisioned_standby_info(&pre_info, &guardian_s3, &cfg, &allowlist, &master_g)?;
+    let standby = verify_provisioned_standby_info(&pre_info, &cfg, &master_g)?;
     info!(
         phase = "guardian preflight",
         session_id = %session_id,
@@ -293,9 +291,7 @@ struct StandbyChecks {
 
 fn verify_provisioned_standby_info(
     info: &GuardianInfo,
-    guardian_s3: &ResolvedS3Config,
     cfg: &Config,
-    allowlist: &hashi_types::guardian::PcrAllowlist,
     master_g: &hashi_types::bitcoin::HashiMasterG,
 ) -> anyhow::Result<StandbyChecks> {
     ensure!(
@@ -306,10 +302,7 @@ fn verify_provisioned_standby_info(
         .secret_sharing_instance
         .clone()
         .context("Guardian info missing secret-sharing instance")?;
-    let bucket_info = info
-        .bucket_info
-        .as_ref()
-        .context("Guardian info missing bucket info")?;
+    let deployment = info.deployment()?;
     let config_hash = info
         .config_hash
         .context("Guardian info missing config_hash")?;
@@ -331,10 +324,10 @@ fn verify_provisioned_standby_info(
         "Guardian has current_committee_epoch => operator activation already ran"
     );
     ensure!(
-        &guardian_s3.bucket_info == bucket_info,
-        "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        guardian_s3.bucket_info,
-        bucket_info
+        deployment == &cfg.deployment_config().summary(),
+        "Guardian deployment mismatch: expected {:?}, got {:?}",
+        cfg.deployment_config().summary(),
+        deployment
     );
     ensure!(
         cfg.limiter_config == limiter_config,
@@ -351,10 +344,7 @@ fn verify_provisioned_standby_info(
     let init_config = InitConfig::new(
         cfg.limiter_config,
         *master_g,
-        allowlist.clone(),
-        guardian_s3.bucket_info.clone(),
-        guardian_s3.retention_environment,
-        cfg.bitcoin_network,
+        cfg.deployment_config(),
         cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let expected_config_hash = init_config.digest();
@@ -402,8 +392,8 @@ fn verify_oi_info_matches_provisioned_standby(
         "OI GuardianInfo secret-sharing instance differs from live standby GuardianInfo"
     );
     ensure!(
-        oi_info.bucket_info == live_info.bucket_info,
-        "OI GuardianInfo bucket info differs from live standby GuardianInfo"
+        oi_info.deployment == live_info.deployment,
+        "OI GuardianInfo deployment differs from live standby GuardianInfo"
     );
     ensure!(
         oi_info.encryption_pubkey == live_info.encryption_pubkey,
@@ -416,10 +406,6 @@ fn verify_oi_info_matches_provisioned_standby(
     ensure!(
         oi_info.genesis_state_hash == live_info.genesis_state_hash,
         "OI GuardianInfo genesis_state_hash differs from live standby GuardianInfo"
-    );
-    ensure!(
-        oi_info.untrusted_git_revision == live_info.untrusted_git_revision,
-        "OI GuardianInfo git revision differs from live standby GuardianInfo"
     );
     ensure!(
         oi_info.limiter_config == live_info.limiter_config,

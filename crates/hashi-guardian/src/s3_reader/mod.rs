@@ -277,6 +277,23 @@ impl GuardianReader {
             .map(|(state, _dealer)| state)
     }
 
+    /// Read existing key material only for its approved Bitcoin network. Build
+    /// allowlists may change during upgrades; the key's intended network cannot.
+    pub async fn read_latest_ceremony_state_for_network(
+        &mut self,
+        network: bitcoin::Network,
+    ) -> GuardianResult<CeremonyState> {
+        let (state, dealer) = self
+            .read_latest_ceremony_state_with_build_requirement(false)
+            .await?;
+        let session = self
+            .sessions
+            .get(dealer.as_str())
+            .expect("verified dealer was loaded");
+        ensure_ceremony_network(session.info().deployment()?, network)?;
+        Ok(state)
+    }
+
     /// Read the latest ceremony together with the latest KP-share state for its
     /// `sharing_seq`, requiring both records to come from the current build.
     pub async fn read_latest_ceremony_state_from_current_build(
@@ -399,4 +416,30 @@ impl GuardianReader {
 
 fn log_verified_read(key: &str, session_id: &SessionID) {
     info!("Successfully read {key} from session {session_id}.");
+}
+
+fn ensure_ceremony_network(
+    deployment: &hashi_types::guardian::DeploymentConfigSummary,
+    expected: bitcoin::Network,
+) -> GuardianResult<()> {
+    if deployment.bitcoin_network != expected {
+        return Err(InvalidS3Log(
+            "ceremony Bitcoin network differs from deployment".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod deployment_tests {
+    use super::*;
+    #[test]
+    fn importing_a_key_preserves_its_network() {
+        let mut deployment = hashi_types::guardian::DeploymentConfig::mock_for_testing().summary();
+        assert!(ensure_ceremony_network(&deployment, bitcoin::Network::Regtest).is_ok());
+        assert!(ensure_ceremony_network(&deployment, bitcoin::Network::Bitcoin).is_err());
+        deployment.git_revision = "upgraded-build".into();
+        deployment.retention_environment = hashi_types::guardian::S3RetentionEnvironment::Devnet;
+        assert!(ensure_ceremony_network(&deployment, bitcoin::Network::Regtest).is_ok());
+    }
 }

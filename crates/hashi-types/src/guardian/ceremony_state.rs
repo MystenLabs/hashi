@@ -27,9 +27,9 @@ pub struct CeremonyState {
 }
 
 impl CeremonyState {
-    /// Blake2b-256 digest of the canonical BCS ceremony state.
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(self).expect("serialization should work");
+    /// KP approval commits to this proposal and the independently expected deployment.
+    pub fn confirmation_digest(&self, deployment: &super::DeploymentConfig) -> [u8; 32] {
+        let bytes = bcs::to_bytes(&(deployment, self)).expect("serializable ceremony approval");
         Blake2b::<U32>::digest(bytes).into()
     }
 

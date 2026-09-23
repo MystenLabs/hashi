@@ -78,10 +78,10 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         target.info.lifecycle
     );
     ensure!(
-        target.info.bucket_info.as_ref() == Some(&guardian_s3.bucket_info),
-        "guardian bucket info mismatch: expected {:?}, got {:?}",
-        guardian_s3.bucket_info,
-        target.info.bucket_info
+        target.info.deployment()? == &cfg.deployment_config().summary(),
+        "guardian deployment mismatch: expected {:?}, got {:?}",
+        cfg.deployment_config().summary(),
+        target.info.deployment
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(&target.info.encryption_pubkey).map_err(anyhow::Error::msg)?;
@@ -102,7 +102,9 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     );
 
     // 2. This KP's share of the dealt set, from the latest attested logs.
-    let state = reader.read_latest_ceremony_state().await?;
+    let state = reader
+        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
+        .await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
@@ -118,7 +120,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let share_id = decrypted.id;
     let request = ProvisionerRotateKpSetRequest::build_from_share(
         session_id.clone(),
-        allowlist,
+        cfg.deployment_config(),
         &decrypted,
         &guardian_pub_key,
         new_certs_roster,

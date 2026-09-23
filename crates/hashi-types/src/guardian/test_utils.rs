@@ -105,14 +105,19 @@ impl GuardianInfo {
         Self {
             lifecycle: WithdrawStage::OperatorInitialized.into(),
             secret_sharing_instance: None,
-            bucket_info: Some(super::S3BucketInfo {
-                bucket: "bucket".to_string(),
-                region: "us-east-1".to_string(),
-            }),
+            deployment: Some(
+                super::DeploymentConfig {
+                    bucket_info: S3BucketInfo {
+                        bucket: "bucket".into(),
+                        region: "us-east-1".into(),
+                    },
+                    ..super::DeploymentConfig::mock_for_testing()
+                }
+                .summary(),
+            ),
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
             genesis_state_hash: None,
-            untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: None,
             limiter_state: None,
             limiter_config: None,
@@ -301,7 +306,7 @@ impl BatchProvisionerRotateKpSetRequest {
         };
         let request = ProvisionerRotateKpSetRequest::new(
             "mock-session".into(),
-            mock_pcr_allowlist(),
+            super::DeploymentConfig::mock_for_testing(),
             encrypted_old_share,
             mock_kp_certs_roster(TEST_N),
             TEST_N,
@@ -374,10 +379,12 @@ impl InitConfig {
         InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
-            mock_pcr_allowlist(),
-            S3BucketInfo::mock_for_testing(),
-            super::S3RetentionEnvironment::Testnet,
-            network,
+            crate::guardian::DeploymentConfig {
+                pcr_allowlist: mock_pcr_allowlist(),
+                bucket_info: S3BucketInfo::mock_for_testing(),
+                retention_environment: super::S3RetentionEnvironment::Testnet,
+                bitcoin_network: network,
+            },
             hashi_object_id,
         )
         .expect("valid InitConfig")
@@ -400,10 +407,12 @@ impl InitConfig {
                 max_bucket_capacity: max_capacity,
             },
             hashi_btc_master_pubkey,
-            mock_pcr_allowlist(),
-            S3BucketInfo::mock_for_testing(),
-            super::S3RetentionEnvironment::Testnet,
-            super::Network::Regtest,
+            crate::guardian::DeploymentConfig {
+                pcr_allowlist: mock_pcr_allowlist(),
+                bucket_info: S3BucketInfo::mock_for_testing(),
+                retention_environment: super::S3RetentionEnvironment::Testnet,
+                bitcoin_network: super::Network::Regtest,
+            },
             TEST_HASHI_OBJECT_ID,
         )
         .expect("valid InitConfig")
@@ -547,6 +556,17 @@ impl ResolvedS3Config {
             },
             bucket_info: S3BucketInfo::mock_for_testing(),
             retention_environment: super::S3RetentionEnvironment::Testnet,
+        }
+    }
+}
+
+impl super::DeploymentConfig {
+    pub fn mock_for_testing() -> Self {
+        Self {
+            bucket_info: S3BucketInfo::mock_for_testing(),
+            retention_environment: super::S3RetentionEnvironment::Testnet,
+            bitcoin_network: super::Network::Regtest,
+            pcr_allowlist: mock_pcr_allowlist(),
         }
     }
 }

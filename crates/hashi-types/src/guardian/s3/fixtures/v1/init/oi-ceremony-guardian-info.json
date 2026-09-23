@@ -7,7 +7,7 @@
     "Init": {
       "OIGuardianInfo": {
         "lifecycle": {
-          "withdraw": "operator_initialized"
+          "ceremony": "uninitialized"
         },
         "secret_sharing_instance": null,
         "deployment": {
@@ -31,5 +31,5 @@
       }
     }
   },
-  "signature": "767664956e210cb2088599481eee3081f6684ec2e3de8143f5eeb9892cfb48283232b566a70419902ef6cbed6ecec84fe3c384f1713256b93dd7602a64210c05"
+  "signature": "98dd00b03eb050ce1a05d1bec25a77f9bc10c9a7a2404376ce8fb612f056ae45c5f580640c10292781b8e58c2afe0403377fd5938be1eca848098600646f9608"
 }

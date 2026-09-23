@@ -162,11 +162,10 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let GuardianInfo {
         lifecycle,
         secret_sharing_instance,
-        bucket_info,
+        deployment,
         encryption_pubkey: enclave_enc_pubkey_bytes,
         config_hash,
         genesis_state_hash,
-        untrusted_git_revision: enclave_git_revision,
         enclave_btc_pubkey,
         limiter_state: enclave_limiter_state,
         limiter_config,
@@ -187,9 +186,15 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let enclave_ss_instance = secret_sharing_instance
         .as_ref()
         .context("Guardian info missing secret_sharing_instance")?;
-    let enclave_bucket_info = bucket_info
+    let deployment = deployment
         .as_ref()
-        .context("Guardian info missing bucket_info")?;
+        .context("Guardian info missing deployment")?;
+    let enclave_bucket_info = &deployment.bucket_info;
+    let enclave_git_revision = &deployment.git_revision;
+    anyhow::ensure!(
+        deployment == &cfg.deployment_config().summary(),
+        "Guardian deployment differs from expected configuration"
+    );
     let enclave_config_hash = config_hash
         .as_ref()
         .copied()
@@ -214,18 +219,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         limiter_max_capacity = enclave_limiter_config.max_bucket_capacity,
         verified_git_revision = %enclave_git_revision,
         "guardian info verified against current build; cross-checking against config",
-    );
-    anyhow::ensure!(
-        enclave_git_revision == allowlist.current_build().git_revision(),
-        "Guardian git revision mismatch: expected {}, got {}",
-        allowlist.current_build().git_revision(),
-        enclave_git_revision
-    );
-    anyhow::ensure!(
-        &guardian_s3.bucket_info == enclave_bucket_info,
-        "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        guardian_s3.bucket_info,
-        enclave_bucket_info
     );
     anyhow::ensure!(
         cfg.limiter_config == enclave_limiter_config,
@@ -279,7 +272,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let state = reader.read_latest_ceremony_state().await?;
+    let state = reader
+        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
+        .await?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
@@ -308,10 +303,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let expected_config = InitConfig::new(
         cfg.limiter_config,
         master_g,
-        allowlist.clone(),
-        guardian_s3.bucket_info.clone(),
-        guardian_s3.retention_environment,
-        cfg.bitcoin_network,
+        cfg.deployment_config(),
         cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let config_hash = expected_config.digest();

@@ -380,6 +380,9 @@ impl Enclave {
     /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`'s
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
+        self.config
+            .set_deployment(args.config.deployment().clone())
+            .unwrap();
         self.config.set_s3_logger(args.s3_logger).unwrap();
         crate::operator_init::OIWithdrawModeInstall::from_parts(
             args.config,
@@ -393,6 +396,10 @@ impl Enclave {
 
     pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
         let enclave = Self::create_with_random_keys_for_mode(EnclaveMode::Ceremony);
+        enclave
+            .config
+            .set_deployment(DeploymentConfig::mock_for_testing())
+            .unwrap();
         enclave.config.set_s3_logger(s3_logger).unwrap();
         enclave
             .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())

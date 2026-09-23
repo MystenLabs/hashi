@@ -48,7 +48,7 @@ use tracing::error;
 #[serde(rename_all = "camelCase")]
 struct GuardianInfoView {
     limiter: Option<LimiterView>,
-    git_revision: String,
+    git_revision: Option<String>,
     committee_epoch: Option<String>,
     btc_pubkey: Option<String>,
     signing_pub_key: String,
@@ -269,7 +269,7 @@ fn project(
 ) -> GuardianInfoView {
     GuardianInfoView {
         limiter: limiter_view(info.limiter_state, info.limiter_config),
-        git_revision: info.untrusted_git_revision.clone(),
+        git_revision: info.deployment.as_ref().map(|d| d.git_revision.clone()),
         committee_epoch: info.current_committee_epoch.map(|e| e.to_string()),
         btc_pubkey: info
             .enclave_btc_pubkey
@@ -332,7 +332,7 @@ mod tests {
         // Fully-initialized guardian: nested limiter, u64s as strings, camelCase.
         let view = GuardianInfoView {
             limiter: limiter_view(Some(limiter_state()), Some(limiter_config())),
-            git_revision: "abc123".to_string(),
+            git_revision: Some("abc123".to_string()),
             committee_epoch: Some("7".to_string()),
             btc_pubkey: Some("deadbeef".to_string()),
             signing_pub_key: "feedface".to_string(),
@@ -367,7 +367,7 @@ mod tests {
         // present as `null` so the client schema is stable.
         let view = GuardianInfoView {
             limiter: None,
-            git_revision: "abc123".to_string(),
+            git_revision: Some("abc123".to_string()),
             committee_epoch: None,
             btc_pubkey: None,
             signing_pub_key: "feedface".to_string(),
@@ -389,7 +389,7 @@ mod tests {
     fn sample_view() -> GuardianInfoView {
         GuardianInfoView {
             limiter: limiter_view(Some(limiter_state()), Some(limiter_config())),
-            git_revision: "abc123".to_string(),
+            git_revision: Some("abc123".to_string()),
             committee_epoch: Some("7".to_string()),
             btc_pubkey: Some("deadbeef".to_string()),
             signing_pub_key: "feedface".to_string(),

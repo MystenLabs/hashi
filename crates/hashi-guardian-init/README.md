@@ -57,7 +57,7 @@ commands both verify that proposal. Once every KP confirms, the guardian
 publishes the finalized `kp-shares/` recovery state and `ceremony/` audit log.
 
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
-setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
+setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, shared deployment configuration) →
 `setup_new_key` → verifies the response signature and shape → confirms each
 share's recipient matches its expected KP cert and its PGP-encrypted ciphertext
 targets that cert (parsed without decrypting) →
@@ -277,7 +277,7 @@ to compare against their own. Each current KP then runs
 
 `submit` decodes the files, checks what the enclave will check (signature,
 pinned session, each signer's share assignment, one submission per share,
-agreement with this config's `new_kp_roster` and PCR allowlist, the dealt
+agreement with this config's `new_kp_roster` and complete deployment configuration, the dealt
 set's threshold), calls `RotateKpSet` in one batch, verifies the guardian-
 signed response (`sharing_seq + 1`, every share encrypted to the new certs)
 and its session-scoped `kp-shares/proposed/` record, then waits for every new
@@ -311,7 +311,7 @@ One current KP's contribution to a KP-set rotation. It:
    against `kp_roster`, and decrypts the share addressed to `kp_pgp_cert_path`
    (`gpg --decrypt` over a pipe; the plaintext stays in memory).
 3. HPKE-encrypts the share to the guardian and signs a request binding it to
-   the pinned session, the PCR allowlist, and `new_kp_roster`'s certs and
+   the pinned session, the deployment configuration, and `new_kp_roster`'s certs and
    `n`/`t`. The signature is what authorizes the proposal.
 4. Writes the signed request to `--submission-path`: the wire message,
    prost-encoded. It holds nothing secret and can be sent to the operator
@@ -324,7 +324,7 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guard
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `kp_pgp_cert_path`, `guardian_endpoint`, `guardian_s3`,
 `kp_roster` and `new_kp_roster`. Every KP must sign the same proposal (the
-new set, `n`, `t` and the PCR allowlist): the enclave rejects a batch whose
+new set, `n`, `t` and the deployment configuration): the enclave rejects a batch whose
 submissions disagree.
 
 ## recovering a lost KP key
@@ -426,3 +426,26 @@ certificate-loading commands do, then prints the primary-key fingerprint.
 key's three PEM sidecars from a self-signed device that only `non-enclave-dev`
 builds trust, so dev ceremonies (the devnet deploy, the local replica) run
 without YubiKeys.
+
+## Shared deployment policy
+
+Ceremony and withdraw initialization use the same `DeploymentConfig`: S3
+bucket/region, retention environment, Bitcoin network, and PCR allowlist. The
+existing YAML fields are assembled into this policy; S3 credentials are separate.
+`GuardianInfo` exposes a derived summary after OI, including the current revision
+but no PCR allowlist. Operators and KPs compare that summary with their own
+configuration and independently pin the live attestation.
+
+New-KP ceremony confirmations sign the session and a digest of the complete
+expected deployment configuration plus the verified ceremony state. Old-KP
+rotation submissions also authorize the full policy before their shares are
+used. Withdraw PI continues to authenticate `InitConfig`, which now nests that
+same policy. A hidden difference in previous-build PCR pins therefore changes
+the approval even when the public summaries match.
+
+The enclave checks its measured PCR against the proposed current build before
+OI commits. This precursor also retains the compiled revision (including the
+ceremony suffix), fixed mode, and baked-in S3 destinations. Failed preparation
+is retryable. When reusing a key for rotation or withdrawal, its original
+ceremony network must match the configured Bitcoin network; upgrades may change
+the allowlist without changing the key's intended network.

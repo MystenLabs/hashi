@@ -9,7 +9,6 @@ use hashi_types::guardian::GenesisState;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::ResolvedS3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
@@ -148,7 +147,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let ceremony_state = reader.read_latest_ceremony_state().await?;
+    let ceremony_state = reader
+        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
+        .await?;
     ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     ceremony_state
         .encrypted_shares
@@ -168,10 +169,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let init_config = InitConfig::new(
         cfg.limiter_config,
         master_g,
-        allowlist.clone(),
-        guardian_s3.bucket_info.clone(),
-        guardian_s3.retention_environment,
-        cfg.bitcoin_network,
+        cfg.deployment_config(),
         cfg.hashi.hashi_ids.hashi_object_id,
     )?;
     let config_hash = init_config.digest();
@@ -219,7 +217,6 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     );
     verify_initialized_info(
         post.info.clone(),
-        &guardian_s3,
         &scraped_instance,
         &init_config,
         config_hash,
@@ -287,8 +284,8 @@ fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
         "guardian already has a secret-sharing instance"
     );
     ensure!(
-        info.bucket_info.is_none(),
-        "guardian already has bucket info"
+        info.deployment.is_none(),
+        "guardian already has deployment configuration"
     );
     ensure!(
         info.config_hash.is_none(),
@@ -323,7 +320,6 @@ fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
 
 fn verify_initialized_info(
     info: GuardianInfo,
-    guardian_s3: &ResolvedS3Config,
     expected_instance: &SecretSharingInstance,
     expected_config: &InitConfig,
     expected_config_hash: [u8; 32],
@@ -336,9 +332,9 @@ fn verify_initialized_info(
     let instance = info
         .secret_sharing_instance
         .context("Guardian info missing secret-sharing instance")?;
-    let bucket_info = info
-        .bucket_info
-        .context("Guardian info missing bucket info")?;
+    let deployment = info
+        .deployment
+        .context("Guardian info missing deployment")?;
     let config_hash = info
         .config_hash
         .context("Guardian info missing config_hash")?;
@@ -356,10 +352,10 @@ fn verify_initialized_info(
         instance
     );
     ensure!(
-        bucket_info == guardian_s3.bucket_info,
-        "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        guardian_s3.bucket_info,
-        bucket_info
+        deployment == expected_config.deployment().summary(),
+        "Guardian deployment mismatch: expected {:?}, got {:?}",
+        expected_config.deployment().summary(),
+        deployment
     );
     ensure!(
         config_hash == expected_config_hash,

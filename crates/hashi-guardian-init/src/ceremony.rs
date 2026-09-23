@@ -53,7 +53,7 @@ pub struct CeremonyGuardian {
 }
 
 impl CeremonyGuardian {
-    /// Connect, run `OperatorInit` (ceremony mode: S3 config only) unless it
+    /// Connect, run `OperatorInit` (ceremony mode: shared deployment configuration) unless it
     /// already ran, and pin the session: the live and the S3 `init/`
     /// attestations must carry the same signing key.
     pub async fn init(cfg: &Config, guardian_s3: &ResolvedS3Config) -> Result<Self> {
@@ -91,10 +91,11 @@ impl CeremonyGuardian {
                     phase = "operator_init",
                     bucket = guardian_s3.bucket_name(),
                     region = guardian_s3.region(),
-                    "calling OperatorInit (ceremony mode: S3 config only)",
+                    "calling OperatorInit (ceremony mode: shared deployment configuration)",
                 );
                 let request = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
-                    guardian_s3.clone(),
+                    cfg.deployment_config(),
+                    guardian_s3.credentials.clone(),
                 ))
                 .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
                 client
@@ -123,10 +124,10 @@ impl CeremonyGuardian {
             verified.session_id
         );
         ensure!(
-            verified.info.bucket_info.as_ref() == Some(&guardian_s3.bucket_info),
-            "guardian bucket info mismatch: expected {:?}, got {:?}",
-            guardian_s3.bucket_info,
-            verified.info.bucket_info
+            verified.info.deployment()? == &cfg.deployment_config().summary(),
+            "guardian deployment mismatch: expected {:?}, got {:?}",
+            cfg.deployment_config().summary(),
+            verified.info.deployment
         );
         info!(
             phase = "guardian info",

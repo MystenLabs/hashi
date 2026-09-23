@@ -3,6 +3,7 @@
 
 mod ceremony_state;
 pub mod crypto;
+mod deployment;
 pub mod errors;
 pub mod lifecycle;
 pub mod proto_conversions;
@@ -19,6 +20,7 @@ pub use crypto::attestation;
 pub use crypto::encryption as kp_certs_roster;
 pub use crypto::signing;
 pub use crypto::*;
+pub use deployment::*;
 pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
@@ -96,8 +98,8 @@ pub struct GuardianInfo {
     pub lifecycle: EnclaveLifecycle,
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
-    /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
-    pub bucket_info: Option<S3BucketInfo>,
+    /// Public summary of the installed deployment configuration, absent before OI.
+    pub deployment: Option<DeploymentConfigSummary>,
     /// Encryption key. Used by KPs to encrypt their shares.
     #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
@@ -105,10 +107,6 @@ pub struct GuardianInfo {
     /// KPs recompute it from their verified sources and match to confirm config.
     #[serde(with = "crate::guardian::serde::option_hex_32")]
     pub config_hash: Option<[u8; 32]>,
-    /// Git revision of the guardian build. Untrusted (enclave-self-reported);
-    /// verified out-of-band by reproducibly building at this revision and matching
-    /// PCRs against the session's attestation.
-    pub untrusted_git_revision: GitRevision,
     /// Enclave BTC signing pubkey (x-only). Absent before `provisioner_init`.
     pub enclave_btc_pubkey: Option<BitcoinPubkey>,
     /// Current rate limiter state (set after operator_activate).
@@ -157,14 +155,8 @@ pub struct InitConfig {
     limiter_config: LimiterConfig,
     /// Raw MPC verifying key (curve point with y-parity preserved).
     hashi_btc_master_pubkey: HashiMasterG,
-    /// Guardian build PCR pins used to verify attested guardian sessions.
-    pcr_allowlist: PcrAllowlist,
-    /// S3 bucket and region used for Guardian state.
-    bucket_info: S3BucketInfo,
-    /// Hashi deployment class selecting the S3 object-lock policy.
-    retention_environment: S3RetentionEnvironment,
-    /// BTC network.
-    network: Network,
+    /// Deployment settings shared with ceremony mode.
+    deployment: DeploymentConfig,
     /// The Hashi shared-object id this guardian serves. Bound into every
     /// committee-certificate preimage the enclave verifies, so certificates
     /// minted for another Hashi deployment can never verify here.
@@ -276,16 +268,16 @@ pub struct ProvisionerRotateCertResponse {
 //    Ceremony mode requests and responses
 // ---------------------------------------
 
-/// Ceremony-mode bootstrap carrying the S3 configuration used for ceremony logs.
+/// Ceremony-mode bootstrap carrying the shared deployment policy and separate credentials.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CeremonyOperatorInitRequest {
-    pub s3_config: ResolvedS3Config,
+    pub deployment: DeploymentConfig,
+    pub s3_credentials: S3Credentials,
 }
 
 /// New KPs authorize the session, roster, and sharing parameters by confirming
 /// the live proposal digest before completed ceremony state is published.
-/// TODO(SEC-525): Bind the ceremony's Bitcoin network and S3 retention
-/// environment into the proposal digest that every KP confirms.
+/// The confirmation also commits to the full deployment configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     /// One ordered KP certificate per secret share.
@@ -305,7 +297,7 @@ pub struct SetupNewKeyResponse {
     pub btc_master_pubkey: BitcoinPubkey,
 }
 /// One KP's signed confirmation that it independently verified the complete
-/// ceremony state for a specific guardian session.
+/// ceremony state and deployment configuration for a specific guardian session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CeremonyConfirmationRequest {
     expected_session_id: SessionID,
@@ -331,7 +323,7 @@ pub struct BatchProvisionerRotateKpSetRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProvisionerRotateKpSetRequest {
     expected_session_id: SessionID,
-    pcr_allowlist: PcrAllowlist,
+    deployment: DeploymentConfig,
     encrypted_old_share: GuardianEncryptedShare,
     /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
     /// `new_params.num_shares()`.
@@ -363,8 +355,11 @@ pub type WithdrawalID = sui_sdk_types::Address;
 // ---------------------------------
 
 impl OperatorInitRequest {
-    pub fn new_ceremony_mode(s3_config: ResolvedS3Config) -> Self {
-        Self::Ceremony(CeremonyOperatorInitRequest { s3_config })
+    pub fn new_ceremony_mode(deployment: DeploymentConfig, s3_credentials: S3Credentials) -> Self {
+        Self::Ceremony(CeremonyOperatorInitRequest {
+            deployment,
+            s3_credentials,
+        })
     }
 
     pub fn new_withdraw_mode(
@@ -567,19 +562,13 @@ impl InitConfig {
     pub fn new(
         limiter_config: LimiterConfig,
         hashi_btc_master_pubkey: HashiMasterG,
-        pcr_allowlist: PcrAllowlist,
-        bucket_info: S3BucketInfo,
-        retention_environment: S3RetentionEnvironment,
-        network: Network,
+        deployment: DeploymentConfig,
         hashi_object_id: sui_sdk_types::Address,
     ) -> GuardianResult<Self> {
         Ok(Self {
             limiter_config,
             hashi_btc_master_pubkey,
-            pcr_allowlist,
-            bucket_info,
-            retention_environment,
-            network,
+            deployment,
             hashi_object_id,
         })
     }
@@ -589,21 +578,19 @@ impl InitConfig {
     ) -> (
         LimiterConfig,
         HashiMasterG,
-        PcrAllowlist,
-        S3BucketInfo,
-        S3RetentionEnvironment,
-        Network,
+        DeploymentConfig,
         sui_sdk_types::Address,
     ) {
         (
             self.limiter_config,
             self.hashi_btc_master_pubkey,
-            self.pcr_allowlist,
-            self.bucket_info,
-            self.retention_environment,
-            self.network,
+            self.deployment,
             self.hashi_object_id,
         )
+    }
+
+    pub fn deployment(&self) -> &DeploymentConfig {
+        &self.deployment
     }
 
     pub fn limiter_config(&self) -> &LimiterConfig {
@@ -614,30 +601,12 @@ impl InitConfig {
         self.hashi_btc_master_pubkey
     }
 
-    pub fn pcr_allowlist(&self) -> &PcrAllowlist {
-        &self.pcr_allowlist
-    }
-
-    pub fn resolved_s3_config(&self, credentials: S3Credentials) -> ResolvedS3Config {
-        ResolvedS3Config {
-            credentials,
-            bucket_info: self.bucket_info.clone(),
-            retention_environment: self.retention_environment,
-        }
-    }
-
-    pub fn network(&self) -> Network {
-        self.network
-    }
-
-    /// The Hashi shared-object id certificates verified by this guardian
-    /// must be bound to.
+    /// Hashi object whose committee certificates this guardian accepts.
     pub fn hashi_object_id(&self) -> sui_sdk_types::Address {
         self.hashi_object_id
     }
 
-    /// The `config_hash`: the digest KPs authenticate in their signed PI
-    /// submissions.
+    /// The config hash KPs authenticate, including the entire deployment policy.
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(&InitConfigRepr::from(self)).expect("serialization should work");
         Blake2b::<U32>::digest(bytes).into()
@@ -741,7 +710,7 @@ impl BatchProvisionerRotateKpSetRequest {
 impl ProvisionerRotateKpSetRequest {
     pub fn new(
         expected_session_id: SessionID,
-        pcr_allowlist: PcrAllowlist,
+        deployment: DeploymentConfig,
         encrypted_old_share: GuardianEncryptedShare,
         new_kp_certs_roster: KpCertRoster,
         new_num_shares: usize,
@@ -757,7 +726,7 @@ impl ProvisionerRotateKpSetRequest {
         }
         Ok(Self {
             expected_session_id,
-            pcr_allowlist,
+            deployment,
             encrypted_old_share,
             new_kp_certs_roster,
             new_params,
@@ -765,10 +734,10 @@ impl ProvisionerRotateKpSetRequest {
     }
 
     /// Build one current KP's rotation request. The KP signature directly binds
-    /// the proposed new roster and sharing parameters to its encrypted old share.
+    /// the full deployment policy, new roster, and sharing parameters to its encrypted old share.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
-        pcr_allowlist: PcrAllowlist,
+        deployment: DeploymentConfig,
         share: &Share,
         enclave_pub_key: &EncPubKey,
         new_kp_certs_roster: KpCertRoster,
@@ -777,7 +746,7 @@ impl ProvisionerRotateKpSetRequest {
     ) -> GuardianResult<Self> {
         Self::new(
             expected_session_id,
-            pcr_allowlist,
+            deployment,
             encrypt_share(share, enclave_pub_key, None, rng),
             new_kp_certs_roster,
             new_params.num_shares(),
@@ -789,8 +758,8 @@ impl ProvisionerRotateKpSetRequest {
         &self.expected_session_id
     }
 
-    pub fn pcr_allowlist(&self) -> &PcrAllowlist {
-        &self.pcr_allowlist
+    pub fn deployment(&self) -> &DeploymentConfig {
+        &self.deployment
     }
 
     pub fn encrypted_old_share(&self) -> &GuardianEncryptedShare {
@@ -809,14 +778,14 @@ impl ProvisionerRotateKpSetRequest {
         self,
     ) -> (
         SessionID,
-        PcrAllowlist,
+        DeploymentConfig,
         GuardianEncryptedShare,
         KpCertRoster,
         SecretSharingParams,
     ) {
         (
             self.expected_session_id,
-            self.pcr_allowlist,
+            self.deployment,
             self.encrypted_old_share,
             self.new_kp_certs_roster,
             self.new_params,
@@ -953,7 +922,7 @@ impl GetGuardianInfoResponse {
     ///
     /// Checks:
     /// - `signed_info` is signed by `signing_pub_key`;
-    /// - its git revision matches `expected_build`;
+    /// - its installed deployment revision, when present, matches `expected_build`;
     /// - the Nitro attestation has a valid signature;
     /// - the certificate chain is valid now;
     /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
@@ -966,10 +935,14 @@ impl GetGuardianInfoResponse {
             .verify_signature(&self.signing_pub_key)?
             .response
             .clone();
-        if info.untrusted_git_revision != expected_build.git_revision() {
+        // Before OI only the independently pinned attestation is available.
+        // Once installed, the signed deployment label must agree as well.
+        if let Some(deployment) = &info.deployment
+            && deployment.git_revision != expected_build.git_revision()
+        {
             return Err(CryptoVerificationError::new(format!(
-                "guardian info reports build '{}', expected current build '{}'",
-                info.untrusted_git_revision,
+                "guardian reports build '{}', expected '{}'",
+                deployment.git_revision,
                 expected_build.git_revision()
             )));
         }
@@ -1016,10 +989,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 struct InitConfigRepr {
     pub limiter_config: LimiterConfig,
     pub hashi_btc_master_pubkey: HashiMasterG,
-    pub pcr_allowlist: PcrAllowlist,
-    pub bucket_info: S3BucketInfo,
-    pub retention_environment: S3RetentionEnvironment,
-    pub network: String,
+    pub deployment: DeploymentConfig,
     pub hashi_object_id: sui_sdk_types::Address,
 }
 
@@ -1082,22 +1052,12 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
 
 impl From<&InitConfig> for InitConfigRepr {
     fn from(config: &InitConfig) -> Self {
-        let (
-            limiter_config,
-            hashi_btc_master_pubkey,
-            pcr_allowlist,
-            bucket_info,
-            retention_environment,
-            network,
-            hashi_object_id,
-        ) = config.clone().into_parts();
+        let (limiter_config, hashi_btc_master_pubkey, deployment, hashi_object_id) =
+            config.clone().into_parts();
         Self {
             limiter_config,
             hashi_btc_master_pubkey,
-            pcr_allowlist,
-            bucket_info,
-            retention_environment,
-            network: network.to_string(),
+            deployment,
             hashi_object_id,
         }
     }
@@ -1182,7 +1142,7 @@ mod tests {
         assert!(matches!(
             ProvisionerRotateKpSetRequest::new(
                 "session".into(),
-                PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
+                DeploymentConfig::mock_for_testing(),
                 GuardianEncryptedShare {
                     id: ShareID::new(1).unwrap(),
                     ciphertext: Ciphertext {
@@ -1213,7 +1173,7 @@ mod tests {
     fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
         let cert_sets = mock_attested_kp_certs(5);
         let reversed: Vec<AttestedKpCert> = cert_sets.iter().rev().cloned().collect();
-        let pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap();
+        let deployment = DeploymentConfig::mock_for_testing();
         let encrypted_old_share = GuardianEncryptedShare {
             id: ShareID::new(1).unwrap(),
             ciphertext: Ciphertext {
@@ -1223,7 +1183,7 @@ mod tests {
         };
         let a = ProvisionerRotateKpSetRequest::new(
             "session".into(),
-            pcr_allowlist.clone(),
+            deployment.clone(),
             encrypted_old_share.clone(),
             KpCertRoster::new(cert_sets).unwrap(),
             5,
@@ -1232,7 +1192,7 @@ mod tests {
         .unwrap();
         let b = ProvisionerRotateKpSetRequest::new(
             "session".into(),
-            pcr_allowlist,
+            deployment,
             encrypted_old_share,
             KpCertRoster::new(reversed).unwrap(),
             5,

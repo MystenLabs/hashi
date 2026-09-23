@@ -83,16 +83,10 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     );
     let session_id = endpoint_verified.session_id;
     let signing_pub_key = endpoint_verified.signing_pub_key;
-    let endpoint_bucket_info = endpoint_verified
-        .info
-        .bucket_info
-        .as_ref()
-        .context("active GuardianInfo missing bucket_info")?;
+    let endpoint_deployment = endpoint_verified.info.deployment()?;
     anyhow::ensure!(
-        &guardian_s3.bucket_info == endpoint_bucket_info,
-        "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        guardian_s3.bucket_info,
-        endpoint_bucket_info
+        endpoint_deployment == &cfg.deployment_config().summary(),
+        "Guardian deployment differs from expected configuration"
     );
     let verified_session = reader.get_current_session_info(&session_id).await?;
     anyhow::ensure!(
@@ -100,8 +94,8 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     anyhow::ensure!(
-        verified_session.info().bucket_info.as_ref() == Some(endpoint_bucket_info),
-        "guardian S3 session bucket info differs from live GuardianInfo"
+        verified_session.info().deployment()? == endpoint_deployment,
+        "guardian S3 session deployment differs from live GuardianInfo"
     );
     let endpoint_btc_pubkey = endpoint_verified
         .info
@@ -111,7 +105,9 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     let guardian_pub_key = EncPubKey::from_bytes(&endpoint_verified.info.encryption_pubkey)
         .map_err(anyhow::Error::msg)?;
 
-    let state = reader.read_latest_ceremony_state().await?;
+    let state = reader
+        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
+        .await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         &state.btc_master_pubkey == endpoint_btc_pubkey,

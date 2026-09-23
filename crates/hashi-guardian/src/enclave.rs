@@ -63,14 +63,12 @@ pub struct EnclaveConfig {
     s3_logger: OnceLock<GuardianS3Client>,
     /// Enclave BTC private key (set in provisioner_init)
     enclave_btc_keypair: OnceLock<Keypair>,
-    /// BTC network: mainnet, testnet, regtest (set in operator_init)
-    btc_network: OnceLock<Network>,
+    /// Complete deployment policy, installed once in either mode during OI.
+    deployment: OnceLock<DeploymentConfig>,
     /// Raw MPC verifying key as a curve point. Stored with y-parity so the
     /// 2-of-2 child-key derivation matches the MPC's signing protocol.
     /// Set in operator_init.
     hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
-    /// Guardian build PCR pins used to verify attested guardian sessions.
-    pcr_allowlist: OnceLock<PcrAllowlist>,
     /// Operator-supplied limiter configuration.
     /// Note: This struct is duplicated in two places: `RateLimiter` stores a copy after activation.
     limiter_config: OnceLock<LimiterConfig>,
@@ -110,11 +108,14 @@ pub(crate) struct PendingCeremony {
 }
 
 impl PendingCeremony {
-    fn new(proposal: CeremonyProposalLogMessage) -> GuardianResult<Self> {
+    fn new(
+        proposal: CeremonyProposalLogMessage,
+        deployment: &DeploymentConfig,
+    ) -> GuardianResult<Self> {
         let state = CeremonyState::from_proposal(proposal.clone())?;
         Ok(Self {
             proposal,
-            digest: state.digest(),
+            digest: state.confirmation_digest(deployment),
             confirmed_share_ids: RwLock::new(BTreeSet::new()),
         })
     }
@@ -187,9 +188,8 @@ impl EnclaveConfig {
             encryption_keys,
             s3_logger: OnceLock::new(),
             enclave_btc_keypair: OnceLock::new(),
-            btc_network: OnceLock::new(),
+            deployment: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
-            pcr_allowlist: OnceLock::new(),
             limiter_config: OnceLock::new(),
             hashi_object_id: OnceLock::new(),
         }
@@ -199,11 +199,20 @@ impl EnclaveConfig {
     // Bitcoin Configuration
     // ========================================================================
 
-    pub fn bitcoin_network(&self) -> GuardianResult<Network> {
-        self.btc_network
+    pub fn deployment(&self) -> GuardianResult<&DeploymentConfig> {
+        self.deployment
             .get()
-            .copied()
-            .ok_or(InvalidInputs("Network is uninitialized".into()))
+            .ok_or(InvalidInputs("Deployment is uninitialized".into()))
+    }
+
+    pub fn set_deployment(&self, deployment: DeploymentConfig) -> GuardianResult<()> {
+        self.deployment
+            .set(deployment)
+            .map_err(|_| InvalidInputs("Deployment is already initialized".into()))
+    }
+
+    pub fn bitcoin_network(&self) -> GuardianResult<Network> {
+        Ok(self.deployment()?.bitcoin_network)
     }
 
     pub fn set_btc_keypair(&self, keypair: Keypair) -> GuardianResult<()> {
@@ -554,17 +563,15 @@ impl Enclave {
 
     /// Whether every field operator_init installs is present (mode-aware).
     fn operator_init_state_installed(&self, mode: EnclaveMode) -> bool {
-        // Both modes install the S3 logger; a ceremony enclave installs nothing else.
-        if self.config.s3_logger.get().is_none() {
+        // Both modes install S3 and the shared deployment policy.
+        if self.config.s3_logger.get().is_none() || self.config.deployment.get().is_none() {
             return false;
         }
         match mode {
             EnclaveMode::Ceremony => true,
             // Withdraw enclaves additionally install their stable configuration.
             EnclaveMode::Withdraw => {
-                self.config.btc_network.get().is_some()
-                    && self.config.pcr_allowlist.get().is_some()
-                    && self.config.limiter_config.get().is_some()
+                self.config.limiter_config.get().is_some()
                     && self.temporary_init_state_is_available()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
                     && self.config.hashi_object_id.get().is_some()
@@ -609,14 +616,14 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    /// Build identity for `GuardianInfo.untrusted_git_revision` / the
+    /// Compiled build identity checked against the deployment revision and the
     /// `PcrAllowlist` key. A real ceremony enclave is a distinct measured build
     /// (its own PCR0) from the same-commit withdraw enclave, so it reports a
     /// distinct identity — the allowlist forbids two entries per revision, so
     /// otherwise the withdraw enclave and KPs couldn't pin both PCR0s.
     /// `test`/`non-enclave-dev` skip attestation and share one entry, so the
     /// suffix is compiled out (existing mock flow unchanged).
-    fn reported_git_revision(&self) -> String {
+    pub(crate) fn reported_git_revision(&self) -> String {
         // Injected at build time (docker/CI); defaults outside a real build.
         let base = option_env!("GIT_REVISION").unwrap_or("unknown");
         if cfg!(not(any(test, feature = "non-enclave-dev"))) && self.mode() == EnclaveMode::Ceremony
@@ -634,17 +641,12 @@ impl Enclave {
             secret_sharing_instance: temporary_init_state
                 .as_ref()
                 .map(|state| state.ceremony_state.secret_sharing_instance.clone()),
-            bucket_info: self
-                .config
-                .s3_logger()
-                .ok()
-                .map(|l| l.bucket_info().clone()),
+            deployment: self.config.deployment.get().map(DeploymentConfig::summary),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             config_hash: temporary_init_state.as_ref().map(|state| state.config_hash),
             genesis_state_hash: temporary_init_state
                 .as_ref()
                 .and_then(|state| state.genesis_state.as_ref().map(GenesisState::digest)),
-            untrusted_git_revision: self.reported_git_revision(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
             limiter_state: self.state.limiter_snapshot(),
             limiter_config: self.limiter_config().ok(),
@@ -750,7 +752,7 @@ impl Enclave {
         &self,
         proposal: CeremonyProposalLogMessage,
     ) -> GuardianResult<()> {
-        let pending = PendingCeremony::new(proposal)?;
+        let pending = PendingCeremony::new(proposal, self.config.deployment()?)?;
         self.pending_ceremony
             .set(pending)
             .map_err(|_| InvalidInputs("Pending ceremony state already set".into()))
@@ -816,24 +818,10 @@ impl Enclave {
     /// Construct a verified reader with the enclave's fixed S3 client and PCR
     /// allowlist. Each operation gets a fresh, operation-scoped session cache.
     pub fn new_guardian_reader(&self) -> GuardianResult<GuardianReader> {
-        let pcr_allowlist = self
-            .config
-            .pcr_allowlist
-            .get()
-            .cloned()
-            .ok_or_else(|| InvalidInputs("PCR allowlist is uninitialized".into()))?;
-        self.new_guardian_reader_with_allowlist(pcr_allowlist)
-    }
-
-    /// Construct a verified reader with an operation-authorized PCR allowlist.
-    /// Ceremony rotation uses the allowlist agreed in the current KPs' signed
-    /// requests because ceremony-mode operator init installs only S3 config.
-    pub(crate) fn new_guardian_reader_with_allowlist(
-        &self,
-        pcr_allowlist: PcrAllowlist,
-    ) -> GuardianResult<GuardianReader> {
-        let s3 = self.config.s3_logger()?.clone();
-        Ok(GuardianReader::from_s3_client(s3, pcr_allowlist))
+        Ok(GuardianReader::from_s3_client(
+            self.config.s3_logger()?.clone(),
+            self.config.deployment()?.pcr_allowlist.clone(),
+        ))
     }
 
     pub fn limiter_config(&self) -> GuardianResult<LimiterConfig> {
@@ -846,24 +834,14 @@ impl Enclave {
 
     pub fn install_config(
         &self,
-        network: Network,
         hashi_btc_master_pubkey: HashiMasterG,
-        pcr_allowlist: PcrAllowlist,
         limiter_config: LimiterConfig,
         hashi_object_id: hashi_types::sui_sdk_types::Address,
     ) -> GuardianResult<()> {
         self.config
-            .btc_network
-            .set(network)
-            .map_err(|_| InvalidInputs("Network is already initialized".into()))?;
-        self.config
             .hashi_btc_master_pubkey
             .set(hashi_btc_master_pubkey)
             .map_err(|_| InvalidInputs("Hashi BTC key is already initialized".into()))?;
-        self.config
-            .pcr_allowlist
-            .set(pcr_allowlist)
-            .map_err(|_| InvalidInputs("PCR allowlist is already initialized".into()))?;
         self.config
             .limiter_config
             .set(limiter_config)

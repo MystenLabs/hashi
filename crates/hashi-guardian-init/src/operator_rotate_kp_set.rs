@@ -18,11 +18,11 @@ use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
+use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::KpSigned;
-use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::ProvisionerRotateKpSetRequest;
 use hashi_types::guardian::RotateKpSetResponse;
 use hashi_types::guardian::SecretSharingInstance;
@@ -47,7 +47,10 @@ pub async fn init(cfg: Config) -> Result<()> {
     let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
     require_fresh(&guardian)?;
 
-    let state = guardian.reader.read_latest_ceremony_state().await?;
+    let state = guardian
+        .reader
+        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
+        .await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
@@ -90,7 +93,6 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
     let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
-    let allowlist = cfg.kp_roster.pcr_allowlist();
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
     let new_params = new_kp_set.params()?;
@@ -99,7 +101,10 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     require_fresh(&guardian)?;
 
     // The dealt set, as the enclave will read it with the KPs' allowlist.
-    let old = guardian.reader.read_latest_ceremony_state().await?;
+    let old = guardian
+        .reader
+        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
+        .await?;
     old.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     old.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let new_sharing_seq = old.secret_sharing_instance.sharing_seq() + 1;
@@ -113,7 +118,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
         &old,
         &Proposal {
             session_id: &guardian.session_id,
-            pcr_allowlist: &allowlist,
+            deployment: &cfg.deployment_config(),
             new_certs_roster: &new_certs_roster,
             new_params,
         },
@@ -246,7 +251,7 @@ fn report(new_instance: &SecretSharingInstance) {
 /// The pinned session and this config's proposal; every submission must match.
 struct Proposal<'a> {
     session_id: &'a SessionID,
-    pcr_allowlist: &'a PcrAllowlist,
+    deployment: &'a DeploymentConfig,
     new_certs_roster: &'a KpCertRoster,
     new_params: SecretSharingParams,
 }
@@ -281,8 +286,8 @@ fn validate_batch(
             share_id.get()
         );
         ensure!(
-            request.pcr_allowlist() == proposal.pcr_allowlist,
-            "{label}: PCR allowlist differs from this config's"
+            request.deployment() == proposal.deployment,
+            "{label}: deployment configuration differs from this config's"
         );
         ensure!(
             request.new_kp_certs_roster() == proposal.new_certs_roster,
@@ -320,6 +325,7 @@ mod tests {
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::KpEncryptedShare;
     use hashi_types::guardian::KpEncryptedShareRoster;
+    use hashi_types::guardian::PcrAllowlist;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::ShareCommitments;
     use hashi_types::guardian::ShareID;
@@ -337,7 +343,7 @@ mod tests {
         /// The dealt KPs' (cert, secret), share id `index + 1`.
         kps: Vec<(AttestedKpCert, String)>,
         session_id: SessionID,
-        pcr_allowlist: PcrAllowlist,
+        deployment: DeploymentConfig,
         new_certs_roster: KpCertRoster,
         new_params: SecretSharingParams,
     }
@@ -376,7 +382,7 @@ mod tests {
                 },
                 kps,
                 session_id: "session".into(),
-                pcr_allowlist: PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
+                deployment: DeploymentConfig::mock_for_testing(),
                 new_certs_roster: mock_kp_certs_roster(4),
                 new_params: SecretSharingParams::new(4, 3).unwrap(),
             }
@@ -385,7 +391,7 @@ mod tests {
         fn proposal(&self) -> Proposal<'_> {
             Proposal {
                 session_id: &self.session_id,
-                pcr_allowlist: &self.pcr_allowlist,
+                deployment: &self.deployment,
                 new_certs_roster: &self.new_certs_roster,
                 new_params: self.new_params,
             }
@@ -394,7 +400,7 @@ mod tests {
         fn request(&self, share_id: u16) -> ProvisionerRotateKpSetRequest {
             ProvisionerRotateKpSetRequest::new(
                 self.session_id.clone(),
-                self.pcr_allowlist.clone(),
+                self.deployment.clone(),
                 GuardianEncryptedShare {
                     id: ShareID::new(share_id).unwrap(),
                     ciphertext: Ciphertext {
@@ -557,7 +563,8 @@ mod tests {
         assert!(err.to_string().contains("sharing params differ"), "{err}");
 
         let mut config = Fixture::new();
-        config.pcr_allowlist = PcrAllowlist::new(BuildPcrs::new("other", vec![1]), []).unwrap();
+        config.deployment.pcr_allowlist =
+            PcrAllowlist::new(BuildPcrs::new("other", vec![1]), []).unwrap();
         config.new_certs_roster = f.new_certs_roster.clone();
         let err = validate_batch(
             vec![f.submission(0), f.submission(1)],
@@ -565,6 +572,9 @@ mod tests {
             &config.proposal(),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("PCR allowlist differs"), "{err}");
+        assert!(
+            err.to_string().contains("deployment configuration differs"),
+            "{err}"
+        );
     }
 }

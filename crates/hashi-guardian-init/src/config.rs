@@ -37,6 +37,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Independently configured policy used by operators and KPs in either mode.
+    pub fn deployment_config(&self) -> hashi_types::guardian::DeploymentConfig {
+        hashi_types::guardian::DeploymentConfig {
+            bucket_info: self.guardian_s3.bucket_info.clone(),
+            retention_environment: self.guardian_s3.retention_environment,
+            bitcoin_network: self.bitcoin_network,
+            pcr_allowlist: self.kp_roster.pcr_allowlist.clone(),
+        }
+    }
+
     pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path).with_context(|| {
             format!("failed to read guardian init config at {}", path.display())

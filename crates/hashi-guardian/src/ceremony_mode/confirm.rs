@@ -94,9 +94,11 @@ mod tests {
         .verify_into_data(&enclave.signing_pubkey())
         .unwrap()
         .response;
+        let ceremony_digest =
+            CeremonyState::from(response).confirmation_digest(enclave.config.deployment().unwrap());
         TestContext {
             enclave,
-            ceremony_digest: CeremonyState::from(response).digest(),
+            ceremony_digest,
             roster,
             secret_keys,
             captures,

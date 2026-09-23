@@ -102,6 +102,11 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
             || verified.info.lifecycle == CeremonyStage::Completed.into(),
         "guardian is not accepting key provisioner ceremony confirmations"
     );
+    let deployment = cfg.deployment_config();
+    ensure!(
+        verified.info.deployment()? == &deployment.summary(),
+        "ceremony deployment differs from expected configuration"
+    );
     let session_id = verified.session_id;
 
     info!(
@@ -183,7 +188,8 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // 5. Submit a signed confirmation only after the verified recovery artifact
     //    is safely stored locally.
-    let confirmation = CeremonyConfirmationRequest::new(session_id, state.digest());
+    let confirmation =
+        CeremonyConfirmationRequest::new(session_id, state.confirmation_digest(&deployment));
     let signed = KpSigned::sign(confirmation, kp_cert, None)
         .map_err(anyhow::Error::msg)
         .context("sign ceremony confirmation with the KP key")?;

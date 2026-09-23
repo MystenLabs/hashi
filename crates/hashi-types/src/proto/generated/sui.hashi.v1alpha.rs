@@ -1829,46 +1829,41 @@ pub struct GuardianInfoData {
     /// Secret-sharing instance (if set).
     #[prost(message, optional, tag = "1")]
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
-    /// S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
+    /// Installed deployment summary; absent before operator initialization.
     #[prost(message, optional, tag = "2")]
-    pub bucket_info: ::core::option::Option<S3BucketInfo>,
+    pub deployment: ::core::option::Option<DeploymentConfigSummary>,
     /// Guardian encryption public key (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub encryption_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Git revision of the guardian build. Untrusted (enclave-self-reported);
-    /// KP tooling verifies by reproducibly building at this revision and matching
-    /// the resulting PCRs against the session's attestation PCRs.
-    #[prost(string, optional, tag = "4")]
-    pub untrusted_git_revision: ::core::option::Option<::prost::alloc::string::String>,
     /// X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
     /// Absent before `provisioner_init` has set the keypair.
-    #[prost(bytes = "bytes", optional, tag = "5")]
+    #[prost(bytes = "bytes", optional, tag = "4")]
     pub enclave_btc_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
     /// Digest of the operator-supplied InitConfig (32 bytes, if set).
-    #[prost(bytes = "bytes", optional, tag = "6")]
+    #[prost(bytes = "bytes", optional, tag = "5")]
     pub config_hash: ::core::option::Option<::prost::bytes::Bytes>,
     /// Current rate limiter state (if initialized).
-    #[prost(message, optional, tag = "7")]
+    #[prost(message, optional, tag = "6")]
     pub limiter_state: ::core::option::Option<LimiterState>,
     /// Immutable limiter configuration (if initialized).
-    #[prost(message, optional, tag = "8")]
+    #[prost(message, optional, tag = "7")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
     /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
-    #[prost(uint64, optional, tag = "9")]
+    #[prost(uint64, optional, tag = "8")]
     pub current_committee_epoch: ::core::option::Option<u64>,
     /// MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
     /// guardian's own BTC key). Set after operator_init.
-    #[prost(bytes = "bytes", optional, tag = "10")]
+    #[prost(bytes = "bytes", optional, tag = "9")]
     pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
     /// Digest of the optional GenesisState pinned during operator_init.
-    #[prost(bytes = "bytes", optional, tag = "13")]
+    #[prost(bytes = "bytes", optional, tag = "12")]
     pub genesis_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
     /// The Hashi shared-object id (32 bytes) this guardian serves (set after
     /// operator_init). Certificates verified by this enclave are bound to it.
-    #[prost(bytes = "bytes", optional, tag = "14")]
+    #[prost(bytes = "bytes", optional, tag = "13")]
     pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
     /// Signed enclave mode and its current lifecycle stage.
-    #[prost(oneof = "guardian_info_data::Lifecycle", tags = "11, 12")]
+    #[prost(oneof = "guardian_info_data::Lifecycle", tags = "10, 11")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
 }
 /// Nested message and enum types in `GuardianInfoData`.
@@ -1876,9 +1871,9 @@ pub mod guardian_info_data {
     /// Signed enclave mode and its current lifecycle stage.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Lifecycle {
-        #[prost(enumeration = "super::CeremonyStage", tag = "11")]
+        #[prost(enumeration = "super::CeremonyStage", tag = "10")]
         Ceremony(i32),
-        #[prost(enumeration = "super::WithdrawStage", tag = "12")]
+        #[prost(enumeration = "super::WithdrawStage", tag = "11")]
         Withdraw(i32),
     }
 }
@@ -1999,7 +1994,7 @@ pub struct SignedCeremonyConfirmationRequest {
     /// Guardian session the KP authenticated before confirming.
     #[prost(string, tag = "1")]
     pub expected_session_id: ::prost::alloc::string::String,
-    /// Blake2b-256 digest of the BCS-encoded CeremonyState.
+    /// Blake2b-256 of BCS(full DeploymentConfig, verified CeremonyState).
     #[prost(bytes = "bytes", optional, tag = "2")]
     pub ceremony_digest: ::core::option::Option<::prost::bytes::Bytes>,
     /// Complete detached-signature envelope.
@@ -2035,10 +2030,12 @@ pub mod operator_init_request {
         Withdraw(::prost::alloc::boxed::Box<super::WithdrawOperatorInitRequest>),
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CeremonyOperatorInitRequest {
     #[prost(message, optional, tag = "1")]
-    pub s3_config: ::core::option::Option<S3Config>,
+    pub deployment: ::core::option::Option<DeploymentConfig>,
+    #[prost(message, optional, tag = "2")]
+    pub s3_credentials: ::core::option::Option<S3Credentials>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WithdrawOperatorInitRequest {
@@ -2061,22 +2058,6 @@ pub struct GenesisState {
     pub hashi_object_id: ::prost::bytes::Bytes,
     #[prost(bytes = "bytes", tag = "3")]
     pub mpc_master_g: ::prost::bytes::Bytes,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct S3Config {
-    #[prost(string, optional, tag = "1")]
-    pub access_key: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "2")]
-    pub secret_key: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "3")]
-    pub bucket_name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "4")]
-    pub region: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "5")]
-    pub session_token: ::core::option::Option<::prost::alloc::string::String>,
-    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
-    #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
-    pub retention_environment: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3Credentials {
@@ -2142,29 +2123,40 @@ pub struct PcrAllowlist {
     #[prost(message, repeated, tag = "2")]
     pub prev_builds: ::prost::alloc::vec::Vec<BuildPcrs>,
 }
+/// Complete deployment policy authenticated by KPs in both modes.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DeploymentConfig {
+    #[prost(message, optional, tag = "1")]
+    pub bucket_info: ::core::option::Option<S3BucketInfo>,
+    #[prost(enumeration = "S3RetentionEnvironment", tag = "2")]
+    pub retention_environment: i32,
+    #[prost(enumeration = "Network", optional, tag = "3")]
+    pub bitcoin_network: ::core::option::Option<i32>,
+    #[prost(message, optional, tag = "4")]
+    pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
+}
+/// Public projection; verifiers keep their independently approved full allowlist.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeploymentConfigSummary {
+    #[prost(message, optional, tag = "1")]
+    pub bucket_info: ::core::option::Option<S3BucketInfo>,
+    #[prost(enumeration = "S3RetentionEnvironment", tag = "2")]
+    pub retention_environment: i32,
+    #[prost(enumeration = "Network", optional, tag = "3")]
+    pub bitcoin_network: ::core::option::Option<i32>,
+    #[prost(string, optional, tag = "4")]
+    pub git_revision: ::core::option::Option<::prost::alloc::string::String>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InitConfig {
-    /// Limiter configuration.
     #[prost(message, optional, tag = "1")]
+    pub deployment: ::core::option::Option<DeploymentConfig>,
+    #[prost(message, optional, tag = "2")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
-    /// Compressed public key bytes (33 bytes).
-    #[prost(bytes = "bytes", optional, tag = "2")]
+    /// Compressed MPC public key (33 bytes).
+    #[prost(bytes = "bytes", optional, tag = "3")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Guardian build PCR pins used by operators/KPs for attestation checks.
-    #[prost(message, optional, tag = "3")]
-    pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
-    /// BTC network.
-    #[prost(enumeration = "Network", optional, tag = "4")]
-    pub network: ::core::option::Option<i32>,
-    /// S3 bucket and region used for Guardian state.
-    #[prost(message, optional, tag = "5")]
-    pub bucket_info: ::core::option::Option<S3BucketInfo>,
-    /// Hashi deployment class selecting the S3 object-lock policy.
-    #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
-    pub retention_environment: i32,
-    /// The Hashi shared-object id (32 bytes) committee certificates verified by
-    /// this guardian must be bound to.
-    #[prost(bytes = "bytes", optional, tag = "7")]
+    #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_object_id: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2239,9 +2231,9 @@ pub struct SignedProvisionerRotateKpSetRequest {
     /// The ceremony guardian session this KP verified before encrypting its share.
     #[prost(string, tag = "2")]
     pub expected_session_id: ::prost::alloc::string::String,
-    /// Builds allowed to authenticate the existing ceremony and KP-share state.
+    /// Complete deployment policy, checked before any old share is used.
     #[prost(message, optional, tag = "3")]
-    pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
+    pub deployment: ::core::option::Option<DeploymentConfig>,
     /// Ordered attested certificates for the proposed new KP set.
     #[prost(message, repeated, tag = "4")]
     pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<AttestedKpCert>,
@@ -2257,7 +2249,7 @@ pub struct SignedProvisionerRotateKpSetRequest {
     pub kp_signature: ::prost::alloc::string::String,
 }
 /// Collects threshold-many current-KP-authorized requests. Every submission must
-/// agree on the PCR allowlist and proposed new KP set. The enclave loads the
+/// agree on the deployment configuration and proposed new KP set. The enclave loads the
 /// authoritative old instance and encrypted-share roster from S3.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BatchProvisionerRotateKpSetRequest {

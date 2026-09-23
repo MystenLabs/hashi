@@ -4,7 +4,7 @@
 //! Production guardian key ceremony commands.
 //!
 //! `operator ceremony` drives a fresh ceremony-mode guardian through genesis BTC key setup:
-//! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
+//! [`OperatorInit`] (ceremony mode, shared deployment configuration) -> [`SetupNewKey`] -> confirm each
 //! share's recipient roster matches its expected KP cert set and every
 //! ciphertext targets its keyed cert (without decrypting) -> cross-check the
 //! guardian's session-scoped `kp-shares/proposed/` record -> wait for every KP
