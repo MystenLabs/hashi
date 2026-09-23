@@ -11,7 +11,7 @@ use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
-use fastcrypto_tbls::threshold_schnorr::signing::Excluded;
+use fastcrypto_tbls::threshold_schnorr::signing::Blame;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
@@ -1123,7 +1123,7 @@ impl AggregationContext {
             self.deriv,
             self.params,
         );
-        let (signature, excluded) = super::spawn_blocking(move || {
+        let (signature, blame) = super::spawn_blocking(move || {
             aggregate_signatures(
                 &message,
                 &nonce,
@@ -1137,12 +1137,12 @@ impl AggregationContext {
         .await?;
         Ok((
             signature,
-            match excluded {
-                Excluded::NoCorrection => Vec::new(),
-                Excluded::Blamable(indices) => indices,
+            match blame {
+                Blame::Nobody => Vec::new(),
+                Blame::Certain(indices) => indices,
                 // The decoding lacked the margin to tell which contributions were wrong, so these
                 // are reported rather than counted against their owners.
-                Excluded::Inconclusive(indices) => {
+                Blame::Inconclusive(indices) => {
                     tracing::warn!(
                         "aggregation excluded share indices {indices:?}, but not by enough to \
                          attribute them to their owners"
@@ -4085,7 +4085,7 @@ mod tests {
         verify_schnorr(&data.vk, message, &sig);
         assert_eq!(
             mismatched,
-            Excluded::Blamable(vec![corrupted_index]),
+            Blame::Certain(vec![corrupted_index]),
             "recovery must identify exactly the corrupted share index"
         );
     }
