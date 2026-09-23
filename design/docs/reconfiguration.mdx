@@ -251,8 +251,11 @@ can form and the last committed committee keeps serving deposits and
 withdrawals; nodes see the flag and do not submit. A reconfiguration already
 pending is unaffected, and so is `abort_reconfig`, so the sequence for staying
 on the last committed committee is to set the flag and then let the overrun
-reconfiguration be aborted. Clearing the flag lets the nodes start the
-replacement at once.
+reconfiguration be aborted. Clearing the flag does not itself start a
+replacement: nodes submit `start_reconfig` on a Sui epoch change, on an abort,
+and at startup, and none of those is a config change, so the replacement waits
+for the next Sui epoch change unless an operator runs
+`hashi committee start-reconfig`.
 
 Every abort observed on chain, whoever submitted it, increments the node
 metric `hashi_reconfig_aborted_total`. An abort means a reconfiguration

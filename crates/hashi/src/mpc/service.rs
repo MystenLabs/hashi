@@ -500,8 +500,10 @@ impl MpcService {
     }
 
     /// Whether governance holds reconfiguration (`reconfig_hold`). The chain
-    /// refuses `start_reconfig` while it is set, so submitting one would only
-    /// burn gas; a pending reconfiguration is unaffected.
+    /// refuses `start_reconfig` while it is set, and the SDK simulates during
+    /// `build`, so an attempt would fail before it was ever submitted; this
+    /// skips the doomed round-trips and the error logs they produce. A
+    /// pending reconfiguration is unaffected.
     fn reconfig_held(&self) -> bool {
         self.inner
             .onchain_state()
@@ -1823,8 +1825,8 @@ impl MpcService {
                     // The chain has the pending change before the mirror
                     // does, and every caller checks for it next. Without
                     // this wait the startup loop came straight back here
-                    // and submitted a duplicate, which the chain rejects
-                    // but still charges for.
+                    // and tried again, burning every retry attempt against
+                    // a chain that now refuses the call.
                     self.wait_for_mirror(|| self.get_pending_epoch_change().is_some())
                         .await;
                     return;

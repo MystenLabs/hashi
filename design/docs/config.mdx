@@ -143,7 +143,11 @@ stall the same way. Only forming a committee is gated: a reconfiguration
 already pending still completes or aborts as usual, and deposits and
 withdrawals are unaffected. Nodes read the flag and do not submit
 `start_reconfig` while it is set; they report it as `hashi_reconfig_hold`.
-Set and cleared with an `UpdateConfig` proposal.
+Set and cleared with an `UpdateConfig` proposal. Clearing it lifts the gate
+but does not itself start a reconfiguration: nodes submit `start_reconfig` on
+a Sui epoch change, on an abort, and at startup, so the replacement waits for
+the next Sui epoch change unless an operator runs
+`hashi committee start-reconfig`.
 
 ### `withdrawal_cancellation_cooldown_ms`
 
