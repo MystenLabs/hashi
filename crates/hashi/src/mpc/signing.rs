@@ -11,6 +11,7 @@ use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
+use fastcrypto_tbls::threshold_schnorr::signing::Excluded;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
@@ -1122,7 +1123,7 @@ impl AggregationContext {
             self.deriv,
             self.params,
         );
-        let (signature, excluded, can_blame) = super::spawn_blocking(move || {
+        let (signature, excluded) = super::spawn_blocking(move || {
             aggregate_signatures(
                 &message,
                 &nonce,
@@ -1134,16 +1135,22 @@ impl AggregationContext {
             )
         })
         .await?;
-        if !can_blame {
-            // The decode lacked the margin to tell which contributions were wrong, so these are
-            // reported rather than counted against their owners.
-            tracing::warn!(
-                "aggregation excluded share indices {excluded:?}, but not by enough to attribute \
-                 them to their owners"
-            );
-            return Ok((signature, Vec::new()));
-        }
-        Ok((signature, excluded))
+        Ok((
+            signature,
+            match excluded {
+                Excluded::NoCorrection => Vec::new(),
+                Excluded::Blamable(indices) => indices,
+                // The decoding lacked the margin to tell which contributions were wrong, so these
+                // are reported rather than counted against their owners.
+                Excluded::Inconclusive(indices) => {
+                    tracing::warn!(
+                        "aggregation excluded share indices {indices:?}, but not by enough to \
+                         attribute them to their owners"
+                    );
+                    Vec::new()
+                }
+            },
+        ))
     }
 }
 
@@ -1175,8 +1182,18 @@ async fn try_finalize_signature(
         deriv: st.derivation_address,
         params,
     };
-    let crypto_error =
-        |e: FastCryptoError| FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string()));
+    let crypto_error = |e: FastCryptoError| {
+        let reason = match e {
+            // The partials were ruled out as the cause, so collecting more cannot fix this.
+            FastCryptoError::InconsistentInputs => {
+                "the presigning tuple, beacon, message or verifying key does not match the one \
+                 the signers used, so retrying will not help"
+                    .to_string()
+            }
+            e => e.to_string(),
+        };
+        FinalizeOutcome::Failed(SigningError::CryptoError(reason))
+    };
     if !st.clean_attempted {
         st.clean_attempted = true;
         match ctx.aggregate(st.partials[..t].to_vec(), metrics).await {
@@ -4051,7 +4068,7 @@ mod tests {
         data.partial_sigs[0].value = S::rand(&mut data.rng);
         let corrupted_index = data.partial_sigs[0].index;
 
-        let (sig, mismatched, can_blame) = aggregate_signatures(
+        let (sig, mismatched) = aggregate_signatures(
             message,
             &data.public_nonce,
             &data.beacon,
@@ -4066,10 +4083,9 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&data.vk, message, &sig);
-        assert!(can_blame, "six partials with one excluded clears t + f");
         assert_eq!(
             mismatched,
-            vec![corrupted_index],
+            Excluded::Blamable(vec![corrupted_index]),
             "recovery must identify exactly the corrupted share index"
         );
     }
