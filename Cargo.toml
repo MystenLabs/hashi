@@ -75,6 +75,7 @@ fjall = { version = "3.0.0", features = ["bytes_1"] }
 async-trait = "0.1"
 thiserror = "1.0"
 hex = { version = "0.4", features = ["serde"] }
+itertools = "0.14"
 bcs = "0.1.6"
 rand = "0.8"
 tap = "1.0.1"

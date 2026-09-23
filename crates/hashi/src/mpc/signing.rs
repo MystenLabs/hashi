@@ -18,6 +18,7 @@ use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use hashi_types::committee::Committee;
+use itertools::Itertools;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -757,17 +758,12 @@ impl SigningManager {
 
         // Whose partial signatures to skip, and how many indices each of them was named for.
         // Both verdicts name contributors to leave out.
-        let per_owner: HashMap<Address, u64> = match &blame {
+        let per_owner: HashMap<Address, usize> = match &blame {
             Blame::Nobody => return false,
-            Blame::Certain(indices) | Blame::Inconclusive(indices) => {
-                let mut per_owner = HashMap::new();
-                for idx in indices {
-                    if let Some(owner) = share_owners.get(idx) {
-                        *per_owner.entry(*owner).or_default() += 1;
-                    }
-                }
-                per_owner
-            }
+            Blame::Certain(indices) | Blame::Inconclusive(indices) => indices
+                .iter()
+                .filter_map(|idx| share_owners.get(idx).copied())
+                .counts(),
         };
 
         // Report metrics.
@@ -777,7 +773,7 @@ impl SigningManager {
                     metrics
                         .mpc_partial_sig_mismatch_total
                         .with_label_values(&[&owner.to_string()])
-                        .inc_by(*count);
+                        .inc_by(*count as u64);
                 }
                 let local: Vec<ShareIndex> = indices
                     .iter()
