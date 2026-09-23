@@ -746,8 +746,6 @@ impl SigningManager {
     ///
     /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
     /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
-    /// The first decode runs on `t + 2` partial signatures, usually too few for certainty, so
-    /// flagging on the certain ones alone would rarely do anything.
     fn flag_mismatched(
         &self,
         blame: Blame,
