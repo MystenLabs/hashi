@@ -3690,7 +3690,7 @@ pub struct AvidNonceDispersal {
     /// The confirm certificate bound to this dispersal.
     #[prost(message, optional, tag = "2")]
     pub confirm_cert: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
-    /// Round-1 message for a non-confirmer, so it can still vote in round 2.
+    /// Round-1 message for non-confirmers, and for everyone on a repeat round.
     #[prost(message, optional, tag = "3")]
     pub optimistic_message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }

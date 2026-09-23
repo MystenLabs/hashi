@@ -51,7 +51,7 @@ message AvidNonceDispersal {
   // The confirm certificate bound to this dispersal.
   optional sui.rpc.v2.Bcs confirm_cert = 2;
 
-  // Round-1 message for a non-confirmer, so it can still vote in round 2.
+  // Round-1 message for non-confirmers, and for everyone on a repeat round.
   optional sui.rpc.v2.Bcs optimistic_message = 3;
 }
 
