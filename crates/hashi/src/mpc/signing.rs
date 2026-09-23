@@ -742,7 +742,8 @@ impl SigningManager {
     }
 
     /// Flag every share index whose owner `blame` names, so the rest of this call skips their
-    /// partial signatures. Returns whether anything new was flagged.
+    /// partial signatures, and count the certain ones against their owners. Returns whether
+    /// anything new was flagged.
     ///
     /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
     /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
