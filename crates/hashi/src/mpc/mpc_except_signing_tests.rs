@@ -16072,6 +16072,66 @@ fn test_avid_blame_refuses_a_vote_cert_for_another_batch() {
 }
 
 #[test]
+fn test_avid_blame_reports_a_forged_vote_cert_as_invalid() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let responder = &mut fx.confirmers[1];
+    responder
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .unwrap();
+    let (held_vote, _, _) = responder
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap()
+        .clone();
+    let target = AvidVoteMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: hash_avid_vote(&held_vote),
+        batch_index,
+    };
+    let other_hashi_id = Address::new([0xBB; 32]);
+    let mut agg = BlsSignatureAggregator::new(other_hashi_id, setup.committee(), target.clone());
+    for i in 0..6usize {
+        agg.add_signature(setup.signing_keys[i].sign(
+            other_hashi_id,
+            setup.epoch(),
+            setup.address(i),
+            &target,
+        ))
+        .unwrap();
+    }
+    let request = ComplainRequest {
+        dealer: fx.dealer_addr,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidBlame {
+            complaint: batch_avss_avid::AvidComplaint {
+                shards: BTreeMap::new(),
+            },
+            vote_cert: agg.finish().unwrap(),
+        },
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+
+    let result = responder.handle_complain_request(setup.address(5), &request);
+    assert!(
+        matches!(result, Err(MpcError::InvalidCertificate(_))),
+        "a blame vote cert with a bad signature must be reported as an invalid certificate: {result:?}"
+    );
+}
+
+#[test]
 fn test_handle_avid_nonce_complaint_responds_and_gates() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(6);

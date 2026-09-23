@@ -151,15 +151,16 @@ impl MpcService for HttpService {
                     epoch,
                     check,
                 } => {
-                    let result = check.run();
-                    mpc_manager
-                        .write()
-                        .unwrap()
-                        .commit_complaint_outcome(epoch, cache_key, result)
-                        .map_err(|e| {
-                            tracing::warn!("complain failed: {e}");
-                            mpc_error_to_status(e)
-                        })?
+                    let response = check.run().map_err(|e| {
+                        tracing::warn!("complain failed: {e}");
+                        mpc_error_to_status(e)
+                    })?;
+                    mpc_manager.write().unwrap().cache_complaint_response(
+                        epoch,
+                        cache_key,
+                        response.clone(),
+                    );
+                    response
                 }
             };
             Ok(ComplainResponse::from(&complaint))

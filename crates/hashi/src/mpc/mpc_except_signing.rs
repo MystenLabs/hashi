@@ -884,17 +884,6 @@ impl MpcManager {
         }
     }
 
-    pub(crate) fn commit_complaint_outcome(
-        &mut self,
-        epoch: u64,
-        cache_key: ComplaintResponsesKey,
-        result: MpcResult<ComplaintResponse>,
-    ) -> MpcResult<ComplaintResponse> {
-        let response = result?;
-        self.cache_complaint_response(epoch, cache_key, response.clone());
-        Ok(response)
-    }
-
     #[cfg(test)]
     pub(crate) fn handle_complain_request(
         &mut self,
@@ -908,8 +897,9 @@ impl MpcManager {
                 epoch,
                 check,
             } => {
-                let result = check.run();
-                self.commit_complaint_outcome(epoch, cache_key, result)
+                let response = check.run()?;
+                self.cache_complaint_response(epoch, cache_key, response.clone());
+                Ok(response)
             }
         }
     }
@@ -6747,7 +6737,7 @@ impl ComplaintCheck {
                     AvidEvidence::Blame { complaint, cert } => {
                         let cert = cert
                             .to_verified()
-                            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
                         (
                             "blame",
                             receiver.handle_avid_complaint(
