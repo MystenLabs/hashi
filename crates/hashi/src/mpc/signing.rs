@@ -3672,7 +3672,8 @@ mod tests {
         // n=4, t=2, f=1. All 3 peers return corrupt sigs.
         // aggregate_signatures uses first `threshold` sigs, so caller(valid) +
         // any_peer(corrupted) → InvalidSignature.
-        // RS: 4 sigs, 3 bad, capacity=(4-2)/2=1 → TooManyErrors.
+        // RS: 4 sigs, 3 bad, capacity=(4-2)/2=1 → decoding fails, reported as
+        // InvalidSignature.
         // No remaining peers → TooManyInvalidSignatures.
         let setup = SigningTestSetup::new(4);
         let message = b"too-many";
