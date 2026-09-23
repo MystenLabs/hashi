@@ -755,25 +755,24 @@ impl SigningManager {
     ) -> bool {
         let share_owners = &self.config.share_owners;
 
-        // Whose partial signatures to skip. Both verdicts name contributors to leave out.
-        let owners: HashSet<Address> = match &blame {
+        // Whose partial signatures to skip, and how many indices each of them was named for.
+        // Both verdicts name contributors to leave out.
+        let per_owner: HashMap<Address, u64> = match &blame {
             Blame::Nobody => return false,
-            Blame::Certain(indices) | Blame::Inconclusive(indices) => indices
-                .iter()
-                .filter_map(|idx| share_owners.get(idx).copied())
-                .collect(),
-        };
-
-        // What to report. Counting an index against its owner is a claim about them.
-        match &blame {
-            Blame::Nobody => {}
-            Blame::Certain(indices) => {
-                let mut per_owner: HashMap<Address, u64> = HashMap::new();
+            Blame::Certain(indices) | Blame::Inconclusive(indices) => {
+                let mut per_owner = HashMap::new();
                 for idx in indices {
                     if let Some(owner) = share_owners.get(idx) {
                         *per_owner.entry(*owner).or_default() += 1;
                     }
                 }
+                per_owner
+            }
+        };
+
+        // Report metrics.
+        match &blame {
+            Blame::Certain(indices) => {
                 for (owner, count) in &per_owner {
                     metrics
                         .mpc_partial_sig_mismatch_total
@@ -793,13 +792,13 @@ impl SigningManager {
                     );
                 }
             }
-            Blame::Inconclusive(_) => {}
+            _ => {}
         }
         let before = flagged.len();
         flagged.extend(
             share_owners
                 .iter()
-                .filter(|(_, owner)| owners.contains(*owner))
+                .filter(|(_, owner)| per_owner.contains_key(*owner))
                 .map(|(idx, _)| *idx),
         );
         let grew = flagged.len() > before;
