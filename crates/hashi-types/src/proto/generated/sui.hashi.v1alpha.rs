@@ -2346,9 +2346,9 @@ pub struct UpdateCommitteeResponse {
 #[repr(i32)]
 pub enum CeremonyStage {
     Unspecified = 0,
-    OperatorInitialized = 2,
-    AwaitingKeyProvisionerConfirmations = 3,
-    Completed = 4,
+    OperatorInitialized = 1,
+    AwaitingKeyProvisionerConfirmations = 2,
+    Completed = 3,
 }
 impl CeremonyStage {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2382,9 +2382,9 @@ impl CeremonyStage {
 #[repr(i32)]
 pub enum WithdrawStage {
     Unspecified = 0,
-    OperatorInitialized = 2,
-    ProvisionerInitialized = 3,
-    Activated = 4,
+    OperatorInitialized = 1,
+    ProvisionerInitialized = 2,
+    Activated = 3,
 }
 impl WithdrawStage {
     /// String value of the enum field names used in the ProtoBuf definition.
