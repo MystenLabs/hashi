@@ -1117,14 +1117,15 @@ mod tests {
                     .map(|&sid| shares_source[u16::from(sid) as usize - 1].clone())
                     .collect(),
             };
+            let params = Parameters {
+                t,
+                f: cfg.max_faulty as u16,
+            };
             let presignatures = mock_presignatures(
                 &nonces_for_dealer,
                 &info.share_ids,
                 batch_size_per_weight,
-                Parameters {
-                    t,
-                    f: cfg.max_faulty as u16,
-                },
+                params,
             );
             let committee = {
                 let mpc_mgr = node.hashi().mpc_manager().unwrap();
@@ -1136,7 +1137,7 @@ mod tests {
             let signing_manager = hashi::mpc::SigningManager::new(
                 info.address,
                 committee,
-                t,
+                params,
                 key_shares,
                 vk,
                 share_owners.clone(),
