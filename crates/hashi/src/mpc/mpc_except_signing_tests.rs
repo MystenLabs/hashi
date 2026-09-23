@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::communication::ChannelResult;
-use crate::config::{AllowedDealer, ComplaintResponsePolicy};
+use crate::config::AllowedDealer;
+use crate::config::ComplaintResponsePolicy;
 use crate::metrics::Metrics;
 
 async fn run_nonce_generation_for_test(
