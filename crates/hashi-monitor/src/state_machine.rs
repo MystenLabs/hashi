@@ -135,7 +135,8 @@ impl WithdrawalStateMachine {
     ///
     /// A missing predecessor is expected by the event timestamp plus
     /// `clock_skew`; a missing successor is expected by the configured
-    /// next-event deadline. Events may be ingested in any order.
+    /// next-event deadline. A neighbor already seen is checked against both
+    /// deadlines of the pair, so findings do not depend on ingestion order.
     ///
     /// Event retention is based on structural validity, not finding category.
     /// `MonitorFinding::InvalidEventAdded` denotes a contradictory, definite
@@ -145,17 +146,6 @@ impl WithdrawalStateMachine {
     ///
     /// The return value contains every resulting finding. An empty vector means
     /// the event was accepted without one.
-    ///
-    /// TODO: Represent a missing neighbor with its full allowed timestamp
-    /// interval, and apply both bounds regardless of event ingestion order. For
-    /// consecutive events `E_i` and `E_{i+1}`, observing `E_i` should constrain
-    /// `E_{i+1}` to `[E_i - clock_skew, E_i + next_event_delay]`; observing
-    /// `E_{i+1}` first should impose the equivalent inverse interval on `E_i`.
-    /// The current single-deadline representation checks only one side of that
-    /// interval, so timing findings can depend on which event is ingested first.
-    /// Before applying this uniformly to E2/E3, account for a Bitcoin block
-    /// header's timestamp being an approximate miner-provided time rather than
-    /// the wall-clock time at which the transaction was confirmed.
     pub fn add_event(
         &mut self,
         new_event: MonitorWithdrawalEvent,
@@ -181,44 +171,30 @@ impl WithdrawalStateMachine {
             )];
         }
 
-        // If a neighbor is already expected, record a timing finding but still
-        // ingest the event. The monitor must retain a late event so it can
-        // distinguish liveness from safety and continue validating the flow.
         let mut timing_findings = Vec::new();
-        for (src, deadline, relation) in self.expected_events.iter() {
-            if *src == new_event.event_type && *deadline < new_event.timestamp_secs {
-                timing_findings.push(MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(new_event.clone()),
-                    relation: *relation,
-                    deadline: *deadline,
-                    occurred_at: new_event.timestamp_secs,
-                });
+        if let Some(predecessor_event_type) = new_event.event_type.predecessor() {
+            match self.get(predecessor_event_type) {
+                Some(predecessor) => {
+                    timing_findings.extend(neighbor_timing_findings(predecessor, &new_event, cfg))
+                }
+                None => self.expected_events.push((
+                    predecessor_event_type,
+                    predecessor_deadline(&new_event, cfg),
+                    EventRelation::Predecessor,
+                )),
             }
         }
-
-        // if neighbor is not there, then we add an expectation indicating when we expect to see it.
-        if let Some(predecessor_event_type) = new_event.event_type.predecessor()
-            && self.get(predecessor_event_type).is_none()
-        {
-            let predecessor_deadline = new_event.timestamp_secs + cfg.clock_skew;
-            self.expected_events.push((
-                predecessor_event_type,
-                predecessor_deadline,
-                EventRelation::Predecessor,
-            ));
-        }
-        if let Some(successor_event_type) = new_event.event_type.successor()
-            && self.get(successor_event_type).is_none()
-        {
-            let successor_deadline = new_event.timestamp_secs
-                + cfg
-                    .next_event_delay(new_event.event_type)
-                    .expect("has a successor");
-            self.expected_events.push((
-                successor_event_type,
-                successor_deadline,
-                EventRelation::Successor,
-            ));
+        if let Some(successor_event_type) = new_event.event_type.successor() {
+            match self.get(successor_event_type) {
+                Some(successor) => {
+                    timing_findings.extend(neighbor_timing_findings(&new_event, successor, cfg))
+                }
+                None => self.expected_events.push((
+                    successor_event_type,
+                    successor_deadline(&new_event, cfg),
+                    EventRelation::Successor,
+                )),
+            }
         }
 
         // remove any previously stored expected events
@@ -294,6 +270,48 @@ impl WithdrawalStateMachine {
         }
         out
     }
+}
+
+fn predecessor_deadline(event: &MonitorWithdrawalEvent, cfg: &Config) -> UnixSeconds {
+    event.timestamp_secs + cfg.clock_skew
+}
+
+fn successor_deadline(event: &MonitorWithdrawalEvent, cfg: &Config) -> UnixSeconds {
+    event.timestamp_secs
+        + cfg
+            .next_event_delay(event.event_type)
+            .expect("has a successor")
+}
+
+/// Both timing bounds between consecutive events. A Bitcoin block time is set by
+/// its miner and can precede the guardian signature, so E3 bounds only its own lateness.
+fn neighbor_timing_findings(
+    predecessor: &MonitorWithdrawalEvent,
+    successor: &MonitorWithdrawalEvent,
+    cfg: &Config,
+) -> Vec<MonitorFinding> {
+    let mut findings = Vec::new();
+    let deadline = successor_deadline(predecessor, cfg);
+    if deadline < successor.timestamp_secs {
+        findings.push(MonitorFinding::EventOccurredAfterDeadline {
+            event: MonitorEvent::Withdrawal(successor.clone()),
+            relation: EventRelation::Successor,
+            deadline,
+            occurred_at: successor.timestamp_secs,
+        });
+    }
+    let deadline = predecessor_deadline(successor, cfg);
+    if successor.event_type != WithdrawalEventType::E3BtcConfirmed
+        && deadline < predecessor.timestamp_secs
+    {
+        findings.push(MonitorFinding::EventOccurredAfterDeadline {
+            event: MonitorEvent::Withdrawal(predecessor.clone()),
+            relation: EventRelation::Predecessor,
+            deadline,
+            occurred_at: predecessor.timestamp_secs,
+        });
+    }
+    findings
 }
 
 /// Deposit State Machine. Unlike withdrawal state machine, here we only listen for a sui event,
@@ -587,32 +605,100 @@ mod tests {
             event(WithdrawalEventType::E1HashiApproved, 4, 100, 4),
             &cfg,
         );
-        assert!(
-            sm.add_event(event(WithdrawalEventType::E3BtcConfirmed, 4, 300, 4), &cfg)
-                .is_empty()
-        );
+        let btc_confirmed = event(WithdrawalEventType::E3BtcConfirmed, 4, 600, 4);
+        assert!(sm.add_event(btc_confirmed.clone(), &cfg).is_empty());
 
-        let event = event(WithdrawalEventType::E2GuardianApproved, 4, 311, 4);
-        let findings = sm.add_event(event.clone(), &cfg);
+        let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 4, 311, 4);
+        let findings = sm.add_event(guardian_approval.clone(), &cfg);
 
         assert_eq!(
             findings,
             vec![
                 MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(event.clone()),
+                    event: MonitorEvent::Withdrawal(guardian_approval),
                     relation: EventRelation::Successor,
                     deadline: 200,
                     occurred_at: 311,
                 },
                 MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(event),
-                    relation: EventRelation::Predecessor,
-                    deadline: 310,
-                    occurred_at: 311,
+                    event: MonitorEvent::Withdrawal(btc_confirmed),
+                    relation: EventRelation::Successor,
+                    deadline: 511,
+                    occurred_at: 600,
                 },
             ]
         );
         assert!(!sm.is_expecting_events());
+    }
+
+    #[test]
+    fn timing_findings_do_not_depend_on_ingestion_order() {
+        let cfg = cfg();
+        let late = |event: &MonitorWithdrawalEvent, relation, deadline| {
+            MonitorFinding::EventOccurredAfterDeadline {
+                event: MonitorEvent::Withdrawal(event.clone()),
+                relation,
+                deadline,
+                occurred_at: event.timestamp_secs,
+            }
+        };
+
+        for (approved_at, signed_at) in [
+            (100, 150),
+            (100, 201),
+            (100, 400_000),
+            (110, 100),
+            (111, 100),
+        ] {
+            let approval = event(WithdrawalEventType::E1HashiApproved, 5, approved_at, 5);
+            let signature = event(WithdrawalEventType::E2GuardianApproved, 5, signed_at, 5);
+            let expected = if signed_at > approved_at + 100 {
+                vec![late(
+                    &signature,
+                    EventRelation::Successor,
+                    approved_at + 100,
+                )]
+            } else if approved_at > signed_at + 10 {
+                vec![late(&approval, EventRelation::Predecessor, signed_at + 10)]
+            } else {
+                vec![]
+            };
+
+            let mut approval_first = WithdrawalStateMachine::new(approval.clone(), &cfg);
+            let mut signature_first = WithdrawalStateMachine::new(signature.clone(), &cfg);
+            assert_eq!(approval_first.add_event(signature, &cfg), expected);
+            assert_eq!(signature_first.add_event(approval, &cfg), expected);
+        }
+    }
+
+    #[test]
+    fn a_bitcoin_block_time_bounds_only_its_own_lateness() {
+        let cfg = cfg();
+        for (confirmed_at, expected_deadline) in [(130, None), (350, None), (351, Some(350))] {
+            let mut sm = WithdrawalStateMachine::new(
+                event(WithdrawalEventType::E1HashiApproved, 6, 100, 6),
+                &cfg,
+            );
+            assert!(
+                sm.add_event(
+                    event(WithdrawalEventType::E2GuardianApproved, 6, 150, 6),
+                    &cfg
+                )
+                .is_empty()
+            );
+            let confirmation = event(WithdrawalEventType::E3BtcConfirmed, 6, confirmed_at, 6);
+
+            let expected = expected_deadline
+                .map(|deadline| MonitorFinding::EventOccurredAfterDeadline {
+                    event: MonitorEvent::Withdrawal(confirmation.clone()),
+                    relation: EventRelation::Successor,
+                    deadline,
+                    occurred_at: confirmed_at,
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            assert_eq!(sm.add_event(confirmation, &cfg), expected);
+        }
     }
 
     #[test]
