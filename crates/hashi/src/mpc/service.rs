@@ -1150,15 +1150,25 @@ impl MpcService {
     /// manager carries no MPC outputs, and peers ask this node for the
     /// epoch's public output (a new member does, during the replacement
     /// rotation), which only the reconstruction from local certificates puts
-    /// back. A failed attempt is not retried before `RETRY_INTERVAL` has
-    /// passed, the same pacing `handle_reconfig` gives the setup it retries,
-    /// since this runs on every checkpoint. Runs under the reconcile guard.
+    /// back.
+    ///
+    /// "Restored" therefore means the manager is for this epoch *and* carries
+    /// its output, not merely that the epoch matches. The recovery path
+    /// installs the manager before it reconstructs, so a failure after that
+    /// point leaves a manager on the right epoch with no output: judging by
+    /// the epoch alone would call that done and never retry, stranding the
+    /// node in exactly the state this is meant to repair. A node that joined
+    /// this epoch hits that often, since reconstructing its previous output
+    /// needs peers that may themselves still be restoring. A failed attempt
+    /// is not retried before `RETRY_INTERVAL` has passed, the same pacing
+    /// `handle_reconfig` gives the setup it retries, since this runs on every
+    /// checkpoint. Runs under the reconcile guard.
     async fn restore_current_manager(&self, epoch: u64) {
-        let pinned = self
-            .inner
-            .mpc_manager()
-            .map(|manager| manager.read().unwrap().mpc_config.epoch);
-        if !manager_needs_restore(pinned, epoch, self.get_pending_epoch_change()) {
+        let installed = self.inner.mpc_manager().map(|manager| {
+            let manager = manager.read().unwrap();
+            (manager.mpc_config.epoch, manager.has_current_output())
+        });
+        if !manager_needs_restore(installed, epoch, self.get_pending_epoch_change()) {
             return;
         }
         let now = tokio::time::Instant::now;
@@ -1170,15 +1180,16 @@ impl MpcService {
                 *self.next_manager_restore.lock().unwrap() = None;
                 info!(
                     "sync_if_stale: restored the MpcManager for epoch {epoch}; a \
-                     reconfiguration that did not complete had left it on {pinned:?}"
+                     reconfiguration that did not complete had left it on {installed:?} \
+                     (epoch, has_output)"
                 );
             }
             Err(e) => {
                 *self.next_manager_restore.lock().unwrap() = Some((epoch, now() + RETRY_INTERVAL));
                 error!(
                     "sync_if_stale: failed to restore the MpcManager for epoch {epoch} (left \
-                     on {pinned:?} by a reconfiguration that did not complete), next attempt \
-                     in {RETRY_INTERVAL:?}: {e}"
+                     on {installed:?} as (epoch, has_output) by a reconfiguration that did not \
+                     complete), next attempt in {RETRY_INTERVAL:?}: {e}"
                 );
             }
         }
@@ -2819,12 +2830,21 @@ fn reconfig_window_closed(latest_sui_epoch: u64, target_epoch: u64) -> bool {
     latest_sui_epoch > target_epoch
 }
 
-/// Whether the `MpcManager` must be rebuilt for `current_epoch`: it is on
-/// some other epoch (or missing) and no reconfiguration is pending. While one
-/// is pending the manager belongs to its target, which `handle_reconfig`
-/// owns and replaces itself.
-fn manager_needs_restore(pinned: Option<u64>, current_epoch: u64, pending: Option<u64>) -> bool {
-    pending.is_none() && pinned != Some(current_epoch)
+/// Whether the `MpcManager` must be rebuilt for `current_epoch`, given the
+/// installed manager as `(its epoch, whether it carries that epoch's MPC
+/// output)` or `None` when none is installed. A rebuild is due unless the
+/// manager is for this epoch and carries its output: an epoch match alone is
+/// what the recovery path leaves behind when it installs the manager and then
+/// fails to reconstruct, which serves peers nothing. While a reconfiguration
+/// is pending the manager belongs to its target, which `handle_reconfig` owns
+/// and replaces itself, so nothing is touched.
+fn manager_needs_restore(
+    installed: Option<(u64, bool)>,
+    current_epoch: u64,
+    pending: Option<u64>,
+) -> bool {
+    pending.is_none()
+        && !matches!(installed, Some((epoch, has_output)) if epoch == current_epoch && has_output)
 }
 
 /// Pending on chain and inside its Sui epoch window.
@@ -3111,21 +3131,32 @@ mod manager_restore_tests {
     #[test]
     fn a_manager_left_on_a_dead_target_is_restored() {
         // The rotation to 7 was aborted; the node still serves epoch 6.
-        assert!(manager_needs_restore(Some(7), 6, None));
+        assert!(manager_needs_restore(Some((7, true)), 6, None));
         // A missing manager is just as unusable for refill.
         assert!(manager_needs_restore(None, 6, None));
     }
 
     #[test]
-    fn a_manager_on_the_current_epoch_is_left_alone() {
-        assert!(!manager_needs_restore(Some(6), 6, None));
+    fn a_manager_on_the_current_epoch_without_its_output_is_restored() {
+        // The recovery path installs the manager and only then reconstructs,
+        // so a failure after that point leaves the epoch matching with no
+        // output to serve peers. Judging by the epoch alone would call this
+        // done and never retry.
+        assert!(manager_needs_restore(Some((6, false)), 6, None));
+    }
+
+    #[test]
+    fn a_manager_on_the_current_epoch_with_its_output_is_left_alone() {
+        assert!(!manager_needs_restore(Some((6, true)), 6, None));
     }
 
     #[test]
     fn nothing_is_touched_while_a_reconfiguration_is_pending() {
         // The target's manager belongs to handle_reconfig.
-        assert!(!manager_needs_restore(Some(7), 6, Some(7)));
+        assert!(!manager_needs_restore(Some((7, true)), 6, Some(7)));
         // Even one on a stale epoch waits: handle_reconfig replaces it.
-        assert!(!manager_needs_restore(Some(5), 6, Some(7)));
+        assert!(!manager_needs_restore(Some((5, true)), 6, Some(7)));
+        // And a half-restored one waits too, for the same reason.
+        assert!(!manager_needs_restore(Some((6, false)), 6, Some(7)));
     }
 }

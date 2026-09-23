@@ -3147,6 +3147,15 @@ impl MpcManager {
             .is_some_and(|weight| weight == 0)
     }
 
+    /// Whether this manager carries the MPC output for its own epoch, which
+    /// is what `handle_get_public_mpc_output_request` serves to peers. Set by
+    /// the protocol runs and by the reconstruction in the recovery path, so a
+    /// manager that is missing it was installed but never finished recovering
+    /// (the rotation path sets the previous epoch's output alongside it).
+    pub(crate) fn has_current_output(&self) -> bool {
+        self.current_output.is_some()
+    }
+
     pub(crate) fn ensure_manager_epoch(&self, epoch: u64) -> MpcResult<()> {
         if self.mpc_config.epoch != epoch {
             return Err(MpcError::InvalidConfig(format!(
