@@ -7,12 +7,19 @@ use super::parse_member_signature;
 use crate::Hashi;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
+use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::CommitmentItem;
+use crate::withdrawals::RefusedItem;
+use crate::withdrawals::RefusedItems;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
+use crate::withdrawals::WithdrawalCommitmentError;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
@@ -20,6 +27,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 use sui_sdk_types::Address;
@@ -554,14 +562,45 @@ impl LeaderService {
             requests.len(),
         );
 
-        // Build the withdrawal tx commitment for the batch.
-        let approval = match inner.build_withdrawal_tx_commitment(&requests).await {
+        let approval = match build_checked_commitment(
+            requests,
+            |requests, excluded_inputs| {
+                let inner = inner.clone();
+                async move {
+                    inner
+                        .build_withdrawal_tx_commitment(requests, excluded_inputs)
+                        .await
+                }
+                .boxed()
+            },
+            |approval| {
+                let inner = inner.clone();
+                async move { inner.validate_withdrawal_tx_commitment(approval).await }.boxed()
+            },
+            |refused| {
+                warn!(
+                    item = ?refused.item,
+                    reason = refused.reason,
+                    "Commit check refused an item; leaving it out of the withdrawal batch: {refused}"
+                );
+                inner
+                    .metrics
+                    .withdrawal_commitment_left_out_total
+                    .with_label_values(&[refused.item.label(), refused.reason])
+                    .inc();
+            },
+        )
+        .await
+        {
             Ok(approval) => {
                 retry_tracker.clear();
                 approval
             }
             Err(e) => {
                 let kind = e.kind();
+                if kind == WithdrawalCommitmentErrorKind::CommitmentCheckFailed {
+                    error!("Withdrawal batch not proposed: {e}");
+                }
                 inner
                     .metrics
                     .leader_retries_total
@@ -776,6 +815,110 @@ impl WithdrawalTxCommitment {
 /// the full batching delay before committing the capped batch anyway.
 fn withdrawal_fire_threshold(config_max: usize) -> usize {
     config_max.min(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
+}
+
+const COMMITMENT_CHECK_ROUNDS: usize = 4;
+
+async fn build_checked_commitment(
+    mut requests: Vec<WithdrawalRequest>,
+    build: impl for<'a> Fn(
+        &'a [WithdrawalRequest],
+        &'a BTreeSet<UtxoId>,
+    )
+        -> BoxFuture<'a, Result<WithdrawalTxCommitment, WithdrawalCommitmentError>>,
+    check: impl for<'a> Fn(&'a WithdrawalTxCommitment) -> BoxFuture<'a, anyhow::Result<()>>,
+    mut on_left_out: impl FnMut(&RefusedItem),
+) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
+    let mut excluded_inputs = BTreeSet::new();
+    for _ in 0..COMMITMENT_CHECK_ROUNDS {
+        let approval = build(&requests, &excluded_inputs).await?;
+        let refusal = match check(&approval).await {
+            Ok(()) => return Ok(approval),
+            Err(refusal) => refusal,
+        };
+        let Some(RefusedItems(items)) = refusal.downcast_ref::<RefusedItems>() else {
+            return Err(WithdrawalCommitmentError::CommitmentCheckFailed(refusal));
+        };
+        for refused in items {
+            on_left_out(refused);
+            match refused.item {
+                CommitmentItem::Request(id) => requests.retain(|r| r.id != id),
+                CommitmentItem::Input(id) => {
+                    excluded_inputs.insert(id);
+                }
+            }
+        }
+        if requests.is_empty() {
+            return Err(WithdrawalCommitmentError::CommitmentCheckFailed(
+                anyhow::anyhow!("the commit check refused every request in the batch"),
+            ));
+        }
+    }
+    Err(WithdrawalCommitmentError::CommitmentCheckFailed(
+        anyhow::anyhow!(
+            "the commit check still refused the batch after {COMMITMENT_CHECK_ROUNDS} rounds"
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod checked_commitment_tests {
+    use super::*;
+    use hashi_types::bitcoin_txid::BitcoinTxid;
+
+    fn request(id: u8) -> WithdrawalRequest {
+        WithdrawalRequest {
+            id: Address::new([id; 32]),
+            sender: Address::new([0; 32]),
+            btc_amount: 100_000,
+            bitcoin_address: vec![0; 20],
+            created_timestamp_ms: 0,
+            approval_cert: None,
+            approved_timestamp_ms: None,
+            withdrawal_txn_id: None,
+            sui_tx_digest: sui_sdk_types::Digest::new([0; 32]),
+            btc: 100_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn leaves_out_the_request_the_commit_check_refuses() {
+        let refused_id = Address::new([2; 32]);
+        let mut left_out = Vec::new();
+        let approval = build_checked_commitment(
+            vec![request(1), request(2), request(3)],
+            |requests, _| {
+                let commitment = WithdrawalTxCommitment {
+                    request_ids: requests.iter().map(|r| r.id).collect(),
+                    selected_utxos: Vec::new(),
+                    outputs: Vec::new(),
+                    txid: BitcoinTxid::ZERO,
+                };
+                futures::future::ready(Ok(commitment)).boxed()
+            },
+            |approval| {
+                let result = if approval.request_ids.contains(&refused_id) {
+                    Err(anyhow::Error::new(RefusedItems(vec![RefusedItem::new(
+                        CommitmentItem::Request(refused_id),
+                        "request_unapproved",
+                        String::new(),
+                    )])))
+                } else {
+                    Ok(())
+                };
+                futures::future::ready(result).boxed()
+            },
+            |refused| left_out.push(refused.item),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            approval.request_ids,
+            vec![Address::new([1; 32]), Address::new([3; 32])]
+        );
+        assert_eq!(left_out, vec![CommitmentItem::Request(refused_id)]);
+    }
 }
 
 #[cfg(test)]
