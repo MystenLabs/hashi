@@ -742,9 +742,12 @@ impl SigningManager {
         }
     }
 
-    /// Flag every share index whose owner `blame` names, so the rest of this call skips their
-    /// partial signatures, and count the certain ones against their owners. Returns whether
-    /// anything new was flagged.
+    /// Flag every share index whose owner `blame` names, so the attempts that work from the
+    /// unflagged partial signatures leave theirs out for the rest of this call, and count the
+    /// certain ones against their owners. Returns whether anything new was flagged.
+    ///
+    /// The full Reed-Solomon attempt still takes every partial signature, since its decoding is
+    /// what corrects them.
     ///
     /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
     /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
@@ -800,8 +803,9 @@ impl SigningManager {
         let grew = flagged.len() > before;
         if grew {
             tracing::debug!(
-                "Flagged {} share index(es) after RS recovery; the other pending inputs are \
-                 also tried without their owners' partials for the rest of this call",
+                "Flagged {} share index(es) after RS recovery; the unflagged attempts on the \
+                 other pending inputs also leave out their owners' partials for the rest of \
+                 this call",
                 flagged.len() - before,
             );
         }
