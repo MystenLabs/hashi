@@ -31,13 +31,13 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("key-provisioner rotate-kp-set")?;
     new_kp_set.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         new_num_shares = new_kp_set.num_shares,
@@ -87,7 +87,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let guardian_pub_key =
         EncPubKey::from_bytes(&target.info.encryption_pubkey).map_err(anyhow::Error::msg)?;
     let session_id = target.session_id;
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     let verified_session = reader.get_current_session_info(&session_id).await?;
@@ -103,9 +103,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     );
 
     // 2. This KP's share of the dealt set, from the latest attested logs.
-    let state = reader
-        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
-        .await?;
+    let state = reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();

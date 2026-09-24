@@ -27,7 +27,7 @@ use crate::kp_roster::decrypt_kp_share;
 
 pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
 
@@ -56,15 +56,15 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         relay_endpoint = %cfg.relay_endpoint,
         signing_fingerprint = %signing_fingerprint_hex,
         new_fingerprint = %new_fingerprint,
         "running individual KP certificate rotation",
     );
 
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     let mut client =
@@ -105,9 +105,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     let guardian_pub_key = EncPubKey::from_bytes(&endpoint_verified.info.encryption_pubkey)
         .map_err(anyhow::Error::msg)?;
 
-    let state = reader
-        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
-        .await?;
+    let state = reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         &state.btc_master_pubkey == endpoint_btc_pubkey,

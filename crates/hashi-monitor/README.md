@@ -82,6 +82,10 @@ still be pending, which is what a restarted service wants.
 ## Config
 See `audit.sample.yaml` for a complete batch/continuous example:
 
+`bitcoin_network` is required. Every Guardian writing session must match the
+configured network, S3 bucket/region, and retention environment. Historical
+builds remain accepted through `prev_builds`.
+
 ```yaml
 # Liveness delay bounds (seconds)
 next_event_delays:
@@ -93,6 +97,9 @@ next_event_delays:
 
 # Optional: Sui withdrawal history before the guardian window (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600
+
+# Required: expected Bitcoin network for every Guardian writing session.
+bitcoin_network: "signet"
 
 guardian_s3:
   bucket: "hashi-guardian-logs"

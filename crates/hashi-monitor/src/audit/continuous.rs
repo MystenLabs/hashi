@@ -267,6 +267,7 @@ next_event_delays:
   - [E1HashiApproved, 1200]
   - [E2GuardianApproved, 86400]
 clock_skew: 300
+bitcoin_network: "signet"
 guardian_s3:
   bucket: "bucket"
   region: "us-west-2"

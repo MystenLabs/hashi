@@ -62,12 +62,12 @@ use crate::kp_roster::decrypt_kp_share;
 
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         relay_endpoint = %cfg.relay_endpoint,
@@ -80,15 +80,15 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     // reads that session first.
     info!(
         phase = "s3 connect",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         current_git_revision = %cfg.kp_roster.pcr_allowlist.current_build().git_revision(),
         current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         prev_build_count = cfg.kp_roster.pcr_allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
     let allowlist = cfg.kp_roster.pcr_allowlist();
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -272,9 +272,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let state = reader
-        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
-        .await?;
+    let state = reader.read_latest_ceremony_state().await?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "ceremony instance",

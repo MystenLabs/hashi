@@ -22,14 +22,14 @@ use crate::guardian_info::verified_live_guardian_info;
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
-    let retention_environment = guardian_s3.retention_environment;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
+    let retention_environment = cfg.guardian_s3.retention_environment;
     let allowlist = cfg.kp_roster.pcr_allowlist();
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         endpoint = %cfg.guardian_endpoint,
         bitcoin_network = ?cfg.bitcoin_network,
         ?retention_environment,
@@ -43,14 +43,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
 
     info!(
         phase = "s3 connect",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         current_git_revision = %allowlist.current_build().git_revision(),
         current_pcr0 = hex::encode(allowlist.current_build().pcr0()),
         prev_build_count = allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -147,9 +147,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let ceremony_state = reader
-        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
-        .await?;
+    let ceremony_state = reader.read_latest_ceremony_state().await?;
     ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     ceremony_state
         .encrypted_shares
@@ -186,7 +184,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "calling OperatorInit (withdraw mode)"
     );
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_withdraw_mode(
-        guardian_s3.credentials.clone(),
+        s3_credentials.clone(),
         init_config.clone(),
         genesis_state,
     ))
@@ -268,8 +266,8 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     println!("  num_shares:      {}", scraped_instance.num_shares());
     println!("  threshold:       {}", scraped_instance.threshold());
     println!("  bitcoin_network: {}", cfg.bitcoin_network);
-    println!("  bucket:          {}", guardian_s3.bucket_name());
-    println!("  region:          {}", guardian_s3.region());
+    println!("  bucket:          {}", cfg.guardian_s3.bucket_info.bucket);
+    println!("  region:          {}", cfg.guardian_s3.bucket_info.region);
 
     Ok(())
 }

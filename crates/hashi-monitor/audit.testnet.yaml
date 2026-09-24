@@ -14,6 +14,9 @@ next_event_delays:
 clock_skew: 300
 withdrawal_predecessor_lookback: 3600
 
+# Required: expected Bitcoin network for every Guardian writing session.
+bitcoin_network: "signet"
+
 guardian_s3:
   bucket: "mysten-hashi-guardian-enclave-testnet-3"
   region: "us-west-2"

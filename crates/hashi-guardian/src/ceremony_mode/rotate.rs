@@ -42,9 +42,7 @@ pub async fn rotate_kp_set(
         &deployment.digest(),
     )?;
     let mut reader = enclave.new_guardian_reader()?;
-    let latest_s3_state = reader
-        .read_latest_ceremony_state_for_network(deployment.bitcoin_network)
-        .await?;
+    let latest_s3_state = reader.read_latest_ceremony_state().await?;
 
     complete_rotation(&enclave, proposal, latest_s3_state).await
 }

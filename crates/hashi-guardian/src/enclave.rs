@@ -818,12 +818,12 @@ impl Enclave {
     // Enclave Configuration
     // ========================================================================
 
-    /// Construct a verified reader with the enclave's fixed S3 client and PCR
-    /// allowlist. Each operation gets a fresh, operation-scoped session cache.
+    /// Construct a verified reader with the enclave's fixed deployment configuration
+    /// and S3 client. Each operation gets a fresh, operation-scoped session cache.
     pub fn new_guardian_reader(&self) -> GuardianResult<GuardianReader> {
         Ok(GuardianReader::from_s3_client(
             self.config.s3_logger()?.clone(),
-            self.config.deployment()?.pcr_allowlist.clone(),
+            self.config.deployment()?.clone(),
         ))
     }
 

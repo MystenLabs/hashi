@@ -188,7 +188,8 @@ mod tests {
     use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
     use hashi_types::guardian::NitroAttestation;
-    use hashi_types::guardian::ResolvedS3Config;
+    use hashi_types::guardian::S3BucketInfo;
+    use hashi_types::guardian::S3RetentionEnvironment;
     use std::future::pending;
     use std::future::ready;
     use std::sync::Arc;
@@ -202,7 +203,11 @@ mod tests {
     }
 
     fn mock_s3(client: Client) -> GuardianS3Client {
-        GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client)
+        GuardianS3Client::from_client_for_tests(
+            S3BucketInfo::mock_for_testing(),
+            S3RetentionEnvironment::Testnet,
+            client,
+        )
     }
 
     fn heartbeat(seq: u64) -> LogMessage {

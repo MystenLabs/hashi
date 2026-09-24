@@ -38,12 +38,12 @@ use crate::kp_roster::decrypt_kp_share;
 /// separately written to disk by this flow.
 pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         sui_rpc = %cfg.hashi.sui_rpc,
@@ -112,12 +112,12 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     info!(
         phase = "s3 connect",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(&guardian_s3, cfg.kp_roster.pcr_allowlist())
+    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");

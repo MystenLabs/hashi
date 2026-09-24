@@ -430,6 +430,7 @@ mod tests {
             .expect("valid intra-event delays"),
             clock_skew: 10,
             withdrawal_predecessor_lookback: 60 * 60,
+            bitcoin_network: bitcoin::Network::Regtest,
             guardian_s3: UnresolvedS3Config {
                 bucket_info: hashi_types::guardian::S3BucketInfo {
                     bucket: "bucket".to_string(),

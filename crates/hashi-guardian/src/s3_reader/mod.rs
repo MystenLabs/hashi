@@ -14,14 +14,14 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyProposalLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
+use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogRecord;
-use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::ResolvedS3Config;
+use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
@@ -39,26 +39,38 @@ pub use verified::VerifiedSessionInfo;
 ///
 /// Reads accept any allowlisted build unless the method explicitly requires
 /// the current build. Reuse one reader so repeated reads can share cached
-/// session attestations and signing keys.
+/// session attestations and signing keys. Every writing session must match the
+/// expected bucket, region, retention environment, and Bitcoin network.
 pub struct GuardianReader {
     s3: GuardianS3Client,
-    allowlist: PcrAllowlist,
+    expected_deployment: DeploymentConfig,
     sessions: HashMap<SessionID, VerifiedSessionInfo>,
 }
 
 impl GuardianReader {
     /// Create a reader after checking S3 connectivity and object-lock support.
-    pub async fn new(config: &ResolvedS3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
-        let s3 = GuardianS3Client::new_checked(config).await?;
-        Ok(Self::from_s3_client(s3, allowlist))
+    pub async fn new(
+        expected_deployment: DeploymentConfig,
+        credentials: S3Credentials,
+    ) -> GuardianResult<Self> {
+        let s3 = GuardianS3Client::new_checked(
+            &expected_deployment.bucket_info,
+            expected_deployment.retention_environment,
+            &credentials,
+        )
+        .await?;
+        Ok(Self::from_s3_client(s3, expected_deployment))
     }
 
-    /// Create a reader from an existing S3 client without another connectivity
-    /// check.
-    pub fn from_s3_client(s3: GuardianS3Client, allowlist: PcrAllowlist) -> Self {
+    /// Reuse the enclave's S3 client, constructed from the same deployment
+    /// configuration, without another connectivity check.
+    pub(crate) fn from_s3_client(
+        s3: GuardianS3Client,
+        expected_deployment: DeploymentConfig,
+    ) -> Self {
         Self {
             s3,
-            allowlist,
+            expected_deployment,
             sessions: HashMap::new(),
         }
     }
@@ -67,7 +79,8 @@ impl GuardianReader {
     async fn ensure_session_info_loaded(&mut self, session_id: &str) -> GuardianResult<()> {
         if !self.sessions.contains_key(session_id) {
             let session_info =
-                VerifiedSessionInfo::read_from_s3(&self.s3, session_id, &self.allowlist).await?;
+                VerifiedSessionInfo::read_from_s3(&self.s3, session_id, &self.expected_deployment)
+                    .await?;
             self.sessions.insert(session_id.into(), session_info);
         }
         Ok(())
@@ -138,7 +151,8 @@ impl GuardianReader {
             .sessions
             .get(session_id)
             .expect("session info was loaded above");
-        self.allowlist
+        self.expected_deployment
+            .pcr_allowlist
             .require_current_build(session_info.build_pcrs())?;
         Ok(session_info.clone())
     }
@@ -161,7 +175,8 @@ impl GuardianReader {
         };
         let verified_record = self.read_verified_record(&key).await?;
         if require_current {
-            self.allowlist
+            self.expected_deployment
+                .pcr_allowlist
                 .require_current_build(verified_record.build_pcrs())?;
         }
         let session_id = verified_record.entry().session_id().clone();
@@ -227,7 +242,8 @@ impl GuardianReader {
         // A live proposal has just been published, so its short-lived Compliance
         // lock must still be active.
         let verified_record = self.read_verified_record(&key).await?;
-        self.allowlist
+        self.expected_deployment
+            .pcr_allowlist
             .require_current_build(verified_record.build_pcrs())?;
         let writing_session_id = verified_record.entry().session_id().clone();
         let proposal = *verified_record
@@ -256,7 +272,8 @@ impl GuardianReader {
             .await?;
         let verified_record = self.verify_record(record).await?;
         if require_current {
-            self.allowlist
+            self.expected_deployment
+                .pcr_allowlist
                 .require_current_build(verified_record.build_pcrs())?;
         }
         let session_id = verified_record.entry().session_id().clone();
@@ -275,23 +292,6 @@ impl GuardianReader {
         self.read_latest_ceremony_state_with_build_requirement(false)
             .await
             .map(|(state, _dealer)| state)
-    }
-
-    /// Read existing key material only for its approved Bitcoin network. Build
-    /// allowlists may change during upgrades; the key's intended network cannot.
-    pub async fn read_latest_ceremony_state_for_network(
-        &mut self,
-        network: bitcoin::Network,
-    ) -> GuardianResult<CeremonyState> {
-        let (state, dealer) = self
-            .read_latest_ceremony_state_with_build_requirement(false)
-            .await?;
-        let session = self
-            .sessions
-            .get(dealer.as_str())
-            .expect("verified dealer was loaded");
-        ensure_ceremony_network(session.info().deployment_info()?, network)?;
-        Ok(state)
     }
 
     /// Read the latest ceremony together with the latest KP-share state for its
@@ -416,30 +416,4 @@ impl GuardianReader {
 
 fn log_verified_read(key: &str, session_id: &SessionID) {
     info!("Successfully read {key} from session {session_id}.");
-}
-
-fn ensure_ceremony_network(
-    deployment: &hashi_types::guardian::DeploymentConfigSummary,
-    expected: bitcoin::Network,
-) -> GuardianResult<()> {
-    if deployment.bitcoin_network != expected {
-        return Err(InvalidS3Log(
-            "ceremony Bitcoin network differs from deployment".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod deployment_tests {
-    use super::*;
-    #[test]
-    fn importing_a_key_preserves_its_network() {
-        let mut deployment = hashi_types::guardian::DeploymentConfig::mock_for_testing().summary();
-        assert!(ensure_ceremony_network(&deployment, bitcoin::Network::Regtest).is_ok());
-        assert!(ensure_ceremony_network(&deployment, bitcoin::Network::Bitcoin).is_err());
-        deployment.git_revision = "upgraded-build".into();
-        deployment.retention_environment = hashi_types::guardian::S3RetentionEnvironment::Devnet;
-        assert!(ensure_ceremony_network(&deployment, bitcoin::Network::Regtest).is_ok());
-    }
 }

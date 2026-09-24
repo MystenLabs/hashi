@@ -27,7 +27,6 @@ pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
 pub use s3::DEVNET_S3_OBJECT_LOCK_POLICY;
 pub use s3::MAINNET_S3_OBJECT_LOCK_POLICY;
-pub use s3::ResolvedS3Config;
 pub use s3::S3BucketInfo;
 pub use s3::S3Credentials;
 pub use s3::S3ObjectLockPolicy;

@@ -1945,7 +1945,7 @@ mod tests {
             OperatorInitRequest::mock_for_testing(),
             OperatorInitRequest::new_ceremony_mode(
                 DeploymentConfig::mock_for_testing(),
-                super::super::ResolvedS3Config::mock_for_testing().credentials,
+                super::super::S3Credentials::mock_for_testing(),
             ),
         ];
         for request in requests {

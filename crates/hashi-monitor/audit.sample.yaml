@@ -13,6 +13,9 @@ next_event_delays:
 # Sui withdrawal history searched before the guardian audit start (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600
 
+# Required: expected Bitcoin network for every Guardian writing session.
+bitcoin_network: "signet"
+
 guardian_s3:
   bucket: "hashi-guardian-logs"
   region: "us-east-1"

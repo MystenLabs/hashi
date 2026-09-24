@@ -38,9 +38,7 @@ pub async fn provisioner_rotate_cert(
     request.validate_session(&live_session_id)?;
 
     let mut reader = enclave.new_guardian_reader()?;
-    let latest_state = reader
-        .read_latest_ceremony_state_for_network(enclave.config.bitcoin_network()?)
-        .await?;
+    let latest_state = reader.read_latest_ceremony_state().await?;
     apply_cert_rotation(&enclave, signer_fingerprint, request, latest_state).await
 }
 

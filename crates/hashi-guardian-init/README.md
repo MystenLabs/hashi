@@ -38,6 +38,9 @@ from the guardian Nitro attestation checks below.
 The key ceremony and provisioning flow is then driven through these commands.
 All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
+Every S3 writing session must match its configured bucket, region, retention
+environment, and Bitcoin network. Historical builds are accepted through the
+configured PCR allowlist.
 
 For a fully-local end-to-end run of this flow (local sui node + a dockerized
 guardian, no devnet), see [`docker/hashi-guardian-local`](../../docker/hashi-guardian-local).

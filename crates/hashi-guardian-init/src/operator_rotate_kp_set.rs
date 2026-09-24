@@ -39,17 +39,14 @@ pub async fn init(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
 
-    let mut guardian = CeremonyGuardian::init(&cfg, &guardian_s3).await?;
+    let mut guardian = CeremonyGuardian::init(&cfg, &s3_credentials).await?;
     require_fresh(&guardian)?;
 
-    let state = guardian
-        .reader
-        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
-        .await?;
+    let state = guardian.reader.read_latest_ceremony_state().await?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     state.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let sharing_seq = state.secret_sharing_instance.sharing_seq();
@@ -91,19 +88,16 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
     let new_params = new_kp_set.params()?;
 
-    let mut guardian = CeremonyGuardian::resume(&cfg, &guardian_s3).await?;
+    let mut guardian = CeremonyGuardian::resume(&cfg, &s3_credentials).await?;
     require_fresh(&guardian)?;
 
     // The dealt set, as the enclave will read it with the KPs' allowlist.
-    let old = guardian
-        .reader
-        .read_latest_ceremony_state_for_network(cfg.bitcoin_network)
-        .await?;
+    let old = guardian.reader.read_latest_ceremony_state().await?;
     old.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     old.encrypted_shares.verify_recipient_set(&certs_roster)?;
     let new_sharing_seq = old.secret_sharing_instance.sharing_seq() + 1;
@@ -180,10 +174,10 @@ pub async fn wait(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
 
-    let mut guardian = CeremonyGuardian::resume(&cfg, &guardian_s3).await?;
+    let mut guardian = CeremonyGuardian::resume(&cfg, &s3_credentials).await?;
     ensure!(
         guardian.info.lifecycle != CeremonyStage::OperatorInitialized.into(),
         "guardian lifecycle is operator_initialized: nothing has been submitted to it \

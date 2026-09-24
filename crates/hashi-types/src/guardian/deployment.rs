@@ -37,14 +37,6 @@ impl DeploymentConfig {
             git_revision: self.pcr_allowlist.current_build().git_revision().to_owned(),
         }
     }
-
-    pub fn resolved_s3_config(&self, credentials: S3Credentials) -> ResolvedS3Config {
-        ResolvedS3Config {
-            credentials,
-            bucket_info: self.bucket_info.clone(),
-            retention_environment: self.retention_environment,
-        }
-    }
 }
 
 impl GuardianInfo {

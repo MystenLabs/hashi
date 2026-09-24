@@ -3,6 +3,8 @@
 
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::DeploymentConfig;
+use hashi_types::guardian::DeploymentConfigSummary;
 use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianInfo;
@@ -12,8 +14,6 @@ use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::LogEntry;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::LogType;
-use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::S3BucketInfo;
 
 /// Initialization checkpoint required by or verified for a session.
 ///
@@ -86,7 +86,7 @@ impl VerifiedSessionInfo {
     pub(super) async fn read_from_s3(
         s3: &GuardianS3Client,
         session_id: &str,
-        allowlist: &PcrAllowlist,
+        expected_deployment: &DeploymentConfig,
     ) -> GuardianResult<Self> {
         // 1. Attestation (unsigned: authenticated by AWS, not the enclave key) →
         //    the signing pubkey it commits to.
@@ -116,18 +116,14 @@ impl VerifiedSessionInfo {
         //    reported build. This replays a logged attestation whose short-lived
         //    leaf cert has typically expired, so the chain is checked at the
         //    document's own signed timestamp, not now.
-        let build_pcrs = allowlist
-            .resolve(&info.deployment_info()?.git_revision)?
-            .clone();
+        let build_pcrs = verify_deployment_info(
+            session_id,
+            info.deployment_info.as_ref(),
+            expected_deployment,
+        )?;
         attestation
             .verify_replay(&signing_pubkey, &build_pcrs)
             .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
-
-        ensure_bucket_info_matches(
-            session_id,
-            Some(&info.deployment_info()?.bucket_info),
-            s3.bucket_info(),
-        )?;
 
         Ok(Self {
             signing_pubkey,
@@ -212,22 +208,40 @@ impl VerifiedSessionInfo {
     }
 }
 
-fn ensure_bucket_info_matches(
+/// Authenticate deployment identity separately from build selection: historical
+/// sessions may use older allowlisted builds, but must serve the same deployment.
+fn verify_deployment_info(
     session_id: &str,
-    reported: Option<&S3BucketInfo>,
-    expected: &S3BucketInfo,
-) -> GuardianResult<()> {
+    reported: Option<&DeploymentConfigSummary>,
+    expected: &DeploymentConfig,
+) -> GuardianResult<BuildPcrs> {
     let reported = reported.ok_or_else(|| {
         InvalidS3Log(format!(
-            "session {session_id} GuardianInfo is missing bucket_info"
+            "session {session_id} GuardianInfo is missing deployment_info"
         ))
     })?;
-    if reported != expected {
+    if reported.bucket_info != expected.bucket_info {
         return Err(InvalidS3Log(format!(
-            "session {session_id} GuardianInfo bucket_info {reported:?} does not match reader bucket_info {expected:?}"
+            "session {session_id} bucket/region {:?} does not match expected {:?}",
+            reported.bucket_info, expected.bucket_info
         )));
     }
-    Ok(())
+    if reported.retention_environment != expected.retention_environment {
+        return Err(InvalidS3Log(format!(
+            "session {session_id} retention environment {:?} does not match expected {:?}",
+            reported.retention_environment, expected.retention_environment
+        )));
+    }
+    if reported.bitcoin_network != expected.bitcoin_network {
+        return Err(InvalidS3Log(format!(
+            "session {session_id} Bitcoin network {:?} does not match expected {:?}",
+            reported.bitcoin_network, expected.bitcoin_network
+        )));
+    }
+    expected
+        .pcr_allowlist
+        .resolve(&reported.git_revision)
+        .cloned()
 }
 
 impl VerifiedLogRecord {
@@ -269,40 +283,61 @@ mod tests {
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::LogMessage;
-    use hashi_types::guardian::ResolvedS3Config;
+    use hashi_types::guardian::S3BucketInfo;
     use hashi_types::guardian::S3ObjectLockPolicy;
+    use hashi_types::guardian::S3RetentionEnvironment;
     use hashi_types::guardian::SessionID;
     use hashi_types::guardian::SetupNewKeyResponse;
     use hashi_types::guardian::ShareID;
 
-    fn bucket_info(bucket: &str, region: &str) -> S3BucketInfo {
-        S3BucketInfo {
-            bucket: bucket.into(),
-            region: region.into(),
+    #[test]
+    fn session_deployment_must_match_all_stable_fields() {
+        let expected = DeploymentConfig::mock_for_testing();
+        let reported = expected.summary();
+        assert_eq!(
+            verify_deployment_info("session", Some(&reported), &expected).unwrap(),
+            *expected.pcr_allowlist.current_build()
+        );
+        let mut wrong_bucket = reported.clone();
+        wrong_bucket.bucket_info.bucket.push_str("-other");
+        let mut wrong_region = reported.clone();
+        wrong_region.bucket_info.region = "us-west-2".into();
+        let mut wrong_retention = reported.clone();
+        wrong_retention.retention_environment =
+            hashi_types::guardian::S3RetentionEnvironment::Devnet;
+        let mut wrong_network = reported.clone();
+        wrong_network.bitcoin_network = bitcoin::Network::Bitcoin;
+        for changed in [wrong_bucket, wrong_region, wrong_retention, wrong_network] {
+            assert!(matches!(
+                verify_deployment_info("session", Some(&changed), &expected),
+                Err(InvalidS3Log(message)) if message.contains("does not match expected")
+            ));
         }
+        assert!(matches!(
+            verify_deployment_info("session", None, &expected),
+            Err(InvalidS3Log(message)) if message.contains("missing deployment_info")
+        ));
     }
 
     #[test]
-    fn matching_bucket_info_is_accepted() {
-        let expected = bucket_info("guardian-bucket", "us-east-1");
-        ensure_bucket_info_matches("session", Some(&expected), &expected).unwrap();
-    }
-
-    #[test]
-    fn mismatched_bucket_info_is_rejected() {
-        let expected = bucket_info("guardian-bucket", "us-east-1");
-        let reported = bucket_info("other-bucket", "us-west-2");
-
-        let error = ensure_bucket_info_matches("session", Some(&reported), &expected).unwrap_err();
-        assert!(matches!(error, InvalidS3Log(message) if message.contains("does not match")));
-    }
-
-    #[test]
-    fn missing_bucket_info_is_rejected() {
-        let expected = bucket_info("guardian-bucket", "us-east-1");
-
-        let error = ensure_bucket_info_matches("session", None, &expected).unwrap_err();
-        assert!(matches!(error, InvalidS3Log(message) if message.contains("missing bucket_info")));
+    fn historical_sessions_use_the_readers_allowlist() {
+        let mut expected = DeploymentConfig::mock_for_testing();
+        let previous = BuildPcrs::new("previous", vec![1]);
+        expected.pcr_allowlist = hashi_types::guardian::PcrAllowlist::new(
+            expected.pcr_allowlist.current_build().clone(),
+            [previous.clone()],
+        )
+        .unwrap();
+        let mut reported = expected.summary();
+        reported.git_revision = "previous".into();
+        let build = verify_deployment_info("session", Some(&reported), &expected).unwrap();
+        assert_eq!(build, previous);
+        assert!(expected
+            .pcr_allowlist
+            .require_current_build(&build)
+            .is_err());
+        reported.git_revision = "not-allowlisted".into();
+        assert!(verify_deployment_info("session", Some(&reported), &expected).is_err());
     }
 
     fn build_pcrs() -> BuildPcrs {
@@ -402,8 +437,7 @@ mod tests {
         );
         let pi_key = pi_log.object_key().to_string();
         let oa_key = oa_log.object_key().to_string();
-        let s3_config = ResolvedS3Config::mock_for_testing();
-        let policy = S3ObjectLockPolicy::for_environment(s3_config.retention_environment);
+        let policy = S3ObjectLockPolicy::for_environment(S3RetentionEnvironment::Testnet);
 
         let list_logs = mock!(Client::list_object_versions)
             .sequence()
@@ -416,7 +450,11 @@ mod tests {
             .output(move || locked_record(&oa_log, policy))
             .build();
         let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&list_logs, &get_logs]);
-        let s3 = GuardianS3Client::from_client_for_tests(s3_config, client);
+        let s3 = GuardianS3Client::from_client_for_tests(
+            S3BucketInfo::mock_for_testing(),
+            S3RetentionEnvironment::Testnet,
+            client,
+        );
         let mut session_info = session_info_ready_for_activation(signing_pubkey);
 
         session_info

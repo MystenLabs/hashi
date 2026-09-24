@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::anyhow;
+use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::UnresolvedS3Config;
 use serde::Deserialize;
@@ -29,6 +30,7 @@ pub struct Config {
     #[serde(default = "default_withdrawal_predecessor_lookback")]
     pub withdrawal_predecessor_lookback: u64,
 
+    pub bitcoin_network: bitcoin::Network,
     pub guardian_s3: UnresolvedS3Config,
     #[serde(flatten)]
     pub pcr_allowlist: PcrAllowlist,
@@ -164,9 +166,14 @@ impl Config {
         self.next_event_delays.get_delay(source)
     }
 
-    /// The PCR allowlist decoded from `current_build` + `prev_builds`.
-    pub fn pcr_allowlist(&self) -> PcrAllowlist {
-        self.pcr_allowlist.clone()
+    /// Deployment identity and builds accepted when auditing Guardian logs.
+    pub fn deployment_config(&self) -> DeploymentConfig {
+        DeploymentConfig {
+            bucket_info: self.guardian_s3.bucket_info.clone(),
+            retention_environment: self.guardian_s3.retention_environment,
+            bitcoin_network: self.bitcoin_network,
+            pcr_allowlist: self.pcr_allowlist.clone(),
+        }
     }
 }
 

@@ -46,13 +46,13 @@ const ACTIVATION_HEARTBEAT_WAIT_BUFFER: Duration = Duration::from_mins(5);
 /// Activate a provisioner-initialized standby guardian.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
+    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         endpoint = %cfg.guardian_endpoint,
         bitcoin_network = ?cfg.bitcoin_network,
         limiter_refill_rate = cfg.limiter_config.refill_rate,
@@ -62,14 +62,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "s3 connect",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.guardian_s3.bucket_info.bucket,
+        region = cfg.guardian_s3.bucket_info.region,
         current_git_revision = %allowlist.current_build().git_revision(),
         current_pcr0 = hex::encode(allowlist.current_build().pcr0()),
         prev_build_count = allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -230,8 +230,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     println!("  committee_epoch:  {committee_epoch}");
     println!("  limiter_next_seq: {}", limiter_state.next_seq);
     println!("  bitcoin_network:  {}", cfg.bitcoin_network);
-    println!("  bucket:           {}", guardian_s3.bucket_name());
-    println!("  region:           {}", guardian_s3.region());
+    println!("  bucket:           {}", cfg.guardian_s3.bucket_info.bucket);
+    println!("  region:           {}", cfg.guardian_s3.bucket_info.region);
 
     Ok(())
 }

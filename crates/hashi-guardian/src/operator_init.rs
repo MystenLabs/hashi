@@ -66,13 +66,9 @@ impl OIWithdrawModeInstall {
         config: InitConfig,
         genesis_state: Option<GenesisState>,
     ) -> GuardianResult<Self> {
-        let mut reader = GuardianReader::from_s3_client(
-            logger.clone(),
-            config.deployment().pcr_allowlist.clone(),
-        );
-        let ceremony_state = reader
-            .read_latest_ceremony_state_for_network(config.deployment().bitcoin_network)
-            .await?;
+        let mut reader =
+            GuardianReader::from_s3_client(logger.clone(), config.deployment().clone());
+        let ceremony_state = reader.read_latest_ceremony_state().await?;
 
         Ok(Self::from_parts(config, ceremony_state, genesis_state))
     }
@@ -181,8 +177,12 @@ pub async fn operator_init(
             deployment.pcr_allowlist.current_build(),
         )
         .map_err(|error| InvalidInputs(format!("deployment attestation check failed: {error}")))?;
-    let s3_config = deployment.resolved_s3_config(s3_credentials);
-    let logger = GuardianS3Client::new_checked(&s3_config).await?;
+    let logger = GuardianS3Client::new_checked(
+        &deployment.bucket_info,
+        deployment.retention_environment,
+        &s3_credentials,
+    )
+    .await?;
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
@@ -285,10 +285,8 @@ mod tests {
         let mut deployment = DeploymentConfig::mock_for_testing();
         deployment.pcr_allowlist =
             PcrAllowlist::new(BuildPcrs::new("other-build", vec![0]), []).unwrap();
-        let request = OperatorInitRequest::new_ceremony_mode(
-            deployment,
-            ResolvedS3Config::mock_for_testing().credentials,
-        );
+        let request =
+            OperatorInitRequest::new_ceremony_mode(deployment, S3Credentials::mock_for_testing());
         assert!(operator_init(enclave.clone(), request)
             .await
             .unwrap_err()

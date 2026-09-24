@@ -41,9 +41,9 @@ use super::ProvisionerRotateCertRequest;
 use super::ProvisionerRotateCertResponse;
 #[cfg(any(test, feature = "test-utils"))]
 use super::ProvisionerRotateKpSetRequest;
-use super::ResolvedS3Config;
 use super::RotateKpSetResponse;
 use super::S3BucketInfo;
+use super::S3Credentials;
 use super::SecretSharingInstance;
 use super::SessionID;
 #[cfg(any(test, feature = "test-utils"))]
@@ -246,10 +246,9 @@ impl GuardianSignedResponse<ProvisionerRotateCertResponse> {
 
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
-        let s3_config = ResolvedS3Config::mock_for_testing();
         let config = InitConfig::mock_for_testing(None);
         OperatorInitRequest::new_withdraw_mode(
-            s3_config.credentials,
+            S3Credentials::mock_for_testing(),
             config,
             Some(GenesisState::mock_for_testing()),
         )
@@ -543,17 +542,12 @@ impl S3BucketInfo {
     }
 }
 
-impl ResolvedS3Config {
-    /// Convenience helper for tests.
+impl S3Credentials {
     pub fn mock_for_testing() -> Self {
         Self {
-            credentials: super::S3Credentials {
-                access_key: "test-access-key".to_string(),
-                secret_key: "test-secret-key".to_string(),
-                session_token: None,
-            },
-            bucket_info: S3BucketInfo::mock_for_testing(),
-            retention_environment: super::S3RetentionEnvironment::Testnet,
+            access_key: "test-access-key".to_string(),
+            secret_key: "test-secret-key".to_string(),
+            session_token: None,
         }
     }
 }
