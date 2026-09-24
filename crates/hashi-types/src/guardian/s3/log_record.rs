@@ -488,6 +488,8 @@ mod tests {
         let response = StandardWithdrawalResponse::mock_for_testing();
         let encrypted_shares = RotateKpSetResponse::mock_for_testing().encrypted_shares;
         let guardian_info = GuardianInfo::mock_for_testing();
+        let mut ceremony_info = guardian_info.clone();
+        ceremony_info.lifecycle = crate::guardian::CeremonyStage::Uninitialized.into();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;
@@ -500,6 +502,9 @@ mod tests {
             })),
             LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
                 guardian_info,
+            )))),
+            LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                ceremony_info,
             )))),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
@@ -589,7 +594,12 @@ mod tests {
             LogMessage::Heartbeat(_) => "heartbeat/heartbeat",
             LogMessage::Init(message) => match message.as_ref() {
                 InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
-                InitLogMessage::OIGuardianInfo(_) => "init/oi-guardian-info",
+                InitLogMessage::OIGuardianInfo(info) => match info.lifecycle {
+                    crate::guardian::EnclaveLifecycle::Ceremony(_) => {
+                        "init/oi-ceremony-guardian-info"
+                    }
+                    crate::guardian::EnclaveLifecycle::Withdraw(_) => "init/oi-guardian-info",
+                },
                 InitLogMessage::PIEnclaveFullyInitialized { .. } => {
                     "init/pi-enclave-fully-initialized"
                 }

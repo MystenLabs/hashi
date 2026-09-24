@@ -93,49 +93,44 @@ message GuardianInfoData {
   // Secret-sharing instance (if set).
   optional SecretSharingInstance secret_sharing_instance = 1;
 
-  // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
-  optional S3BucketInfo bucket_info = 2;
+  // Installed deployment summary; absent before operator initialization.
+  DeploymentConfigSummary deployment_info = 2;
 
   // Guardian encryption public key (32 bytes).
   optional bytes encryption_pubkey = 3;
 
-  // Git revision of the guardian build. Untrusted (enclave-self-reported);
-  // KP tooling verifies by reproducibly building at this revision and matching
-  // the resulting PCRs against the session's attestation PCRs.
-  optional string untrusted_git_revision = 4;
-
   // X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
   // Absent before `provisioner_init` has set the keypair.
-  optional bytes enclave_btc_pubkey = 5;
+  optional bytes enclave_btc_pubkey = 4;
 
   // Digest of the operator-supplied InitConfig (32 bytes, if set).
-  optional bytes config_hash = 6;
+  optional bytes config_hash = 5;
 
   // Current rate limiter state (if initialized).
-  LimiterState limiter_state = 7;
+  LimiterState limiter_state = 6;
 
   // Immutable limiter configuration (if initialized).
-  LimiterConfig limiter_config = 8;
+  LimiterConfig limiter_config = 7;
 
   // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
-  optional uint64 current_committee_epoch = 9;
+  optional uint64 current_committee_epoch = 8;
 
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
-  optional bytes mpc_master_g = 10;
+  optional bytes mpc_master_g = 9;
 
   // Signed enclave mode and its current lifecycle stage.
   oneof lifecycle {
-    CeremonyStage ceremony = 11;
-    WithdrawStage withdraw = 12;
+    CeremonyStage ceremony = 10;
+    WithdrawStage withdraw = 11;
   }
 
   // Digest of the optional GenesisState pinned during operator_init.
-  optional bytes genesis_state_hash = 13;
+  optional bytes genesis_state_hash = 12;
 
   // The Hashi shared-object id (32 bytes) this guardian serves (set after
   // operator_init). Certificates verified by this enclave are bound to it.
-  optional bytes hashi_object_id = 14;
+  optional bytes hashi_object_id = 13;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.
@@ -149,7 +144,7 @@ message SecretSharingInstance {
 }
 
 message S3BucketInfo {
-  optional string bucket = 1;
+  optional string name = 1;
   optional string region = 2;
 }
 
@@ -237,8 +232,8 @@ message SignedCeremonyConfirmationRequest {
   // Guardian session the KP authenticated before confirming.
   string expected_session_id = 1;
 
-  // Blake2b-256 digest of the BCS-encoded CeremonyState.
-  optional bytes ceremony_digest = 2;
+  // Blake2b-256 of BCS(CeremonyArtifacts): full DeploymentConfig and verified CeremonyState.
+  optional bytes ceremony_artifacts_digest = 2;
 
   // Complete detached-signature envelope.
   AttestedKpCert signer_cert = 3;
@@ -268,7 +263,8 @@ message OperatorInitRequest {
 }
 
 message CeremonyOperatorInitRequest {
-  S3Config s3_config = 1;
+  DeploymentConfig deployment = 1;
+  S3Credentials s3_credentials = 2;
 }
 
 message WithdrawOperatorInitRequest {
@@ -294,16 +290,6 @@ message GenesisState {
   Committee committee = 1;
   bytes hashi_object_id = 2;
   bytes mpc_master_g = 3;
-}
-
-message S3Config {
-  optional string access_key = 1;
-  optional string secret_key = 2;
-  optional string bucket_name = 3;
-  optional string region = 4;
-  optional string session_token = 5;
-  // Hashi deployment class used to select the Guardian S3 object-lock policy.
-  S3RetentionEnvironment retention_environment = 6;
 }
 
 message S3Credentials {
@@ -371,28 +357,28 @@ message PcrAllowlist {
   repeated BuildPcrs prev_builds = 2;
 }
 
+// Complete deployment policy authenticated by KPs in both modes.
+message DeploymentConfig {
+  S3BucketInfo bucket_info = 1;
+  S3RetentionEnvironment retention_environment = 2;
+  optional Network bitcoin_network = 3;
+  PcrAllowlist pcr_allowlist = 4;
+}
+
+// Public projection; verifiers keep their independently approved full allowlist.
+message DeploymentConfigSummary {
+  S3BucketInfo bucket_info = 1;
+  S3RetentionEnvironment retention_environment = 2;
+  optional Network bitcoin_network = 3;
+  optional string git_revision = 4;
+}
+
 message InitConfig {
-  // Limiter configuration.
-  LimiterConfig limiter_config = 1;
-
-  // Compressed public key bytes (33 bytes).
-  optional bytes hashi_btc_master_pubkey = 2;
-
-  // Guardian build PCR pins used by operators/KPs for attestation checks.
-  PcrAllowlist pcr_allowlist = 3;
-
-  // BTC network.
-  optional Network network = 4;
-
-  // S3 bucket and region used for Guardian state.
-  S3BucketInfo bucket_info = 5;
-
-  // Hashi deployment class selecting the S3 object-lock policy.
-  S3RetentionEnvironment retention_environment = 6;
-
-  // The Hashi shared-object id (32 bytes) committee certificates verified by
-  // this guardian must be bound to.
-  optional bytes hashi_object_id = 7;
+  DeploymentConfig deployment = 1;
+  LimiterConfig limiter_config = 2;
+  // Compressed MPC public key (33 bytes).
+  optional bytes hashi_btc_master_pubkey = 3;
+  optional bytes hashi_object_id = 4;
 }
 
 message LimiterState {
@@ -469,8 +455,9 @@ message SignedProvisionerRotateKpSetRequest {
   // The ceremony guardian session this KP verified before encrypting its share.
   string expected_session_id = 2;
 
-  // Builds allowed to authenticate the existing ceremony and KP-share state.
-  PcrAllowlist pcr_allowlist = 3;
+  // Blake2b-256 of BCS(DeploymentConfig), checked against the installed policy
+  // before any old share is used.
+  optional bytes expected_deployment_config_hash = 3;
 
   // Ordered attested certificates for the proposed new KP set.
   repeated AttestedKpCert new_kp_pgp_certs = 4;
@@ -484,7 +471,7 @@ message SignedProvisionerRotateKpSetRequest {
 }
 
 // Collects threshold-many current-KP-authorized requests. Every submission must
-// agree on the PCR allowlist and proposed new KP set. The enclave loads the
+// agree on the deployment configuration and proposed new KP set. The enclave loads the
 // authoritative old instance and encrypted-share roster from S3.
 message BatchProvisionerRotateKpSetRequest {
   repeated SignedProvisionerRotateKpSetRequest submissions = 1;

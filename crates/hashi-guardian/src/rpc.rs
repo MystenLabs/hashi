@@ -268,12 +268,11 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use crate::test_utils::OperatorInitTestArgs;
-    use hashi_types::guardian::BuildPcrs;
+    use hashi_types::guardian::CeremonyArtifacts;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::PcrAllowlist;
     use hashi_types::guardian::ProvisionerInitRequest;
     use hashi_types::guardian::ProvisionerRotateKpSetRequest;
     use hashi_types::guardian::SecretSharingParams;
@@ -333,7 +332,14 @@ mod tests {
     async fn confirmation_rpc_rejects_untrusted_signer_without_recording_confirmation() {
         let (rpc, state, roster, secrets, puts) = pending_ceremony().await;
         let cert = roster.iter().next().unwrap().clone();
-        let request = CeremonyConfirmationRequest::new(rpc.enclave.s3_session_id(), state.digest());
+        let request = CeremonyConfirmationRequest::new(
+            rpc.enclave.s3_session_id(),
+            CeremonyArtifacts {
+                deployment: rpc.enclave.config.deployment().unwrap().clone(),
+                ceremony_state: state,
+            }
+            .digest(),
+        );
         let signature = sign_detached_in_process(
             &secrets[&cert.fingerprint().to_hex()],
             &KpSigned::signed_bytes(&request),
@@ -495,7 +501,7 @@ mod tests {
                 let cert = roster.cert_for_share(share.id).unwrap().clone();
                 let request = ProvisionerRotateKpSetRequest::build_from_share(
                     rpc.enclave.s3_session_id(),
-                    PcrAllowlist::new(BuildPcrs::new("test", vec![0]), []).unwrap(),
+                    rpc.enclave.config.deployment().unwrap().digest(),
                     share,
                     rpc.enclave.encryption_public_key(),
                     roster.clone(),

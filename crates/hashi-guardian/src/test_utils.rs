@@ -33,11 +33,16 @@ pub fn mock_logger() -> GuardianS3Client {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::ResolvedS3Config;
+    use hashi_types::guardian::S3BucketInfo;
+    use hashi_types::guardian::S3RetentionEnvironment;
 
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client)
+    GuardianS3Client::from_client_for_tests(
+        S3BucketInfo::mock_for_testing(),
+        S3RetentionEnvironment::Testnet,
+        client,
+    )
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
@@ -112,7 +117,8 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::ResolvedS3Config;
+    use hashi_types::guardian::S3BucketInfo;
+    use hashi_types::guardian::S3RetentionEnvironment;
 
     let captures: CapturedPuts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captures_w = captures.clone();
@@ -138,8 +144,11 @@ pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
         RuleMode::MatchAny,
         &[&put_ok, &list_v2, &list_versions]
     );
-    let logger =
-        GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client);
+    let logger = GuardianS3Client::from_client_for_tests(
+        S3BucketInfo::mock_for_testing(),
+        S3RetentionEnvironment::Testnet,
+        client,
+    );
     (logger, captures)
 }
 
@@ -171,7 +180,8 @@ pub fn mock_logger_with_deleted_layout(
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::ResolvedS3Config;
+    use hashi_types::guardian::S3BucketInfo;
+    use hashi_types::guardian::S3RetentionEnvironment;
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -261,7 +271,11 @@ pub fn mock_logger_with_deleted_layout(
         RuleMode::MatchAny,
         &[&list_dirs, &list_versions, &put_ok]
     );
-    GuardianS3Client::from_client_for_tests(ResolvedS3Config::mock_for_testing(), client)
+    GuardianS3Client::from_client_for_tests(
+        S3BucketInfo::mock_for_testing(),
+        S3RetentionEnvironment::Testnet,
+        client,
+    )
 }
 
 /// Args for arming a withdraw-mode test enclave. `config` is the stable
@@ -380,6 +394,9 @@ impl Enclave {
     /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`'s
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
+        self.config
+            .set_deployment(args.config.deployment().clone())
+            .unwrap();
         self.config.set_s3_logger(args.s3_logger).unwrap();
         crate::operator_init::OIWithdrawModeInstall::from_parts(
             args.config,
@@ -393,6 +410,10 @@ impl Enclave {
 
     pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
         let enclave = Self::create_with_random_keys_for_mode(EnclaveMode::Ceremony);
+        enclave
+            .config
+            .set_deployment(DeploymentConfig::mock_for_testing())
+            .unwrap();
         enclave.config.set_s3_logger(s3_logger).unwrap();
         enclave
             .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())

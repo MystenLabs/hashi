@@ -24,7 +24,6 @@ use hashi_guardian_init::load_attested_kp_cert;
 use hashi_types::guardian::AttestedKpCert;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::KpCertRoster;
-use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareID;
@@ -37,8 +36,8 @@ use tracing::info;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-/// Common KP-roster config: the sharing params, the full KP cert roster, and the
-/// PCR allowlist. Shared by every command that needs to discover and verify a
+/// Common KP-roster config: the sharing params and full KP cert roster.
+/// Shared by every command that needs to discover and verify a
 /// ceremony against an expected KP set.
 #[derive(Deserialize)]
 pub struct KpRosterConfig {
@@ -50,8 +49,6 @@ pub struct KpRosterConfig {
     /// New ceremonies assign IDs by fingerprint order; existing signed state
     /// owns the share assignments.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
-    #[serde(flatten)]
-    pub pcr_allowlist: PcrAllowlist,
 }
 
 impl KpRosterConfig {
@@ -62,15 +59,10 @@ impl KpRosterConfig {
     pub fn load_certs_roster(&self) -> Result<KpCertRoster> {
         load_kp_certs_roster(&self.kp_pgp_cert_paths)
     }
-
-    /// The PCR allowlist decoded from `current_build` + `prev_builds`.
-    pub fn pcr_allowlist(&self) -> PcrAllowlist {
-        self.pcr_allowlist.clone()
-    }
 }
 
 /// The KP set a `rotate-kp-set` proposes: sharing params and one cert per
-/// KP, in any order. The proposal carries `kp_roster`'s PCR allowlist.
+/// KP, in any order.
 #[derive(Deserialize)]
 pub struct KpSetConfig {
     pub num_shares: usize,
@@ -292,11 +284,7 @@ mod tests {
             "num_shares: 2\n\
              threshold: 2\n\
              kp_pgp_cert_paths:\n\
-             {paths}\
-             current_build:\n\
-             \x20 git_revision: \"0000000000000000000000000000000000000000\"\n\
-             \x20 pcr0: \"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"\n\
-             prev_builds: []\n"
+             {paths}"
         )
     }
 

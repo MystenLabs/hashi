@@ -31,13 +31,14 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("key-provisioner rotate-kp-set")?;
     new_kp_set.validate()?;
-    let guardian_s3 = hashi_guardian::resolve_s3_config(&cfg.guardian_s3).await?;
-    let allowlist = cfg.kp_roster.pcr_allowlist();
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
+    let allowlist = cfg.deployment.pcr_allowlist.clone();
 
     info!(
         phase = "setup",
-        bucket = guardian_s3.bucket_name(),
-        region = guardian_s3.region(),
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         new_num_shares = new_kp_set.num_shares,
@@ -77,16 +78,17 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
         "guardian lifecycle is {:?}; expected ceremony/operator_initialized (run `operator rotate-kp-set init`)",
         target.info.lifecycle
     );
+    let deployment = cfg.deployment.clone();
     ensure!(
-        target.info.bucket_info.as_ref() == Some(&guardian_s3.bucket_info),
-        "guardian bucket info mismatch: expected {:?}, got {:?}",
-        guardian_s3.bucket_info,
-        target.info.bucket_info
+        target.info.deployment_info()? == &deployment.summary(),
+        "guardian deployment mismatch: expected {:?}, got {:?}",
+        deployment.summary(),
+        target.info.deployment_info
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(&target.info.encryption_pubkey).map_err(anyhow::Error::msg)?;
     let session_id = target.session_id;
-    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     let verified_session = reader.get_current_session_info(&session_id).await?;
@@ -118,7 +120,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let share_id = decrypted.id;
     let request = ProvisionerRotateKpSetRequest::build_from_share(
         session_id.clone(),
-        allowlist,
+        deployment.digest(),
         &decrypted,
         &guardian_pub_key,
         new_certs_roster,

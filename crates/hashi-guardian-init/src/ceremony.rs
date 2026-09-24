@@ -20,7 +20,7 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::ResolvedS3Config;
+use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
@@ -53,25 +53,25 @@ pub struct CeremonyGuardian {
 }
 
 impl CeremonyGuardian {
-    /// Connect, run `OperatorInit` (ceremony mode: S3 config only) unless it
+    /// Connect, run `OperatorInit` (ceremony mode: shared deployment configuration) unless it
     /// already ran, and pin the session: the live and the S3 `init/`
     /// attestations must carry the same signing key.
-    pub async fn init(cfg: &Config, guardian_s3: &ResolvedS3Config) -> Result<Self> {
-        Self::connect(cfg, guardian_s3, true).await
+    pub async fn init(cfg: &Config, s3_credentials: &S3Credentials) -> Result<Self> {
+        Self::connect(cfg, s3_credentials, true).await
     }
 
     /// Connect to a guardian `init` already operator-initialized and pin its
     /// session; a command that resumes one never runs `OperatorInit`.
-    pub async fn resume(cfg: &Config, guardian_s3: &ResolvedS3Config) -> Result<Self> {
-        Self::connect(cfg, guardian_s3, false).await
+    pub async fn resume(cfg: &Config, s3_credentials: &S3Credentials) -> Result<Self> {
+        Self::connect(cfg, s3_credentials, false).await
     }
 
     async fn connect(
         cfg: &Config,
-        guardian_s3: &ResolvedS3Config,
+        s3_credentials: &S3Credentials,
         operator_init: bool,
     ) -> Result<Self> {
-        let allowlist = cfg.kp_roster.pcr_allowlist();
+        let allowlist = cfg.deployment.pcr_allowlist.clone();
         info!(
             phase = "connect",
             endpoint = %cfg.guardian_endpoint,
@@ -89,12 +89,13 @@ impl CeremonyGuardian {
                 );
                 info!(
                     phase = "operator_init",
-                    bucket = guardian_s3.bucket_name(),
-                    region = guardian_s3.region(),
-                    "calling OperatorInit (ceremony mode: S3 config only)",
+                    bucket = cfg.deployment.bucket_info.name,
+                    region = cfg.deployment.bucket_info.region,
+                    "calling OperatorInit (ceremony mode: shared deployment configuration)",
                 );
                 let request = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
-                    guardian_s3.clone(),
+                    cfg.deployment.clone(),
+                    s3_credentials.clone(),
                 ))
                 .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
                 client
@@ -123,10 +124,10 @@ impl CeremonyGuardian {
             verified.session_id
         );
         ensure!(
-            verified.info.bucket_info.as_ref() == Some(&guardian_s3.bucket_info),
-            "guardian bucket info mismatch: expected {:?}, got {:?}",
-            guardian_s3.bucket_info,
-            verified.info.bucket_info
+            verified.info.deployment_info()? == &cfg.deployment.summary(),
+            "guardian deployment mismatch: expected {:?}, got {:?}",
+            cfg.deployment.summary(),
+            verified.info.deployment_info
         );
         info!(
             phase = "guardian info",
@@ -140,7 +141,7 @@ impl CeremonyGuardian {
             session_id = %verified.session_id,
             "connecting to guardian log bucket + verifying attestation against current build",
         );
-        let mut reader = GuardianReader::new(guardian_s3, allowlist.clone())
+        let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
             .await
             .context("connect to guardian log bucket")?;
         let verified_session = reader

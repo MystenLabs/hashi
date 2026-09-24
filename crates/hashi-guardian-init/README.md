@@ -38,13 +38,17 @@ from the guardian Nitro attestation checks below.
 The key ceremony and provisioning flow is then driven through these commands.
 All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
+Every S3 writing session must match its configured bucket, region, retention
+environment, and Bitcoin network. Historical builds are accepted through the
+configured PCR allowlist.
 
 For a fully-local end-to-end run of this flow (local sui node + a dockerized
 guardian, no devnet), see [`docker/hashi-guardian-local`](../../docker/hashi-guardian-local).
 
-The guardian init config may omit `guardian_s3.access_key` and
-`guardian_s3.secret_key`; when both are omitted, the commands use the AWS SDK
-default credential chain.
+The required `deployment` block contains the bucket/region, retention environment,
+Bitcoin network, and PCR allowlist. The optional `s3_credentials` block supplies
+`access_key`, `secret_key`, and an optional `session_token`; omit the entire block
+to use the AWS SDK default credential chain.
 
 ## operator ceremony
 
@@ -57,13 +61,17 @@ commands both verify that proposal. Once every KP confirms, the guardian
 publishes the finalized `kp-shares/` recovery state and `ceremony/` audit log.
 
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
-setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
+setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, shared deployment configuration) →
 `setup_new_key` → verifies the response signature and shape → confirms each
 share's recipient matches its expected KP cert and its PGP-encrypted ciphertext
 targets that cert (parsed without decrypting) →
 cross-checks the guardian's `kp-shares/proposed/` record. It then waits for every
 KP to confirm successful share recovery and for the finalized `kp-shares/` and
 `ceremony/` records to be published.
+
+Operator initialization installs the configured S3 destination, retention policy,
+Bitcoin network, and PCR allowlist. The enclave checks its own attestation against
+`current_build` before committing initialization.
 
 `kp_roster.kp_pgp_cert_paths` lists one certificate per KP, in any order.
 New ceremonies assign share IDs by fingerprint order; existing assignments
@@ -87,8 +95,9 @@ checks the proposal against the live secret-sharing instance and expected
 match the expected KP cert, uses `kp_pgp_cert_path` to identify and decrypt this
 KP's share, and verifies its commitment. After verification it saves the full
 proposed ceremony state, including every KP's encrypted share and the public
-ceremony data, then
-signs and submits a confirmation to the live guardian. The guardian completes
+ceremony data, then signs and submits `ceremony_artifacts_digest` and the session
+to the live guardian. `CeremonyArtifacts` binds that state to the KP's independently
+configured deployment policy. The guardian completes
 the ceremony and publishes the finalized `kp-shares/` and `ceremony/` records
 only after all KP/share entries have confirmed. For rotations,
 the ceremony guardian must keep running after `RotateKpSet` returns until
@@ -127,7 +136,8 @@ It:
    against the configured current build, and confirms it is not already
    operator-initialized.
 2. Reads the latest attested ceremony from S3 and verifies its encrypted-share
-   recipients against the expected KP roster.
+   recipients against the expected KP roster and its Bitcoin network against
+   the configured network.
 3. Fetches on-chain MPC master `G`, and reads the latest `committee-update/` or
    `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
@@ -156,7 +166,7 @@ the Hashi object id comes from config. All three require threshold KP
 authorization during PI.
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+command uses `guardian_endpoint`, `deployment`, `hashi`,
 `kp_roster`, and `limiter_config`.
 
 ## key-provisioner provision
@@ -277,7 +287,7 @@ to compare against their own. Each current KP then runs
 
 `submit` decodes the files, checks what the enclave will check (signature,
 pinned session, each signer's share assignment, one submission per share,
-agreement with this config's `new_kp_roster` and PCR allowlist, the dealt
+agreement with this config's `new_kp_roster` and complete deployment configuration, the dealt
 set's threshold), calls `RotateKpSet` in one batch, verifies the guardian-
 signed response (`sharing_seq + 1`, every share encrypted to the new certs)
 and its session-scoped `kp-shares/proposed/` record, then waits for every new
@@ -297,7 +307,7 @@ cargo run -p hashi-guardian-init -- operator rotate-kp-set wait --config guardia
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). These
-commands use `guardian_endpoint`, `guardian_s3`, `kp_roster` (the dealt set)
+commands use `guardian_endpoint`, `deployment`, `kp_roster` (the dealt set)
 and `new_kp_roster`.
 
 ## key-provisioner rotate-kp-set
@@ -306,13 +316,15 @@ One current KP's contribution to a KP-set rotation. It:
 
 1. Fetches and verifies the ceremony guardian's `GuardianInfo` through
    `guardian_endpoint` (attestation, `operator_initialized`, git revision,
-   bucket), then requires the same session's S3 `init/` attestation.
+   deployment summary), then requires the same session's S3 `init/` attestation.
 2. Reads the latest attested `ceremony/` + `kp-shares/` state, verifies it
-   against `kp_roster`, and decrypts the share addressed to `kp_pgp_cert_path`
+   against `kp_roster` and the configured Bitcoin network, and decrypts the share
+   addressed to `kp_pgp_cert_path`
    (`gpg --decrypt` over a pipe; the plaintext stays in memory).
 3. HPKE-encrypts the share to the guardian and signs a request binding it to
-   the pinned session, the PCR allowlist, and `new_kp_roster`'s certs and
-   `n`/`t`. The signature is what authorizes the proposal.
+   the pinned session, `expected_deployment_config_hash`, and `new_kp_roster`'s
+   certs and `n`/`t`. The hash comes from this KP's configured deployment policy;
+   the enclave checks it against the policy installed during OI before using shares.
 4. Writes the signed request to `--submission-path`: the wire message,
    prost-encoded. It holds nothing secret and can be sent to the operator
    over any channel.
@@ -322,9 +334,9 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guard
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `kp_pgp_cert_path`, `guardian_endpoint`, `guardian_s3`,
+command uses `kp_pgp_cert_path`, `guardian_endpoint`, `deployment`,
 `kp_roster` and `new_kp_roster`. Every KP must sign the same proposal (the
-new set, `n`, `t` and the PCR allowlist): the enclave rejects a batch whose
+new set, `n`, `t` and the deployment configuration): the enclave rejects a batch whose
 submissions disagree.
 
 ## recovering a lost KP key
@@ -401,7 +413,7 @@ cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sam
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+command uses `guardian_endpoint`, `deployment`, `hashi`,
 `kp_roster`, and `limiter_config`.
 
 ## tools

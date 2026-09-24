@@ -61,9 +61,10 @@ pub struct GuardianWithdrawalsPoller {
 impl GuardianWithdrawalsPoller {
     // Note: Throws an error if there is a S3 connectivity issue
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
-        let guardian_s3 = hashi_guardian::resolve_s3_config(&config.guardian_s3).await?;
+        let s3_credentials =
+            hashi_guardian::resolve_s3_credentials(config.s3_credentials.as_ref()).await?;
         Ok(Self {
-            reader: GuardianReader::new(&guardian_s3, config.pcr_allowlist()).await?,
+            reader: GuardianReader::new(config.deployment.clone(), s3_credentials).await?,
             cursor: S3HourScopedDirectory::withdraw(start),
         })
     }

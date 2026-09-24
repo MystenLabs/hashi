@@ -1,12 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Combined ceremony and KP share state derived from guardian log messages.
+//! Ceremony state and the complete artifacts approved by new KPs.
 
 use super::s3::log::CeremonyLogMessage;
 use super::s3::log::CeremonyProposalLogMessage;
 use super::s3::log::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
+use crate::guardian::DeploymentConfig;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianResult;
 use crate::guardian::KpEncryptedShareRoster;
@@ -26,13 +27,23 @@ pub struct CeremonyState {
     pub encrypted_shares: KpEncryptedShareRoster,
 }
 
-impl CeremonyState {
-    /// Blake2b-256 digest of the canonical BCS ceremony state.
+/// Complete ceremony artifacts approved by each new KP. The KP supplies its
+/// independently expected deployment configuration and the verified ceremony state.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CeremonyArtifacts {
+    pub deployment: DeploymentConfig,
+    pub ceremony_state: CeremonyState,
+}
+
+impl CeremonyArtifacts {
+    /// Commitment carried by `CeremonyConfirmationRequest::ceremony_artifacts_digest`.
     pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(self).expect("serialization should work");
+        let bytes = bcs::to_bytes(self).expect("serializable ceremony artifacts");
         Blake2b::<U32>::digest(bytes).into()
     }
+}
 
+impl CeremonyState {
     /// Combine a ceremony log message with the KP share-state message for its
     /// resulting secret-sharing instance.
     pub fn new(

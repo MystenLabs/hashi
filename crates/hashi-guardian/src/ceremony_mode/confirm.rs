@@ -30,7 +30,7 @@ pub async fn confirm_ceremony(
         .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
     request.validate_session(&enclave.s3_session_id())?;
     let (share_id, already_confirmed) =
-        pending.validate_confirmation(&signer_fingerprint, request.ceremony_digest())?;
+        pending.validate_confirmation(&signer_fingerprint, request.ceremony_artifacts_digest())?;
     if already_confirmed {
         return pending.status();
     }
@@ -64,6 +64,7 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use hashi_types::guardian::test_utils::mock_attested_kp_keypair;
+    use hashi_types::guardian::CeremonyArtifacts;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
     use hashi_types::guardian::SessionID;
@@ -75,7 +76,7 @@ mod tests {
 
     struct TestContext {
         enclave: Arc<Enclave>,
-        ceremony_digest: [u8; 32],
+        ceremony_artifacts_digest: [u8; 32],
         roster: KpCertRoster,
         secret_keys: MockKpSecretKeys,
         captures: CapturedPuts,
@@ -94,9 +95,14 @@ mod tests {
         .verify_into_data(&enclave.signing_pubkey())
         .unwrap()
         .response;
+        let ceremony_artifacts_digest = CeremonyArtifacts {
+            deployment: enclave.config.deployment().unwrap().clone(),
+            ceremony_state: CeremonyState::from(response),
+        }
+        .digest();
         TestContext {
             enclave,
-            ceremony_digest: CeremonyState::from(response).digest(),
+            ceremony_artifacts_digest,
             roster,
             secret_keys,
             captures,
@@ -105,25 +111,33 @@ mod tests {
 
     impl TestContext {
         fn signed_confirmation(&self, index: usize) -> KpSigned<CeremonyConfirmationRequest> {
-            self.signed_confirmation_with(index, self.enclave.s3_session_id(), self.ceremony_digest)
+            self.signed_confirmation_with(
+                index,
+                self.enclave.s3_session_id(),
+                self.ceremony_artifacts_digest,
+            )
         }
 
         fn signed_confirmation_with_digest(
             &self,
             index: usize,
-            ceremony_digest: [u8; 32],
+            ceremony_artifacts_digest: [u8; 32],
         ) -> KpSigned<CeremonyConfirmationRequest> {
-            self.signed_confirmation_with(index, self.enclave.s3_session_id(), ceremony_digest)
+            self.signed_confirmation_with(
+                index,
+                self.enclave.s3_session_id(),
+                ceremony_artifacts_digest,
+            )
         }
 
         fn signed_confirmation_with(
             &self,
             index: usize,
             session_id: SessionID,
-            ceremony_digest: [u8; 32],
+            ceremony_artifacts_digest: [u8; 32],
         ) -> KpSigned<CeremonyConfirmationRequest> {
             let cert = self.roster.iter().nth(index).unwrap().clone();
-            let request = CeremonyConfirmationRequest::new(session_id, ceremony_digest);
+            let request = CeremonyConfirmationRequest::new(session_id, ceremony_artifacts_digest);
             let signature = sign_detached_in_process(
                 self.secret_keys.get(&cert.fingerprint().to_hex()).unwrap(),
                 &KpSigned::signed_bytes(&request),
@@ -182,7 +196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_wrong_ceremony_digest() {
+    async fn rejects_wrong_ceremony_artifacts_digest() {
         let context = setup_context().await;
         let signed = context.signed_confirmation_with_digest(0, [0; 32]);
         let error = confirm_ceremony(context.enclave.clone(), signed)
@@ -197,8 +211,11 @@ mod tests {
     #[tokio::test]
     async fn rejects_wrong_session() {
         let context = setup_context().await;
-        let signed =
-            context.signed_confirmation_with(0, "other-session".into(), context.ceremony_digest);
+        let signed = context.signed_confirmation_with(
+            0,
+            "other-session".into(),
+            context.ceremony_artifacts_digest,
+        );
         let error = confirm_ceremony(context.enclave.clone(), signed)
             .await
             .unwrap_err();
@@ -215,7 +232,7 @@ mod tests {
         let (cert, secret) = mock_attested_kp_keypair();
         let request = CeremonyConfirmationRequest::new(
             context.enclave.s3_session_id(),
-            context.ceremony_digest,
+            context.ceremony_artifacts_digest,
         );
         let signature = sign_detached_in_process(&secret, &KpSigned::signed_bytes(&request));
         let error = confirm_ceremony(

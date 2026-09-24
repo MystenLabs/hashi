@@ -20,6 +20,8 @@ use GuardianError::*;
 
 /// Complete operator-init state ready for its fail-stop commit.
 pub struct OIInstall {
+    deployment: DeploymentConfig,
+    attestation: NitroAttestation,
     logger: GuardianS3Client,
     withdraw_mode: Option<OIWithdrawModeInstall>,
 }
@@ -32,8 +34,15 @@ pub struct OIWithdrawModeInstall {
 }
 
 impl OIInstall {
-    fn new(logger: GuardianS3Client, withdraw_mode: Option<OIWithdrawModeInstall>) -> Self {
+    fn new(
+        deployment: DeploymentConfig,
+        attestation: NitroAttestation,
+        logger: GuardianS3Client,
+        withdraw_mode: Option<OIWithdrawModeInstall>,
+    ) -> Self {
         Self {
+            deployment,
+            attestation,
             logger,
             withdraw_mode,
         }
@@ -61,7 +70,7 @@ impl OIWithdrawModeInstall {
         genesis_state: Option<GenesisState>,
     ) -> GuardianResult<Self> {
         let mut reader =
-            GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
+            GuardianReader::from_s3_client(logger.clone(), config.deployment().clone());
         let ceremony_state = reader.read_latest_ceremony_state().await?;
 
         Ok(Self::from_parts(config, ceremony_state, genesis_state))
@@ -73,8 +82,6 @@ impl OIWithdrawModeInstall {
         let config_hash = self.init_config.digest();
         let limiter_config = *self.init_config.limiter_config();
         let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
-        let pcr_allowlist = self.init_config.pcr_allowlist().clone();
-        let network = self.init_config.network();
         let hashi_object_id = self.init_config.hashi_object_id();
 
         info!(
@@ -100,25 +107,19 @@ impl OIWithdrawModeInstall {
             })
             .expect("Unable to set temporary initialization state");
 
-        info!(?network, "Setting enclave configuration.");
+        info!("Setting withdraw configuration.");
         enclave
-            .install_config(
-                network,
-                hashi_btc_master_pubkey,
-                pcr_allowlist,
-                limiter_config,
-                hashi_object_id,
-            )
+            .install_config(hashi_btc_master_pubkey, limiter_config, hashi_object_id)
             .expect("Unable to set enclave configuration");
     }
 }
 
 /// Receives S3 API keys and mode-specific configuration. A ceremony enclave
-/// carries only S3; a withdraw enclave installs the stable `InitConfig`, arming
-/// state, and fixed `config_hash`.
+/// installs the shared deployment policy; a withdraw enclave additionally
+/// installs the stable `InitConfig`, arming state, and fixed `config_hash`.
 ///
 /// Invariant: operator_init never returns an `Err` from a partially-initialized
-/// enclave. Every fallible step (request validation, S3 connectivity, S3 reads)
+/// enclave. Every fallible preparation step (validation, attestation, S3 access)
 /// runs before any state is mutated, so an early `Err` leaves the enclave
 /// untouched and retryable. The mutation then happens entirely in
 /// `commit_operator_init`, which returns `()` — it cannot report an error, so a
@@ -141,19 +142,25 @@ pub async fn operator_init(
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
 
-    let (s3_config, withdraw_inputs) = match (enclave.mode(), request) {
+    let (deployment, s3_credentials, withdraw_inputs) = match (enclave.mode(), request) {
         (
             EnclaveMode::Ceremony,
-            OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }),
-        ) => (s3_config, None),
+            OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
+                deployment,
+                s3_credentials,
+            }),
+        ) => (deployment, s3_credentials, None),
         (EnclaveMode::Withdraw, OperatorInitRequest::Withdraw(request)) => {
             let WithdrawOperatorInitRequest {
                 s3_credentials,
                 init_config,
                 genesis_state,
             } = *request;
-            let s3_config = init_config.resolved_s3_config(s3_credentials);
-            (s3_config, Some((init_config, genesis_state)))
+            (
+                init_config.deployment().clone(),
+                s3_credentials,
+                Some((init_config, genesis_state)),
+            )
         }
         (EnclaveMode::Ceremony, OperatorInitRequest::Withdraw(_)) => {
             return Err(InvalidInputs(
@@ -166,7 +173,20 @@ pub async fn operator_init(
             ));
         }
     };
-    let logger = GuardianS3Client::new_checked(&s3_config).await?;
+    validate_deployment(&enclave, &deployment)?;
+    let attestation = get_attestation(&enclave.signing_pubkey())?;
+    attestation
+        .verify_live(
+            &enclave.signing_pubkey(),
+            deployment.pcr_allowlist.current_build(),
+        )
+        .map_err(|error| InvalidInputs(format!("deployment attestation check failed: {error}")))?;
+    let logger = GuardianS3Client::new(
+        &deployment.bucket_info,
+        deployment.retention_environment,
+        &s3_credentials,
+    )
+    .await?;
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
@@ -176,7 +196,7 @@ pub async fn operator_init(
         }
         None => None,
     };
-    let install = OIInstall::new(logger, withdraw_mode);
+    let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing S3 logger and mode-specific initialization state.");
@@ -186,12 +206,25 @@ pub async fn operator_init(
     Ok(())
 }
 
+/// This precursor retains the compiled revision. The runtime-config follow-up
+/// removes this comparison together with the corresponding build input.
+fn validate_deployment(enclave: &Enclave, deployment: &DeploymentConfig) -> GuardianResult<()> {
+    if deployment.pcr_allowlist.current_build().git_revision() != enclave.reported_git_revision() {
+        return Err(InvalidInputs(
+            "deployment revision does not match the compiled build".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Install the validated config on the enclave and write the operator_init logs.
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
-/// `set` here runs on a fresh enclave under the control lock, and the I/O steps
-/// (attestation, S3 logging) panic on failure rather than return.
+/// `set` here runs on a fresh enclave under the control lock, and S3 logging
+/// panics on failure rather than returning an error.
 async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     let OIInstall {
+        deployment,
+        attestation,
         logger,
         withdraw_mode,
     } = install;
@@ -200,6 +233,11 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
         .config
         .set_s3_logger(logger)
         .expect("Unable to set logger");
+
+    enclave
+        .config
+        .set_deployment(deployment)
+        .expect("deployment is installed once");
 
     // A ceremony enclave has no withdraw-mode arming state.
     if let Some(withdraw_mode) = withdraw_mode {
@@ -211,7 +249,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     let signing_pk = enclave.signing_pubkey();
     enclave
         .log_init(OIAttestationUnsigned {
-            attestation: get_attestation(&signing_pk).expect("Unable to get attestation"),
+            attestation,
             signing_public_key: signing_pk,
         })
         .await
@@ -223,8 +261,6 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     // TODO(testnet-wipe): Replace the full GuardianInfo snapshot with a
     // purpose-built OI payload containing only the data readers and KPs need;
     // the evolving status response should not define the durable log schema.
-    // Record bucket identity and retention environment together as the
-    // immutable S3 policy.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
@@ -244,6 +280,30 @@ mod tests {
     use super::*;
     use crate::test_utils::CapturedPuts;
 
+    #[tokio::test]
+    async fn wrong_build_policy_leaves_initialization_retryable() {
+        let enclave = Arc::new(Enclave::new(
+            GuardianSignKeyPair::new(rand::thread_rng()),
+            GuardianEncKeyPair::random(&mut rand::thread_rng()),
+            EnclaveMode::Ceremony,
+        ));
+        let mut deployment = DeploymentConfig::mock_for_testing();
+        deployment.pcr_allowlist =
+            PcrAllowlist::new(BuildPcrs::new("other-build", vec![0]), []).unwrap();
+        let request =
+            OperatorInitRequest::new_ceremony_mode(deployment, S3Credentials::mock_for_testing());
+        assert!(operator_init(enclave.clone(), request)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("compiled build"));
+        assert_eq!(enclave.lifecycle(), CeremonyStage::Uninitialized.into());
+        assert!(enclave.config.deployment().is_err());
+        assert!(enclave.config.s3_logger().is_err());
+        let deployment = DeploymentConfig::mock_for_testing();
+        assert!(validate_deployment(&enclave, &deployment).is_ok());
+    }
+
     /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
     /// carries the InitConfig install bundle; ceremony => none).
     async fn commit_for_mode(mode: EnclaveMode) -> (Arc<Enclave>, CapturedPuts) {
@@ -254,12 +314,12 @@ mod tests {
         ));
 
         let (logger, captures) = crate::test_utils::mock_logger_capturing();
-        let install = match mode {
+        let (deployment, withdraw_mode) = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
                 let args = crate::test_utils::OperatorInitTestArgs::default();
-                OIInstall::new(
-                    logger,
+                (
+                    config.deployment().clone(),
                     Some(OIWithdrawModeInstall::from_parts(
                         config,
                         args.ceremony_state,
@@ -267,9 +327,11 @@ mod tests {
                     )),
                 )
             }
-            EnclaveMode::Ceremony => OIInstall::new(logger, None),
+            EnclaveMode::Ceremony => (DeploymentConfig::mock_for_testing(), None),
         };
 
+        let attestation = get_attestation(&enclave.signing_pubkey()).unwrap();
+        let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
         commit_operator_init(&enclave, install).await;
         (enclave, captures)
     }

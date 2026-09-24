@@ -13,31 +13,12 @@ const TEN_YEARS: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3BucketInfo {
-    pub bucket: String,
+    pub name: String,
     pub region: String,
 }
 
-/// S3 configuration as supplied by a config file, before AWS credentials have
-/// been resolved.
-#[derive(Clone, Debug, Deserialize)]
-pub struct UnresolvedS3Config {
-    #[serde(flatten)]
-    pub bucket_info: S3BucketInfo,
-    pub access_key: Option<String>,
-    pub secret_key: Option<String>,
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-/// Runtime S3 configuration with concrete credentials.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ResolvedS3Config {
-    pub credentials: S3Credentials,
-    pub bucket_info: S3BucketInfo,
-    pub retention_environment: S3RetentionEnvironment,
-}
-
-/// Concrete credentials used to access the S3 policy authenticated through
-/// withdraw-mode `InitConfig`.
+/// Concrete credentials used to access S3, separate from the authorized
+/// deployment configuration.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3Credentials {
     pub access_key: String,
@@ -100,15 +81,5 @@ impl S3ObjectLockPolicy {
             S3RetentionEnvironment::Mainnet => MAINNET_S3_OBJECT_LOCK_POLICY,
             S3RetentionEnvironment::Testnet => TESTNET_S3_OBJECT_LOCK_POLICY,
         }
-    }
-}
-
-impl ResolvedS3Config {
-    pub fn bucket_name(&self) -> &str {
-        &self.bucket_info.bucket
-    }
-
-    pub fn region(&self) -> &str {
-        &self.bucket_info.region
     }
 }

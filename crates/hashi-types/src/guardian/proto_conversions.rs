@@ -15,6 +15,8 @@ use super::CeremonyOperatorInitRequest;
 use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
+use super::DeploymentConfig;
+use super::DeploymentConfigSummary;
 use super::EnclaveLifecycle;
 use super::GenesisState;
 use super::GetGuardianInfoResponse;
@@ -225,11 +227,17 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
         match req.request.ok_or_else(|| missing("request"))? {
             pb::operator_init_request::Request::Ceremony(req) => {
-                let s3_config = super::ResolvedS3Config::try_from(
-                    req.s3_config.ok_or_else(|| missing("s3_config"))?,
-                )?;
+                let deployment = req
+                    .deployment
+                    .ok_or_else(|| missing("deployment"))?
+                    .try_into()?;
+                let s3_credentials = req
+                    .s3_credentials
+                    .ok_or_else(|| missing("s3_credentials"))?
+                    .try_into()?;
                 Ok(OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
-                    s3_config,
+                    deployment,
+                    s3_credentials,
                 }))
             }
             pb::operator_init_request::Request::Withdraw(req) => {
@@ -378,13 +386,15 @@ impl TryFrom<pb::SignedCeremonyConfirmationRequest> for KpSigned<CeremonyConfirm
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
-        let ceremony_digest = req
-            .ceremony_digest
-            .ok_or_else(|| missing("ceremony_digest"))?;
-        let ceremony_digest = <[u8; 32]>::try_from(ceremony_digest.as_ref())
-            .map_err(|_| InvalidInputs("ceremony_digest must be 32 bytes".into()))?;
-        let request =
-            CeremonyConfirmationRequest::new(req.expected_session_id.into(), ceremony_digest);
+        let ceremony_artifacts_digest = req
+            .ceremony_artifacts_digest
+            .ok_or_else(|| missing("ceremony_artifacts_digest"))?;
+        let ceremony_artifacts_digest = <[u8; 32]>::try_from(ceremony_artifacts_digest.as_ref())
+            .map_err(|_| InvalidInputs("ceremony_artifacts_digest must be 32 bytes".into()))?;
+        let request = CeremonyConfirmationRequest::new(
+            req.expected_session_id.into(),
+            ceremony_artifacts_digest,
+        );
         Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
     }
 }
@@ -452,8 +462,13 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
             req.encrypted_old_share
                 .ok_or_else(|| missing("encrypted_old_share"))?,
         )?;
-        let pcr_allowlist =
-            PcrAllowlist::try_from(req.pcr_allowlist.ok_or_else(|| missing("pcr_allowlist"))?)?;
+        let expected_deployment_config_hash = req
+            .expected_deployment_config_hash
+            .ok_or_else(|| missing("expected_deployment_config_hash"))?;
+        let expected_deployment_config_hash =
+            <[u8; 32]>::try_from(expected_deployment_config_hash.as_ref()).map_err(|_| {
+                InvalidInputs("expected_deployment_config_hash must be 32 bytes".into())
+            })?;
         let new_num_shares = req
             .new_num_shares
             .ok_or_else(|| missing("new_num_shares"))? as usize;
@@ -461,7 +476,7 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
         let new_kp_certs_roster = kp_cert_roster_from_pb(req.new_kp_pgp_certs)?;
         let request = ProvisionerRotateKpSetRequest::new(
             req.expected_session_id.into(),
-            pcr_allowlist,
+            expected_deployment_config_hash,
             encrypted_old_share,
             new_kp_certs_roster,
             new_num_shares,
@@ -594,20 +609,10 @@ impl TryFrom<pb::InitConfig> for InitConfig {
         let hashi_btc_master_pubkey = HashiMasterG::from_byte_array(&master_pk_bytes_arr)
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
-        let pcr_allowlist = PcrAllowlist::try_from(
-            config_pb
-                .pcr_allowlist
-                .ok_or_else(|| missing("pcr_allowlist"))?,
-        )?;
-
-        let network = pb_to_network(config_pb.network.ok_or_else(|| missing("network"))?)?;
-
-        let bucket_info = config_pb
-            .bucket_info
-            .ok_or_else(|| missing("bucket_info"))?
+        let deployment = config_pb
+            .deployment
+            .ok_or_else(|| missing("deployment"))?
             .try_into()?;
-        let retention_environment =
-            super::S3RetentionEnvironment::try_from(config_pb.retention_environment)?;
 
         let hashi_object_id_bytes = config_pb
             .hashi_object_id
@@ -621,15 +626,12 @@ impl TryFrom<pb::InitConfig> for InitConfig {
             })?;
         let hashi_object_id = sui_sdk_types::Address::new(hashi_object_id_arr);
 
-        InitConfig::new(
+        Ok(InitConfig::new(
             limiter_config,
             hashi_btc_master_pubkey,
-            pcr_allowlist,
-            bucket_info,
-            retention_environment,
-            network,
+            deployment,
             hashi_object_id,
-        )
+        ))
     }
 }
 
@@ -792,11 +794,15 @@ pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
     let request = match r {
-        OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest { s3_config }) => {
-            pb::operator_init_request::Request::Ceremony(pb::CeremonyOperatorInitRequest {
-                s3_config: Some(s3_config_to_pb(s3_config)),
-            })
-        }
+        OperatorInitRequest::Ceremony(CeremonyOperatorInitRequest {
+            deployment,
+            s3_credentials,
+        }) => pb::operator_init_request::Request::Ceremony(Box::new(
+            pb::CeremonyOperatorInitRequest {
+                deployment: Some(deployment_config_to_pb(deployment)?),
+                s3_credentials: Some(s3_credentials.into()),
+            },
+        )),
         OperatorInitRequest::Withdraw(request) => {
             let WithdrawOperatorInitRequest {
                 s3_credentials,
@@ -871,10 +877,10 @@ pub fn signed_ceremony_confirmation_request_to_pb(
 impl From<KpSigned<CeremonyConfirmationRequest>> for pb::SignedCeremonyConfirmationRequest {
     fn from(signed: KpSigned<CeremonyConfirmationRequest>) -> Self {
         let (request, signer_cert, kp_signature) = signed.into_parts();
-        let (expected_session_id, ceremony_digest) = request.into_parts();
+        let (expected_session_id, ceremony_artifacts_digest) = request.into_parts();
         Self {
             expected_session_id: expected_session_id.into(),
-            ceremony_digest: Some(ceremony_digest.to_vec().into()),
+            ceremony_artifacts_digest: Some(ceremony_artifacts_digest.to_vec().into()),
             signer_cert: Some(signer_cert.into()),
             kp_signature,
         }
@@ -909,25 +915,74 @@ impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotat
 
 // Throws an error if network is invalid.
 pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
-    let (
-        limiter_config,
-        hashi_btc_master_pubkey,
-        pcr_allowlist,
-        bucket_info,
-        retention_environment,
-        network,
-        hashi_object_id,
-    ) = s.into_parts();
-
+    let (limiter_config, hashi_btc_master_pubkey, deployment, hashi_object_id) = s.into_parts();
     Ok(pb::InitConfig {
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
-        pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
-        network: Some(network_to_pb(network)?),
-        bucket_info: Some(s3_bucket_info_to_pb(bucket_info)),
-        retention_environment: retention_environment.into(),
+        deployment: Some(deployment_config_to_pb(deployment)?),
         hashi_object_id: Some(hashi_object_id.into_inner().to_vec().into()),
     })
+}
+
+impl TryFrom<pb::DeploymentConfig> for DeploymentConfig {
+    type Error = GuardianError;
+    fn try_from(value: pb::DeploymentConfig) -> GuardianResult<Self> {
+        Ok(Self {
+            bucket_info: value
+                .bucket_info
+                .ok_or_else(|| missing("bucket_info"))?
+                .try_into()?,
+            retention_environment: value.retention_environment.try_into()?,
+            bitcoin_network: pb_to_network(
+                value
+                    .bitcoin_network
+                    .ok_or_else(|| missing("bitcoin_network"))?,
+            )?,
+            pcr_allowlist: value
+                .pcr_allowlist
+                .ok_or_else(|| missing("pcr_allowlist"))?
+                .try_into()?,
+        })
+    }
+}
+
+pub fn deployment_config_to_pb(value: DeploymentConfig) -> GuardianResult<pb::DeploymentConfig> {
+    Ok(pb::DeploymentConfig {
+        bucket_info: Some(s3_bucket_info_to_pb(value.bucket_info)),
+        retention_environment: value.retention_environment.into(),
+        bitcoin_network: Some(network_to_pb(value.bitcoin_network)?),
+        pcr_allowlist: Some(pcr_allowlist_to_pb(value.pcr_allowlist)),
+    })
+}
+
+impl TryFrom<pb::DeploymentConfigSummary> for DeploymentConfigSummary {
+    type Error = GuardianError;
+    fn try_from(value: pb::DeploymentConfigSummary) -> GuardianResult<Self> {
+        Ok(Self {
+            bucket_info: value
+                .bucket_info
+                .ok_or_else(|| missing("bucket_info"))?
+                .try_into()?,
+            retention_environment: value.retention_environment.try_into()?,
+            bitcoin_network: pb_to_network(
+                value
+                    .bitcoin_network
+                    .ok_or_else(|| missing("bitcoin_network"))?,
+            )?,
+            git_revision: value.git_revision.ok_or_else(|| missing("git_revision"))?,
+        })
+    }
+}
+
+fn deployment_summary_to_pb(value: DeploymentConfigSummary) -> pb::DeploymentConfigSummary {
+    pb::DeploymentConfigSummary {
+        bucket_info: Some(s3_bucket_info_to_pb(value.bucket_info)),
+        retention_environment: value.retention_environment.into(),
+        bitcoin_network: Some(
+            network_to_pb(value.bitcoin_network).expect("supported Bitcoin network"),
+        ),
+        git_revision: Some(value.git_revision),
+    }
 }
 
 fn build_pcrs_to_pb(build: BuildPcrs) -> pb::BuildPcrs {
@@ -963,7 +1018,7 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
         let (request, signer_cert, signature) = r.into_parts();
         let (
             expected_session_id,
-            pcr_allowlist,
+            expected_deployment_config_hash,
             encrypted_old_share,
             new_kp_certs_roster,
             new_params,
@@ -971,7 +1026,7 @@ impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRota
         Self {
             encrypted_old_share: Some(guardian_encrypted_share_to_pb(encrypted_old_share)),
             expected_session_id: expected_session_id.into(),
-            pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
+            expected_deployment_config_hash: Some(expected_deployment_config_hash.to_vec().into()),
             new_kp_pgp_certs: new_kp_certs_roster
                 .into_vec()
                 .into_iter()
@@ -1078,15 +1133,15 @@ impl TryFrom<pb::S3BucketInfo> for super::S3BucketInfo {
     type Error = GuardianError;
 
     fn try_from(info: pb::S3BucketInfo) -> Result<Self, Self::Error> {
-        let bucket = info.bucket.ok_or_else(|| missing("bucket"))?;
+        let name = info.name.ok_or_else(|| missing("name"))?;
         let region = info.region.ok_or_else(|| missing("region"))?;
-        Ok(Self { bucket, region })
+        Ok(Self { name, region })
     }
 }
 
 fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     pb::S3BucketInfo {
-        bucket: Some(info.bucket),
+        name: Some(info.name),
         region: Some(info.region),
     }
 }
@@ -1162,19 +1217,15 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
             .map(SecretSharingInstance::try_from)
             .transpose()?;
 
-        let bucket_info = data
-            .bucket_info
-            .map(super::S3BucketInfo::try_from)
+        let deployment_info = data
+            .deployment_info
+            .map(DeploymentConfigSummary::try_from)
             .transpose()?;
 
         let encryption_pubkey = data
             .encryption_pubkey
             .ok_or_else(|| missing("encryption_pubkey"))?
             .to_vec();
-
-        let untrusted_git_revision = data
-            .untrusted_git_revision
-            .ok_or_else(|| missing("untrusted_git_revision"))?;
 
         let config_hash = data
             .config_hash
@@ -1226,11 +1277,10 @@ impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
         Ok(Self {
             lifecycle,
             secret_sharing_instance,
-            bucket_info,
+            deployment_info,
             encryption_pubkey,
             config_hash,
             genesis_state_hash,
-            untrusted_git_revision,
             enclave_btc_pubkey,
             limiter_state,
             limiter_config,
@@ -1256,11 +1306,10 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .secret_sharing_instance
             .as_ref()
             .map(secret_sharing_instance_to_pb),
-        bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
+        deployment_info: info.deployment_info.map(deployment_summary_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         config_hash: info.config_hash.map(|h| h.to_vec().into()),
         genesis_state_hash: info.genesis_state_hash.map(|h| h.to_vec().into()),
-        untrusted_git_revision: Some(info.untrusted_git_revision),
         enclave_btc_pubkey: info
             .enclave_btc_pubkey
             .map(|pk| pk.serialize().to_vec().into()),
@@ -1327,32 +1376,6 @@ fn share_id_to_pb(id: ShareID) -> pb::GuardianShareId {
     }
 }
 
-impl TryFrom<pb::S3Config> for super::ResolvedS3Config {
-    type Error = GuardianError;
-
-    fn try_from(cfg: pb::S3Config) -> Result<Self, Self::Error> {
-        let access_key = cfg.access_key.ok_or_else(|| missing("access_key"))?;
-        let secret_key = cfg.secret_key.ok_or_else(|| missing("secret_key"))?;
-        let bucket_name = cfg.bucket_name.ok_or_else(|| missing("bucket_name"))?;
-        let region = cfg.region.ok_or_else(|| missing("region"))?;
-        let retention_environment =
-            super::S3RetentionEnvironment::try_from(cfg.retention_environment)?;
-
-        Ok(Self {
-            credentials: super::S3Credentials {
-                access_key,
-                secret_key,
-                session_token: cfg.session_token,
-            },
-            bucket_info: super::S3BucketInfo {
-                bucket: bucket_name,
-                region,
-            },
-            retention_environment,
-        })
-    }
-}
-
 impl TryFrom<pb::S3Credentials> for super::S3Credentials {
     type Error = GuardianError;
 
@@ -1376,17 +1399,6 @@ impl From<super::S3Credentials> for pb::S3Credentials {
             secret_key: Some(credentials.secret_key),
             session_token: credentials.session_token,
         }
-    }
-}
-
-fn s3_config_to_pb(cfg: super::ResolvedS3Config) -> pb::S3Config {
-    pb::S3Config {
-        access_key: Some(cfg.credentials.access_key),
-        secret_key: Some(cfg.credentials.secret_key),
-        bucket_name: Some(cfg.bucket_info.bucket),
-        region: Some(cfg.bucket_info.region),
-        session_token: cfg.credentials.session_token,
-        retention_environment: cfg.retention_environment.into(),
     }
 }
 
@@ -1886,11 +1898,10 @@ mod tests {
             lifecycle: WithdrawStage::ProvisionerInitialized.into(),
             hashi_object_id: None,
             secret_sharing_instance: None,
-            bucket_info: None,
+            deployment_info: None,
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
             genesis_state_hash: None,
-            untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: Some(pk),
             limiter_state: None,
             limiter_config: None,
@@ -1933,7 +1944,8 @@ mod tests {
         let requests = [
             OperatorInitRequest::mock_for_testing(),
             OperatorInitRequest::new_ceremony_mode(
-                super::super::ResolvedS3Config::mock_for_testing(),
+                DeploymentConfig::mock_for_testing(),
+                super::super::S3Credentials::mock_for_testing(),
             ),
         ];
         for request in requests {

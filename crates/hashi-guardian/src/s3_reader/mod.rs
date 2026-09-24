@@ -14,14 +14,14 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyProposalLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
+use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogRecord;
-use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::ResolvedS3Config;
+use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::move_types::Committee;
@@ -39,26 +39,38 @@ pub use verified::VerifiedSessionInfo;
 ///
 /// Reads accept any allowlisted build unless the method explicitly requires
 /// the current build. Reuse one reader so repeated reads can share cached
-/// session attestations and signing keys.
+/// session attestations and signing keys. Every writing session must match the
+/// expected bucket, region, retention environment, and Bitcoin network.
 pub struct GuardianReader {
     s3: GuardianS3Client,
-    allowlist: PcrAllowlist,
+    expected_deployment: DeploymentConfig,
     sessions: HashMap<SessionID, VerifiedSessionInfo>,
 }
 
 impl GuardianReader {
     /// Create a reader after checking S3 connectivity and object-lock support.
-    pub async fn new(config: &ResolvedS3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
-        let s3 = GuardianS3Client::new_checked(config).await?;
-        Ok(Self::from_s3_client(s3, allowlist))
+    pub async fn new(
+        expected_deployment: DeploymentConfig,
+        credentials: S3Credentials,
+    ) -> GuardianResult<Self> {
+        let s3 = GuardianS3Client::new(
+            &expected_deployment.bucket_info,
+            expected_deployment.retention_environment,
+            &credentials,
+        )
+        .await?;
+        Ok(Self::from_s3_client(s3, expected_deployment))
     }
 
-    /// Create a reader from an existing S3 client without another connectivity
-    /// check.
-    pub fn from_s3_client(s3: GuardianS3Client, allowlist: PcrAllowlist) -> Self {
+    /// Reuse the enclave's S3 client, constructed from the same deployment
+    /// configuration, without another connectivity check.
+    pub(crate) fn from_s3_client(
+        s3: GuardianS3Client,
+        expected_deployment: DeploymentConfig,
+    ) -> Self {
         Self {
             s3,
-            allowlist,
+            expected_deployment,
             sessions: HashMap::new(),
         }
     }
@@ -67,7 +79,8 @@ impl GuardianReader {
     async fn ensure_session_info_loaded(&mut self, session_id: &str) -> GuardianResult<()> {
         if !self.sessions.contains_key(session_id) {
             let session_info =
-                VerifiedSessionInfo::read_from_s3(&self.s3, session_id, &self.allowlist).await?;
+                VerifiedSessionInfo::read_from_s3(&self.s3, session_id, &self.expected_deployment)
+                    .await?;
             self.sessions.insert(session_id.into(), session_info);
         }
         Ok(())
@@ -138,7 +151,8 @@ impl GuardianReader {
             .sessions
             .get(session_id)
             .expect("session info was loaded above");
-        self.allowlist
+        self.expected_deployment
+            .pcr_allowlist
             .require_current_build(session_info.build_pcrs())?;
         Ok(session_info.clone())
     }
@@ -161,7 +175,8 @@ impl GuardianReader {
         };
         let verified_record = self.read_verified_record(&key).await?;
         if require_current {
-            self.allowlist
+            self.expected_deployment
+                .pcr_allowlist
                 .require_current_build(verified_record.build_pcrs())?;
         }
         let session_id = verified_record.entry().session_id().clone();
@@ -227,7 +242,8 @@ impl GuardianReader {
         // A live proposal has just been published, so its short-lived Compliance
         // lock must still be active.
         let verified_record = self.read_verified_record(&key).await?;
-        self.allowlist
+        self.expected_deployment
+            .pcr_allowlist
             .require_current_build(verified_record.build_pcrs())?;
         let writing_session_id = verified_record.entry().session_id().clone();
         let proposal = *verified_record
@@ -256,7 +272,8 @@ impl GuardianReader {
             .await?;
         let verified_record = self.verify_record(record).await?;
         if require_current {
-            self.allowlist
+            self.expected_deployment
+                .pcr_allowlist
                 .require_current_build(verified_record.build_pcrs())?;
         }
         let session_id = verified_record.entry().session_id().clone();

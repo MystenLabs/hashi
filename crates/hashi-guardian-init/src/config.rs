@@ -5,12 +5,12 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use bitcoin::Network;
 use hashi::config::HashiIds;
 use hashi::onchain::OnchainState;
 use hashi::onchain::ScrapeScope;
+use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::UnresolvedS3Config;
+use hashi_types::guardian::S3Credentials;
 use serde::Deserialize;
 
 use crate::kp_roster::KpRosterConfig;
@@ -19,9 +19,9 @@ use crate::kp_roster::KpSetConfig;
 #[derive(Deserialize)]
 pub struct Config {
     pub hashi: HashiOnchainConfig,
-    pub guardian_s3: UnresolvedS3Config,
-    #[serde(deserialize_with = "deserialize_network")]
-    pub bitcoin_network: Network,
+    pub deployment: DeploymentConfig,
+    /// Omit to use AWS's default credential chain.
+    pub s3_credentials: Option<S3Credentials>,
     pub kp_roster: KpRosterConfig,
     /// The KP set a `rotate-kp-set` proposes; `kp_roster` stays the dealt set.
     /// Required by the rotate-kp-set commands only.
@@ -55,26 +55,6 @@ impl Config {
         self.new_kp_roster.as_ref().ok_or_else(|| {
             anyhow::anyhow!("{command} requires new_kp_roster in guardian init config")
         })
-    }
-}
-
-fn deserialize_network<'de, D>(deserializer: D) -> Result<Network, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    parse_network(&s).map_err(serde::de::Error::custom)
-}
-
-fn parse_network(s: &str) -> anyhow::Result<Network> {
-    match s.to_ascii_lowercase().as_str() {
-        "mainnet" | "bitcoin" => Ok(Network::Bitcoin),
-        "testnet" => Ok(Network::Testnet),
-        "regtest" => Ok(Network::Regtest),
-        "signet" => Ok(Network::Signet),
-        _ => {
-            anyhow::bail!("unknown bitcoin_network `{s}`; expected mainnet/testnet/regtest/signet")
-        }
     }
 }
 
@@ -127,5 +107,29 @@ impl HashiOnchainConfig {
         )
         .await
         .with_context(|| format!("failed to connect to Sui RPC at {}", self.sui_rpc))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_config_supports_default_and_explicit_credentials() {
+        let sample = include_str!("../guardian-init.sample.yaml");
+        let config: Config = serde_yaml::from_str(sample).unwrap();
+        assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
+        assert!(config.s3_credentials.is_none());
+        config.kp_roster.validate().unwrap();
+
+        let explicit = format!(
+            "{sample}\ns3_credentials:\n  access_key: key\n  secret_key: secret\n  session_token: token\n"
+        );
+        let config: Config = serde_yaml::from_str(&explicit).unwrap();
+        let credentials = config.s3_credentials.unwrap();
+        assert_eq!(credentials.session_token.as_deref(), Some("token"));
+
+        let incomplete = format!("{sample}\ns3_credentials:\n  access_key: key\n");
+        assert!(serde_yaml::from_str::<Config>(&incomplete).is_err());
     }
 }
