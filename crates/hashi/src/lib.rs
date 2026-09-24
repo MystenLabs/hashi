@@ -72,6 +72,7 @@ pub struct Hashi {
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
     guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
+    guardian_next_seq_read: RwLock<Option<u64>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
     reported_registration_aborts: RwLock<HashSet<String>>,
@@ -108,6 +109,7 @@ impl Hashi {
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
+            guardian_next_seq_read: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
@@ -144,6 +146,7 @@ impl Hashi {
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
+            guardian_next_seq_read: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
         }))
@@ -155,7 +158,12 @@ impl Hashi {
         wid: sui_sdk_types::Address,
     ) -> bool {
         let last = *self.guardian_last_finalized.read().unwrap();
-        guardian_limiter::should_defer_guardian_finalize(next_seq, last, wid)
+        let guardian_next_seq = *self.guardian_next_seq_read.read().unwrap();
+        guardian_limiter::should_defer_guardian_finalize(next_seq, last, wid, guardian_next_seq)
+    }
+
+    fn record_guardian_next_seq(&self, next_seq: u64) {
+        *self.guardian_next_seq_read.write().unwrap() = Some(next_seq);
     }
 
     /// Record a successful guardian finalize; monotonic in `seq`.
@@ -972,6 +980,7 @@ impl Hashi {
             tracing::debug!("guardian bootstrap: guardian has no limiter yet");
             return false;
         };
+        self.record_guardian_next_seq(state.next_seq);
         let limiter = Arc::new(guardian_limiter::LocalLimiter::new(config, state));
         if self.local_limiter.set(limiter.clone()).is_ok() {
             tracing::info!(
@@ -1057,7 +1066,10 @@ impl Hashi {
             return None;
         }
         match (info.limiter_config, info.limiter_state) {
-            (Some(config), Some(state)) => Some((limiter, config, state)),
+            (Some(config), Some(state)) => {
+                self.record_guardian_next_seq(state.next_seq);
+                Some((limiter, config, state))
+            }
             // The enclave installs the config at operator_init and builds the
             // limiter from it at operator_activate, so state can never outrun
             // config. Say so rather than stalling every reconcile in silence.
