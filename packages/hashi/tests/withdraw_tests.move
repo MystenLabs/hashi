@@ -299,7 +299,10 @@ fun setup_fully_signed_txn(
 
     let input_id = utxo::utxo_id(@0xBEEF, 0);
     let input = utxo::utxo(input_id, 1_000_000, option::none());
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(input);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(input, hashi::utxo::spend_data_for_testing(&input));
 
     let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[id],
@@ -394,7 +397,10 @@ fun test_archive_entry_batch_mixed() {
     hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(id2, dummy_queue_cert(), &clock);
     let input2_id = utxo::utxo_id(@0xF00D, 0);
     let input2 = utxo::utxo(input2_id, 2_000_000, option::none());
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(input2);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(input2, hashi::utxo::spend_data_for_testing(&input2));
     let txn2 = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[id2],
         vector[input2],

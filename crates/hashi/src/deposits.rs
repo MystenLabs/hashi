@@ -8,6 +8,8 @@ use crate::leader::RetryPolicy;
 use crate::metrics;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::SpendData;
+use crate::spend_data::SpendCheckSite;
 use crate::trm;
 use anyhow::Context;
 use anyhow::anyhow;
@@ -15,7 +17,6 @@ use bitcoin::ScriptBuf;
 
 use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::ProjectivePoint;
-use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::G;
 use hashi_types::bitcoin as hashi_bitcoin;
@@ -28,8 +29,8 @@ impl Hashi {
         &self,
         deposit_request: &DepositRequest,
     ) -> Result<MemberSignature, UnapprovedDepositError> {
-        self.validate_deposit_request(deposit_request).await?;
-        self.sign_deposit_confirmation(deposit_request)
+        let spend = self.validate_deposit_request(deposit_request).await?;
+        self.sign_deposit_confirmation(deposit_request, spend)
             .map_err(UnapprovedDepositError::SignDepositFailed)
     }
 
@@ -37,27 +38,35 @@ impl Hashi {
     pub async fn validate_deposit_request(
         &self,
         deposit_request: &DepositRequest,
-    ) -> Result<(), UnapprovedDepositError> {
+    ) -> Result<SpendData, UnapprovedDepositError> {
         self.validate_deposit_request_on_sui(deposit_request)?;
         self.validate_deposit_utxo_unspent_on_sui(deposit_request)
             .await?;
-        self.validate_deposit_request_on_bitcoin(deposit_request)
+        let key_path = normalized_derivation_path(deposit_request.utxo.derivation_path.as_ref());
+        let spend = self
+            .new_spend_data(&key_path)
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::Deposit, e))
+            .map_err(|e| UnapprovedDepositError::SpendDataFailed(e.into()))?;
+        self.validate_deposit_request_on_bitcoin(deposit_request, &spend)
             .await?;
-        self.screen_deposit(deposit_request).await?;
-        Ok(())
+        self.screen_deposit(deposit_request, &spend).await?;
+        Ok(spend)
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
     async fn screen_deposit(
         &self,
         deposit_request: &DepositRequest,
+        spend: &SpendData,
     ) -> Result<(), UnapprovedDepositError> {
         let Some(trm) = self.trm_client() else {
             return Ok(());
         };
-        let deposit_address = self
-            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
-            .map_err(UnapprovedDepositError::AmlServiceError)?;
+        let deposit_address = hashi_bitcoin::BitcoinAddress::from_script(
+            &ScriptBuf::from_bytes(spend.script_pubkey.clone()),
+            self.config.bitcoin_network(),
+        )
+        .map_err(|e| UnapprovedDepositError::AmlServiceError(anyhow!(e)))?;
         let screening = trm::DepositScreening::new(deposit_request, deposit_address.to_string());
         let started = std::time::Instant::now();
         let result = trm.screen_deposit(&screening).await;
@@ -186,6 +195,7 @@ impl Hashi {
     async fn validate_deposit_request_on_bitcoin(
         &self,
         deposit_request: &DepositRequest,
+        spend: &SpendData,
     ) -> Result<(), UnapprovedDepositError> {
         let outpoint = deposit_request.utxo.id.into();
         // Read the threshold live from on-chain state so governance
@@ -240,35 +250,13 @@ impl Hashi {
             )));
         }
 
-        self.validate_deposit_request_derivation_path(&txout.script_pubkey, deposit_request)
-            .await?;
-        Ok(())
-    }
-
-    async fn validate_deposit_request_derivation_path(
-        &self,
-        script_pubkey: &ScriptBuf,
-        deposit_request: &DepositRequest,
-    ) -> Result<(), UnapprovedDepositError> {
-        let deposit_address = hashi_bitcoin::BitcoinAddress::from_script(
-            script_pubkey,
-            self.config.bitcoin_network(),
-        )
-        .map_err(|e| {
-            UnapprovedDepositError::DepositDataMismatch(anyhow!(
-                "Failed to extract address from script_pubkey: {e}"
-            ))
-        })?;
-        let expected_address = self
-            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
-            .map_err(UnapprovedDepositError::DepositDataMismatch)?;
-
-        if deposit_address != expected_address {
+        if txout.script_pubkey.as_bytes() != spend.script_pubkey.as_slice() {
             return Err(UnapprovedDepositError::DepositDataMismatch(anyhow!(
-                "Expected address {expected_address}, got address {deposit_address}",
+                "Expected script_pubkey {}, got {}",
+                ScriptBuf::from_bytes(spend.script_pubkey.clone()),
+                txout.script_pubkey,
             )));
         }
-
         Ok(())
     }
 
@@ -286,57 +274,14 @@ impl Hashi {
         )
     }
 
-    /// 2-of-2 taproot leaf artifacts (script, control block, leaf hash)
-    /// for a deposit UTXO. Used by the withdrawal sighash and the
-    /// rebroadcast witness builder.
-    pub(crate) fn deposit_spend_artifacts(
-        &self,
-        derivation_path: Option<&sui_sdk_types::Address>,
-    ) -> anyhow::Result<(
-        bitcoin::ScriptBuf,
-        bitcoin::taproot::ControlBlock,
-        bitcoin::taproot::TapLeafHash,
-    )> {
-        let mpc_g = self.mpc_master_g()?;
-        let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(hashi_bitcoin::taproot_2of2_witness_artifacts(
-            &guardian_pubkey,
-            &mpc_g,
-            &normalized_derivation_path(derivation_path),
-        ))
-    }
-
     /// Raw MPC verifying key (`G`) with y-parity preserved. Prefers the
     /// local signing manager (set immediately after DKG completes); falls
     /// back to the on-chain key. Both sources point at the same value.
-    fn mpc_master_g(&self) -> anyhow::Result<G> {
+    pub(crate) fn mpc_master_g(&self) -> anyhow::Result<G> {
         self.signing_verifying_key()
             .map(Ok)
             .unwrap_or_else(|| self.onchain_state().onchain_verifying_key_g())
             .context("MPC public key not available yet")
-    }
-
-    /// Hashi committee's child pubkey at `derivation_path`. `None` maps
-    /// to a zero-byte path (change outputs).
-    pub(crate) fn deposit_pubkey(
-        &self,
-        derivation_path: Option<&sui_sdk_types::Address>,
-    ) -> anyhow::Result<XOnlyPublicKey> {
-        // Prefer the local signing manager (available after DKG preparation).
-        // Fall back to the on-chain key, which is guaranteed present once the
-        // initial committee has formed and `end_reconfig` has been processed.
-        let verifying_key = self
-            .signing_verifying_key()
-            .map(Ok)
-            .unwrap_or_else(|| self.onchain_state().onchain_verifying_key_g())
-            .context("MPC public key not available yet")?;
-        let derivation_path = normalized_derivation_path(derivation_path).into_inner();
-        let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
-            &verifying_key,
-            &derivation_path,
-        )
-        .context("derive child verifying key")?;
-        XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
 
     fn require_guardian_btc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
@@ -348,6 +293,7 @@ impl Hashi {
     fn sign_deposit_confirmation(
         &self,
         deposit_request: &DepositRequest,
+        spend: SpendData,
     ) -> anyhow::Result<MemberSignature> {
         let epoch = self.onchain_state().epoch();
         let validator_address = self
@@ -370,6 +316,7 @@ impl Hashi {
         let message = DepositConfirmationMessage {
             request_id: deposit_request.id,
             utxo: deposit_request.utxo.clone(),
+            spend,
         };
 
         let signature_bytes = private_key
@@ -458,6 +405,9 @@ pub enum UnapprovedDepositError {
     #[error("Deposit data mismatch: {0}")]
     DepositDataMismatch(#[source] anyhow::Error),
 
+    #[error("Failed to compute or check the deposit's spend data: {0}")]
+    SpendDataFailed(#[source] anyhow::Error),
+
     #[error("AML checks rejected deposit: {0}")]
     AmlRejected(#[source] anyhow::Error),
 
@@ -495,6 +445,7 @@ impl UnapprovedDepositError {
             | Self::ExecutorInitFailed(_)
             | Self::ApproveDepositFailed(_)
             | Self::SignDepositFailed(_)
+            | Self::SpendDataFailed(_)
             | Self::AlreadyApprovedThisEpoch
             | Self::TimedOut(_) => UnapprovedDepositErrorKind::RetryOnNextBlock,
             Self::InvalidOnchainRequest(_)

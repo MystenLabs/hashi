@@ -878,6 +878,7 @@ fn find_tob_buckets_to_prune(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::onchain::types::SpendData;
     use crate::onchain::types::Utxo;
     use crate::onchain::types::WithdrawalTransaction;
     use hashi_types::bitcoin_txid::BitcoinTxid;
@@ -903,6 +904,13 @@ mod tests {
                 amount: 1_000,
                 derivation_path: None,
             },
+            spend: SpendData {
+                script_pubkey: vec![],
+                leaf_script: vec![],
+                control_block: vec![],
+                key_path: Address::ZERO,
+                sighash_type: 0,
+            },
             produced_by: None,
             spent_by: None,
             spent_epoch,
@@ -926,6 +934,7 @@ mod tests {
                 amount: 1_000,
                 derivation_path: None,
             },
+            spend: None,
             approval_cert: approved_timestamp_ms.map(|_| CommitteeSignature {
                 epoch: 0,
                 signature: Vec::new(),
@@ -1027,6 +1036,7 @@ mod tests {
         WithdrawalTransaction {
             id: Address::new([byte; 32]),
             txid: BitcoinTxid::new([byte; 32]),
+            sighash_digest: Address::ZERO,
             request_ids: vec![],
             inputs: vec![],
             withdrawal_outputs: vec![],

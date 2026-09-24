@@ -1297,6 +1297,7 @@ mod tests {
         sui_tx_digest: Digest,
         utxo: move_types::Utxo,
         approval_cert: Option<move_types::CommitteeSignature>,
+        spend: Option<move_types::SpendData>,
         approved_timestamp_ms: Option<u64>,
         confirmed_timestamp_ms: Option<u64>,
     }
@@ -1381,6 +1382,7 @@ mod tests {
     #[derive(serde_derive::Serialize)]
     struct UtxoRecordEnc {
         utxo: move_types::Utxo,
+        spend: move_types::SpendData,
         produced_by: Option<Address>,
         spent_by: Option<Address>,
         spent_epoch: Option<u64>,
@@ -1456,6 +1458,16 @@ mod tests {
         }
     }
 
+    fn spend_data() -> move_types::SpendData {
+        move_types::SpendData {
+            script_pubkey: vec![0x51, 0x20],
+            leaf_script: vec![0x20],
+            control_block: vec![0xc0],
+            key_path: addr(0x78),
+            sighash_type: 0,
+        }
+    }
+
     fn utxo_field_object(field_id: Address, version: u64, amount: u64) -> Object {
         let record_utxo = utxo(0x77, 0, amount);
         let contents = bcs::to_bytes(&FieldEnc {
@@ -1463,6 +1475,7 @@ mod tests {
             name: record_utxo.id,
             value: UtxoRecordEnc {
                 utxo: record_utxo,
+                spend: spend_data(),
                 produced_by: None,
                 spent_by: None,
                 spent_epoch: None,
@@ -1509,6 +1522,7 @@ mod tests {
                 sui_tx_digest: Digest::ZERO,
                 utxo: utxo(0x77, 0, 1_000),
                 approval_cert: None,
+                spend: approved.then(spend_data),
                 approved_timestamp_ms: approved.then_some(2_000),
                 confirmed_timestamp_ms: None,
             })
@@ -1520,6 +1534,7 @@ mod tests {
         move_types::WithdrawalTransaction {
             id: value_id,
             txid: BitcoinTxid::from(addr(0x66)),
+            sighash_digest: addr(0x00),
             request_ids: vec![],
             inputs: vec![utxo(0x77, 0, 1_000)],
             withdrawal_outputs: vec![],

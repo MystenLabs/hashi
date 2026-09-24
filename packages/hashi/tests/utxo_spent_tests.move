@@ -24,7 +24,10 @@ fun test_mark_spent_marks_but_keeps_record() {
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo, hashi::utxo::spend_data_for_testing(&utxo));
 
     hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);
 
@@ -48,7 +51,10 @@ fun test_cleanup_spent_moves_record() {
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo, hashi::utxo::spend_data_for_testing(&utxo));
     hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);
     hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
 
@@ -72,8 +78,14 @@ fun test_insert_active_rejects_existing_active_utxo() {
     let utxo1 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
     let utxo2 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo1);
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo2);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo1, hashi::utxo::spend_data_for_testing(&utxo1));
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo2, hashi::utxo::spend_data_for_testing(&utxo2));
 
     std::unit_test::destroy(hashi);
 }
@@ -91,10 +103,16 @@ fun test_insert_active_rejects_spent_utxo() {
     let utxo1 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
     let utxo2 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo1);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo1, hashi::utxo::spend_data_for_testing(&utxo1));
     hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);
     hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo2);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo2, hashi::utxo::spend_data_for_testing(&utxo2));
 
     std::unit_test::destroy(hashi);
 }
@@ -112,8 +130,14 @@ fun test_insert_pending_rejects_existing_active_utxo() {
     let utxo1 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
     let utxo2 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo1);
-    hashi.bitcoin_mut().utxo_pool_mut().insert_pending(utxo2, @0xB1);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo1, hashi::utxo::spend_data_for_testing(&utxo1));
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_pending(utxo2, hashi::utxo::spend_data_for_testing(&utxo2), @0xB1);
 
     std::unit_test::destroy(hashi);
 }
@@ -134,10 +158,16 @@ fun test_insert_pending_rejects_spent_utxo() {
     let utxo1 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
     let utxo2 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo1);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo1, hashi::utxo::spend_data_for_testing(&utxo1));
     hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);
     hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
-    hashi.bitcoin_mut().utxo_pool_mut().insert_pending(utxo2, @0xB1);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_pending(utxo2, hashi::utxo::spend_data_for_testing(&utxo2), @0xB1);
 
     std::unit_test::destroy(hashi);
 }
@@ -153,7 +183,10 @@ fun test_insert_pending_accepts_fresh_utxo() {
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 1);
     let utxo = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_pending(utxo, @0xB1);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_pending(utxo, hashi::utxo::spend_data_for_testing(&utxo), @0xB1);
 
     let pool = hashi.bitcoin().utxo_pool();
     assert!(pool.has_active_record(utxo_id));
@@ -174,7 +207,10 @@ fun test_cleanup_spent_idempotent() {
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     let utxo = hashi::utxo::utxo(utxo_id, 50_000, option::none());
 
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
+    hashi
+        .bitcoin_mut()
+        .utxo_pool_mut()
+        .insert_active(utxo, hashi::utxo::spend_data_for_testing(&utxo));
 
     // Mark as spent, then cleanup -- moves to spent_utxos.
     hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);

@@ -88,6 +88,7 @@ These details trip up most operators:
 | [11. Troubleshooting](#11-troubleshooting) | Symptoms, causes, and fixes, grouped by where the failure surfaces |
 | [12. Coming soon](#12-coming-soon) | Planned capabilities that are not yet available |
 | [13. Testnet releases](#13-testnet-releases) | Published binaries, container images, and the Mysten fleet rollout |
+| [14. Releases that change signing](#14-releases-that-change-signing) | The release rule for signing changes, and how a new signing version ships |
 
 For the protocol behavior behind these operations, see [Committee](committee.mdx) (which validators can join, and what registration writes onchain), [Deposit](deposit.mdx) and [Withdraw](withdraw.mdx) (the flows your node runs), [Reconfiguration](reconfiguration.mdx) (what happens at each epoch boundary), and [Hashi Node Backups](node-backup.mdx) (the full key-generation and restore procedure).
 
@@ -1026,6 +1027,12 @@ Notes:
 | `hashi_withdrawal_queue_size` | gauge | Pending withdrawals (by status). |
 | `hashi_utxo_pool_size` | gauge | Managed UTXOs (available / unconfirmed_change / locked). |
 | `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
+| `hashi_spend_check_refusals_total` | counter | Operations this node refused because a UTXO's spend data was missing or wrong, or a txid, the sighash digest or the presignature pairing did not match what it computed (by `site`, `check`). Healthy: flat. |
+| `hashi_utxo_selection_skipped_records` | gauge | UTXOs skipped because their spend record failed a check (by `reason`), as of the latest coin selection this node ran as leader. Healthy: `0`. |
+| `hashi_mpc_signing_version_supported` | gauge | 1 for each signing version this binary supports (label `version`, section 14). |
+| `hashi_mpc_signing_version_refused_total` | counter | Refusals of an epoch this node cannot compute, by `reason`: `unsupported` (its release lacks the epoch's signing version, given in `version`), `missing` or `malformed` (the committee's config has no valid `mpc_signing_version`), or `legacy` (the committee still carries a retired key such as `mpc_threshold_in_basis_points`). Healthy: flat. |
+| `hashi_mpc_reduction_version_info` | gauge | 1 for each signing version this binary supports, labelled `version` and `source_digest`, a digest of that version's weight-reduction source. Every release that supports a version must report the same digest for it. |
+| `hashi_mpc_reduction_info` | gauge | 1 for each epoch the node reads, labelled `epoch`, `version` and `digest`, a digest of that epoch's weight reduction. Every node should show the same digest for an epoch. |
 | `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG/rotation duration. |
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
 | `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance), labeled `address` with the operator address paying gas. `-1` until the first successful sample. |
@@ -1055,6 +1062,8 @@ See [Committee](committee.mdx) for what membership means and how Hashi derives t
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
+| `increase(hashi_spend_check_refusals_total[1h]) > 0 or (hashi_spend_check_refusals_total unless hashi_spend_check_refusals_total offset 1h) or (hashi_spend_check_refusals_total and on(job, instance) uptime < 3600)` | Warning | A spend check refused work on this node; the `site` and `check` labels say where and which. Ask in the operator channel whether peers refuse too: if only this node does, its release differs from the fleet's (section 14); if every other node refuses at `site="commit"`, the leader's proposal is at fault. |
+| `increase(hashi_mpc_signing_version_refused_total[10m]) > 0 or (hashi_mpc_signing_version_refused_total unless hashi_mpc_signing_version_refused_total offset 10m) or (hashi_mpc_signing_version_refused_total and on(job, instance) uptime < 600)` | Critical | This node sits an epoch out. For `reason="unsupported"`, upgrade to a release that supports `version` (section 14). The other reasons mean the committee's config does not fit this release: `missing` or `malformed` (no valid `mpc_signing_version`, for example on a package published before the key) or `legacy` (a retired key such as `mpc_threshold_in_basis_points`). Check that the node runs the network's release; if it does, escalate. |
 | `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the `address` named in the alert's labels. (`-1` means not yet sampled, not empty.) |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
@@ -1082,6 +1091,7 @@ On every Sui epoch change, the Hashi committee reconfigures:
 - **Keep your node online across epoch boundaries.** It must participate in key rotation.
 - **Keep registration metadata current.** If you change endpoint URL, TLS key, or other registration info, re-run `hashi register` before the next epoch change. Metadata updates accept either the operator or the validator key.
 - **Monitor reconfiguration.** Watch `hashi_reconfig_in_progress` and `hashi_mpc_reconfig_total_duration_seconds`.
+- **Apply releases that change signing only as §14 describes.** Their new behavior starts when governance raises the signing version, at the next committee formation, never node by node.
 
 ### 9.3 Stuck reconfigurations
 
@@ -1427,10 +1437,26 @@ kubectl -n hashi-testnet rollout status deploy/mysten<N> --timeout=600s
 kubectl -n hashi-testnet logs deploy/mysten<N> | grep -m1 "Guardian bootstrap complete"
 ```
 
-Proceed to the next node only after all three checks pass. If a node does not come back healthy, stop and investigate before touching the next — every additional node down eats into the committee's 2/3 signing margin (§9).
+Proceed to the next node only after all three checks pass. If a node does not come back healthy, stop and investigate before touching the next — every additional node down eats into the committee's 2/3 signing margin (§9). Never roll a release that changes signing (§14) this way: testnet's committees have no signing version, so old and new nodes would sign the same epoch differently. Hold such a release until testnet has its own plan.
 
 Rollout gotchas:
 
 - **Serialize the updates.** Wait for each `pulumi up` to exit before starting the next; concurrent targeted ups conflict on the stack lock (409).
 - **Don't trust the pod label for readiness.** `kubectl wait --for=condition=Ready pod -l hashi-node=mysten<N>` also matches the still-terminating old pod.
 - **Unhealthy fleet, different gates.** Mid-incident (for example a reconfiguration stall, §9.3) no pod turns Ready, so `rollout status` never completes and pulumi's readiness await reports the Deployment as errored even though the image update applied. Gate on the pod reaching `Running` with no restarts plus the guardian bootstrap log line, and re-run the targeted `pulumi up` after recovery to reconcile state.
+
+---
+
+## 14. Releases that change signing
+
+This applies to networks whose committees pin a signing version, such as mainnet. Testnet does not (§13.3).
+
+If old and new nodes sign the same epoch differently, the committee's Bitcoin key can leak. So a release never changes how an existing epoch is signed: a signing change ships as a new signing version, which governance switches for every node at once at a committee formation. The golden signing tests must pass unchanged, and any release that touches signing code or bumps fastcrypto is reviewed as a signing change.
+
+To ship one:
+
+1. Release the new version beside the old one and roll out as usual.
+2. Before the vote, check that nearly all the stake runs a release with it (§8.3), in both the current committee and the next.
+3. Governance sets `mpc_signing_version` (§6.6). Nodes without it refuse the new epoch. Too many of them stall the formation, holding deposits and withdrawals, until it is aborted at the end of its Sui epoch (§9.3). Upgrade them in time, or revert the key or set `reconfig_hold` before the abort; a hold only defers, so clear it once fixed.
+
+Roll back only to a release that supports every pinned version. Before every release, stop if `hashi mpc show-reduction` differs between the running release and the candidate on any network.

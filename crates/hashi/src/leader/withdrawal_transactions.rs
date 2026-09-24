@@ -7,6 +7,8 @@ use super::parse_member_signature;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::onchain::types::WithdrawalTransaction;
+use crate::spend_data::SpendCheckSite;
+use crate::spend_data::WithdrawalSpends;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalBroadcastError;
@@ -111,21 +113,15 @@ fn chunk_step_after_attempt(made_progress: bool, stalled_for: Duration) -> Chunk
     }
 }
 
-/// Derives the x-only verifying key the MPC signature for input `idx` must
-/// validate against (the master key derived by the input's path), mirroring the
-/// per-input check the committee re-runs at the commit cert
-/// (`validate_and_sign_mpc_input_signatures`).
-fn input_verifying_key(
-    inner: &Hashi,
-    txn: &WithdrawalTransaction,
-    idx: u64,
-) -> anyhow::Result<SchnorrPublicKey> {
-    let input = txn
-        .inputs
+/// The x-only key the MPC signature for input `idx` must validate against: the
+/// leaf key of its stored spend data, as the committee checks at the commit
+/// cert (`validate_and_sign_mpc_input_signatures`).
+fn input_verifying_key(spends: &WithdrawalSpends, idx: u64) -> anyhow::Result<SchnorrPublicKey> {
+    let checked = spends
+        .checked
         .get(idx as usize)
         .ok_or_else(|| anyhow::anyhow!("input index {idx} out of range"))?;
-    let input_pubkey = inner.deposit_pubkey(input.derivation_path.as_ref())?;
-    SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+    SchnorrPublicKey::from_byte_array(&checked.leaf_key)
         .map_err(|e| anyhow::anyhow!("invalid verifying key for input {idx}: {e}"))
 }
 
@@ -732,20 +728,23 @@ impl LeaderService {
             chunk_size = chunk_indices.len(),
             "Collecting MPC signatures for next unsigned input chunk"
         );
-        // Per-input sighashes the MPC signatures must verify against; used to
-        // gate each candidate before it is unioned into the chunk.
-        let unsigned_tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-        let signing_messages = inner.withdrawal_signing_messages(&unsigned_tx, &txn.inputs)?;
+        // Per-input sighashes and keys the MPC signatures must verify against;
+        // used to gate each candidate before it is unioned into the chunk.
+        let spends = inner
+            .withdrawal_spends(
+                &txn.inputs,
+                &txn.all_outputs(),
+                &txn.txid,
+                Some(&txn.sighash_digest),
+            )
+            .inspect_err(|e| inner.record_spend_refusal(SpendCheckSite::LeaderCollection, e))?;
 
-        let sigs_by_index = Self::collect_withdrawal_tx_signatures(
-            inner,
-            txn,
-            &chunk_indices,
-            members,
-            &signing_messages,
-        )
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
+        let sigs_by_index =
+            Self::collect_withdrawal_tx_signatures(inner, txn, &chunk_indices, members, &spends)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
+                })?;
 
         let committee = inner
             .onchain_state()
@@ -858,9 +857,10 @@ impl LeaderService {
         txn: &WithdrawalTransaction,
         expected_indices: &[u64],
         members: &[CommitteeMember],
-        signing_messages: &[[u8; 32]],
+        spends: &WithdrawalSpends,
     ) -> Option<Vec<(u64, SchnorrSignature)>> {
         let withdrawal_txn_id = txn.id;
+        let signing_messages = &spends.sighashes;
         let mut sig_tasks = JoinSet::new();
         for member in members {
             let inner = inner.clone();
@@ -877,18 +877,17 @@ impl LeaderService {
             });
         }
 
-        // Per-input verifying keys for the chunk, derived once. A missing key
-        // (derivation failed) means candidates for that index can't be verified
-        // and are dropped.
+        // Per-input verifying keys for the chunk. A missing key means
+        // candidates for that index can't be verified and are dropped.
         let mut verify_keys: HashMap<u64, SchnorrPublicKey> =
             HashMap::with_capacity(expected_indices.len());
         for &idx in expected_indices {
-            match input_verifying_key(inner, txn, idx) {
+            match input_verifying_key(spends, idx) {
                 Ok(pk) => {
                     verify_keys.insert(idx, pk);
                 }
                 Err(e) => {
-                    warn!(%withdrawal_txn_id, "Cannot derive verifying key for input {idx}: {e}")
+                    warn!(%withdrawal_txn_id, "Cannot read verifying key for input {idx}: {e}")
                 }
             }
         }
@@ -1407,7 +1406,10 @@ impl LeaderService {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No guardian signatures on withdrawal transaction"))?;
 
-        let mut tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        let spends = inner
+            .withdrawal_spends(&txn.inputs, &txn.all_outputs(), &txn.txid, None)
+            .inspect_err(|e| inner.record_spend_refusal(SpendCheckSite::Broadcast, e))?;
+        let mut tx = spends.tx;
 
         anyhow::ensure!(
             raw_sigs.len() == tx.input.len(),
@@ -1428,21 +1430,19 @@ impl LeaderService {
             txn.inputs.len()
         );
 
-        for (((input, txn_input), hashi_sig_bytes), guardian_sig_bytes) in tx
+        for (((input, record), hashi_sig_bytes), guardian_sig_bytes) in tx
             .input
             .iter_mut()
-            .zip(txn.inputs.iter())
+            .zip(spends.records.iter())
             .zip(raw_sigs)
             .zip(raw_guardian_sigs)
         {
-            let (script, control_block, _) =
-                inner.deposit_spend_artifacts(txn_input.derivation_path.as_ref())?;
             let mut witness = bitcoin::Witness::new();
             // multi_a satisfier order: hashi_sig (bottom) then guardian_sig (top).
             witness.push(hashi_sig_bytes);
             witness.push(guardian_sig_bytes);
-            witness.push(script.to_bytes());
-            witness.push(control_block.serialize());
+            witness.push(&record.leaf_script);
+            witness.push(&record.control_block);
             input.witness = witness;
         }
 

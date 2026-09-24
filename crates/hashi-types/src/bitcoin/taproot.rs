@@ -5,10 +5,13 @@
 //! Bitcoin UTXOs. The UTXO/transaction types that consume these live in
 //! `super::utxo`.
 
+use super::BTC_LIB;
 use super::BitcoinAddress;
 use super::BitcoinPubkey;
 use super::DerivationPath;
 use super::HashiMasterG;
+use crate::move_types::SpendData;
+use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
@@ -16,10 +19,13 @@ use bitcoin::TapSighashType;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::HashEngine;
+use bitcoin::hashes::sha256;
 use bitcoin::relative;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::ControlBlock;
+use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
@@ -46,6 +52,9 @@ pub const HASHI_MPC_RECOVERY_DELAY_SECONDS: u32 = 60 * 24 * 60 * 60;
 /// These must match the leaf order in its descriptor string.
 const IMMEDIATE_2OF2_LEAF_INDEX: usize = 0;
 const MPC_RECOVERY_LEAF_INDEX: usize = 1;
+
+/// BIP-341 `SIGHASH_DEFAULT`, the only sighash type [`check_spend_record`] accepts.
+pub const SIGHASH_TYPE_DEFAULT: u8 = 0;
 
 /// scriptPubKey and immediate 2-of-2 tap leaf hash for the output at
 /// `derivation_path`.
@@ -118,6 +127,137 @@ fn taproot_witness_artifacts_at_leaf(
         .into_control_block();
 
     (tap_script, control_block, leaf_hash)
+}
+
+pub fn taproot_2of2_spend_data(
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_g: &HashiMasterG,
+    key_path: &DerivationPath,
+) -> SpendData {
+    let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_g, key_path);
+    let (leaf_script, control_block, _) =
+        taproot_witness_artifacts_at_leaf(&desc, IMMEDIATE_2OF2_LEAF_INDEX);
+    SpendData {
+        script_pubkey: desc.script_pubkey().into_bytes(),
+        leaf_script: leaf_script.into_bytes(),
+        control_block: control_block.serialize(),
+        key_path: *key_path,
+        sighash_type: SIGHASH_TYPE_DEFAULT,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckedSpend {
+    pub script_pubkey: ScriptBuf,
+    pub leaf_script: ScriptBuf,
+    pub control_block: ControlBlock,
+    pub leaf_hash: TapLeafHash,
+    pub leaf_key: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SpendRecordError {
+    #[error("script_pubkey is not a P2TR output")]
+    NotP2tr,
+    #[error("leaf is not the 2-of-2 with the guardian key")]
+    NotGuardianTwoOfTwo,
+    #[error("control block does not decode: {0}")]
+    ControlBlockDecode(String),
+    #[error("control block leaf version is not TapScript")]
+    NotTapScript,
+    #[error("control block does not prove the leaf under the output key")]
+    CommitmentMismatch,
+    #[error("sighash type {0:#04x} is not Default")]
+    UnsupportedSighashType(u8),
+}
+
+pub fn check_spend_record(
+    spend: &SpendData,
+    guardian_pubkey: &BitcoinPubkey,
+) -> Result<CheckedSpend, SpendRecordError> {
+    if spend.sighash_type != SIGHASH_TYPE_DEFAULT {
+        return Err(SpendRecordError::UnsupportedSighashType(spend.sighash_type));
+    }
+    let output_key = match spend.script_pubkey.as_slice() {
+        [0x51, 0x20, program @ ..] if program.len() == 32 => {
+            BitcoinPubkey::from_slice(program).map_err(|_| SpendRecordError::NotP2tr)?
+        }
+        _ => return Err(SpendRecordError::NotP2tr),
+    };
+    let leaf_key = guardian_two_of_two_key(&spend.leaf_script, guardian_pubkey)
+        .ok_or(SpendRecordError::NotGuardianTwoOfTwo)?;
+    let control_block = ControlBlock::decode(&spend.control_block)
+        .map_err(|e| SpendRecordError::ControlBlockDecode(e.to_string()))?;
+    if control_block.leaf_version != LeafVersion::TapScript {
+        return Err(SpendRecordError::NotTapScript);
+    }
+    let leaf_script = ScriptBuf::from_bytes(spend.leaf_script.clone());
+    if !control_block.verify_taproot_commitment(&BTC_LIB, output_key, &leaf_script) {
+        return Err(SpendRecordError::CommitmentMismatch);
+    }
+    Ok(CheckedSpend {
+        script_pubkey: ScriptBuf::from_bytes(spend.script_pubkey.clone()),
+        leaf_hash: TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript),
+        leaf_script,
+        control_block,
+        leaf_key,
+    })
+}
+
+fn guardian_two_of_two_key(leaf: &[u8], guardian_pubkey: &BitcoinPubkey) -> Option<[u8; 32]> {
+    let key: [u8; 32] = leaf.get(35..67)?.try_into().ok()?;
+    let expected = [
+        &[0x20][..],
+        &guardian_pubkey.serialize(),
+        &[0xac, 0x20],
+        &key,
+        &[0xba, 0x52, 0x9c],
+    ]
+    .concat();
+    (leaf == expected.as_slice()).then_some(key)
+}
+
+pub fn signing_key_x(
+    verifying_key: &HashiMasterG,
+    derivation_address: Option<&[u8; 32]>,
+) -> anyhow::Result<[u8; 32]> {
+    Ok(match derivation_address {
+        Some(address) => derive_verifying_key(verifying_key, address)?.to_byte_array(),
+        None => verifying_key.x_as_be_bytes()?,
+    })
+}
+
+pub fn signs_under_leaf_key(
+    verifying_key: &HashiMasterG,
+    derivation_address: Option<&[u8; 32]>,
+    leaf_key: &[u8; 32],
+) -> bool {
+    signing_key_x(verifying_key, derivation_address).is_ok_and(|x| x == *leaf_key)
+}
+
+pub fn checked_spend_sighashes(
+    tx: &Transaction,
+    amounts: &[Amount],
+    spends: &[CheckedSpend],
+) -> Vec<[u8; 32]> {
+    let prevouts: Vec<TxOut> = amounts
+        .iter()
+        .zip(spends)
+        .map(|(amount, spend)| TxOut {
+            value: *amount,
+            script_pubkey: spend.script_pubkey.clone(),
+        })
+        .collect();
+    let leaf_hashes: Vec<TapLeafHash> = spends.iter().map(|spend| spend.leaf_hash).collect();
+    taproot_script_spend_sighashes(tx, &prevouts, &leaf_hashes)
+}
+
+pub fn sighash_digest(sighashes: &[[u8; 32]]) -> [u8; 32] {
+    let mut engine = sha256::Hash::engine();
+    for sighash in sighashes {
+        engine.input(sighash);
+    }
+    sha256::Hash::from_engine(engine).to_byte_array()
 }
 
 /// Per-input taproot script-spend sighashes for an unsigned tx. `prevouts` and

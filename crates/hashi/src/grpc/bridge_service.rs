@@ -12,7 +12,7 @@ use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalRequestApproval;
-use crate::withdrawals::WithdrawalTxCommitment;
+use crate::withdrawals::WithdrawalTxProposal;
 use crate::withdrawals::WithdrawalTxSigning;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::proto::GetServiceInfoRequest;
@@ -126,7 +126,7 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalTxConstructionResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        let approval = parse_withdrawal_tx_commitment(request.get_ref())
+        let approval = parse_withdrawal_tx_proposal(request.get_ref())
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record("bitcoin_txid", tracing::field::display(&approval.txid));
         let member_signature = self
@@ -377,6 +377,7 @@ fn parse_deposit_request(
         // Approval state isn't carried by the proto. Validators look up
         // the on-chain version separately when verifying.
         approval_cert: None,
+        spend: None,
         approved_timestamp_ms: None,
         confirmed_timestamp_ms: None,
     })
@@ -389,9 +390,9 @@ fn parse_withdrawal_request_approval(
     Ok(WithdrawalRequestApproval { request_id })
 }
 
-fn parse_withdrawal_tx_commitment(
+fn parse_withdrawal_tx_proposal(
     request: &SignWithdrawalTxConstructionRequest,
-) -> anyhow::Result<WithdrawalTxCommitment> {
+) -> anyhow::Result<WithdrawalTxProposal> {
     let request_ids: Vec<Address> = request
         .request_ids
         .iter()
@@ -421,7 +422,7 @@ fn parse_withdrawal_tx_commitment(
         .collect();
     let txid = parse_address(&request.txid)?.into();
 
-    Ok(WithdrawalTxCommitment {
+    Ok(WithdrawalTxProposal {
         request_ids,
         selected_utxos,
         outputs,

@@ -148,6 +148,13 @@ deposit should be approved. If a quorum of validators cannot agree that a
 deposit should be approved, the request is either retried later or ignored
 if invalid.
 
+Each member's signature also covers the UTXO's spend data: its output script,
+its 2-of-2 leaf and control block, the key path the MPC signs under, and the
+sighash type. Each member computes this from its own keys and checks the
+Bitcoin output against it, so a certificate forms only on spend data a quorum
+computed. Withdrawals later sign from this stored data instead of deriving it
+again.
+
 After a quorum is reached, one validator submits the certificate onchain by
 calling `hashi::deposit::approve_deposit`:
 
@@ -155,15 +162,17 @@ calling `hashi::deposit::approve_deposit`:
 entry fun approve_deposit(
     hashi: &mut Hashi,
     request_id: address,
+    spend: SpendData,
     cert: CommitteeSignature,
     clock: &Clock,
     ctx: &mut TxContext,
 )
 ```
 
-The function verifies the committee certificate against the current committee
-and records both the certificate and the current clock timestamp on the
-request. The request remains in the deposit queue, and no `hBTC` is minted yet.
+The function verifies the committee certificate over the request, its UTXO and
+`spend` against the current committee, and records the certificate, `spend`
+and the current clock timestamp on the request. The request remains in the
+deposit queue, and no `hBTC` is minted yet.
 
 ## Confirm
 

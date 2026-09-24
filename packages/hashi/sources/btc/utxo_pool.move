@@ -9,7 +9,7 @@
 #[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo_pool;
 
-use hashi::utxo::{Utxo, UtxoId};
+use hashi::utxo::{SpendData, Utxo, UtxoId};
 use sui::bag::Bag;
 
 // ~~~~~~~ Errors ~~~~~~~
@@ -38,6 +38,7 @@ const EUtxoAlreadyUsed: vector<u8> = b"UTXO is already active or spent";
 /// outputs before the parent transaction confirms.
 public struct UtxoRecord has store {
     utxo: Utxo,
+    spend: SpendData,
     produced_by: Option<address>,
     spent_by: Option<address>,
     spent_epoch: Option<u64>,
@@ -65,7 +66,7 @@ public(package) fun create(ctx: &mut TxContext): UtxoPool {
 }
 
 /// Insert a confirmed UTXO (from a deposit) into the pool.
-public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
+public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo, spend: SpendData) {
     let utxo_id = utxo.id();
     self.assert_not_spent_or_active(utxo_id);
     self
@@ -74,6 +75,7 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
             utxo_id,
             UtxoRecord {
                 utxo,
+                spend,
                 produced_by: option::none(),
                 spent_by: option::none(),
                 spent_epoch: option::none(),
@@ -91,7 +93,12 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
 /// observed on Bitcoin, so this insert carries the same replay guard as
 /// `insert_active`: an outpoint that is live or already spent is refused
 /// before any record is written.
-public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
+public(package) fun insert_pending(
+    self: &mut UtxoPool,
+    utxo: Utxo,
+    spend: SpendData,
+    withdrawal_id: address,
+) {
     let utxo_id = utxo.id();
     self.assert_not_spent_or_active(utxo_id);
     self
@@ -100,6 +107,7 @@ public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_i
             utxo_id,
             UtxoRecord {
                 utxo,
+                spend,
                 produced_by: option::some(withdrawal_id),
                 spent_by: option::none(),
                 spent_epoch: option::none(),
@@ -151,7 +159,7 @@ public(package) fun confirm_pending(self: &mut UtxoPool, utxo_id: UtxoId) {
 /// No-ops if the record has already been cleaned up.
 public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
     if (self.utxo_records.contains(utxo_id)) {
-        let UtxoRecord { utxo, produced_by: _, spent_by: _, spent_epoch } = self
+        let UtxoRecord { utxo, spend: _, produced_by: _, spent_by: _, spent_epoch } = self
             .utxo_records
             .remove(utxo_id);
         let epoch = spent_epoch.destroy_some();
@@ -161,6 +169,17 @@ public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public(package) fun new_record_for_testing(
+    utxo: Utxo,
+    spend: SpendData,
+    produced_by: Option<address>,
+    spent_by: Option<address>,
+    spent_epoch: Option<u64>,
+): UtxoRecord {
+    UtxoRecord { utxo, spend, produced_by, spent_by, spent_epoch }
+}
 
 #[test_only]
 public(package) fun has_active_record(self: &UtxoPool, utxo_id: UtxoId): bool {

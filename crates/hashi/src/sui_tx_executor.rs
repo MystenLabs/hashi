@@ -175,6 +175,28 @@ fn build_chunked_move_vec_arg(
     combined
 }
 
+fn build_spend_data_arg(
+    builder: &mut TransactionBuilder,
+    package_id: Address,
+    spend: &SpendData,
+) -> sui_transaction_builder::Argument {
+    let args = vec![
+        builder.pure(&spend.script_pubkey),
+        builder.pure(&spend.leaf_script),
+        builder.pure(&spend.control_block),
+        builder.pure(&spend.key_path),
+        builder.pure(&spend.sighash_type),
+    ];
+    builder.move_call(
+        Function::new(
+            package_id,
+            Identifier::from_static("utxo"),
+            Identifier::from_static("spend_data"),
+        ),
+        args,
+    )
+}
+
 /// Split a `Vec<Vec<u8>>` into chunks whose BCS-serialized size each stays
 /// within `max_bytes`.
 ///
@@ -256,6 +278,7 @@ use crate::onchain;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::SpendData;
 use crate::onchain::types::UtxoId;
 use crate::withdrawals::WithdrawalTxCommitment;
 
@@ -703,6 +726,8 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let request_id_arg = builder.pure(&deposit_request.id);
+        let spend_arg =
+            build_spend_data_arg(&mut builder, package_id, &signed_message.message().spend);
         let cert_arg = build_committee_signature_arg(
             &mut builder,
             package_id,
@@ -720,7 +745,7 @@ impl SuiTxExecutor {
                 Identifier::from_static("deposit"),
                 Identifier::from_static("approve_deposit"),
             ),
-            vec![hashi_arg, request_id_arg, cert_arg, clock_arg],
+            vec![hashi_arg, request_id_arg, spend_arg, cert_arg, clock_arg],
         );
 
         let response = self.execute(builder).await?;
@@ -1641,6 +1666,36 @@ impl SuiTxExecutor {
             build_chunked_move_vec_arg(&mut builder, output_elements, output_utxo_type.into());
 
         let txid_arg = builder.pure(&approval.txid);
+        let spend_data_type = StructTag::new(
+            self.hashi_ids.package_id,
+            Identifier::from_static("utxo"),
+            Identifier::from_static("SpendData"),
+            vec![],
+        );
+        let change_spend_arg = match &approval.change_spend {
+            Some(spend) => {
+                let spend_arg = build_spend_data_arg(&mut builder, package_id, spend);
+                builder.move_call(
+                    Function::new(
+                        MOVE_STDLIB_ADDRESS,
+                        Identifier::from_static("option"),
+                        Identifier::from_static("some"),
+                    )
+                    .with_type_args(vec![spend_data_type.into()]),
+                    vec![spend_arg],
+                )
+            }
+            None => builder.move_call(
+                Function::new(
+                    MOVE_STDLIB_ADDRESS,
+                    Identifier::from_static("option"),
+                    Identifier::from_static("none"),
+                )
+                .with_type_args(vec![spend_data_type.into()]),
+                vec![],
+            ),
+        };
+        let sighash_digest_arg = builder.pure(&approval.sighash_digest);
         let cert_arg = build_committee_signature_arg(&mut builder, package_id, cert);
 
         let clock_arg = builder.object(
@@ -1666,6 +1721,8 @@ impl SuiTxExecutor {
                 selected_utxos_arg,
                 outputs_arg,
                 txid_arg,
+                change_spend_arg,
+                sighash_digest_arg,
                 cert_arg,
                 clock_arg,
                 random_arg,

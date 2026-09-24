@@ -935,6 +935,17 @@ impl OnchainState {
             .map(|(_, utxo)| utxo.clone())
     }
 
+    pub fn utxo_spends<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a types::UtxoId>,
+    ) -> Vec<Option<types::SpendData>> {
+        let state = self.state();
+        let records = state.hashi().bitcoin().utxo_pool.utxo_records();
+        ids.into_iter()
+            .map(|id| records.get(id).map(|record| record.spend.clone()))
+            .collect()
+    }
+
     pub fn utxo_records(&self) -> std::collections::BTreeMap<types::UtxoId, types::UtxoRecord> {
         self.state()
             .hashi()

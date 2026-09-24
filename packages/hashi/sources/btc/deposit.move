@@ -3,7 +3,7 @@
 
 /// User-facing Bitcoin deposit flow. A depositor registers the UTXO they
 /// sent to the bridge's address, the committee approves it with a
-/// certificate over `(request_id, utxo)`, and — after a configurable time
+/// certificate over `(request_id, utxo, spend)`, and — after a configurable time
 /// delay in which a faulty approval can be caught and the service paused —
 /// the deposit is confirmed: hBTC is minted to the recipient encoded in the
 /// UTXO's derivation path and the UTXO joins the active pool. Requests that
@@ -17,7 +17,7 @@ use hashi::{
     config::Config,
     deposit_queue,
     hashi::Hashi,
-    utxo::{Utxo, UtxoId}
+    utxo::{SpendData, Utxo, UtxoId}
 };
 
 use fun btc_config::bitcoin_deposit_minimum as Config.deposit_minimum;
@@ -42,6 +42,7 @@ const EAlreadyApprovedThisEpoch: vector<u8> =
 public struct DepositConfirmationMessage has copy, drop, store {
     request_id: address,
     utxo: Utxo,
+    spend: SpendData,
 }
 
 // ~~~~~~~ Events ~~~~~~~
@@ -118,8 +119,8 @@ entry fun deposit(
 }
 
 /// First phase of deposit confirmation. Records a committee certificate
-/// over `(request_id, utxo)` on the request, alongside the approval
-/// timestamp, and re-inserts the request into the queue.
+/// over `(request_id, utxo, spend)` on the request, alongside `spend` and the
+/// approval timestamp, and re-inserts the request into the queue.
 ///
 /// The approval is not yet final — `confirm_deposit` must be called after
 /// the configured `bitcoin_deposit_time_delay_ms` has elapsed. The delay
@@ -131,6 +132,7 @@ entry fun deposit(
 entry fun approve_deposit(
     hashi: &mut Hashi,
     request_id: address,
+    spend: SpendData,
     cert: CommitteeSignature,
     clock: &sui::clock::Clock,
     _ctx: &mut TxContext,
@@ -159,16 +161,18 @@ entry fun approve_deposit(
         EAlreadyApprovedThisEpoch,
     );
 
-    // Verify the committee certificate over the request ID + UTXO.
+    spend.assert_spend_data(utxo.expected_key_path());
+
+    // Verify the committee certificate over the request ID + UTXO + spend data.
     hashi.verify(
         hashi::intent::deposit_confirmation(),
-        DepositConfirmationMessage { request_id, utxo },
+        DepositConfirmationMessage { request_id, utxo, spend },
         cert,
     );
 
-    // Record the cert and the approval timestamp for the time-delay check
-    // in `confirm_deposit`.
-    request.approve(cert, clock);
+    // Record the cert, the spend data and the approval timestamp for the
+    // time-delay check in `confirm_deposit`.
+    request.approve(cert, spend, clock);
 
     hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
 
@@ -207,14 +211,15 @@ entry fun confirm_deposit(
     let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
     let utxo = request.utxo();
     let cert = request.approval_cert().destroy_some();
+    let spend = request.spend().destroy_some();
     let approved_timestamp_ms = request.approved_timestamp_ms().destroy_some();
 
-    // Verify the certificate over the request ID + UTXO against the current committee.
-    // If a deposit is approved by an older committee, it will need to be
-    // re-approved by the current committee.
+    // Verify the certificate over the request ID + UTXO + spend data against
+    // the current committee. If a deposit is approved by an older committee,
+    // it will need to be re-approved by the current committee.
     hashi.verify(
         hashi::intent::deposit_confirmation(),
-        DepositConfirmationMessage { request_id, utxo },
+        DepositConfirmationMessage { request_id, utxo, spend },
         cert,
     );
 
@@ -241,7 +246,7 @@ entry fun confirm_deposit(
     };
 
     // Insert UTXO into active pool
-    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo, spend);
 
     // Move request to processed bag.
     let (req_id, recipient_opt) = hashi.bitcoin_mut().deposit_queue_mut().insert_processed(request);
@@ -274,6 +279,7 @@ entry fun delete_expired_deposit(
 public fun new_deposit_confirmation_message(
     request_id: address,
     utxo: Utxo,
+    spend: SpendData,
 ): DepositConfirmationMessage {
-    DepositConfirmationMessage { request_id, utxo }
+    DepositConfirmationMessage { request_id, utxo, spend }
 }

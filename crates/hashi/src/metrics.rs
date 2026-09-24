@@ -150,6 +150,8 @@ pub struct Metrics {
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
     pub utxo_selection_attempt_failures_total: IntCounterVec,
+    pub utxo_selection_skipped_records: IntGaugeVec,
+    pub spend_check_refusals_total: IntCounterVec,
     /// Withdrawal builds that fell back to ordinary consolidation ordering
     /// because confirmation-age resolution failed.
     pub utxo_confirmation_age_resolution_failures_total: IntCounter,
@@ -1003,6 +1005,20 @@ impl Metrics {
                 "hashi_utxo_selection_attempt_failures_total",
                 "Failed UTXO selection attempts by concrete selector error kind",
                 &["error_kind"],
+                registry,
+            )
+            .unwrap(),
+            utxo_selection_skipped_records: register_int_gauge_vec_with_registry!(
+                "hashi_utxo_selection_skipped_records",
+                "UTXOs the latest coin selection skipped because their spend record failed a check, by reason",
+                &["reason"],
+                registry,
+            )
+            .unwrap(),
+            spend_check_refusals_total: register_int_counter_vec_with_registry!(
+                "hashi_spend_check_refusals_total",
+                "Calls refused by a spend-data, txid, digest or pairing check outside the signing manager, by site and check",
+                &["site", "check"],
                 registry,
             )
             .unwrap(),

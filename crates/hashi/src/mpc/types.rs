@@ -1215,6 +1215,22 @@ pub enum SigningError {
          derivation address or beacon"
     )]
     RequestChanged { signing_id: Address },
+
+    #[error("The key {signing_id} would be signed under is not its leaf's key")]
+    KeyMismatch { signing_id: Address },
+
+    #[error("The presig for {signing_id} carries index {found}, not its slot {expected}")]
+    PresigMismatch {
+        signing_id: Address,
+        expected: u64,
+        found: u64,
+    },
+
+    #[error("Refused with its call: input {failing} failed a check")]
+    CallRefused {
+        signing_id: Address,
+        failing: Address,
+    },
 }
 
 pub type SigningResult<T> = Result<T, SigningError>;

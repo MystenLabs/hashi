@@ -16,7 +16,7 @@ use hashi::{
     committee::CommitteeSignature,
     config::Config,
     hashi::Hashi,
-    utxo::UtxoId,
+    utxo::{SpendData, UtxoId},
     withdrawal_queue::OutputUtxo
 };
 use sui::{balance::Balance, clock::Clock, random::Random};
@@ -59,6 +59,8 @@ public struct WithdrawalCommitmentMessage has copy, drop, store {
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    change_spend: Option<SpendData>,
+    sighash_digest: address,
 }
 
 // MESSAGE STEP 3
@@ -115,6 +117,8 @@ entry fun commit_withdrawal_tx(
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    change_spend: Option<SpendData>,
+    sighash_digest: address,
     cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
@@ -132,11 +136,13 @@ entry fun commit_withdrawal_tx(
         selected_utxos,
         outputs,
         txid,
+        change_spend,
+        sighash_digest,
     };
 
     hashi.verify(hashi::intent::withdrawal_commitment(), approval, cert);
 
-    let WithdrawalCommitmentMessage { outputs, txid, .. } = approval;
+    let WithdrawalCommitmentMessage { outputs, txid, change_spend, sighash_digest, .. } = approval;
 
     // Copy the full UTXO data from the pool before locking — used for fee
     // accounting and event emission inside new_withdrawal_txn.
@@ -159,12 +165,14 @@ entry fun commit_withdrawal_tx(
         inputs,
         outputs,
         txid,
+        sighash_digest,
         presig_start_index,
         epoch,
         hashi.config(),
         clock,
         randomness,
     );
+    withdrawal_txn.assert_change_spend(&change_spend);
 
     // Now that the object exists, use its ID for UTXO locks and request commits.
     let withdrawal_txn_id = withdrawal_txn.withdrawal_txn_id();
@@ -184,7 +192,10 @@ entry fun commit_withdrawal_tx(
     // selected by subsequent transactions before this one confirms on Bitcoin.
     let change_utxos = hashi::withdrawal_queue::build_change_utxos(&withdrawal_txn);
     change_utxos.do!(|change_utxo| {
-        hashi.bitcoin_mut().utxo_pool_mut().insert_pending(change_utxo, withdrawal_txn_id);
+        hashi
+            .bitcoin_mut()
+            .utxo_pool_mut()
+            .insert_pending(change_utxo, *change_spend.borrow(), withdrawal_txn_id);
     });
 
     withdrawal_txn.emit_withdrawal_picked_for_processing();
@@ -497,8 +508,17 @@ public(package) fun new_withdrawal_commitment_message(
     selected_utxos: vector<UtxoId>,
     outputs: vector<OutputUtxo>,
     txid: address,
+    change_spend: Option<SpendData>,
+    sighash_digest: address,
 ): WithdrawalCommitmentMessage {
-    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid }
+    WithdrawalCommitmentMessage {
+        request_ids,
+        selected_utxos,
+        outputs,
+        txid,
+        change_spend,
+        sighash_digest,
+    }
 }
 
 public(package) fun new_withdrawal_signed_message(

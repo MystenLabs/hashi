@@ -543,6 +543,7 @@ fun test_miner_fee_single_request() {
         vector[utxo::utxo(utxo::utxo_id(@0xAA01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA01,
+        @0x0,
         0,
         0,
         &config,
@@ -583,6 +584,7 @@ fun test_miner_fee_single_request_large_fee() {
         vector[utxo::utxo(utxo::utxo_id(@0xAA02, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xAA02,
+        @0x0,
         0,
         0,
         &config,
@@ -630,6 +632,7 @@ fun test_miner_fee_batched_even_split() {
             make_test_output(change),
         ],
         @0xBB01,
+        @0x0,
         0,
         0,
         &config,
@@ -686,6 +689,7 @@ fun test_miner_fee_batched_with_remainder_aborts() {
             make_test_output(change),
         ],
         @0xBB02,
+        @0x0,
         0,
         0,
         &config,
@@ -733,6 +737,7 @@ fun test_miner_fee_batched_unequal_amounts() {
             make_test_output(change),
         ],
         @0xBB03,
+        @0x0,
         0,
         0,
         &config,
@@ -772,6 +777,7 @@ fun test_miner_fee_zero() {
         vector[utxo::utxo(utxo::utxo_id(@0xCC01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC01,
+        @0x0,
         0,
         0,
         &config,
@@ -813,6 +819,7 @@ fun test_miner_fee_output_at_dust_floor() {
         vector[utxo::utxo(utxo::utxo_id(@0xCC02, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xCC02,
+        @0x0,
         0,
         0,
         &config,
@@ -855,6 +862,7 @@ fun test_miner_fee_output_below_dust_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xDD01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xDD01,
+        @0x0,
         0,
         0,
         &config,
@@ -897,6 +905,7 @@ fun test_miner_fee_wrong_output_amount_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xDD02, 0), input_amount, option::none())],
         vector[make_test_output(wrong_output), make_test_output(change)],
         @0xDD02,
+        @0x0,
         0,
         0,
         &config,
@@ -938,6 +947,7 @@ fun test_miner_fee_wrong_address_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xDD03, 0), input_amount, option::none())],
         vector[make_test_output_with_address(user_output, wrong_addr), make_test_output(change)],
         @0xDD03,
+        @0x0,
         0,
         0,
         &config,
@@ -980,6 +990,7 @@ fun test_miner_fee_exceeds_max_aborts() {
         vector[utxo::utxo(utxo::utxo_id(@0xEE01, 0), input_amount, option::none())],
         vector[make_test_output(user_output), make_test_output(change)],
         @0xEE01,
+        @0x0,
         0,
         0,
         &config,
@@ -1349,4 +1360,69 @@ fun test_finish_archive_v1_committed_request_counts_as_archived() {
 
     clock.destroy_for_testing();
     std::unit_test::destroy(queue);
+}
+
+fun change_txn(
+    change_program: vector<u8>,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+): withdrawal_queue::WithdrawalTransaction {
+    let input = utxo::utxo(utxo::utxo_id(@0xC0DE, 0), 1_000_000, option::none());
+    withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[@0x1],
+        vector[input],
+        vector[make_test_output(1)],
+        vector[make_test_output_with_address(2, change_program)],
+        @0xC0DE,
+        clock,
+        ctx,
+    )
+}
+
+fun p2tr_spend(program: vector<u8>): utxo::SpendData {
+    let mut script = x"5120";
+    script.append(program);
+    utxo::spend_data(script, vector[], vector[], @0x0, 0)
+}
+
+#[test]
+fun test_assert_change_spend_accepts_matching_spend() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let clock = clock::create_for_testing(ctx);
+    let program = x"1111111111111111111111111111111111111111111111111111111111111111";
+    let txn = change_txn(program, &clock, ctx);
+    txn.assert_change_spend(&option::some(p2tr_spend(program)));
+    clock.destroy_for_testing();
+    std::unit_test::destroy(txn);
+}
+
+#[test]
+#[expected_failure(abort_code = withdrawal_queue::EChangeSpendMismatch)]
+fun test_assert_change_spend_rejects_missing_spend() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let clock = clock::create_for_testing(ctx);
+    let program = x"1111111111111111111111111111111111111111111111111111111111111111";
+    let txn = change_txn(program, &clock, ctx);
+    txn.assert_change_spend(&option::none());
+    clock.destroy_for_testing();
+    std::unit_test::destroy(txn);
+}
+
+#[test]
+#[expected_failure(abort_code = withdrawal_queue::EChangeSpendMismatch)]
+fun test_assert_change_spend_rejects_other_script() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let clock = clock::create_for_testing(ctx);
+    let txn = change_txn(
+        x"1111111111111111111111111111111111111111111111111111111111111111",
+        &clock,
+        ctx,
+    );
+    txn.assert_change_spend(
+        &option::some(
+            p2tr_spend(x"2222222222222222222222222222222222222222222222222222222222222222"),
+        ),
+    );
+    clock.destroy_for_testing();
+    std::unit_test::destroy(txn);
 }

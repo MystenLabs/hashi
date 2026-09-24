@@ -606,7 +606,12 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!("Failed to add withdrawal commitment signature: {e}");
+                error!(
+                    sighash_digest = %approval.sighash_digest,
+                    change_spend = ?approval.change_spend.as_ref().map(crate::spend_data::spend_data_digest),
+                    "Failed to add withdrawal commitment signature (a member may have computed \
+                     other spend data or sighashes): {e}"
+                );
             }
             if aggregator.weight() >= required_weight {
                 break;

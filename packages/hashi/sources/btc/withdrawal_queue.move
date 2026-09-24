@@ -15,7 +15,7 @@ use hashi::{
     committee::CommitteeSignature,
     config::Config,
     mpc_signing::{Self, SigningBatch},
-    utxo::{Utxo, UtxoId}
+    utxo::{SpendData, Utxo, UtxoId}
 };
 use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
 
@@ -66,6 +66,9 @@ const EWithdrawalAlreadyConfirmed: vector<u8> = b"Withdrawal transaction is alre
 #[error]
 const ERequestTxnMismatch: vector<u8> =
     b"Withdrawal request is not linked to this withdrawal transaction";
+#[error]
+const EChangeSpendMismatch: vector<u8> =
+    b"Change spend data does not match the transaction's change outputs";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -127,6 +130,10 @@ public struct WithdrawalRequestQueue has store {
 public struct WithdrawalTransaction has key, store {
     id: UID,
     txid: address,
+    /// SHA-256 over every input's 32-byte sighash, concatenated in input
+    /// order, as the commitment certified it. Signing refuses when its own
+    /// sighashes do not hash to this.
+    sighash_digest: address,
     request_ids: vector<address>,
     /// UTXOs consumed by this withdrawal. The UTXOs remain locked in the pool
     /// until `confirm_withdrawal()` moves them to spent; these copies are kept
@@ -444,6 +451,7 @@ public(package) fun new_withdrawal_txn(
     inputs: vector<Utxo>,
     mut outputs: vector<OutputUtxo>,
     txid: address,
+    sighash_digest: address,
     presig_start_index: u64,
     epoch: u64,
     config: &Config,
@@ -492,7 +500,8 @@ public(package) fun new_withdrawal_txn(
     });
 
     // TODO: ensure any change output goes to the correct destination address, once we start
-    // storing the pubkey on chain.
+    // storing the pubkey on chain. `assert_change_spend` checks only that the change outputs
+    // agree with the certified change spend data.
     // https://linear.app/mysten-labs/issue/IOP-226/dkg-commit-mpc-public-key-onchain-and-read-from-there
 
     // Split off the trailing change outputs (indices `[request_count,
@@ -510,6 +519,7 @@ public(package) fun new_withdrawal_txn(
     WithdrawalTransaction {
         id: object::new(ctx),
         txid,
+        sighash_digest,
         request_ids,
         inputs,
         withdrawal_outputs: outputs,
@@ -787,6 +797,24 @@ public(package) fun build_change_utxos(self: &WithdrawalTransaction): vector<has
     utxos
 }
 
+public(package) fun assert_change_spend(
+    self: &WithdrawalTransaction,
+    change_spend: &Option<SpendData>,
+) {
+    assert!(change_spend.is_some() == !self.change_outputs.is_empty(), EChangeSpendMismatch);
+    change_spend.do_ref!(|spend| {
+        spend.assert_spend_data(@0x0);
+        self.change_outputs.do_ref!(|change| {
+            let mut expected = vector[0x51, 0x20];
+            expected.append(change.bitcoin_address);
+            assert!(
+                change.bitcoin_address.length() == 32 && spend.script_pubkey() == &expected,
+                EChangeSpendMismatch,
+            );
+        });
+    });
+}
+
 /// Compute the change UTXO IDs for a withdrawal transaction, in vout order, or
 /// an empty vector if there are no change outputs.
 public(package) fun change_utxo_ids(self: &WithdrawalTransaction): vector<UtxoId> {
@@ -966,6 +994,14 @@ public(package) fun commit_requests_v1_style_for_testing(
 }
 
 #[test_only]
+public(package) fun set_sighash_digest_for_testing(
+    self: &mut WithdrawalTransaction,
+    digest: address,
+) {
+    self.sighash_digest = digest;
+}
+
+#[test_only]
 public(package) fun new_withdrawal_txn_for_testing(
     request_ids: vector<address>,
     inputs: vector<Utxo>,
@@ -979,6 +1015,7 @@ public(package) fun new_withdrawal_txn_for_testing(
     WithdrawalTransaction {
         id: object::new(ctx),
         txid,
+        sighash_digest: @0x0,
         request_ids,
         inputs,
         withdrawal_outputs,

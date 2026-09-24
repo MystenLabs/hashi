@@ -160,12 +160,12 @@ calling `hashi::withdraw::commit_withdrawal_tx`:
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
-    selected_utxos: vector<vector<u8>>,
-    outputs: vector<vector<u8>>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
     txid: address,
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
+    change_spend: Option<SpendData>,
+    sighash_digest: address,
+    cert: CommitteeSignature,
     clock: &Clock,
     r: &Random,
     ctx: &mut TxContext,
@@ -174,7 +174,12 @@ entry fun commit_withdrawal_tx(
 
 The function verifies the committee certificate, burns the `hBTC` from each
 request, spends the selected UTXOs from the pool, and creates a pending
-withdrawal record that all validators can independently verify.
+withdrawal record that all validators can independently verify. The
+certificate also covers `change_spend`, the spend data stored with the change
+UTXOs, and `sighash_digest`, a SHA-256 over every input's sighash. Each member
+computes both itself, the sighashes from the inputs' stored spend data, and
+signing later refuses a withdrawal whose sighashes do not hash to
+`sighash_digest`.
 
 ## Sign
 

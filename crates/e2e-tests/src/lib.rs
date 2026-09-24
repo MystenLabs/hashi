@@ -1219,6 +1219,7 @@ mod tests {
                         message: msg.clone(),
                         global_presig_index: *pidx,
                         derivation_address: *deriv,
+                        leaf_key: None,
                     })
                     .collect();
                 let order = order.clone();

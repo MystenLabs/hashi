@@ -4,9 +4,7 @@
 use anyhow::anyhow;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
-use bitcoin::TxOut;
 use bitcoin::Weight;
-use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::hash::Blake2b256;
@@ -29,11 +27,14 @@ use crate::leader::RetryPolicy;
 use crate::metrics;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
+use crate::onchain::types::SpendData;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::UtxoRecord;
 use crate::onchain::types::WithdrawalRequest;
 use crate::onchain::types::WithdrawalTransaction;
+use crate::spend_data::SpendCheckError;
+use crate::spend_data::SpendCheckSite;
 use crate::trm;
 use crate::utxo_pool;
 use crate::utxo_pool::AncestorTx;
@@ -373,14 +374,48 @@ impl hashi_types::intent::IntentMessage for WithdrawalRequestApproval {
         hashi_types::intent::Intent::WithdrawalRequestApproval;
 }
 
+#[derive(Clone, Debug)]
+pub struct WithdrawalTxProposal {
+    pub request_ids: Vec<Address>,
+    pub selected_utxos: Vec<UtxoId>,
+    pub outputs: Vec<OutputUtxo>,
+    pub txid: BitcoinTxid,
+}
+
 /// The data that validators BLS-sign over to commit to a withdrawal transaction.
 /// This is the step 2 certificate with UTXO selection and tx construction.
+/// BCS must match Move `hashi::withdraw::WithdrawalCommitmentMessage` exactly.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalTxCommitment {
     pub request_ids: Vec<Address>,
     pub selected_utxos: Vec<UtxoId>,
     pub outputs: Vec<OutputUtxo>,
     pub txid: BitcoinTxid,
+    pub change_spend: Option<SpendData>,
+    pub sighash_digest: Address,
+}
+
+impl WithdrawalTxCommitment {
+    fn new(
+        proposal: WithdrawalTxProposal,
+        change_spend: Option<SpendData>,
+        sighash_digest: Address,
+    ) -> Self {
+        let WithdrawalTxProposal {
+            request_ids,
+            selected_utxos,
+            outputs,
+            txid,
+        } = proposal;
+        Self {
+            request_ids,
+            selected_utxos,
+            outputs,
+            txid,
+            change_spend,
+            sighash_digest,
+        }
+    }
 }
 
 impl hashi_types::intent::IntentMessage for WithdrawalTxCommitment {
@@ -467,17 +502,20 @@ impl Hashi {
     #[tracing::instrument(level = "info", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_and_sign_withdrawal_tx_commitment(
         &self,
-        approval: &WithdrawalTxCommitment,
+        approval: &WithdrawalTxProposal,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        self.validate_withdrawal_tx_commitment(approval).await?;
-        self.sign_withdrawal_tx_commitment(approval)
+        let commitment = self.validate_withdrawal_tx_commitment(approval).await?;
+        self.sign_message_proto(&commitment)
     }
 
+    /// Validate a leader's proposal and return the commitment this member
+    /// certifies: the proposal plus the change spend data and sighash digest
+    /// this member computes itself.
     #[tracing::instrument(level = "debug", skip_all, fields(bitcoin_txid = %approval.txid))]
     pub async fn validate_withdrawal_tx_commitment(
         &self,
-        approval: &WithdrawalTxCommitment,
-    ) -> anyhow::Result<()> {
+        approval: &WithdrawalTxProposal,
+    ) -> anyhow::Result<WithdrawalTxCommitment> {
         anyhow::ensure!(!approval.request_ids.is_empty(), "No request IDs");
         anyhow::ensure!(!approval.selected_utxos.is_empty(), "No selected UTXOs");
         anyhow::ensure!(!approval.outputs.is_empty(), "No outputs");
@@ -638,14 +676,17 @@ impl Hashi {
         }
 
         // 5. Verify every change output (the trailing outputs after the
-        //    per-request ones) goes to the hashi root pubkey and is above dust.
-        if output_count > request_count {
-            let expected_address =
-                hashi_bitcoin::witness_program_from_address(&self.get_deposit_address(None)?)?;
+        //    per-request ones) pays this member's change spend data and is
+        //    above dust.
+        let change_spend = if output_count > request_count {
+            let spend = self
+                .new_spend_data(&Address::ZERO)
+                .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::Commit, e))?;
+            let program = p2tr_witness_program(&spend.script_pubkey)?;
             for (j, change_output) in approval.outputs[request_count..].iter().enumerate() {
                 anyhow::ensure!(
-                    change_output.bitcoin_address == expected_address,
-                    "Change output {j} does not go to hashi root pubkey"
+                    change_output.bitcoin_address == program,
+                    "Change output {j} does not pay the change spend data's script"
                 );
                 anyhow::ensure!(
                     change_output.amount >= utxo_pool::TR_DUST_RELAY_MIN_VALUE,
@@ -654,7 +695,10 @@ impl Hashi {
                     utxo_pool::TR_DUST_RELAY_MIN_VALUE
                 );
             }
-        }
+            Some(spend)
+        } else {
+            None
+        };
 
         // 6. Validate fee is reasonable. The ceiling covers the whole CPFP
         //    package: a leader spending unconfirmed change must also cover
@@ -710,24 +754,30 @@ impl Hashi {
             );
         }
 
-        // 7. Rebuild unsigned tx and verify txid matches.
-        let tx = self.build_unsigned_withdrawal_tx(&selected_utxos, &approval.outputs)?;
-        let expected_txid = BitcoinTxid::from(tx.compute_txid());
-        anyhow::ensure!(
-            approval.txid == expected_txid,
-            "Txid mismatch: approval has {:?}, rebuilt tx has {:?}",
-            approval.txid,
-            expected_txid
-        );
+        // 7. Rebuild the tx, verify its txid, and compute every input's
+        //    sighash from its stored spend data, refusing any input whose
+        //    record fails the record or key check.
+        let records = selected_records.iter().map(|r| r.spend.clone()).collect();
+        let spends = self
+            .withdrawal_spends_from(
+                &selected_utxos,
+                records,
+                &approval.outputs,
+                &approval.txid,
+                None,
+            )
+            .and_then(|spends| {
+                spends
+                    .check_leaf_keys(&self.mpc_master_g().map_err(SpendCheckError::Unavailable)?)?;
+                Ok(spends)
+            })
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::Commit, e))?;
 
-        Ok(())
-    }
-
-    fn sign_withdrawal_tx_commitment(
-        &self,
-        approval: &WithdrawalTxCommitment,
-    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        self.sign_message_proto(approval)
+        Ok(WithdrawalTxCommitment::new(
+            approval.clone(),
+            change_spend,
+            spends.digest,
+        ))
     }
 
     pub async fn sign_withdrawal_confirmation(
@@ -900,8 +950,15 @@ impl Hashi {
             ),
         }
 
-        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-        let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
+        let spends = self
+            .withdrawal_spends(
+                &txn.inputs,
+                &txn.all_outputs(),
+                &txn.txid,
+                Some(&txn.sighash_digest),
+            )
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::Finalize, e))?;
+        let signing_messages = &spends.sighashes;
         let guardian_btc_pubkey = self.guardian_btc_pubkey().copied().ok_or_else(|| {
             anyhow!("Guardian BTC pubkey not yet pinned; cannot validate withdrawal")
         })?;
@@ -916,7 +973,7 @@ impl Hashi {
             .zip(signing_messages.iter())
             .enumerate()
         {
-            // MPC: verify against the derived hashi child key.
+            // MPC: verify against the input's checked leaf key.
             let mpc_arr: &[u8; 64] = mpc_sig_bytes.as_slice().try_into().map_err(|_| {
                 anyhow!(
                     "MPC signature {i} is not 64 bytes for WithdrawalTransaction {}",
@@ -925,8 +982,7 @@ impl Hashi {
             })?;
             let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
                 .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
-            let input_pubkey = self.deposit_pubkey(txn.inputs[i].derivation_path.as_ref())?;
-            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&spends.checked[i].leaf_key)
                 .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
             mpc_schnorr_pk
                 .verify(sighash, &mpc_sig)
@@ -989,8 +1045,15 @@ impl Hashi {
             message.withdrawal_id
         );
 
-        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-        let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
+        let spends = self
+            .withdrawal_spends(
+                &txn.inputs,
+                &txn.all_outputs(),
+                &txn.txid,
+                Some(&txn.sighash_digest),
+            )
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::ChunkCheck, e))?;
+        let signing_messages = &spends.sighashes;
 
         for (chunk_pos, (&input_index, mpc_sig_bytes)) in message
             .indices
@@ -1011,8 +1074,7 @@ impl Hashi {
             })?;
             let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
                 .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
-            let input_pubkey = self.deposit_pubkey(txn.inputs[i].derivation_path.as_ref())?;
-            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&spends.checked[i].leaf_key)
                 .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
             mpc_schnorr_pk
                 .verify(sighash, &mpc_sig)
@@ -1127,17 +1189,17 @@ impl Hashi {
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
-        let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, requested_input_indices, sink)
+        let (txn, spends) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
+        self.mpc_sign_withdrawal_tx(&txn, &spends, requested_input_indices, sink)
             .await
     }
 
-    pub async fn validate_withdrawal_signing(
+    pub(crate) async fn validate_withdrawal_signing(
         &self,
         withdrawal_txn_id: &Address,
     ) -> anyhow::Result<(
         crate::onchain::types::WithdrawalTransaction,
-        bitcoin::Transaction,
+        crate::spend_data::WithdrawalSpends,
     )> {
         let txn = self
             .onchain_state()
@@ -1145,18 +1207,15 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
-
-        // Rebuild the unsigned BTC tx and verify the txid matches
-        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
-        let expected_txid = BitcoinTxid::from(tx.compute_txid());
-        anyhow::ensure!(
-            txn.txid == expected_txid,
-            "Txid mismatch: WithdrawalTransaction has {:?}, rebuilt tx has {:?}",
-            txn.txid,
-            expected_txid
-        );
-
-        Ok((txn.clone(), tx))
+        let spends = self
+            .withdrawal_spends(
+                &txn.inputs,
+                &txn.all_outputs(),
+                &txn.txid,
+                Some(&txn.sighash_digest),
+            )
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::Signing, e))?;
+        Ok((txn, spends))
     }
 
     /// Produce MPC Schnorr signatures for an unsigned withdrawal transaction.
@@ -1168,7 +1227,7 @@ impl Hashi {
     async fn mpc_sign_withdrawal_tx(
         &self,
         txn: &WithdrawalTransaction,
-        unsigned_tx: &bitcoin::Transaction,
+        spends: &crate::spend_data::WithdrawalSpends,
         requested_input_indices: &[u64],
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
@@ -1195,8 +1254,7 @@ impl Hashi {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
-        let beacon = S::from_bytes_mod_order(&txn.randomness);
-        let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
+        let beacon = withdrawal_beacon(&txn.randomness);
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
         let beacon_ref = &beacon;
@@ -1206,40 +1264,11 @@ impl Hashi {
         // out-of-order / resume works and the index is always the current-epoch
         // one assigned by `commit`/`reallocate`. Already-signed inputs are skipped.
         let signing = &txn.signing;
-        let inputs = &txn.inputs;
         let sink_ref = &sink;
-        let selected_input_indices =
-            select_withdrawal_signing_indices(signing, requested_input_indices)?;
-        let mut requests = Vec::with_capacity(selected_input_indices.len());
-        let mut index_by_id: HashMap<Address, usize> =
-            HashMap::with_capacity(selected_input_indices.len());
-        for input_index in selected_input_indices {
-            let message = signing_messages
-                .get(input_index)
-                .expect("validated input_index is in range for signing_messages");
-            let global_presig_index = signing
-                .pending_index(input_index)
-                .expect("validated input_index is pending");
-            let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
-            // Change UTXOs (`derivation_path = None`) ride the `[0; 32]` path
-            // everywhere else (leaf script, `deposit_pubkey`). MPC must too —
-            // passing `None` signs for master `G`, not the `derive(G, [0; 32])`
-            // child the 2-of-2 leaf binds.
-            let derivation_address = inputs
-                .get(input_index)
-                .map(|input| {
-                    crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
-                        .into_inner()
-                })
-                .expect("validated input_index is in range for txn.inputs");
-            index_by_id.insert(signing_id, input_index);
-            requests.push(crate::mpc::SignInput {
-                signing_id,
-                message: message.to_vec(),
-                global_presig_index,
-                derivation_address: Some(derivation_address),
-            });
-        }
+        let (requests, index_by_id) =
+            withdrawal_signing_requests(&txn_id, signing, spends, requested_input_indices)?;
+        check_signing_pairing(&txn_id, signing, spends, &requests, signing_manager.epoch())
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::Signing, e))?;
         let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
         let batch_start = std::time::Instant::now();
         let collect = signing_manager_ref.sign(
@@ -1262,42 +1291,6 @@ impl Hashi {
         Ok(())
     }
 
-    pub(crate) fn withdrawal_signing_messages(
-        &self,
-        unsigned_tx: &bitcoin::Transaction,
-        inputs: &[Utxo],
-    ) -> anyhow::Result<Vec<[u8; 32]>> {
-        let spend_inputs = inputs
-            .iter()
-            .map(|input| {
-                let address = self.get_deposit_address(input.derivation_path.as_ref())?;
-                let (_, _, leaf_hash) =
-                    self.deposit_spend_artifacts(input.derivation_path.as_ref())?;
-                Ok((
-                    TxOut {
-                        value: Amount::from_sat(input.amount),
-                        script_pubkey: address.script_pubkey(),
-                    },
-                    leaf_hash,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let prevouts = spend_inputs
-            .iter()
-            .map(|(txout, _)| txout.clone())
-            .collect::<Vec<_>>();
-        let leaf_hashes = spend_inputs
-            .iter()
-            .map(|(_, leaf_hash)| *leaf_hash)
-            .collect::<Vec<TapLeafHash>>();
-
-        Ok(hashi_bitcoin::taproot_script_spend_sighashes(
-            unsigned_tx,
-            &prevouts,
-            &leaf_hashes,
-        ))
-    }
-
     // --- UTXO selection and tx crafting ---
 
     /// The configured fee-rate floor, capped at the high-fee threshold.
@@ -1310,33 +1303,13 @@ impl Hashi {
             .min(CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD)
     }
 
-    /// Build an unsigned Bitcoin transaction for a withdrawal. This is used both
-    /// by the leader when initially crafting the tx, and by validators when
-    /// verifying that a proposed `WithdrawalTxCommitment` produces the expected txid.
+    /// Build an unsigned Bitcoin transaction for a withdrawal.
     pub fn build_unsigned_withdrawal_tx(
         &self,
         selected_utxos: &[Utxo],
         outputs: &[OutputUtxo],
     ) -> anyhow::Result<bitcoin::Transaction> {
-        let inputs: Vec<bitcoin::TxIn> = selected_utxos
-            .iter()
-            .map(|utxo| hashi_bitcoin::InputUTXO::from(utxo).txin())
-            .collect();
-
-        let tx_outputs: Vec<bitcoin::TxOut> = outputs
-            .iter()
-            .map(|output| {
-                let script_pubkey =
-                    hashi_bitcoin::script_pubkey_from_witness_program(&output.bitcoin_address)
-                        .expect("invalid bitcoin address in output");
-                bitcoin::TxOut {
-                    value: bitcoin::Amount::from_sat(output.amount),
-                    script_pubkey,
-                }
-            })
-            .collect();
-
-        Ok(hashi_bitcoin::construct_tx(inputs, tx_outputs))
+        unsigned_withdrawal_tx(selected_utxos, outputs)
     }
 
     /// Build a withdrawal commitment for a batch of approved requests: select
@@ -1359,9 +1332,21 @@ impl Hashi {
         let min_fee_rate = self.effective_min_fee_rate();
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
-        let change_address = self
-            .get_deposit_address(None)
+        let change_spend = self
+            .new_spend_data(&Address::ZERO)
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::LeaderBuild, e))
+            .map_err(|e| WithdrawalCommitmentError::BtcTxBuildFailed(e.into()))?;
+        let change_address = hashi_bitcoin::BitcoinAddress::from_script(
+            &bitcoin::ScriptBuf::from_bytes(change_spend.script_pubkey.clone()),
+            self.config.bitcoin_network(),
+        )
+        .map_err(|e| WithdrawalCommitmentError::BtcTxBuildFailed(anyhow!(e)))?;
+        let mpc_key = self
+            .mpc_master_g()
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
+        let guardian = self
+            .onchain_guardian_btc_pubkey()
+            .map_err(|e| WithdrawalCommitmentError::BtcTxBuildFailed(e.into()))?;
 
         let configured_max_inputs = CoinSelectionParams::DEFAULT_MAX_INPUTS;
         let configured_long_term_fee_rate = CoinSelectionParams::DEFAULT_LONG_TERM_FEE_RATE;
@@ -1394,10 +1379,21 @@ impl Hashi {
         // instead of always hardcoding 0.
         let tx_confirmations = fetch_withdrawal_tx_confirmations(self, &withdrawal_txns).await;
 
-        // Map available (unlocked) UTXOs to UtxoCandidates.
+        // Map available (unlocked) UTXOs to UtxoCandidates, skipping any whose
+        // spend record fails the record or key check.
+        let mut skipped = BTreeMap::<&'static str, i64>::new();
         let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
             .filter(|r| r.spent_by.is_none())
+            .filter(
+                |r| match self.spend_verdict(&r.spend, &mpc_key, &guardian) {
+                    None => true,
+                    Some(reason) => {
+                        *skipped.entry(reason).or_default() += 1;
+                        false
+                    }
+                },
+            )
             .map(|r| {
                 let status =
                     build_utxo_status(self, r, &withdrawal_txns, &tx_confirmations, &utxo_records);
@@ -1410,6 +1406,20 @@ impl Hashi {
                 }
             })
             .collect();
+
+        self.retain_spend_verdicts(utxo_records.values().map(|r| &r.spend));
+        for reason in ["record", "key"] {
+            self.metrics
+                .utxo_selection_skipped_records
+                .with_label_values(&[reason])
+                .set(skipped.get(reason).copied().unwrap_or(0));
+        }
+        if !skipped.is_empty() {
+            tracing::warn!(
+                ?skipped,
+                "Coin selection skipped UTXOs whose spend record failed a check",
+            );
+        }
 
         // Drain versus consolidate: size the batch cap by comparing the
         // queue depth to the available pool. `candidates` counts every
@@ -1557,16 +1567,32 @@ impl Hashi {
                 ))
             })?;
 
+        let records = self
+            .onchain_state()
+            .utxo_spends(&selected_utxos)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                WithdrawalCommitmentError::BtcTxBuildFailed(anyhow!(
+                    "a selected UTXO's record disappeared between selection and tx build"
+                ))
+            })?;
         let tx = self
             .build_unsigned_withdrawal_tx(&selected_input_utxos, &outputs)
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
         let txid = BitcoinTxid::from(tx.compute_txid());
+        let spends = self
+            .withdrawal_spends_from(&selected_input_utxos, records, &outputs, &txid, None)
+            .inspect_err(|e| self.record_spend_refusal(SpendCheckSite::LeaderBuild, e))
+            .map_err(|e| WithdrawalCommitmentError::BtcTxBuildFailed(e.into()))?;
 
         Ok(WithdrawalTxCommitment {
             request_ids,
             selected_utxos,
             outputs,
             txid,
+            change_spend: result.change.is_some().then_some(change_spend),
+            sighash_digest: spends.digest,
         })
     }
 
@@ -1788,6 +1814,123 @@ impl WithdrawalBroadcastError {
 
     pub fn kind(&self) -> WithdrawalBroadcastErrorKind {
         self.kind
+    }
+}
+
+pub(crate) fn withdrawal_beacon(randomness: &[u8]) -> S {
+    S::from_bytes_mod_order(randomness)
+}
+
+pub(crate) fn unsigned_withdrawal_tx(
+    selected_utxos: &[Utxo],
+    outputs: &[OutputUtxo],
+) -> anyhow::Result<bitcoin::Transaction> {
+    let inputs: Vec<bitcoin::TxIn> = selected_utxos
+        .iter()
+        .map(|utxo| hashi_bitcoin::InputUTXO::from(utxo).txin())
+        .collect();
+
+    let tx_outputs = outputs
+        .iter()
+        .map(|output| {
+            Ok(bitcoin::TxOut {
+                value: Amount::from_sat(output.amount),
+                script_pubkey: hashi_bitcoin::script_pubkey_from_witness_program(
+                    &output.bitcoin_address,
+                )?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(hashi_bitcoin::construct_tx(inputs, tx_outputs))
+}
+
+pub(crate) fn withdrawal_signing_requests(
+    txn_id: &Address,
+    signing: &hashi_types::move_types::SigningBatch,
+    spends: &crate::spend_data::WithdrawalSpends,
+    requested_input_indices: &[u64],
+) -> anyhow::Result<(Vec<crate::mpc::SignInput>, HashMap<Address, usize>)> {
+    anyhow::ensure!(
+        signing.num_inputs() == spends.sighashes.len(),
+        "signing batch has {} inputs, the withdrawal {}",
+        signing.num_inputs(),
+        spends.sighashes.len()
+    );
+    let selected_input_indices =
+        select_withdrawal_signing_indices(signing, requested_input_indices)?;
+    let mut requests = Vec::with_capacity(selected_input_indices.len());
+    let mut index_by_id: HashMap<Address, usize> =
+        HashMap::with_capacity(selected_input_indices.len());
+    for input_index in selected_input_indices {
+        let global_presig_index = signing
+            .pending_index(input_index)
+            .expect("validated input_index is pending");
+        let signing_id = withdrawal_input_signing_id(txn_id, input_index as u32);
+        index_by_id.insert(signing_id, input_index);
+        requests.push(crate::mpc::SignInput {
+            signing_id,
+            message: spends.sighashes[input_index].to_vec(),
+            global_presig_index,
+            derivation_address: Some(spends.records[input_index].key_path.into_inner()),
+            leaf_key: Some(spends.checked[input_index].leaf_key),
+        });
+    }
+    Ok((requests, index_by_id))
+}
+
+pub(crate) fn check_signing_pairing(
+    txn_id: &Address,
+    signing: &hashi_types::move_types::SigningBatch,
+    spends: &crate::spend_data::WithdrawalSpends,
+    requests: &[crate::mpc::SignInput],
+    signing_manager_epoch: u64,
+) -> Result<(), SpendCheckError> {
+    let refuse = |reason: String| Err(SpendCheckError::Pairing(reason));
+    if signing.num_inputs() != spends.sighashes.len() {
+        return refuse(format!(
+            "signing batch has {} inputs, the withdrawal {}",
+            signing.num_inputs(),
+            spends.sighashes.len()
+        ));
+    }
+    if signing.epoch != signing_manager_epoch {
+        return refuse(format!(
+            "batch epoch {} is not the signing manager's {signing_manager_epoch}",
+            signing.epoch
+        ));
+    }
+    let mut owners = HashMap::with_capacity(signing.signatures.len());
+    for (input_index, sig) in signing.signatures.iter().enumerate() {
+        if let hashi_types::move_types::MpcSig::Pending(slot) = sig
+            && owners.insert(*slot, input_index).is_some()
+        {
+            return refuse(format!("slot {slot} is pending for two inputs"));
+        }
+    }
+    for request in requests {
+        let slot = request.global_presig_index;
+        let Some(&owner) = owners.get(&slot) else {
+            return refuse(format!("no pending input holds slot {slot}"));
+        };
+        let pairs = request.message.as_slice() == spends.sighashes[owner].as_slice()
+            && request.leaf_key == Some(spends.checked[owner].leaf_key)
+            && request.derivation_address == Some(spends.records[owner].key_path.into_inner())
+            && request.signing_id == withdrawal_input_signing_id(txn_id, owner as u32);
+        if !pairs {
+            return refuse(format!(
+                "request {} is not built from input {owner}, which owns slot {slot}",
+                request.signing_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn p2tr_witness_program(script_pubkey: &[u8]) -> anyhow::Result<Vec<u8>> {
+    match script_pubkey {
+        [0x51, 0x20, program @ ..] if program.len() == 32 => Ok(program.to_vec()),
+        _ => anyhow::bail!("script_pubkey is not P2TR"),
     }
 }
 
@@ -2043,6 +2186,8 @@ async fn forward_signing_results(
         let input_index = index_by_id[&signing_id];
         let sign_duration = batch_start.elapsed().as_secs_f64();
         match &sign_result {
+            // Counted once, under the failing input's own reason.
+            Err(crate::mpc::types::SigningError::CallRefused { .. }) => {}
             Ok(_) => {
                 metrics
                     .mpc_sign_duration_seconds
@@ -2063,6 +2208,8 @@ async fn forward_signing_results(
                     }
                     crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
                     crate::mpc::types::SigningError::RequestChanged { .. } => "request_changed",
+                    crate::mpc::types::SigningError::KeyMismatch { .. } => "key_mismatch",
+                    crate::mpc::types::SigningError::PresigMismatch { .. } => "presig_mismatch",
                     _ => "other",
                 };
                 metrics
@@ -2320,6 +2467,7 @@ mod tests {
         WithdrawalTransaction {
             id: Address::ZERO,
             txid: BitcoinTxid::ZERO,
+            sighash_digest: Address::ZERO,
             request_ids: vec![],
             inputs: inputs.into_iter().map(input).collect(),
             withdrawal_outputs: withdrawal_outputs.into_iter().map(output).collect(),
@@ -2355,6 +2503,13 @@ mod tests {
                 id,
                 amount: 1_000,
                 derivation_path: None,
+            },
+            spend: SpendData {
+                script_pubkey: vec![],
+                leaf_script: vec![],
+                control_block: vec![],
+                key_path: Address::ZERO,
+                sighash_type: 0,
             },
             produced_by,
             spent_by,

@@ -94,6 +94,17 @@ groups:
             implements; autonomous writes are halted. Upgrade the node
             binary immediately.
 
+      - alert: HashiSigningVersionRefused
+        expr: increase(hashi_mpc_signing_version_refused_total[10m]) > 0 or (hashi_mpc_signing_version_refused_total unless hashi_mpc_signing_version_refused_total offset 10m) or (hashi_mpc_signing_version_refused_total and on(job, instance) uptime < 600)
+        labels:
+          severity: critical
+        annotations:
+          summary: "node sits out an epoch it cannot compute"
+          description: >-
+            For reason="unsupported", upgrade to a release with that version.
+            Otherwise the committee's config does not fit this release: check
+            the node runs the network's release, and escalate if it does.
+
       - alert: HashiDbPoisoned
         expr: hashi_db_poisoned == 1
         labels:
@@ -116,3 +127,14 @@ groups:
             This node owned share indices in the previous committee but entered
             the rotation with none to reshare, so its weight did not reach the
             new key.
+
+      - alert: HashiSpendCheckRefused
+        expr: increase(hashi_spend_check_refusals_total[1h]) > 0 or (hashi_spend_check_refusals_total unless hashi_spend_check_refusals_total offset 1h) or (hashi_spend_check_refusals_total and on(job, instance) uptime < 3600)
+        labels:
+          severity: warning
+        annotations:
+          summary: "a spend check refused work on this node"
+          description: >-
+            See the site and check labels. If only this node refuses, its
+            release differs from the fleet's; if all do at site="commit", the
+            leader's proposal is at fault.

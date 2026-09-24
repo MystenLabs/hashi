@@ -3161,6 +3161,7 @@ dependencies = [
  "sui-sdk-types",
  "tempfile",
  "test-strategy",
+ "thiserror 1.0.69",
  "time",
  "tokio",
  "tonic",

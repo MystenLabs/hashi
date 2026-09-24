@@ -658,6 +658,7 @@ mod tests {
                 amount: 12_345,
                 derivation_path,
             },
+            spend: None,
             approval_cert: None,
             approved_timestamp_ms: None,
             confirmed_timestamp_ms: None,

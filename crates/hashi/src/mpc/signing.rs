@@ -17,6 +17,7 @@ use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
+use hashi_types::bitcoin::signs_under_leaf_key;
 use hashi_types::committee::Committee;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -58,11 +59,17 @@ const PARTIAL_SIGS_CALL_RETRIES: usize = 1;
 /// How long a peer whose poll failed is skipped before being probed again.
 const PARTIAL_SIGS_PEER_COOLDOWN: Duration = Duration::from_secs(10);
 
+#[derive(Clone)]
+struct PooledPresig {
+    index: u64,
+    presig: (Vec<S>, G),
+}
+
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
     /// Each presig is wrapped in `Option` so it can be taken exactly once,
     /// preventing nonce reuse even if the same index is assigned twice.
-    pool: Vec<Option<(Vec<S>, G)>>,
+    pool: Vec<Option<PooledPresig>>,
     /// Global index of the first presig in this batch.
     start_index: u64,
     /// Monotonically increasing batch sequence number.
@@ -70,6 +77,24 @@ struct PresigBatch {
 }
 
 impl PresigBatch {
+    fn new(pool: Vec<Option<(Vec<S>, G)>>, start_index: u64, batch_index: u32) -> Self {
+        let pool = pool
+            .into_iter()
+            .enumerate()
+            .map(|(position, presig)| {
+                presig.map(|presig| PooledPresig {
+                    index: start_index + position as u64,
+                    presig,
+                })
+            })
+            .collect();
+        Self {
+            pool,
+            start_index,
+            batch_index,
+        }
+    }
+
     fn end_index(&self) -> u64 {
         self.start_index + self.pool.len() as u64
     }
@@ -120,11 +145,6 @@ fn owned_counts_by_member(share_owners: &HashMap<ShareIndex, Address>) -> HashMa
             *counts.entry(*owner).or_default() += 1;
             counts
         })
-}
-
-enum CacheOrPresig {
-    Cached(G, Vec<Eval<S>>),
-    Presig((Vec<S>, G)),
 }
 
 struct SigningPoolState {
@@ -292,19 +312,18 @@ impl SigningManager {
     ) -> (Self, PresigBatchIdentity) {
         let generated: Vec<(Vec<S>, G)> = presignatures.collect();
         let identity = identity_inputs.identity_for(batch_index, generated.iter().map(|(_, n)| n));
-        let pool: Vec<Option<(Vec<S>, G)>> = generated.into_iter().map(Some).collect();
+        let batch = PresigBatch::new(
+            generated.into_iter().map(Some).collect(),
+            batch_start_index,
+            batch_index,
+        );
         tracing::info!(
             "Presig batch installed: address={address}, epoch={}, batch_index={batch_index}, \
              start_index={batch_start_index}, size={}, fingerprint={}",
             identity.epoch,
-            pool.len(),
+            batch.pool.len(),
             identity.short(),
         );
-        let batch = PresigBatch {
-            pool,
-            start_index: batch_start_index,
-            batch_index,
-        };
         let manager = Self {
             config: Arc::new(SigningEpochConfig {
                 address,
@@ -375,11 +394,7 @@ impl SigningManager {
                 identity.short(),
             );
             identities.push((batch_index, identity));
-            batches.push(PresigBatch {
-                pool,
-                start_index,
-                batch_index,
-            });
+            batches.push(PresigBatch::new(pool, start_index, batch_index));
         }
         anyhow::ensure!(
             covered_pending == pending.len(),
@@ -584,20 +599,33 @@ impl SigningManager {
             .filter(|addr| *addr != self_address)
             .collect();
         let deadline = Instant::now() + timeout;
+        let prepared = match self.prepare_local_partial_signatures(&inputs, beacon_value, metrics) {
+            Ok(prepared) => prepared,
+            Err(CallRefusal { failing, error }) => {
+                let failing_id = inputs[failing].signing_id;
+                tracing::error!(
+                    "Refused a signing call of {} input(s): {error}",
+                    inputs.len(),
+                );
+                let _ = result_tx.send((failing_id, Err(error)));
+                for (i, input) in inputs.iter().enumerate() {
+                    if i != failing {
+                        let _ = result_tx.send((
+                            input.signing_id,
+                            Err(SigningError::CallRefused {
+                                signing_id: input.signing_id,
+                                failing: failing_id,
+                            }),
+                        ));
+                    }
+                }
+                return;
+            }
+        };
         let mut pending: Vec<InputSigningState> = Vec::with_capacity(inputs.len());
         let mut request_changed: Vec<Address> = Vec::new();
-        for input in inputs {
-            match self
-                .prepare_local_partial_signatures(
-                    input.signing_id,
-                    &input.message,
-                    input.global_presig_index,
-                    beacon_value,
-                    input.derivation_address.as_ref(),
-                    metrics,
-                )
-                .await
-            {
+        for (input, prepared) in inputs.into_iter().zip(prepared) {
+            match prepared {
                 Ok((public_nonce, partials)) => pending.push(InputSigningState::new(
                     input.signing_id,
                     input.message,
@@ -793,175 +821,269 @@ impl SigningManager {
         grew
     }
 
-    #[tracing::instrument(
-        level = "info",
-        skip_all,
-        fields(signing_id = %signing_id, global_presig_index),
-    )]
-    async fn prepare_local_partial_signatures(
+    fn prepare_local_partial_signatures(
         &self,
-        signing_id: Address,
-        message: &[u8],
-        global_presig_index: u64,
+        inputs: &[SignInput],
         beacon_value: &S,
-        derivation_address: Option<&DerivationAddress>,
         metrics: &Metrics,
-    ) -> SigningResult<(G, Vec<Eval<S>>)> {
+    ) -> Result<Vec<SigningResult<LocalPartials>>, CallRefusal> {
         let config = &self.config;
-        // Splitting the lock is safe because a given `signing_id` is never signed concurrently
-        // on a node (distinct id per withdrawal input, retries sequential), and the presig is already
-        // removed from the pool under the first lock section.
-        let taken = {
+        for (i, input) in inputs.iter().enumerate() {
+            let Some(leaf_key) = input.leaf_key else {
+                continue;
+            };
+            if !signs_under_leaf_key(
+                &config.verifying_key,
+                input.derivation_address.as_ref(),
+                &leaf_key,
+            ) {
+                return Err(CallRefusal {
+                    failing: i,
+                    error: SigningError::KeyMismatch {
+                        signing_id: input.signing_id,
+                    },
+                });
+            }
+        }
+        let mut resolved: Vec<Resolved> = {
             let mut state = self.state.write().unwrap();
-            if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
-                let digest = signing_request_digest(message, derivation_address);
-                let nonce = signing_nonce_bytes(&existing.public_nonce(), beacon_value);
-                if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
-                {
-                    return Err(SigningError::RequestChanged { signing_id });
-                }
-                tracing::info!(
-                    "Cache hit for {signing_id} (global_presig_index={global_presig_index}), \
-                     reusing cached partial sigs (batch_index={})",
-                    state.batches.last().map_or(0, |b| b.batch_index),
-                );
-                CacheOrPresig::Cached(existing.public_nonce(), existing.partial_sigs.clone())
-            } else {
-                // Find the batch containing this presig index, advancing
-                // into the next batch if needed.
-                let batch = if let Some(b) = state
-                    .batches
-                    .iter()
-                    .position(|b| b.contains(global_presig_index))
-                {
-                    &mut state.batches[b]
-                } else {
-                    if let Some(latest) = state.batches.last() {
-                        let next_start = latest.end_index();
-                        let next_batch_index = latest.batch_index + 1;
-                        match &state.next_batch {
-                            Some(next) if next.batch_index == next_batch_index => {
-                                let next = state.next_batch.take().expect("checked above");
-                                tracing::info!(
-                                    "Presig batch installed: address={}, epoch={}, \
-                                     batch_index={next_batch_index}, start_index={next_start}, \
-                                     size={}, fingerprint={}",
-                                    config.address,
-                                    next.identity.epoch,
-                                    next.pool.len(),
-                                    next.identity.short(),
-                                );
-                                state.batches.push(PresigBatch {
-                                    pool: next.pool,
-                                    start_index: next_start,
-                                    batch_index: next_batch_index,
-                                });
-                            }
-                            Some(next) => {
-                                tracing::error!(
-                                    "Prefetched presig batch {} does not match the expected \
-                                     next batch {next_batch_index}; refusing to install it",
-                                    next.batch_index,
-                                );
-                                if next.batch_index < next_batch_index {
-                                    state.next_batch = None;
-                                } else {
-                                    let _ = self.refill_tx.send(next_batch_index);
-                                }
-                            }
-                            None => {}
-                        }
-                    }
-                    // Check if the index is now covered.
-                    if let Some(b) = state
-                        .batches
-                        .iter()
-                        .position(|b| b.contains(global_presig_index))
-                    {
-                        &mut state.batches[b]
-                    } else {
-                        if state.next_batch.is_none() {
-                            let next = state.batches.last().map_or(0, |b| b.batch_index) + 1;
-                            let _ = self.refill_tx.send(next);
-                        }
-                        tracing::error!(
-                            "Presig index {global_presig_index} not found in any \
-                             batch ({} batch(es) active).",
-                            state.batches.len(),
-                        );
-                        return Err(SigningError::PoolExhausted);
-                    }
+            let mut resolved: Vec<Resolved> = inputs
+                .iter()
+                .map(|input| self.resolve(&mut state, input, beacon_value))
+                .collect();
+            if let Some(failing) = resolved
+                .iter()
+                .position(|r| matches!(r, Resolved::Mismatch(_)))
+            {
+                let Resolved::Mismatch(error) = resolved.swap_remove(failing) else {
+                    unreachable!("matched above");
                 };
-                let target_position = (global_presig_index - batch.start_index) as usize;
-                let presig = batch
-                    .pool
-                    .get_mut(target_position)
-                    .and_then(|slot| slot.take())
-                    .ok_or_else(|| {
-                        tracing::error!(
-                            "Presig at position {target_position} unavailable for \
-                             batch {} (already consumed or out of range).",
-                            batch.batch_index,
-                        );
-                        SigningError::PoolExhausted
-                    })?;
-                let used_batch_index = batch.batch_index;
+                return Err(CallRefusal { failing, error });
+            }
+            let mut took_any = false;
+            for r in &mut resolved {
+                if let Resolved::Presig(address) = *r {
+                    *r = match state.batches[address.batch].pool[address.position].take() {
+                        Some(presig) => {
+                            took_any = true;
+                            Resolved::Taken(presig)
+                        }
+                        None => Resolved::Failed(SigningError::PoolExhausted),
+                    };
+                }
+            }
+            if took_any
+                && let Some(latest) = state.batches.last()
+                && latest.remaining() <= latest.pool.len() / config.refill_divisor
+            {
+                let _ = self.refill_tx.send(latest.batch_index + 1);
+            }
+            while state.batches.len() > 1 && state.batches[0].is_fully_consumed() {
+                state.batches.remove(0);
+            }
+            resolved
+        };
+        for (i, (input, r)) in inputs.iter().zip(&resolved).enumerate() {
+            if let Resolved::Taken(presig) = r
+                && presig.index != input.global_presig_index
+            {
+                return Err(CallRefusal {
+                    failing: i,
+                    error: SigningError::PresigMismatch {
+                        signing_id: input.signing_id,
+                        expected: input.global_presig_index,
+                        found: presig.index,
+                    },
+                });
+            }
+        }
+        Ok(inputs
+            .iter()
+            .zip(resolved.drain(..))
+            .map(|(input, r)| match r {
+                Resolved::Cached(nonce, sigs) => Ok((nonce, sigs)),
+                Resolved::Failed(e) => Err(e),
+                Resolved::Taken(presig) => {
+                    self.generate_and_cache(input, presig.presig, beacon_value, metrics)
+                }
+                Resolved::Presig(_) | Resolved::Mismatch(_) => {
+                    unreachable!("addresses are taken and mismatches refused above")
+                }
+            })
+            .collect())
+    }
+
+    fn resolve(
+        &self,
+        state: &mut SigningPoolState,
+        input: &SignInput,
+        beacon_value: &S,
+    ) -> Resolved {
+        let signing_id = input.signing_id;
+        let global_presig_index = input.global_presig_index;
+        if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
+            let digest = signing_request_digest(&input.message, input.derivation_address.as_ref());
+            let nonce = signing_nonce_bytes(&existing.public_nonce(), beacon_value);
+            if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce {
+                return Resolved::Failed(SigningError::RequestChanged { signing_id });
+            }
+            tracing::info!(
+                "Cache hit for {signing_id} (global_presig_index={global_presig_index}), \
+                 reusing cached partial sigs (batch_index={})",
+                state.batches.last().map_or(0, |b| b.batch_index),
+            );
+            return Resolved::Cached(existing.public_nonce(), existing.partial_sigs.clone());
+        }
+        let Some(batch) = self.batch_position_for(state, global_presig_index) else {
+            return Resolved::Failed(SigningError::PoolExhausted);
+        };
+        let position = (global_presig_index - state.batches[batch].start_index) as usize;
+        let batch_index = state.batches[batch].batch_index;
+        match state.batches[batch].pool.get(position) {
+            Some(Some(presig)) if presig.index != global_presig_index => {
+                Resolved::Mismatch(SigningError::PresigMismatch {
+                    signing_id,
+                    expected: global_presig_index,
+                    found: presig.index,
+                })
+            }
+            Some(Some(_)) => {
                 tracing::info!(
                     "Cache miss for {signing_id}, using presig \
                      (address={}, global_presig_index={global_presig_index}, \
-                     batch_index={used_batch_index}, \
-                     position={target_position})",
-                    config.address,
+                     batch_index={batch_index}, position={position})",
+                    self.config.address,
                 );
-                // Trigger refill based on the latest batch's consumption.
-                if let Some(latest) = state.batches.last() {
-                    let remaining = latest.remaining();
-                    let refill_at = latest.pool.len() / config.refill_divisor;
-                    if remaining <= refill_at {
-                        let _ = self.refill_tx.send(latest.batch_index + 1);
+                Resolved::Presig(PresigAddress { batch, position })
+            }
+            _ => {
+                tracing::error!(
+                    "Presig at position {position} unavailable for \
+                     batch {batch_index} (already consumed or out of range).",
+                );
+                Resolved::Failed(SigningError::PoolExhausted)
+            }
+        }
+    }
+
+    fn batch_position_for(
+        &self,
+        state: &mut SigningPoolState,
+        global_presig_index: u64,
+    ) -> Option<usize> {
+        if let Some(b) = state
+            .batches
+            .iter()
+            .position(|b| b.contains(global_presig_index))
+        {
+            return Some(b);
+        }
+        if let Some(latest) = state.batches.last() {
+            let next_start = latest.end_index();
+            let next_batch_index = latest.batch_index + 1;
+            match &state.next_batch {
+                Some(next) if next.batch_index == next_batch_index => {
+                    let next = state.next_batch.take().expect("checked above");
+                    tracing::info!(
+                        "Presig batch installed: address={}, epoch={}, \
+                         batch_index={next_batch_index}, start_index={next_start}, \
+                         size={}, fingerprint={}",
+                        self.config.address,
+                        next.identity.epoch,
+                        next.pool.len(),
+                        next.identity.short(),
+                    );
+                    state
+                        .batches
+                        .push(PresigBatch::new(next.pool, next_start, next_batch_index));
+                }
+                Some(next) => {
+                    tracing::error!(
+                        "Prefetched presig batch {} does not match the expected \
+                         next batch {next_batch_index}; refusing to install it",
+                        next.batch_index,
+                    );
+                    if next.batch_index < next_batch_index {
+                        state.next_batch = None;
+                    } else {
+                        let _ = self.refill_tx.send(next_batch_index);
                     }
                 }
-                // Prune fully-consumed batches, but always keep the last
-                // one so its `end_index()` can anchor the next batch's
-                // start.
-                while state.batches.len() > 1 && state.batches[0].is_fully_consumed() {
-                    state.batches.remove(0);
-                }
-                CacheOrPresig::Presig(presig)
+                None => {}
             }
-        }; // state write lock released
-        let (public_nonce, partial_sigs) = match taken {
-            CacheOrPresig::Cached(nonce, sigs) => (nonce, sigs),
-            CacheOrPresig::Presig(presig) => {
-                let _timer = metrics
-                    .mpc_sign_partial_gen_duration_seconds
-                    .with_label_values(&[MPC_LABEL_SIGNING])
-                    .start_timer();
-                let result = generate_partial_signatures(
-                    message,
-                    presig,
-                    beacon_value,
-                    &config.key_shares,
-                    &config.verifying_key,
-                    derivation_address,
-                )
-                .map_err(|e| SigningError::CryptoError(e.to_string()))?;
-                drop(_timer);
-                self.state.write().unwrap().partial_signing_outputs.insert(
-                    signing_id,
-                    PartialSigningOutput::new(
-                        result.0,
-                        beacon_value,
-                        message,
-                        derivation_address,
-                        result.1.clone(),
-                    ),
-                );
-                result
+        }
+        let found = state
+            .batches
+            .iter()
+            .position(|b| b.contains(global_presig_index));
+        if found.is_none() {
+            if state.next_batch.is_none() {
+                let next = state.batches.last().map_or(0, |b| b.batch_index) + 1;
+                let _ = self.refill_tx.send(next);
             }
-        };
-        Ok((public_nonce, partial_sigs))
+            tracing::error!(
+                "Presig index {global_presig_index} not found in any \
+                 batch ({} batch(es) active).",
+                state.batches.len(),
+            );
+        }
+        found
     }
+
+    fn generate_and_cache(
+        &self,
+        input: &SignInput,
+        presig: (Vec<S>, G),
+        beacon_value: &S,
+        metrics: &Metrics,
+    ) -> SigningResult<LocalPartials> {
+        let timer = metrics
+            .mpc_sign_partial_gen_duration_seconds
+            .with_label_values(&[MPC_LABEL_SIGNING])
+            .start_timer();
+        let result = generate_partial_signatures(
+            &input.message,
+            presig,
+            beacon_value,
+            &self.config.key_shares,
+            &self.config.verifying_key,
+            input.derivation_address.as_ref(),
+        )
+        .map_err(|e| SigningError::CryptoError(e.to_string()))?;
+        drop(timer);
+        self.state.write().unwrap().partial_signing_outputs.insert(
+            input.signing_id,
+            PartialSigningOutput::new(
+                result.0,
+                beacon_value,
+                &input.message,
+                input.derivation_address.as_ref(),
+                result.1.clone(),
+            ),
+        );
+        Ok(result)
+    }
+}
+
+type LocalPartials = (G, Vec<Eval<S>>);
+
+struct CallRefusal {
+    failing: usize,
+    error: SigningError,
+}
+
+#[derive(Clone, Copy)]
+struct PresigAddress {
+    batch: usize,
+    position: usize,
+}
+
+enum Resolved {
+    Cached(G, Vec<Eval<S>>),
+    Presig(PresigAddress),
+    Taken(PooledPresig),
+    Failed(SigningError),
+    Mismatch(SigningError),
 }
 
 pub struct SignInput {
@@ -969,6 +1091,7 @@ pub struct SignInput {
     pub message: Vec<u8>,
     pub global_presig_index: u64,
     pub derivation_address: Option<DerivationAddress>,
+    pub leaf_key: Option<[u8; 32]>,
 }
 
 struct InputSigningState {
@@ -1562,6 +1685,7 @@ mod tests {
                     message: message.to_vec(),
                     global_presig_index,
                     derivation_address: derivation_address.copied(),
+                    leaf_key: None,
                 }],
                 beacon_value,
                 timeout,
@@ -2037,7 +2161,7 @@ mod tests {
                         .find(|b| b.contains(global_presig_index))
                         .and_then(|b| {
                             let pos = (global_presig_index - b.start_index) as usize;
-                            b.pool.get(pos).and_then(|s| s.clone())
+                            b.pool.get(pos).and_then(|s| s.clone()).map(|p| p.presig)
                         })
                         .unwrap()
                 };
@@ -2161,11 +2285,9 @@ mod tests {
                 let next_start = latest.end_index();
                 let next_batch_index = latest.batch_index + 1;
                 let next = state.next_batch.take().unwrap();
-                state.batches.push(PresigBatch {
-                    pool: next.pool,
-                    start_index: next_start,
-                    batch_index: next_batch_index,
-                });
+                state
+                    .batches
+                    .push(PresigBatch::new(next.pool, next_start, next_batch_index));
             }
         }
     }
@@ -2598,6 +2720,7 @@ mod tests {
                 message: msg.clone(),
                 global_presig_index: *pidx,
                 derivation_address: None,
+                leaf_key: None,
             })
             .collect();
 
@@ -2653,6 +2776,7 @@ mod tests {
                 message: msg.clone(),
                 global_presig_index: *pidx,
                 derivation_address: None,
+                leaf_key: None,
             })
             .collect();
         requests.push(SignInput {
@@ -2660,6 +2784,7 @@ mod tests {
             message: b"bad".to_vec(),
             global_presig_index: 2,
             derivation_address: None,
+            leaf_key: None,
         });
 
         let p2p = setup.mock_p2p_for(0);
@@ -2748,7 +2873,7 @@ mod tests {
             let mgr = &setup.managers[i];
             let presig = {
                 let state = mgr.state.read().unwrap();
-                state.batches[0].pool[0].clone().unwrap()
+                state.batches[0].pool[0].clone().unwrap().presig
             };
             let (pn, sigs) = generate_partial_signatures(
                 message,
@@ -4352,7 +4477,7 @@ mod tests {
             let mgr = &setup.managers[0];
             let mut state = mgr.state.write().unwrap();
             let batch = state.batches.last_mut().unwrap();
-            let presig = batch.pool[i].take().unwrap();
+            let presig = batch.pool[i].take().unwrap().presig;
             let _ = generate_partial_signatures(
                 b"msg",
                 presig,
@@ -4467,11 +4592,9 @@ mod tests {
             let next_start = latest.end_index();
             let next_batch_index = latest.batch_index + 1;
             let next = state.next_batch.take().unwrap();
-            state.batches.push(PresigBatch {
-                pool: next.pool,
-                start_index: next_start,
-                batch_index: next_batch_index,
-            });
+            state
+                .batches
+                .push(PresigBatch::new(next.pool, next_start, next_batch_index));
         }
 
         // Sign with an index from batch 0 — should succeed because batch 0
@@ -4678,5 +4801,285 @@ mod tests {
             pool_before - 2,
             "two different requests should consume two presigs"
         );
+    }
+
+    const GOLDEN_PARTIALS: [&str; 4] = [
+        "a6f6634397adb6696a7de753aeacbc2d50bbc570dcfbd21869681e537c2877d2",
+        "3259a22d9e0bedfd8843bc612aa02853dcac00372845a4f101fad298c7cbf007",
+        "7ff998a9229e8e1385a8d2c6da15421275ed105e1349c424526bc03092a0adea",
+        "e6b477ad37a0072fb4219b42957e1af955e0377f875e02e6606c55a8604d5c73",
+    ];
+
+    fn derived_key(vk: &G, address: &DerivationAddress) -> G {
+        use fastcrypto::traits::ToFromBytes;
+        let mut ikm = vk.x_as_be_bytes().unwrap().to_vec();
+        ikm.extend_from_slice(address);
+        let tweak = fastcrypto::hmac::hkdf_sha3_256(
+            &fastcrypto::hmac::HkdfIkm::from_bytes(&ikm).unwrap(),
+            &[],
+            &[],
+            64,
+        )
+        .unwrap();
+        let derived = *vk + G::generator() * S::from_bytes_mod_order(&tweak);
+        assert_eq!(
+            derived.x_as_be_bytes().unwrap(),
+            fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(vk, address)
+                .unwrap()
+                .to_byte_array()
+        );
+        derived
+    }
+
+    fn pooled_nonce(mgr: &SigningManager, index: u64) -> G {
+        let state = mgr.state.read().unwrap();
+        let batch = state.batches.iter().find(|b| b.contains(index)).unwrap();
+        batch.pool[(index - batch.start_index) as usize]
+            .as_ref()
+            .unwrap()
+            .presig
+            .1
+    }
+
+    fn prepare_peers(setup: &SigningTestSetup, input: &SignInput, beacon: &S) {
+        for mgr in &setup.managers[1..] {
+            let presig = {
+                let state = mgr.state.read().unwrap();
+                let batch = state
+                    .batches
+                    .iter()
+                    .find(|b| b.contains(input.global_presig_index))
+                    .unwrap();
+                batch.pool[(input.global_presig_index - batch.start_index) as usize]
+                    .clone()
+                    .unwrap()
+                    .presig
+            };
+            let (nonce, sigs) = generate_partial_signatures(
+                &input.message,
+                presig,
+                beacon,
+                &mgr.config.key_shares,
+                &mgr.config.verifying_key,
+                input.derivation_address.as_ref(),
+            )
+            .unwrap();
+            mgr.state.write().unwrap().partial_signing_outputs.insert(
+                input.signing_id,
+                PartialSigningOutput::new(
+                    nonce,
+                    beacon,
+                    &input.message,
+                    input.derivation_address.as_ref(),
+                    sigs,
+                ),
+            );
+        }
+    }
+
+    async fn sign_all(
+        setup: &SigningTestSetup,
+        inputs: Vec<SignInput>,
+        beacon: &S,
+    ) -> Vec<(Address, SigningResult<SchnorrSignature>)> {
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        setup.managers[0]
+            .sign(
+                &setup.mock_p2p_for(0),
+                inputs,
+                beacon,
+                Duration::from_secs(30),
+                &test_metrics(),
+                result_tx,
+            )
+            .await;
+        let mut results = Vec::new();
+        while let Some(result) = result_rx.recv().await {
+            results.push(result);
+        }
+        results
+    }
+
+    fn golden_input(setup: &SigningTestSetup, i: u8, index: u64) -> SignInput {
+        let derivation_address = [0x40 + i; 32];
+        SignInput {
+            signing_id: Address::new([0xb0 + i; 32]),
+            message: format!("golden {i}").into_bytes(),
+            global_presig_index: index,
+            derivation_address: Some(derivation_address),
+            leaf_key: Some(
+                derived_key(&setup.verifying_key, &derivation_address)
+                    .x_as_be_bytes()
+                    .unwrap(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn golden_partial_signatures() {
+        let setup = SigningTestSetup::new(4);
+        let batch_end = setup.managers[0].initial_presig_count() as u64;
+        setup.set_next_batch_on_all();
+        setup.advance_peers_to_next_batch(0);
+        let beacon = S::from(5u128);
+        let inputs: Vec<SignInput> = (0..4u8)
+            .map(|i| golden_input(&setup, i, batch_end - 2 + u64::from(i)))
+            .collect();
+        assert!(inputs.iter().any(|input| {
+            !derived_key(
+                &setup.verifying_key,
+                input.derivation_address.as_ref().unwrap(),
+            )
+            .has_even_y()
+            .unwrap()
+        }));
+        assert!(inputs.iter().any(|input| {
+            !(pooled_nonce(&setup.managers[1], input.global_presig_index) + G::generator() * beacon)
+                .has_even_y()
+                .unwrap()
+        }));
+        for input in &inputs {
+            prepare_peers(&setup, input, &beacon);
+        }
+
+        let first = sign_all(
+            &setup,
+            vec![
+                golden_input(&setup, 0, batch_end - 2),
+                golden_input(&setup, 2, batch_end),
+            ],
+            &beacon,
+        )
+        .await;
+        assert_eq!(first.len(), 2);
+        let second = sign_all(
+            &setup,
+            (0..4u8)
+                .map(|i| golden_input(&setup, i, batch_end - 2 + u64::from(i)))
+                .collect(),
+            &beacon,
+        )
+        .await;
+        assert_eq!(second.len(), 4);
+
+        for (signing_id, result) in first.into_iter().chain(second) {
+            let input = inputs.iter().find(|i| i.signing_id == signing_id).unwrap();
+            let key = derived_key(
+                &setup.verifying_key,
+                input.derivation_address.as_ref().unwrap(),
+            );
+            verify_schnorr(&key, &input.message, &result.unwrap());
+        }
+        let state = setup.managers[0].state.read().unwrap();
+        let partials: Vec<String> = inputs
+            .iter()
+            .map(|input| {
+                let output = &state.partial_signing_outputs[&input.signing_id];
+                hex::encode(output.partial_sigs[0].value.to_byte_array())
+            })
+            .collect();
+        assert_eq!(partials, GOLDEN_PARTIALS);
+    }
+
+    #[tokio::test]
+    async fn sign_refuses_a_call_whose_path_derives_another_key() {
+        let setup = SigningTestSetup::new(4);
+        let good = golden_input(&setup, 0, 0);
+        let mut bad = golden_input(&setup, 1, 1);
+        bad.leaf_key = good.leaf_key;
+        let (good_id, bad_id) = (good.signing_id, bad.signing_id);
+        let remaining = setup.managers[0].presignatures_remaining();
+
+        let results = sign_all(&setup, vec![good, bad], &S::zero()).await;
+
+        assert!(matches!(
+            &results[..],
+            [
+                (first, Err(SigningError::KeyMismatch { signing_id })),
+                (second, Err(SigningError::CallRefused { failing, .. })),
+            ] if *first == bad_id && *signing_id == bad_id && *second == good_id && *failing == bad_id
+        ));
+        assert_eq!(setup.managers[0].presignatures_remaining(), remaining);
+        assert!(
+            setup.managers[0]
+                .state
+                .read()
+                .unwrap()
+                .partial_signing_outputs
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_refuses_a_presig_stamped_with_another_index() {
+        let setup = SigningTestSetup::new(4);
+        setup.managers[0].state.write().unwrap().batches[0].pool[3]
+            .as_mut()
+            .unwrap()
+            .index = 7;
+        let fine = golden_input(&setup, 0, 2);
+        let stamped = golden_input(&setup, 1, 3);
+        let (fine_id, stamped_id) = (fine.signing_id, stamped.signing_id);
+
+        let results = sign_all(&setup, vec![fine, stamped], &S::zero()).await;
+
+        assert!(matches!(
+            &results[..],
+            [
+                (first, Err(SigningError::PresigMismatch { expected: 3, found: 7, .. })),
+                (second, Err(SigningError::CallRefused { failing, .. })),
+            ] if *first == stamped_id && *second == fine_id && *failing == stamped_id
+        ));
+        let state = setup.managers[0].state.read().unwrap();
+        assert!(state.batches[0].pool[2].is_some() && state.batches[0].pool[3].is_some());
+        assert!(state.partial_signing_outputs.is_empty());
+    }
+
+    const GOLDEN_PRESIG_NONCES: [&str; 5] = [
+        "3991d8c5b2ae21d5351f69cb6fc5b94ee415a9ea0f4055eff275a8675674f91900",
+        "d43fa209ab87535b1b5bd3c23f7a0e9aeb525a9046db8a502a5598561388cfcf80",
+        "aa14e3a0f237f17b8b8378e14e93041957cc460cffb8142d38ab83865184d40300",
+        "01fa1d399f7d72f95bb6bd85e90ef1be07468cc55a47edc3fae3aecd969e95d200",
+        "9a483f662371568c8fe5036a32a03631c826a23961adcd397caba208cddb5cbf00",
+    ];
+    const GOLDEN_BEACONS: [&str; 2] = [
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "000000000000000000000000000000014551231950b75fc4402da1732fc9bebe",
+    ];
+    const GOLDEN_NONCE: &str = "2b2599281228d7330409b9f368a73d90c1fc68c92c400cede3ec63d9dacafbae00";
+
+    #[test]
+    fn golden_presig_numbering_and_beacon() {
+        let setup = SigningTestSetup::new(4);
+        let mgr = &setup.managers[0];
+        let batch_end = mgr.initial_presig_count() as u64;
+        setup.set_next_batch_on_all();
+        {
+            let mut state = mgr.state.write().unwrap();
+            assert_eq!(mgr.batch_position_for(&mut state, batch_end), Some(1));
+            for batch in &state.batches {
+                for (position, presig) in batch.pool.iter().enumerate() {
+                    assert_eq!(
+                        presig.as_ref().unwrap().index,
+                        batch.start_index + position as u64
+                    );
+                }
+            }
+        }
+        let nonces: Vec<String> = [0, 1, batch_end - 1, batch_end, batch_end + 1]
+            .iter()
+            .map(|&index| hex::encode(pooled_nonce(mgr, index).to_byte_array()))
+            .collect();
+        assert_eq!(nonces, GOLDEN_PRESIG_NONCES);
+
+        let randomness: [Vec<u8>; 2] = [(0u8..32).collect(), vec![0xff; 32]];
+        let beacons: Vec<String> = randomness
+            .iter()
+            .map(|r| hex::encode(crate::withdrawals::withdrawal_beacon(r).to_byte_array()))
+            .collect();
+        assert_eq!(beacons, GOLDEN_BEACONS);
+        let beacon = crate::withdrawals::withdrawal_beacon(&randomness[0]);
+        let nonce = pooled_nonce(mgr, 0) + G::generator() * beacon;
+        assert_eq!(hex::encode(nonce.to_byte_array()), GOLDEN_NONCE);
     }
 }

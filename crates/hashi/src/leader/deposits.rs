@@ -471,7 +471,7 @@ impl LeaderService {
         info!("Approving deposit request");
 
         // Validate deposit_request before asking for signatures
-        inner
+        let spend = inner
             .validate_deposit_request(&deposit_request)
             .await
             .inspect_err(|err| debug!("Deposit validation failed: {err}"))?;
@@ -502,9 +502,11 @@ impl LeaderService {
         }
 
         // Collect signatures, stopping once we reach quorum.
+        let spend_digest = crate::spend_data::spend_data_digest(&spend);
         let confirmation_message = DepositConfirmationMessage {
             request_id: deposit_request.id,
             utxo: deposit_request.utxo.clone(),
+            spend,
         };
         let mut aggregator = BlsSignatureAggregator::new(
             inner.config.hashi_ids().hashi_object_id,
@@ -514,7 +516,11 @@ impl LeaderService {
         while let Some(result) = sig_tasks.join_next().await {
             let Ok(Some(sig)) = result else { continue };
             if let Err(e) = aggregator.add_signature(sig) {
-                error!("Failed to add deposit signature: {e}");
+                error!(
+                    %spend_digest,
+                    "Failed to add deposit signature (a member may have computed other \
+                     spend data): {e}"
+                );
             }
             if aggregator.weight() >= required_weight {
                 break;
@@ -795,6 +801,7 @@ mod tests {
                 derivation_path: None,
             },
             approval_cert: None,
+            spend: None,
             approved_timestamp_ms: None,
             confirmed_timestamp_ms: None,
         }

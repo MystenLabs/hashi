@@ -354,7 +354,7 @@ mod tests {
                 Err(error) => panic!(
                     "node {index} returned an unexpected validation error at {confirmations} confirmations: {error}"
                 ),
-                Ok(()) => panic!(
+                Ok(_) => panic!(
                     "node {index} accepted the deposit at {confirmations}/{required_confirmations} confirmations"
                 ),
             }

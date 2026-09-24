@@ -25,9 +25,11 @@ Two principles shape this list:
 | Reconfig not tracking   | `changes(hashi_epoch[3h]) == 0`                                       | Testnet reconfigures roughly every 40 minutes. If the committee epoch stops moving, either your node stopped following reconfig or the fleet itself stalled — check the operator channel before assuming local fault.     |
 | Low gas                 | `hashi_sui_balance < 1e9`                                             | Below 1 SUI the operator wallet is close to unable to submit. Refill.                                                                                                                                                     |
 | Binary behind chain     | `hashi_package_version_unsupported == 1`                              | The chain moved to a package version this binary does not implement; autonomous writes are halted. Upgrade the binary immediately.                                                                                        |
+| Signing version refused | `increase(hashi_mpc_signing_version_refused_total[10m]) > 0 or (hashi_mpc_signing_version_refused_total unless hashi_mpc_signing_version_refused_total offset 10m) or (hashi_mpc_signing_version_refused_total and on(job, instance) uptime < 600)`| This node sits an epoch out. For `reason="unsupported"`, upgrade to a release that supports `version`. `missing`, `malformed` and `legacy` mean the committee's config does not fit this release: check that the node runs the network's release, and escalate if it does. The last two clauses catch a label set's first refusal, and the first after a restart, which `increase` misses.|
 | Database poisoned       | `hashi_db_poisoned == 1`                                              | fjall refuses every write after a failed flush or fsync (usually a full disk) until the process restarts, while reads and signing carry on looking healthy. Free the disk, then restart.                                  |
 | Crash looping           | `changes(process_start_time_seconds{job="<your-node>"}[1h]) > 3`      | Uses the standard process exporter if you run one; any restart-count source works.                                                                                                                                        |
 | Previous shares missing | `increase(hashi_mpc_rotation_previous_shares_missing_total[1h]) > 0`  | The node owed shares to a rotation and had none, so its weight did not reach the new key.                                                                                                                                 |
+| Spend check refused     | `increase(hashi_spend_check_refusals_total[1h]) > 0 or (hashi_spend_check_refusals_total unless hashi_spend_check_refusals_total offset 1h) or (hashi_spend_check_refusals_total and on(job, instance) uptime < 3600)`| A spend check refused work on this node: a UTXO's spend data was missing or wrong, or a txid, the sighash digest or the presig pairing did not match what it computed; `site` and `check` say where and which. If peers do not refuse, this node's release differs from theirs; if every other node refuses at `site="commit"`, the leader's proposal is at fault. The last two clauses catch a label set's first refusal, and the first after a restart, which `increase` misses.|
 
 Dashboard-worthy but **not** alerts:
 
@@ -41,6 +43,16 @@ Dashboard-worthy but **not** alerts:
   batch an earlier round already fixed a signer set for, by `outcome`.
 - `hashi_is_leader` — leadership rotates; useful context when reading other
   metrics, meaningless to alert on.
+- `hashi_mpc_signing_version_supported` / `hashi_mpc_reduction_version_info` —
+  the signing versions this build supports, and each one's reduction source
+  digest. Before a version vote, support is counted with the first and the
+  second must agree across releases.
+- `hashi_mpc_reduction_info` — a digest of each epoch's weight reduction this
+  node reads. Every node should show the same digest for an epoch.
+- `hashi_utxo_selection_skipped_records` — UTXOs skipped because their spend
+  record failed a check, by `reason`, as of the latest coin selection this node
+  ran as leader. Activity-gated: it updates only when this node leads a
+  withdrawal build.
 - `hashi_db_keyspace_disk_bytes` — live table bytes per keyspace. Each one
   should fall at every epoch boundary; one that climbs across epochs is
   leaking. Alert on the volume itself, not on this.
@@ -72,6 +84,8 @@ Dashboard-worthy but **not** alerts:
 | `hashi_latest_checkpoint_*`, `hashi_task_last_iteration_timestamp_seconds` | node |
 | `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader` | node |
 | `hashi_db_*` | node |
+| `hashi_spend_check_refusals_total`, `hashi_utxo_selection_skipped_records` | node |
+| `hashi_mpc_signing_version_*`, `hashi_mpc_reduction_*` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
 | `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

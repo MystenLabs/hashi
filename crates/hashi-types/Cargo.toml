@@ -26,6 +26,7 @@ fastcrypto-tbls.workspace = true
 
 anyhow.workspace = true
 base64ct.workspace = true
+thiserror.workspace = true
 
 # Guardian crypto dependencies
 hpke.workspace = true

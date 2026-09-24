@@ -9,7 +9,7 @@
 /// enforcement) are driven by `hashi::deposit`.
 module hashi::deposit_queue;
 
-use hashi::{committee::CommitteeSignature, utxo::Utxo};
+use hashi::{committee::CommitteeSignature, utxo::{SpendData, Utxo}};
 use sui::{clock::Clock, object_bag::ObjectBag};
 
 // ~~~~~~~ Constants ~~~~~~~
@@ -41,6 +41,10 @@ public struct DepositRequest has key, store {
     /// Committee certificate recorded at approval time. `None` until
     /// `approve_deposit` has been called.
     approval_cert: Option<CommitteeSignature>,
+    /// Spend data the certificate covers. `None` until `approve_deposit` has
+    /// been called; kept on the processed request, where it is the only copy
+    /// once the UTXO is cleaned up.
+    spend: Option<SpendData>,
     /// Clock timestamp at the moment of approval. `None` until
     /// `approve_deposit` has been called.
     approved_timestamp_ms: Option<u64>,
@@ -77,6 +81,7 @@ public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContex
         sui_tx_digest: *ctx.digest(),
         utxo,
         approval_cert: option::none(),
+        spend: option::none(),
         approved_timestamp_ms: option::none(),
         confirmed_timestamp_ms: option::none(),
     }
@@ -98,11 +103,17 @@ public(package) fun remove_request(
     self.requests.remove(request_id)
 }
 
-/// Record `cert` and the current clock timestamp on `request` to mark it
-/// as approved. Caller is responsible for verifying `cert` against the
-/// current committee before calling this.
-public(package) fun approve(request: &mut DepositRequest, cert: CommitteeSignature, clock: &Clock) {
+/// Record `cert`, the `spend` it covers and the current clock timestamp on
+/// `request` to mark it as approved. Caller is responsible for verifying
+/// `cert` against the current committee before calling this.
+public(package) fun approve(
+    request: &mut DepositRequest,
+    cert: CommitteeSignature,
+    spend: SpendData,
+    clock: &Clock,
+) {
     request.approval_cert = option::some(cert);
+    request.spend = option::some(spend);
     request.approved_timestamp_ms = option::some(clock.timestamp_ms());
 }
 
@@ -143,6 +154,7 @@ public(package) fun delete_expired(
         sui_tx_digest: _,
         utxo,
         approval_cert: _,
+        spend: _,
         approved_timestamp_ms: _,
         confirmed_timestamp_ms: _,
     } = request;
@@ -174,6 +186,11 @@ public(package) fun utxo(request: &DepositRequest): Utxo {
 /// `None` for requests that have not yet been through `approve_deposit`.
 public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
     request.approval_cert
+}
+
+/// The spend data recorded at approval time, if any.
+public(package) fun spend(request: &DepositRequest): Option<SpendData> {
+    request.spend
 }
 
 /// The clock timestamp at which the request was approved, if any.

@@ -28,6 +28,7 @@ use hashi_types::utils::Base64;
 pub use hashi_types::move_types::ConfigValue;
 pub use hashi_types::move_types::DepositRequest;
 pub use hashi_types::move_types::OutputUtxo;
+pub use hashi_types::move_types::SpendData;
 pub use hashi_types::move_types::UpgradeCap;
 pub use hashi_types::move_types::Utxo;
 pub use hashi_types::move_types::UtxoId;
@@ -907,6 +908,7 @@ impl WithdrawalRequestQueue {
 pub struct DepositConfirmationMessage {
     pub request_id: Address,
     pub utxo: Utxo,
+    pub spend: SpendData,
 }
 
 impl hashi_types::intent::IntentMessage for DepositConfirmationMessage {

@@ -721,6 +721,9 @@ impl SigningBatch {
 pub struct WithdrawalTransaction {
     pub id: Address,
     pub txid: BitcoinTxid,
+    /// SHA-256 over every input's 32-byte sighash, concatenated in input
+    /// order, as the commitment certified it.
+    pub sighash_digest: Address,
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
@@ -797,6 +800,8 @@ pub struct DepositRequest {
     pub sui_tx_digest: Digest,
     pub utxo: Utxo,
     pub approval_cert: Option<CommitteeSignature>,
+    /// Spend data the approval certificate covers; `None` until approved.
+    pub spend: Option<SpendData>,
     pub approved_timestamp_ms: Option<u64>,
     pub confirmed_timestamp_ms: Option<u64>,
 }
@@ -809,10 +814,22 @@ pub struct Utxo {
     pub derivation_path: Option<Address>,
 }
 
+/// Rust version of the Move hashi::utxo::SpendData type: what signing needs to
+/// spend a UTXO through its 2-of-2 leaf, fixed and certified at creation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct SpendData {
+    pub script_pubkey: Vec<u8>,
+    pub leaf_script: Vec<u8>,
+    pub control_block: Vec<u8>,
+    pub key_path: Address,
+    pub sighash_type: u8,
+}
+
 /// Rust version of the Move hashi::utxo_pool::UtxoRecord type.
 #[derive(Clone, Debug, serde_derive::Deserialize)]
 pub struct UtxoRecord {
     pub utxo: Utxo,
+    pub spend: SpendData,
     pub produced_by: Option<Address>,
     pub spent_by: Option<Address>,
     pub spent_epoch: Option<u64>,
@@ -2192,5 +2209,39 @@ mod tests {
             bcs::from_bytes::<ConfigValue>(&bytes).expect("deserialize"),
             u256_value
         );
+    }
+
+    const UTXO_RECORD_BCS: &str = "0000000000000000000000000000000000000000000000000000000000000011020000000300000000000000010000000000000000000000000000000000000000000000000000000000000044035120aa0220bb02c0cc00000000000000000000000000000000000000000000000000000000000000dd0001000000000000000000000000000000000000000000000000000000000000005500010600000000000000";
+    const DEPOSIT_REQUEST_BCS: &str = "a4137e2ed945e7f4e8c307001c32e97472fb3eebb8f7b4ab7534b447d22da89b000000000000000000000000000000000000000000000000000000000000010000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000011020000000300000000000000010000000000000000000000000000000000000000000000000000000000000044010700000000000000000001035120aa0220bb02c0cc00000000000000000000000000000000000000000000000000000000000000dd0001000000000000000000";
+    const WITHDRAWAL_TRANSACTION_BCS: &str = "a4137e2ed945e7f4e8c307001c32e97472fb3eebb8f7b4ab7534b447d22da89b0000000000000000000000000000000000000000000000000000000000000088000000000000000000000000000000000000000000000000000000000000009901000000000000000000000000000000000000000000000000000000000000006601000000000000000000000000000000000000000000000000000000000000001102000000030000000000000001000000000000000000000000000000000000000000000000000000000000004401010000000000000001770000000000000000000000040000000001000000000000000000000000000000000000";
+
+    fn pinned_spend() -> SpendData {
+        SpendData {
+            script_pubkey: vec![0x51, 0x20, 0xaa],
+            leaf_script: vec![0x20, 0xbb],
+            control_block: vec![0xc0, 0xcc],
+            key_path: Address::from_static("0xdd"),
+            sighash_type: 0,
+        }
+    }
+
+    #[test]
+    fn spend_data_fields_decode_from_move_bytes() {
+        let record: UtxoRecord = bcs::from_bytes(&hex::decode(UTXO_RECORD_BCS).unwrap()).unwrap();
+        assert_eq!(record.spend, pinned_spend());
+        assert_eq!(record.produced_by, Some(Address::from_static("0x55")));
+        assert_eq!(record.spent_epoch, Some(6));
+
+        let request: DepositRequest =
+            bcs::from_bytes(&hex::decode(DEPOSIT_REQUEST_BCS).unwrap()).unwrap();
+        assert_eq!(request.spend, Some(pinned_spend()));
+        assert_eq!(request.approval_cert.map(|cert| cert.epoch), Some(7));
+        assert_eq!(request.approved_timestamp_ms, Some(0));
+
+        let txn: WithdrawalTransaction =
+            bcs::from_bytes(&hex::decode(WITHDRAWAL_TRANSACTION_BCS).unwrap()).unwrap();
+        assert_eq!(txn.txid, BitcoinTxid::from(Address::from_static("0x88")));
+        assert_eq!(txn.sighash_digest, Address::from_static("0x99"));
+        assert_eq!(txn.request_ids, vec![Address::from_static("0x66")]);
     }
 }

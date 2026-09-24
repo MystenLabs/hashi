@@ -33,6 +33,7 @@ pub mod mpc;
 pub mod onchain;
 pub mod publish;
 pub mod published;
+pub mod spend_data;
 pub mod storage;
 pub mod sui_rpc_client;
 pub mod sui_tx_executor;
@@ -75,6 +76,7 @@ pub struct Hashi {
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
     reported_registration_aborts: RwLock<HashSet<String>>,
+    spend_verdicts: spend_data::SpendVerdictCache,
 }
 
 impl Hashi {
@@ -110,6 +112,7 @@ impl Hashi {
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
+            spend_verdicts: Default::default(),
         }))
     }
 
@@ -146,6 +149,7 @@ impl Hashi {
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
             reported_registration_aborts: RwLock::new(HashSet::new()),
+            spend_verdicts: Default::default(),
         }))
     }
 
