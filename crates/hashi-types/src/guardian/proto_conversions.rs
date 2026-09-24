@@ -386,13 +386,15 @@ impl TryFrom<pb::SignedCeremonyConfirmationRequest> for KpSigned<CeremonyConfirm
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
-        let ceremony_digest = req
-            .ceremony_digest
-            .ok_or_else(|| missing("ceremony_digest"))?;
-        let ceremony_digest = <[u8; 32]>::try_from(ceremony_digest.as_ref())
-            .map_err(|_| InvalidInputs("ceremony_digest must be 32 bytes".into()))?;
-        let request =
-            CeremonyConfirmationRequest::new(req.expected_session_id.into(), ceremony_digest);
+        let ceremony_artifacts_digest = req
+            .ceremony_artifacts_digest
+            .ok_or_else(|| missing("ceremony_artifacts_digest"))?;
+        let ceremony_artifacts_digest = <[u8; 32]>::try_from(ceremony_artifacts_digest.as_ref())
+            .map_err(|_| InvalidInputs("ceremony_artifacts_digest must be 32 bytes".into()))?;
+        let request = CeremonyConfirmationRequest::new(
+            req.expected_session_id.into(),
+            ceremony_artifacts_digest,
+        );
         Ok(KpSigned::from_parts(request, signer_cert, req.kp_signature))
     }
 }
@@ -460,8 +462,13 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
             req.encrypted_old_share
                 .ok_or_else(|| missing("encrypted_old_share"))?,
         )?;
-        let deployment =
-            DeploymentConfig::try_from(req.deployment.ok_or_else(|| missing("deployment"))?)?;
+        let expected_deployment_config_hash = req
+            .expected_deployment_config_hash
+            .ok_or_else(|| missing("expected_deployment_config_hash"))?;
+        let expected_deployment_config_hash =
+            <[u8; 32]>::try_from(expected_deployment_config_hash.as_ref()).map_err(|_| {
+                InvalidInputs("expected_deployment_config_hash must be 32 bytes".into())
+            })?;
         let new_num_shares = req
             .new_num_shares
             .ok_or_else(|| missing("new_num_shares"))? as usize;
@@ -469,7 +476,7 @@ impl TryFrom<pb::SignedProvisionerRotateKpSetRequest> for KpSigned<ProvisionerRo
         let new_kp_certs_roster = kp_cert_roster_from_pb(req.new_kp_pgp_certs)?;
         let request = ProvisionerRotateKpSetRequest::new(
             req.expected_session_id.into(),
-            deployment,
+            expected_deployment_config_hash,
             encrypted_old_share,
             new_kp_certs_roster,
             new_num_shares,
@@ -870,10 +877,10 @@ pub fn signed_ceremony_confirmation_request_to_pb(
 impl From<KpSigned<CeremonyConfirmationRequest>> for pb::SignedCeremonyConfirmationRequest {
     fn from(signed: KpSigned<CeremonyConfirmationRequest>) -> Self {
         let (request, signer_cert, kp_signature) = signed.into_parts();
-        let (expected_session_id, ceremony_digest) = request.into_parts();
+        let (expected_session_id, ceremony_artifacts_digest) = request.into_parts();
         Self {
             expected_session_id: expected_session_id.into(),
-            ceremony_digest: Some(ceremony_digest.to_vec().into()),
+            ceremony_artifacts_digest: Some(ceremony_artifacts_digest.to_vec().into()),
             signer_cert: Some(signer_cert.into()),
             kp_signature,
         }
@@ -1009,14 +1016,17 @@ pub fn batch_provisioner_rotate_kp_set_request_to_pb(
 impl From<KpSigned<ProvisionerRotateKpSetRequest>> for pb::SignedProvisionerRotateKpSetRequest {
     fn from(r: KpSigned<ProvisionerRotateKpSetRequest>) -> Self {
         let (request, signer_cert, signature) = r.into_parts();
-        let (expected_session_id, deployment, encrypted_old_share, new_kp_certs_roster, new_params) =
-            request.into_parts();
+        let (
+            expected_session_id,
+            expected_deployment_config_hash,
+            encrypted_old_share,
+            new_kp_certs_roster,
+            new_params,
+        ) = request.into_parts();
         Self {
             encrypted_old_share: Some(guardian_encrypted_share_to_pb(encrypted_old_share)),
             expected_session_id: expected_session_id.into(),
-            deployment: Some(
-                deployment_config_to_pb(deployment).expect("supported Bitcoin network"),
-            ),
+            expected_deployment_config_hash: Some(expected_deployment_config_hash.to_vec().into()),
             new_kp_pgp_certs: new_kp_certs_roster
                 .into_vec()
                 .into_iter()

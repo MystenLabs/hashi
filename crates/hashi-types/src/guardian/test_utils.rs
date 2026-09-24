@@ -306,7 +306,7 @@ impl BatchProvisionerRotateKpSetRequest {
         };
         let request = ProvisionerRotateKpSetRequest::new(
             "mock-session".into(),
-            super::DeploymentConfig::mock_for_testing(),
+            super::DeploymentConfig::mock_for_testing().digest(),
             encrypted_old_share,
             mock_kp_certs_roster(TEST_N),
             TEST_N,

@@ -18,11 +18,32 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
+/// Complete operator-init state ready for its fail-stop commit.
+pub struct OIInstall {
+    deployment: DeploymentConfig,
+    logger: GuardianS3Client,
+    withdraw_mode: Option<OIWithdrawModeInstall>,
+}
+
 /// Withdraw-mode arming state built from `InitConfig` and the ceremony logs.
 pub struct OIWithdrawModeInstall {
     init_config: InitConfig,
     ceremony_state: CeremonyState,
     genesis_state: Option<GenesisState>,
+}
+
+impl OIInstall {
+    fn new(
+        deployment: DeploymentConfig,
+        logger: GuardianS3Client,
+        withdraw_mode: Option<OIWithdrawModeInstall>,
+    ) -> Self {
+        Self {
+            deployment,
+            logger,
+            withdraw_mode,
+        }
+    }
 }
 
 impl OIWithdrawModeInstall {
@@ -171,9 +192,11 @@ pub async fn operator_init(
         }
         None => None,
     };
+    let install = OIInstall::new(deployment, logger, withdraw_mode);
+
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing S3 logger and mode-specific initialization state.");
-    commit_operator_init(&enclave, deployment, logger, withdraw_mode).await;
+    commit_operator_init(&enclave, install).await;
 
     info!("Operator initialization complete.");
     Ok(())
@@ -194,12 +217,13 @@ fn validate_deployment(enclave: &Enclave, deployment: &DeploymentConfig) -> Guar
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and the I/O steps
 /// (attestation, S3 logging) panic on failure rather than return.
-async fn commit_operator_init(
-    enclave: &Enclave,
-    deployment: DeploymentConfig,
-    logger: GuardianS3Client,
-    withdraw_mode: Option<OIWithdrawModeInstall>,
-) {
+async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
+    let OIInstall {
+        deployment,
+        logger,
+        withdraw_mode,
+    } = install;
+
     enclave
         .config
         .set_s3_logger(logger)
@@ -303,7 +327,8 @@ mod tests {
             EnclaveMode::Ceremony => (DeploymentConfig::mock_for_testing(), None),
         };
 
-        commit_operator_init(&enclave, deployment, logger, withdraw_mode).await;
+        let install = OIInstall::new(deployment, logger, withdraw_mode);
+        commit_operator_init(&enclave, install).await;
         (enclave, captures)
     }
 

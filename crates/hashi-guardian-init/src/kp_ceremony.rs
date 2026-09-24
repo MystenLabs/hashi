@@ -9,6 +9,7 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian_init::load_attested_kp_cert;
+use hashi_types::guardian::CeremonyArtifacts;
 use hashi_types::guardian::CeremonyConfirmationRequest;
 use hashi_types::guardian::CeremonyConfirmationResponse;
 use hashi_types::guardian::CeremonyStage;
@@ -125,7 +126,11 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         phase = "ceremony scrape",
         "scraping this guardian session's ceremony proposal (attestation-anchored)",
     );
-    let state = reader.read_live_ceremony_proposal(&session_id).await?;
+    let artifacts = CeremonyArtifacts {
+        deployment,
+        ceremony_state: reader.read_live_ceremony_proposal(&session_id).await?,
+    };
+    let state = &artifacts.ceremony_state;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "ceremony scrape",
@@ -150,7 +155,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     );
 
     // 3. Decrypt and commitment-check this KP's ciphertext.
-    let reconstructed = decrypt_kp_share(&state, &kp_cert)?;
+    let reconstructed = decrypt_kp_share(state, &kp_cert)?;
     let share_id = reconstructed.id;
     let expected_commitment = state
         .secret_sharing_instance
@@ -172,7 +177,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // 4. Save the ceremony state only after every verification step succeeds.
     let ceremony_state_bytes =
-        serde_json::to_vec(&state).context("serialize ceremony state with encrypted shares")?;
+        serde_json::to_vec(state).context("serialize ceremony state with encrypted shares")?;
     std::fs::write(encrypted_shares_path, ceremony_state_bytes).with_context(|| {
         format!(
             "write ceremony state with encrypted shares to {}",
@@ -188,8 +193,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     // 5. Submit a signed confirmation only after the verified recovery artifact
     //    is safely stored locally.
-    let confirmation =
-        CeremonyConfirmationRequest::new(session_id, state.confirmation_digest(&deployment));
+    let confirmation = CeremonyConfirmationRequest::new(session_id, artifacts.digest());
     let signed = KpSigned::sign(confirmation, kp_cert, None)
         .map_err(anyhow::Error::msg)
         .context("sign ceremony confirmation with the KP key")?;

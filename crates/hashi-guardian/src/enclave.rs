@@ -103,7 +103,7 @@ pub struct TemporaryInitState {
 
 pub(crate) struct PendingCeremony {
     proposal: CeremonyProposalLogMessage,
-    digest: [u8; 32],
+    ceremony_artifacts_digest: [u8; 32],
     confirmed_share_ids: RwLock<BTreeSet<ShareID>>,
 }
 
@@ -112,10 +112,13 @@ impl PendingCeremony {
         proposal: CeremonyProposalLogMessage,
         deployment: &DeploymentConfig,
     ) -> GuardianResult<Self> {
-        let state = CeremonyState::from_proposal(proposal.clone())?;
+        let artifacts = CeremonyArtifacts {
+            deployment: deployment.clone(),
+            ceremony_state: CeremonyState::from_proposal(proposal.clone())?,
+        };
         Ok(Self {
             proposal,
-            digest: state.confirmation_digest(deployment),
+            ceremony_artifacts_digest: artifacts.digest(),
             confirmed_share_ids: RwLock::new(BTreeSet::new()),
         })
     }
@@ -123,9 +126,9 @@ impl PendingCeremony {
     pub(crate) fn validate_confirmation(
         &self,
         signer_fingerprint: &str,
-        ceremony_digest: &[u8; 32],
+        ceremony_artifacts_digest: &[u8; 32],
     ) -> GuardianResult<(ShareID, bool)> {
-        if ceremony_digest != &self.digest {
+        if ceremony_artifacts_digest != &self.ceremony_artifacts_digest {
             return Err(InvalidInputs(
                 "ceremony confirmation digest differs from pending ceremony".into(),
             ));

@@ -15,37 +15,6 @@ carry one recipient fingerprint and one ciphertext per share. The
 `VersionedLogMessage` wrapper retains explicit version dispatch for future
 schema changes.
 
-## Deployment configuration and KP approval
-
-Both modes install one `DeploymentConfig` during operator initialization: S3
-bucket/region, retention environment, Bitcoin network, and the full PCR allowlist.
-Credentials are supplied separately. `GuardianInfo.deployment` is absent before
-OI and then contains a derived `DeploymentConfigSummary`; the summary reports the
-current revision but omits PCR pins and previous builds. Callers retain their own
-approved allowlist and independently verify the live attestation.
-
-Withdraw's `InitConfig` contains this shared policy plus its limiter, MPC master
-key, and Hashi object ID. Its digest is authenticated by KP provisioning
-signatures. In ceremony mode, old KPs sign the complete deployment policy with
-their rotation inputs; the enclave checks it against the installed policy before
-reading old state or using shares. New KPs independently compute a confirmation
-digest over the complete deployment policy and verified ceremony state. Final
-ceremony records are published only after every new KP confirms.
-
-Importing an existing key for rotation or withdrawal requires its recorded
-ceremony network to match the new deployment's Bitcoin network. Other settings,
-including the PCR allowlist, may change during an upgrade.
-
-This precursor retains the EIF's build-time revision, mode, and S3 routes. OI
-rejects a policy whose current revision differs from the compiled revision,
-or whose current PCR0 differs from the enclave's own Nitro attestation.
-These checks run before initialization commits, leaving failed attempts retryable.
-The existing `non-enclave-dev`/test attestation stub remains in effect for local
-mock flows; real enclaves and external verifiers check real attestations.
-
-The schema and signature changes establish the new testnet-wipe baseline;
-pre-wipe compatibility is intentionally not retained.
-
 ## Heartbeat write fencing
 
 Every Guardian S3 log write is serialized. After the first successful

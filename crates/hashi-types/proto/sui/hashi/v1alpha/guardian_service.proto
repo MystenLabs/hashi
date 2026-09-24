@@ -232,8 +232,8 @@ message SignedCeremonyConfirmationRequest {
   // Guardian session the KP authenticated before confirming.
   string expected_session_id = 1;
 
-  // Blake2b-256 of BCS(full DeploymentConfig, verified CeremonyState).
-  optional bytes ceremony_digest = 2;
+  // Blake2b-256 of BCS(CeremonyArtifacts): full DeploymentConfig and verified CeremonyState.
+  optional bytes ceremony_artifacts_digest = 2;
 
   // Complete detached-signature envelope.
   AttestedKpCert signer_cert = 3;
@@ -455,8 +455,9 @@ message SignedProvisionerRotateKpSetRequest {
   // The ceremony guardian session this KP verified before encrypting its share.
   string expected_session_id = 2;
 
-  // Complete deployment policy, checked before any old share is used.
-  DeploymentConfig deployment = 3;
+  // Blake2b-256 of BCS(DeploymentConfig), checked against the installed policy
+  // before any old share is used.
+  optional bytes expected_deployment_config_hash = 3;
 
   // Ordered attested certificates for the proposed new KP set.
   repeated AttestedKpCert new_kp_pgp_certs = 4;

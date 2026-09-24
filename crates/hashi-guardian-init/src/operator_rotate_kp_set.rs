@@ -18,7 +18,6 @@ use hashi_types::guardian::BatchProvisionerRotateKpSetRequest;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::CeremonyState;
-use hashi_types::guardian::DeploymentConfig;
 use hashi_types::guardian::GuardianSignedResponse;
 use hashi_types::guardian::KpCertRoster;
 use hashi_types::guardian::KpShareStateLogMessage;
@@ -118,7 +117,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
         &old,
         &Proposal {
             session_id: &guardian.session_id,
-            deployment: &cfg.deployment_config(),
+            expected_deployment_config_hash: cfg.deployment_config().digest(),
             new_certs_roster: &new_certs_roster,
             new_params,
         },
@@ -251,7 +250,7 @@ fn report(new_instance: &SecretSharingInstance) {
 /// The pinned session and this config's proposal; every submission must match.
 struct Proposal<'a> {
     session_id: &'a SessionID,
-    deployment: &'a DeploymentConfig,
+    expected_deployment_config_hash: [u8; 32],
     new_certs_roster: &'a KpCertRoster,
     new_params: SecretSharingParams,
 }
@@ -286,7 +285,7 @@ fn validate_batch(
             share_id.get()
         );
         ensure!(
-            request.deployment() == proposal.deployment,
+            *request.expected_deployment_config_hash() == proposal.expected_deployment_config_hash,
             "{label}: deployment configuration differs from this config's"
         );
         ensure!(
@@ -322,6 +321,7 @@ mod tests {
     use hashi_types::guardian::AttestedKpCert;
     use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::Ciphertext;
+    use hashi_types::guardian::DeploymentConfig;
     use hashi_types::guardian::GuardianEncryptedShare;
     use hashi_types::guardian::KpEncryptedShare;
     use hashi_types::guardian::KpEncryptedShareRoster;
@@ -391,7 +391,7 @@ mod tests {
         fn proposal(&self) -> Proposal<'_> {
             Proposal {
                 session_id: &self.session_id,
-                deployment: &self.deployment,
+                expected_deployment_config_hash: self.deployment.digest(),
                 new_certs_roster: &self.new_certs_roster,
                 new_params: self.new_params,
             }
@@ -400,7 +400,7 @@ mod tests {
         fn request(&self, share_id: u16) -> ProvisionerRotateKpSetRequest {
             ProvisionerRotateKpSetRequest::new(
                 self.session_id.clone(),
-                self.deployment.clone(),
+                self.deployment.digest(),
                 GuardianEncryptedShare {
                     id: ShareID::new(share_id).unwrap(),
                     ciphertext: Ciphertext {

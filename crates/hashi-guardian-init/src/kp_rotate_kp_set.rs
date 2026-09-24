@@ -121,7 +121,7 @@ pub async fn run(cfg: Config, submission_path: &Path) -> Result<()> {
     let share_id = decrypted.id;
     let request = ProvisionerRotateKpSetRequest::build_from_share(
         session_id.clone(),
-        deployment,
+        deployment.digest(),
         &decrypted,
         &guardian_pub_key,
         new_certs_roster,

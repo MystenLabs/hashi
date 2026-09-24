@@ -1994,9 +1994,9 @@ pub struct SignedCeremonyConfirmationRequest {
     /// Guardian session the KP authenticated before confirming.
     #[prost(string, tag = "1")]
     pub expected_session_id: ::prost::alloc::string::String,
-    /// Blake2b-256 of BCS(full DeploymentConfig, verified CeremonyState).
+    /// Blake2b-256 of BCS(CeremonyArtifacts): full DeploymentConfig and verified CeremonyState.
     #[prost(bytes = "bytes", optional, tag = "2")]
-    pub ceremony_digest: ::core::option::Option<::prost::bytes::Bytes>,
+    pub ceremony_artifacts_digest: ::core::option::Option<::prost::bytes::Bytes>,
     /// Complete detached-signature envelope.
     #[prost(message, optional, tag = "3")]
     pub signer_cert: ::core::option::Option<AttestedKpCert>,
@@ -2231,9 +2231,10 @@ pub struct SignedProvisionerRotateKpSetRequest {
     /// The ceremony guardian session this KP verified before encrypting its share.
     #[prost(string, tag = "2")]
     pub expected_session_id: ::prost::alloc::string::String,
-    /// Complete deployment policy, checked before any old share is used.
-    #[prost(message, optional, tag = "3")]
-    pub deployment: ::core::option::Option<DeploymentConfig>,
+    /// Blake2b-256 of BCS(DeploymentConfig), checked against the installed policy
+    /// before any old share is used.
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub expected_deployment_config_hash: ::core::option::Option<::prost::bytes::Bytes>,
     /// Ordered attested certificates for the proposed new KP set.
     #[prost(message, repeated, tag = "4")]
     pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<AttestedKpCert>,

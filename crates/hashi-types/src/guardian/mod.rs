@@ -297,12 +297,13 @@ pub struct SetupNewKeyResponse {
     pub btc_master_pubkey: BitcoinPubkey,
 }
 /// One KP's signed confirmation that it independently verified the complete
-/// ceremony state and deployment configuration for a specific guardian session.
+/// [`CeremonyArtifacts`] for a specific guardian session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CeremonyConfirmationRequest {
     expected_session_id: SessionID,
+    /// Digest of the deployment configuration and ceremony state in `CeremonyArtifacts`.
     #[serde(with = "hex::serde")]
-    ceremony_digest: [u8; 32],
+    ceremony_artifacts_digest: [u8; 32],
 }
 
 /// Progress returned after accepting one ceremony confirmation.
@@ -323,7 +324,7 @@ pub struct BatchProvisionerRotateKpSetRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProvisionerRotateKpSetRequest {
     expected_session_id: SessionID,
-    deployment: DeploymentConfig,
+    expected_deployment_config_hash: [u8; 32],
     encrypted_old_share: GuardianEncryptedShare,
     /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
     /// `new_params.num_shares()`.
@@ -413,10 +414,10 @@ impl SetupNewKeyRequest {
 }
 
 impl CeremonyConfirmationRequest {
-    pub fn new(expected_session_id: SessionID, ceremony_digest: [u8; 32]) -> Self {
+    pub fn new(expected_session_id: SessionID, ceremony_artifacts_digest: [u8; 32]) -> Self {
         Self {
             expected_session_id,
-            ceremony_digest,
+            ceremony_artifacts_digest,
         }
     }
 
@@ -424,12 +425,12 @@ impl CeremonyConfirmationRequest {
         &self.expected_session_id
     }
 
-    pub fn ceremony_digest(&self) -> &[u8; 32] {
-        &self.ceremony_digest
+    pub fn ceremony_artifacts_digest(&self) -> &[u8; 32] {
+        &self.ceremony_artifacts_digest
     }
 
     pub fn into_parts(self) -> (SessionID, [u8; 32]) {
-        (self.expected_session_id, self.ceremony_digest)
+        (self.expected_session_id, self.ceremony_artifacts_digest)
     }
 }
 
@@ -710,7 +711,7 @@ impl BatchProvisionerRotateKpSetRequest {
 impl ProvisionerRotateKpSetRequest {
     pub fn new(
         expected_session_id: SessionID,
-        deployment: DeploymentConfig,
+        expected_deployment_config_hash: [u8; 32],
         encrypted_old_share: GuardianEncryptedShare,
         new_kp_certs_roster: KpCertRoster,
         new_num_shares: usize,
@@ -726,7 +727,7 @@ impl ProvisionerRotateKpSetRequest {
         }
         Ok(Self {
             expected_session_id,
-            deployment,
+            expected_deployment_config_hash,
             encrypted_old_share,
             new_kp_certs_roster,
             new_params,
@@ -734,10 +735,10 @@ impl ProvisionerRotateKpSetRequest {
     }
 
     /// Build one current KP's rotation request. The KP signature directly binds
-    /// the full deployment policy, new roster, and sharing parameters to its encrypted old share.
+    /// the deployment config hash, new roster, and sharing parameters to its encrypted old share.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
-        deployment: DeploymentConfig,
+        expected_deployment_config_hash: [u8; 32],
         share: &Share,
         enclave_pub_key: &EncPubKey,
         new_kp_certs_roster: KpCertRoster,
@@ -746,7 +747,7 @@ impl ProvisionerRotateKpSetRequest {
     ) -> GuardianResult<Self> {
         Self::new(
             expected_session_id,
-            deployment,
+            expected_deployment_config_hash,
             encrypt_share(share, enclave_pub_key, None, rng),
             new_kp_certs_roster,
             new_params.num_shares(),
@@ -758,8 +759,8 @@ impl ProvisionerRotateKpSetRequest {
         &self.expected_session_id
     }
 
-    pub fn deployment(&self) -> &DeploymentConfig {
-        &self.deployment
+    pub fn expected_deployment_config_hash(&self) -> &[u8; 32] {
+        &self.expected_deployment_config_hash
     }
 
     pub fn encrypted_old_share(&self) -> &GuardianEncryptedShare {
@@ -778,14 +779,14 @@ impl ProvisionerRotateKpSetRequest {
         self,
     ) -> (
         SessionID,
-        DeploymentConfig,
+        [u8; 32],
         GuardianEncryptedShare,
         KpCertRoster,
         SecretSharingParams,
     ) {
         (
             self.expected_session_id,
-            self.deployment,
+            self.expected_deployment_config_hash,
             self.encrypted_old_share,
             self.new_kp_certs_roster,
             self.new_params,
@@ -1120,7 +1121,7 @@ mod tests {
         assert!(matches!(
             ProvisionerRotateKpSetRequest::new(
                 "session".into(),
-                DeploymentConfig::mock_for_testing(),
+                DeploymentConfig::mock_for_testing().digest(),
                 GuardianEncryptedShare {
                     id: ShareID::new(1).unwrap(),
                     ciphertext: Ciphertext {
@@ -1151,7 +1152,7 @@ mod tests {
     fn provisioner_rotate_kp_set_signature_commits_to_roster_order() {
         let cert_sets = mock_attested_kp_certs(5);
         let reversed: Vec<AttestedKpCert> = cert_sets.iter().rev().cloned().collect();
-        let deployment = DeploymentConfig::mock_for_testing();
+        let deployment_config_hash = DeploymentConfig::mock_for_testing().digest();
         let encrypted_old_share = GuardianEncryptedShare {
             id: ShareID::new(1).unwrap(),
             ciphertext: Ciphertext {
@@ -1161,7 +1162,7 @@ mod tests {
         };
         let a = ProvisionerRotateKpSetRequest::new(
             "session".into(),
-            deployment.clone(),
+            deployment_config_hash,
             encrypted_old_share.clone(),
             KpCertRoster::new(cert_sets).unwrap(),
             5,
@@ -1170,7 +1171,7 @@ mod tests {
         .unwrap();
         let b = ProvisionerRotateKpSetRequest::new(
             "session".into(),
-            deployment,
+            deployment_config_hash,
             encrypted_old_share,
             KpCertRoster::new(reversed).unwrap(),
             5,

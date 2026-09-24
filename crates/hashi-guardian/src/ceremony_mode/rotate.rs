@@ -19,7 +19,6 @@ struct VerifiedShareSubmission {
 }
 
 struct VerifiedRotationProposal {
-    deployment: DeploymentConfig,
     share_submissions: Vec<VerifiedShareSubmission>,
     new_kp_certs_roster: KpCertRoster,
     new_params: SecretSharingParams,
@@ -36,15 +35,15 @@ pub async fn rotate_kp_set(
 
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
-    let proposal = verify_signed_submissions(request.submissions(), &enclave.s3_session_id())?;
-    if &proposal.deployment != enclave.config.deployment()? {
-        return Err(GuardianError::InvalidInputs(
-            "KP-approved deployment differs from installed configuration".into(),
-        ));
-    }
+    let deployment = enclave.config.deployment()?;
+    let proposal = verify_signed_submissions(
+        request.submissions(),
+        &enclave.s3_session_id(),
+        &deployment.digest(),
+    )?;
     let mut reader = enclave.new_guardian_reader()?;
     let latest_s3_state = reader
-        .read_latest_ceremony_state_for_network(proposal.deployment.bitcoin_network)
+        .read_latest_ceremony_state_for_network(deployment.bitcoin_network)
         .await?;
 
     complete_rotation(&enclave, proposal, latest_s3_state).await
@@ -93,8 +92,8 @@ async fn complete_rotation(
 fn verify_signed_submissions(
     submissions: &[KpSigned<ProvisionerRotateKpSetRequest>],
     live_session_id: &SessionID,
+    deployment_config_hash: &[u8; 32],
 ) -> GuardianResult<VerifiedRotationProposal> {
-    let mut agreed_deployment = None;
     let mut agreed_new_kp_certs_roster = None;
     let mut agreed_new_params = None;
     let mut share_submissions = Vec::with_capacity(submissions.len());
@@ -106,11 +105,11 @@ fn verify_signed_submissions(
             .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
 
         submission.validate_session(live_session_id)?;
-        require_agreement(
-            &mut agreed_deployment,
-            submission.deployment(),
-            "deployment configuration",
-        )?;
+        if submission.expected_deployment_config_hash() != deployment_config_hash {
+            return Err(GuardianError::InvalidInputs(
+                "KP-approved deployment differs from installed configuration".into(),
+            ));
+        }
         require_agreement(
             &mut agreed_new_kp_certs_roster,
             submission.new_kp_certs_roster(),
@@ -134,7 +133,6 @@ fn verify_signed_submissions(
     }
 
     Ok(VerifiedRotationProposal {
-        deployment: agreed_deployment.expect("batch construction rejects an empty submission list"),
         share_submissions,
         new_kp_certs_roster: agreed_new_kp_certs_roster
             .expect("batch construction rejects an empty submission list"),
@@ -272,12 +270,11 @@ mod tests {
         latest_s3_state: CeremonyState,
     ) -> GuardianResult<GuardianSignedResponse<RotateKpSetResponse>> {
         enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
-        let proposal = verify_signed_submissions(request.submissions(), &enclave.s3_session_id())?;
-        if &proposal.deployment != enclave.config.deployment()? {
-            return Err(GuardianError::InvalidInputs(
-                "KP-approved deployment differs from installed configuration".into(),
-            ));
-        }
+        let proposal = verify_signed_submissions(
+            request.submissions(),
+            &enclave.s3_session_id(),
+            &enclave.config.deployment()?.digest(),
+        )?;
         complete_rotation(&enclave, proposal, latest_s3_state).await
     }
 
@@ -359,7 +356,7 @@ mod tests {
         ) -> KpSigned<ProvisionerRotateKpSetRequest> {
             let request = ProvisionerRotateKpSetRequest::build_from_share(
                 expected_session_id,
-                self.deployment.clone(),
+                self.deployment.digest(),
                 share,
                 self.enclave.encryption_public_key(),
                 new_kp_certs_roster.clone(),

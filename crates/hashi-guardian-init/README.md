@@ -65,6 +65,10 @@ cross-checks the guardian's `kp-shares/proposed/` record. It then waits for ever
 KP to confirm successful share recovery and for the finalized `kp-shares/` and
 `ceremony/` records to be published.
 
+Operator initialization installs the configured S3 destination, retention policy,
+Bitcoin network, and PCR allowlist. The enclave checks its own attestation against
+`current_build` before committing initialization.
+
 `kp_roster.kp_pgp_cert_paths` lists one certificate per KP, in any order.
 New ceremonies assign share IDs by fingerprint order; existing assignments
 come from signed `kp-shares/` state. Each ciphertext targets its recipient's
@@ -87,8 +91,9 @@ checks the proposal against the live secret-sharing instance and expected
 match the expected KP cert, uses `kp_pgp_cert_path` to identify and decrypt this
 KP's share, and verifies its commitment. After verification it saves the full
 proposed ceremony state, including every KP's encrypted share and the public
-ceremony data, then
-signs and submits a confirmation to the live guardian. The guardian completes
+ceremony data, then signs and submits `ceremony_artifacts_digest` and the session
+to the live guardian. `CeremonyArtifacts` binds that state to the KP's independently
+configured deployment policy. The guardian completes
 the ceremony and publishes the finalized `kp-shares/` and `ceremony/` records
 only after all KP/share entries have confirmed. For rotations,
 the ceremony guardian must keep running after `RotateKpSet` returns until
@@ -127,7 +132,8 @@ It:
    against the configured current build, and confirms it is not already
    operator-initialized.
 2. Reads the latest attested ceremony from S3 and verifies its encrypted-share
-   recipients against the expected KP roster.
+   recipients against the expected KP roster and its Bitcoin network against
+   the configured network.
 3. Fetches on-chain MPC master `G`, and reads the latest `committee-update/` or
    `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
@@ -306,13 +312,15 @@ One current KP's contribution to a KP-set rotation. It:
 
 1. Fetches and verifies the ceremony guardian's `GuardianInfo` through
    `guardian_endpoint` (attestation, `operator_initialized`, git revision,
-   bucket), then requires the same session's S3 `init/` attestation.
+   deployment summary), then requires the same session's S3 `init/` attestation.
 2. Reads the latest attested `ceremony/` + `kp-shares/` state, verifies it
-   against `kp_roster`, and decrypts the share addressed to `kp_pgp_cert_path`
+   against `kp_roster` and the configured Bitcoin network, and decrypts the share
+   addressed to `kp_pgp_cert_path`
    (`gpg --decrypt` over a pipe; the plaintext stays in memory).
 3. HPKE-encrypts the share to the guardian and signs a request binding it to
-   the pinned session, the deployment configuration, and `new_kp_roster`'s certs and
-   `n`/`t`. The signature is what authorizes the proposal.
+   the pinned session, `expected_deployment_config_hash`, and `new_kp_roster`'s
+   certs and `n`/`t`. The hash comes from this KP's configured deployment policy;
+   the enclave checks it against the policy installed during OI before using shares.
 4. Writes the signed request to `--submission-path`: the wire message,
    prost-encoded. It holds nothing secret and can be sent to the operator
    over any channel.
@@ -426,26 +434,3 @@ certificate-loading commands do, then prints the primary-key fingerprint.
 key's three PEM sidecars from a self-signed device that only `non-enclave-dev`
 builds trust, so dev ceremonies (the devnet deploy, the local replica) run
 without YubiKeys.
-
-## Shared deployment policy
-
-Ceremony and withdraw initialization use the same `DeploymentConfig`: S3
-bucket/region, retention environment, Bitcoin network, and PCR allowlist. The
-existing YAML fields are assembled into this policy; S3 credentials are separate.
-`GuardianInfo` exposes a derived summary after OI, including the current revision
-but no PCR allowlist. Operators and KPs compare that summary with their own
-configuration and independently pin the live attestation.
-
-New-KP ceremony confirmations sign the session and a digest of the complete
-expected deployment configuration plus the verified ceremony state. Old-KP
-rotation submissions also authorize the full policy before their shares are
-used. Withdraw PI continues to authenticate `InitConfig`, which now nests that
-same policy. A hidden difference in previous-build PCR pins therefore changes
-the approval even when the public summaries match.
-
-The enclave checks its measured PCR against the proposed current build before
-OI commits. This precursor also retains the compiled revision (including the
-ceremony suffix), fixed mode, and baked-in S3 destinations. Failed preparation
-is retryable. When reusing a key for rotation or withdrawal, its original
-ceremony network must match the configured Bitcoin network; upgrades may change
-the allowlist without changing the key's intended network.

@@ -268,6 +268,7 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::test_utils::MockKpSecretKeys;
     use crate::test_utils::OperatorInitTestArgs;
+    use hashi_types::guardian::CeremonyArtifacts;
     use hashi_types::guardian::CeremonyState;
     use hashi_types::guardian::KpCertRoster;
     use hashi_types::guardian::LimiterConfig;
@@ -333,7 +334,11 @@ mod tests {
         let cert = roster.iter().next().unwrap().clone();
         let request = CeremonyConfirmationRequest::new(
             rpc.enclave.s3_session_id(),
-            state.confirmation_digest(rpc.enclave.config.deployment().unwrap()),
+            CeremonyArtifacts {
+                deployment: rpc.enclave.config.deployment().unwrap().clone(),
+                ceremony_state: state,
+            }
+            .digest(),
         );
         let signature = sign_detached_in_process(
             &secrets[&cert.fingerprint().to_hex()],
@@ -496,7 +501,7 @@ mod tests {
                 let cert = roster.cert_for_share(share.id).unwrap().clone();
                 let request = ProvisionerRotateKpSetRequest::build_from_share(
                     rpc.enclave.s3_session_id(),
-                    rpc.enclave.config.deployment().unwrap().clone(),
+                    rpc.enclave.config.deployment().unwrap().digest(),
                     share,
                     rpc.enclave.encryption_public_key(),
                     roster.clone(),

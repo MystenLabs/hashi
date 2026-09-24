@@ -24,6 +24,11 @@ pub struct DeploymentConfigSummary {
 }
 
 impl DeploymentConfig {
+    /// Commitment old KPs authorize before releasing shares into this deployment.
+    pub fn digest(&self) -> [u8; 32] {
+        Blake2b::<U32>::digest(bcs::to_bytes(self).expect("serializable deployment config")).into()
+    }
+
     pub fn summary(&self) -> DeploymentConfigSummary {
         DeploymentConfigSummary {
             bucket_info: self.bucket_info.clone(),
@@ -86,9 +91,18 @@ mod tests {
         .unwrap();
         changes.push(changed);
         for changed in changes {
+            assert_ne!(changed.digest(), original.digest());
             assert_ne!(
-                state.confirmation_digest(&changed),
-                state.confirmation_digest(&original)
+                CeremonyArtifacts {
+                    deployment: changed.clone(),
+                    ceremony_state: state.clone()
+                }
+                .digest(),
+                CeremonyArtifacts {
+                    deployment: original.clone(),
+                    ceremony_state: state.clone()
+                }
+                .digest()
             );
             let changed_init = InitConfig::new(
                 *init.limiter_config(),
@@ -110,10 +124,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.summary(), updated.summary());
+        assert_ne!(config.digest(), updated.digest());
         let state = CeremonyState::from(SetupNewKeyResponse::mock_for_testing());
         assert_ne!(
-            state.confirmation_digest(&config),
-            state.confirmation_digest(&updated)
+            CeremonyArtifacts {
+                deployment: config.clone(),
+                ceremony_state: state.clone()
+            }
+            .digest(),
+            CeremonyArtifacts {
+                deployment: updated,
+                ceremony_state: state
+            }
+            .digest()
         );
         let json = serde_json::to_value(config.summary()).unwrap();
         assert!(json.get("pcr_allowlist").is_none());
