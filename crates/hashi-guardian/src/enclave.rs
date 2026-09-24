@@ -606,13 +606,9 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    pub async fn info(&self) -> GuardianInfo {
-        self.info_for_lifecycle(self.lifecycle())
-    }
-
-    /// Build the durable OI snapshot before publishing the completed lifecycle.
     /// Live readers of an uninitialized session see no pending configuration.
-    pub(crate) fn info_for_lifecycle(&self, lifecycle: Option<EnclaveLifecycle>) -> GuardianInfo {
+    pub async fn info(&self) -> GuardianInfo {
+        let lifecycle = self.lifecycle();
         if lifecycle.is_none() {
             return GuardianInfo {
                 lifecycle,

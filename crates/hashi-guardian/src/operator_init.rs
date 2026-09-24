@@ -339,12 +339,14 @@ mod tests {
         .await
         .unwrap();
         let enclave = Enclave::create_with_random_keys();
-        enclave
-            .config
-            .set_deployment(install.init_config.deployment().clone())
-            .unwrap();
-        install.install_into(&enclave);
-        let info = enclave.info_for_lifecycle(WithdrawStage::OperatorInitialized.into());
+        let install = OIInstall::new(
+            install.init_config.deployment().clone(),
+            NitroAttestation::new(vec![]),
+            crate::test_utils::mock_logger(),
+            Some(install),
+        );
+        commit_operator_init(&enclave, install).await;
+        let info = enclave.info().await;
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
         assert_eq!(info.genesis_state_hash, None);
@@ -368,12 +370,14 @@ mod tests {
         .await
         .unwrap();
         let enclave = Enclave::create_with_random_keys();
-        enclave
-            .config
-            .set_deployment(install.init_config.deployment().clone())
-            .unwrap();
-        install.install_into(&enclave);
-        let info = enclave.info_for_lifecycle(WithdrawStage::OperatorInitialized.into());
+        let install = OIInstall::new(
+            install.init_config.deployment().clone(),
+            NitroAttestation::new(vec![]),
+            crate::test_utils::mock_logger(),
+            Some(install),
+        );
+        commit_operator_init(&enclave, install).await;
+        let info = enclave.info().await;
         assert_eq!(info.hashi_object_id, Some(object_id));
         assert_eq!(info.mpc_master_g, Some(master_g));
         assert_eq!(info.genesis_state_hash, Some(expected_hash));
@@ -560,14 +564,14 @@ mod tests {
             .set_s3_logger(crate::test_utils::mock_logger())
             .unwrap();
         assert_eq!(enclave.info().await, before);
-        let snapshot = enclave.info_for_lifecycle(CeremonyStage::OperatorInitialized.into());
-        assert_eq!(
-            snapshot.deployment_info,
-            Some(DeploymentConfig::mock_for_testing().summary())
-        );
         enclave
             .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
             .unwrap();
-        assert_eq!(enclave.info().await, snapshot);
+        let after = enclave.info().await;
+        assert_eq!(after.lifecycle, CeremonyStage::OperatorInitialized.into());
+        assert_eq!(
+            after.deployment_info,
+            Some(DeploymentConfig::mock_for_testing().summary())
+        );
     }
 }

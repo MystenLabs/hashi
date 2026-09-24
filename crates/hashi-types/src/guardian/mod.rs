@@ -900,7 +900,10 @@ impl GetGuardianInfoResponse {
             .response
             .clone();
         if info.lifecycle.is_none()
-            || info.deployment_info.as_ref().map(|d| d.git_revision.as_str())
+            || info
+                .deployment_info
+                .as_ref()
+                .map(|d| d.git_revision.as_str())
                 != Some(expected_build.git_revision())
         {
             return Err(CryptoVerificationError::new(format!(
