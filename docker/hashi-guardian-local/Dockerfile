@@ -12,9 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-# Baked into the guardian at build time (option_env!) and reported as
-# `untrusted_git_revision`; the init config's `current_build.git_revision` must
-# match it, so pin a stable local value both sides agree on.
+# The revision label comes from the deployment config supplied during OI.
 # All three need `non-enclave-dev`: the guardian stubs the Nitro NSM
 # attestation, the init tooling accepts that mock attestation, and all three
 # accept the test KP keys' software attestations. One invocation builds all

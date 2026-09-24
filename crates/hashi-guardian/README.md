@@ -27,7 +27,8 @@ allowlist entry supplies the revision label; there is no separate revision input
 Initialization checks its own PCR against the proposed current build, validates
 S3 connectivity, and prepares the mode-specific state,
 then writes the attestation and signed, operator-initialized GuardianInfo logs.
-Only after those logs are durable does the live lifecycle advance. Mode and the full deployment configuration are fixed for that session. Heartbeats remain idle until
+Only after those logs are durable does the live lifecycle advance. Mode and the
+full deployment configuration are fixed for that session. Heartbeats remain idle until
 withdraw initialization completes. Tooling verifies the same session and expected
 configuration afterward. A revision label is only a lookup key into an
 independently approved revision-to-PCR mapping; it never proves the source by

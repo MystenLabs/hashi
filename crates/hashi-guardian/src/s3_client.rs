@@ -149,7 +149,8 @@ impl GuardianS3Client {
                 retention_environment,
                 credentials,
                 Some(http_client),
-            ).await
+            )
+            .await
         }
     }
 
