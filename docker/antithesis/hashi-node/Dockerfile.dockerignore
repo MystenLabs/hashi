@@ -1,0 +1,10 @@
+target
+out
+.git
+.github
+.hashi
+.claude
+design
+docs
+**/node_modules
+docker
