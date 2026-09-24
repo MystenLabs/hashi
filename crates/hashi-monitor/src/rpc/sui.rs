@@ -47,6 +47,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PAGE_SIZE: u32 = 1_000;
 const MIN_CHECKPOINTS_PER_RETRY: u64 = 25;
 const MAX_RANGE_ATTEMPTS: u32 = 3;
+const MAX_LOOKUP_ATTEMPTS: u32 = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 struct TransactionScan {
@@ -77,6 +78,19 @@ fn completed_checkpoint_for_scan(
         "Sui transaction scan watermark checkpoint {completed_checkpoint} is outside requested range ending at {end_checkpoint}"
     );
     Ok((completed_checkpoint >= start_checkpoint).then_some(completed_checkpoint))
+}
+
+/// Connection-level failures that a fresh connection can clear, as the node's peer
+/// retries classify them: a `GOAWAY` surfaces as `Internal`, a broken pipe as `Unknown`.
+fn is_transient(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable
+            | tonic::Code::Unknown
+            | tonic::Code::Internal
+            | tonic::Code::Cancelled
+            | tonic::Code::DeadlineExceeded
+    )
 }
 
 /// The Hashi approval recorded by the object at `wid`, or `None` if that object
@@ -290,18 +304,45 @@ impl SuiEventsPoller {
             Object::path_builder().object_type(),
             Object::path_builder().contents().finish(),
         ]));
-        let object = match self.client.ledger_client().get_object(request).await {
-            Ok(response) => response
-                .into_inner()
-                .object
-                .context("Sui GetObject response is missing the object")?,
-            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-            Err(status) => {
-                return Err(status)
-                    .with_context(|| format!("failed to fetch withdrawal transaction {wid}"));
+        let lookup = async {
+            let mut attempt = 0u32;
+            loop {
+                match self
+                    .client
+                    .ledger_client()
+                    .get_object(request.clone())
+                    .await
+                {
+                    Ok(response) => {
+                        break response
+                            .into_inner()
+                            .object
+                            .context("Sui GetObject response is missing the object")
+                            .map(Some);
+                    }
+                    Err(status) if status.code() == tonic::Code::NotFound => break Ok(None),
+                    Err(status) if attempt + 1 < MAX_LOOKUP_ATTEMPTS && is_transient(&status) => {
+                        let delay = INITIAL_RETRY_DELAY.saturating_mul(1 << attempt);
+                        attempt += 1;
+                        tracing::warn!(%wid, attempt, ?delay, ?status, "Sui object lookup failed; retrying");
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(status) => {
+                        break Err(status).with_context(|| {
+                            format!("failed to fetch withdrawal transaction {wid}")
+                        });
+                    }
+                }
             }
         };
-        withdrawal_approval(&self.package_versions, wid, &object)
+        // Retries share one request's timeout, so a lookup never stalls the audit longer than one request.
+        let object = tokio::time::timeout(REQUEST_TIMEOUT, lookup)
+            .await
+            .with_context(|| format!("Sui lookup of withdrawal transaction {wid} timed out"))??;
+        match object {
+            Some(object) => withdrawal_approval(&self.package_versions, wid, &object),
+            None => Ok(None),
+        }
     }
 
     /// Find a safe checkpoint bracket `(before, at_or_after)` for a timestamp.
@@ -588,6 +629,10 @@ impl SuiEventsPoller {
 mod tests {
     use super::*;
 
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
     use hashi_types::bitcoin_txid::BitcoinTxid;
     use hashi_types::move_types::SigningBatch;
     use sui_rpc::proto::sui::rpc::v2::Bcs;
@@ -632,7 +677,40 @@ mod tests {
         }
     }
 
-    async fn poller_for(ledger: OneObjectLedger) -> SuiEventsPoller {
+    /// Answers the first requests with `failures`, in order, then defers to `ledger`.
+    #[derive(Clone)]
+    struct FlakyLedger {
+        failures: Arc<Mutex<VecDeque<tonic::Code>>>,
+        requests: Arc<Mutex<u32>>,
+        ledger: OneObjectLedger,
+    }
+
+    impl FlakyLedger {
+        fn new(failures: impl IntoIterator<Item = tonic::Code>, ledger: OneObjectLedger) -> Self {
+            Self {
+                failures: Arc::new(Mutex::new(failures.into_iter().collect())),
+                requests: Arc::default(),
+                ledger,
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl LedgerService for FlakyLedger {
+        async fn get_object(
+            &self,
+            request: tonic::Request<GetObjectRequest>,
+        ) -> Result<tonic::Response<GetObjectResponse>, tonic::Status> {
+            *self.requests.lock().unwrap() += 1;
+            let failure = self.failures.lock().unwrap().pop_front();
+            match failure {
+                Some(code) => Err(tonic::Status::new(code, "injected failure")),
+                None => self.ledger.get_object(request).await,
+            }
+        }
+    }
+
+    async fn poller_for(ledger: impl LedgerService) -> SuiEventsPoller {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let incoming = futures::stream::unfold(listener, |listener| async move {
@@ -774,22 +852,104 @@ mod tests {
         }
     }
 
+    fn ledger_with_approval() -> OneObjectLedger {
+        OneObjectLedger {
+            object: Some(object_at_wid(PACKAGE_ID, &withdrawal_transaction(WID))),
+            miss: tonic::Code::NotFound,
+        }
+    }
+
+    fn status_code(error: &anyhow::Error) -> Option<tonic::Code> {
+        error
+            .downcast_ref::<tonic::Status>()
+            .map(|status| status.code())
+    }
+
     #[tokio::test]
-    async fn any_status_but_not_found_is_an_error() {
-        let mut poller = poller_for(OneObjectLedger {
-            object: None,
-            miss: tonic::Code::Unavailable,
-        })
-        .await;
+    async fn transient_statuses_are_retried() {
+        let ledger = FlakyLedger::new(
+            [tonic::Code::Internal, tonic::Code::Unavailable],
+            ledger_with_approval(),
+        );
+        let mut poller = poller_for(ledger.clone()).await;
+
+        assert!(
+            poller
+                .fetch_withdrawal_approval(WID)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(*ledger.requests.lock().unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_before_not_found_is_no_approval() {
+        let ledger = FlakyLedger::new(
+            [tonic::Code::Unavailable],
+            OneObjectLedger {
+                object: None,
+                miss: tonic::Code::NotFound,
+            },
+        );
+        let mut poller = poller_for(ledger.clone()).await;
+
+        assert_eq!(poller.fetch_withdrawal_approval(WID).await.unwrap(), None);
+        assert_eq!(*ledger.requests.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_gives_up_after_its_last_attempt() {
+        let ledger = FlakyLedger::new(
+            [tonic::Code::Unavailable; MAX_LOOKUP_ATTEMPTS as usize],
+            ledger_with_approval(),
+        );
+        let mut poller = poller_for(ledger.clone()).await;
 
         let error = poller.fetch_withdrawal_approval(WID).await.unwrap_err();
         assert_eq!(
-            error
-                .downcast_ref::<tonic::Status>()
-                .map(|status| status.code()),
+            status_code(&error),
             Some(tonic::Code::Unavailable),
             "{error:#}"
         );
+        assert_eq!(*ledger.requests.lock().unwrap(), MAX_LOOKUP_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn other_statuses_fail_without_a_retry() {
+        let ledger = FlakyLedger::new([tonic::Code::PermissionDenied], ledger_with_approval());
+        let mut poller = poller_for(ledger.clone()).await;
+
+        let error = poller.fetch_withdrawal_approval(WID).await.unwrap_err();
+        assert_eq!(
+            status_code(&error),
+            Some(tonic::Code::PermissionDenied),
+            "{error:#}"
+        );
+        assert_eq!(*ledger.requests.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn connection_failures_are_transient_and_rejections_are_not() {
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::Unknown,
+            tonic::Code::Internal,
+            tonic::Code::Cancelled,
+            tonic::Code::DeadlineExceeded,
+        ] {
+            assert!(is_transient(&tonic::Status::new(code, "boom")), "{code:?}");
+        }
+        for code in [
+            tonic::Code::NotFound,
+            tonic::Code::InvalidArgument,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unauthenticated,
+            tonic::Code::ResourceExhausted,
+        ] {
+            assert!(!is_transient(&tonic::Status::new(code, "nope")), "{code:?}");
+        }
     }
 
     #[test]
