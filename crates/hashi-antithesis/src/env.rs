@@ -263,3 +263,40 @@ pub fn committee_ready(onchain: &hashi::onchain::OnchainState) -> bool {
             .pending_epoch_change()
             .is_none()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the formats `docker/antithesis/config/genesis/generate.py` writes:
+    /// the key encoding, and the address it funds at genesis for that key.
+    #[test]
+    fn env_file_matches_genesis_generator() {
+        let env: EnvFile = serde_yaml::from_str(
+            "funded-account-key: AAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH\n\
+             validators:\n\
+             - name: validator1\n  \
+               hashi-host: hashi1\n  \
+               account-key: AAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH\n\
+             guardian-btc-secret-key: 0707070707070707070707070707070707070707070707070707070707070707\n",
+        )
+        .unwrap();
+        let expected: Address =
+            "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            env.funded_key().unwrap().public_key().derive_address(),
+            expected
+        );
+        assert_eq!(
+            env.validators[0]
+                .key()
+                .unwrap()
+                .public_key()
+                .derive_address(),
+            expected
+        );
+        env.guardian_btc_keypair().unwrap();
+    }
+}
