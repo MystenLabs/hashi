@@ -264,9 +264,9 @@ impl AuditorCore {
         Ok(findings)
     }
 
-    /// Fetches each overdue Hashi approval the Sui event scan never saw, such as
-    /// one made before the scan's lookback. An approval whose lookup fails stays
-    /// missing, so it is still reported.
+    /// Fetches each overdue Hashi approval made before the Sui event scan
+    /// started. An approval inside the scanned range, or one whose lookup
+    /// fails, stays missing, so it is still reported.
     pub async fn fetch_missing_hashi_approvals(
         &mut self,
         window: &impl AuditWindow,
@@ -281,6 +281,15 @@ impl AuditorCore {
         let mut approvals = Vec::new();
         for wid in wids {
             match self.sui_poller.fetch_withdrawal_approval(wid).await {
+                Ok(Some(approval)) if self.sui_poller.has_scanned(approval.timestamp_secs) => {
+                    tracing::warn!(
+                        source = "sui",
+                        %wid,
+                        approved_at = %utc_timestamp(approval.timestamp_secs),
+                        sui_cursor = %utc_timestamp(cursors.sui),
+                        "Sui event scan already covered this Hashi approval; reporting it missing"
+                    )
+                }
                 Ok(Some(approval)) => {
                     tracing::info!(
                         %wid,

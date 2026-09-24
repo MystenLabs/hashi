@@ -118,6 +118,8 @@ pub struct SuiEventsPoller {
     package_versions: PackageVersions,
     /// Original Hashi package used to construct server-side transaction filters.
     package_id: String,
+    /// Timestamp from which the poller scans every checkpoint.
+    start_seconds: UnixSeconds,
     /// Latest timestamp through which the poller has completely scanned transactions.
     cursor_seconds: UnixSeconds,
     /// First checkpoint not yet scanned, once the initial timestamp lookup completes.
@@ -142,6 +144,7 @@ impl SuiEventsPoller {
             client,
             package_versions,
             package_id: config.package_id.clone(),
+            start_seconds: start,
             cursor_seconds: start,
             next_checkpoint_to_scan: None,
             checkpoint_timestamps: BTreeMap::new(),
@@ -151,6 +154,12 @@ impl SuiEventsPoller {
 
     pub fn cursor_seconds(&self) -> UnixSeconds {
         self.cursor_seconds
+    }
+
+    /// Whether the scan covered `timestamp_secs`. The cursor's own second is
+    /// excluded, since later unscanned checkpoints can share it.
+    pub fn has_scanned(&self, timestamp_secs: UnixSeconds) -> bool {
+        (self.start_seconds..self.cursor_seconds).contains(&timestamp_secs)
     }
 
     /// Scan through the checkpoint covering `up_to`, or the observed chain head.
@@ -822,5 +831,21 @@ mod tests {
                 Some(110)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_scan_covers_its_start_but_not_its_cursor_second() {
+        let config = SuiConfig {
+            rpc_url: "http://127.0.0.1:9".to_string(),
+            package_id: PACKAGE_ID.to_string(),
+        };
+        let mut poller = SuiEventsPoller::new(&config, 100).unwrap();
+        assert!(!poller.has_scanned(100));
+
+        poller.cursor_seconds = 200;
+        assert!(!poller.has_scanned(99));
+        assert!(poller.has_scanned(100));
+        assert!(poller.has_scanned(199));
+        assert!(!poller.has_scanned(200));
     }
 }

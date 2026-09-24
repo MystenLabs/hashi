@@ -61,7 +61,7 @@ impl AuditWindow for BatchAuditWindow {
 ///     - fetch withdrawal and deposit events from
 ///       `[t1 - withdrawal_predecessor_lookback, t2 + clock_skew]`
 ///     - fetch BTC data for in-scope withdrawals and deposits found in the Sui range
-///     - fetch each overdue Hashi approval missing from the Sui range by its withdrawal id
+///     - fetch each overdue Hashi approval made before the Sui range by its withdrawal id
 /// Finally, it logs progress watermarks that identify a safe start for the next audit.
 ///
 /// Notes:
