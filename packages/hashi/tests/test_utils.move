@@ -258,6 +258,12 @@ public fun sign_with_committee(
     (aggregated_sig, bitmap)
 }
 
+/// A well-formed stand-in for the MPC threshold public key: 33 bytes, the
+/// compressed secp256k1 encoding `end_reconfig` requires.
+public fun mpc_public_key_for_testing(): vector<u8> {
+    vector::tabulate!(33, |i| (i as u8) + 1)
+}
+
 /// Signs a message and returns a CommitteeSignature for use in entry functions.
 public fun sign_certificate(
     epoch: u64,

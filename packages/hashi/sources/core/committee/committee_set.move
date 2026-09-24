@@ -22,6 +22,12 @@ use sui::{
     table::Table
 };
 
+// ~~~~~~~ Constants ~~~~~~~
+
+/// Byte length of the MPC threshold public key: a compressed secp256k1 point
+/// in the fixed-size encoding the node submits with `end_reconfig`.
+const MPC_PUBLIC_KEY_LENGTH: u64 = 33;
+
 // ~~~~~~~ Errors ~~~~~~~
 
 #[error(code = 0)]
@@ -64,6 +70,9 @@ const EInvalidBlsProofOfPossession: vector<u8> =
 #[error(code = 14)]
 const EPendingEpochStillCurrent: vector<u8> =
     b"The pending reconfiguration targets Sui's current epoch and may still complete";
+#[error(code = 15)]
+const EInvalidMpcPublicKey: vector<u8> =
+    b"MPC public key must be a 33-byte compressed secp256k1 point";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -461,6 +470,10 @@ public(package) fun end_reconfig(
         .pending_epoch_change
         .extract();
     assert!(self.has_committee(next_epoch));
+    // An empty key doubles as the "no DKG yet" marker, so a malformed key
+    // would otherwise leave the bridge stuck at genesis or activate an epoch
+    // under a key no node can use.
+    assert!(mpc_public_key.length() == MPC_PUBLIC_KEY_LENGTH, EInvalidMpcPublicKey);
 
     // If the mpc_public_key is empty, then this is the initial reconfig where
     // DKG is run and we need to set the produced pubkey.
