@@ -10,6 +10,10 @@
 /// parameters but never introduce unknown keys, change an entry's type, or
 /// rewrite a pinned key. New keys go through `add_config`; the epoch-scoped
 /// store, including the MPC parameters, through `update_epoch_config`.
+///
+/// The entry checks run at proposal time as well, so a doomed proposal is
+/// refused before it can collect votes. They run again at execution because
+/// the store can change between the two.
 module hashi::update_config;
 
 use hashi::{btc_config, config, config_value::Value, hashi::Hashi, proposal};
@@ -50,6 +54,8 @@ public fun propose(
 ): ID {
     hashi.versioning().assert_version_enabled();
     assert!(!entries.is_empty(), ENoEntriesProvided);
+    // Fast feedback for the proposer; state can still drift before execute.
+    assert_valid_entries(hashi, &entries);
     proposal::create(
         hashi,
         validator_address,
@@ -63,13 +69,24 @@ public fun propose(
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let UpdateConfig { entries } = proposal::execute(hashi, proposal_id, clock);
+    assert_valid_entries(hashi, &entries);
     let (keys, values) = entries.into_keys_values();
+    keys.zip_do!(values, |key, value| {
+        hashi.config_mut().upsert(*key.as_bytes(), value);
+    });
+}
+
+// ~~~~~~~ Private Functions ~~~~~~~
+
+/// Every entry must name a governable key that exists in the instant config
+/// with a value of the stored variant.
+fun assert_valid_entries(hashi: &Hashi, entries: &VecMap<String, Value>) {
+    let (keys, values) = (*entries).into_keys_values();
     keys.zip_do!(values, |key, value| {
         assert!(
             config::is_governable_key(&key) && btc_config::is_governable_key(&key),
             EProtectedConfigKey,
         );
         assert!(hashi.config().is_valid_config_update(&key, &value), EInvalidConfigEntry);
-        hashi.config_mut().upsert(*key.as_bytes(), value);
     });
 }

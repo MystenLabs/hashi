@@ -3,7 +3,9 @@
 
 /// `update_epoch_config` semantics on the epoch config: the MPC parameters
 /// are tuned here (with range validation), batches apply atomically, unknown
-/// keys and type changes abort, and `pin` normalizes then snapshots the store.
+/// keys, type changes and out-of-range values abort at proposal time, the
+/// cross-key rule is judged at execution, and `pin` normalizes then snapshots
+/// the store.
 #[test_only]
 #[allow(implicit_const_copy, unused_variable)]
 module hashi::update_epoch_config_tests;
@@ -53,6 +55,8 @@ fun propose_and_execute(
     update_epoch_config::execute(hashi, proposal_id, clock);
 }
 
+/// Proposes a single entry without executing: the per-entry checks must
+/// refuse it before it can collect a single vote.
 fun reject_single(key: std::string::String, value: config_value::Value) {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
@@ -60,7 +64,14 @@ fun reject_single(key: std::string::String, value: config_value::Value) {
 
     let mut entries = vec_map::empty();
     entries.insert(key, value);
-    propose_and_execute(&mut hashi, entries, &clock, ctx);
+    let _ = update_epoch_config::propose(
+        &mut hashi,
+        VOTER1,
+        entries,
+        vec_map::empty(),
+        &clock,
+        ctx,
+    );
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -160,20 +171,20 @@ fun test_empty_entries_aborts_at_propose() {
 
 #[test]
 #[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
-fun test_unknown_key_aborts_at_execute() {
+fun test_unknown_key_aborts_at_propose() {
     reject_single(b"does_not_exist".to_string(), config_value::new_u64(42));
 }
 
 /// Instant keys are not reachable through the epoch store.
 #[test]
 #[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
-fun test_instant_key_aborts_at_execute() {
+fun test_instant_key_aborts_at_propose() {
     reject_single(b"bitcoin_deposit_minimum".to_string(), config_value::new_u64(50_000));
 }
 
 #[test]
 #[expected_failure(abort_code = update_epoch_config::EInvalidConfigEntry)]
-fun test_wrong_value_type_aborts_at_execute() {
+fun test_wrong_value_type_aborts_at_propose() {
     reject_single(mpc_max_faulty_key(), config_value::new_bool(true));
 }
 

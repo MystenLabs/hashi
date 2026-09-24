@@ -13,6 +13,11 @@
 /// an entry's type, or leave the MPC parameters in a state `start_reconfig`
 /// would have to repair. The keys the package pins for the deployment's lifetime
 /// are refused here as on `update_config`. New keys go through `add_config`.
+///
+/// The per-entry checks run at proposal time as well, so a doomed proposal is
+/// refused before it can collect votes. They run again at execution because
+/// the store can change between the two. The cross-key consistency rule is
+/// judged on the store execution leaves behind, so it runs at execution only.
 module hashi::update_epoch_config;
 
 use hashi::{btc_config, config, config_value::Value, hashi::Hashi, mpc_config, proposal};
@@ -58,6 +63,8 @@ public fun propose(
 ): ID {
     hashi.versioning().assert_version_enabled();
     assert!(!entries.is_empty(), ENoEntriesProvided);
+    // Fast feedback for the proposer; state can still drift before execute.
+    assert_valid_entries(hashi, &entries);
     proposal::create(
         hashi,
         validator_address,
@@ -72,7 +79,22 @@ public fun propose(
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     hashi.versioning().assert_version_enabled();
     let UpdateEpochConfig { entries } = proposal::execute(hashi, proposal_id, clock);
+    assert_valid_entries(hashi, &entries);
     let (keys, values) = entries.into_keys_values();
+    keys.zip_do!(values, |key, value| {
+        hashi.epoch_config_mut().upsert(*key.as_bytes(), value);
+    });
+    // Judged on the resulting store so both coupled keys can move in one
+    // proposal regardless of entry order.
+    assert!(mpc_config::is_consistent(hashi.epoch_config()), EInconsistentMpcConfig);
+}
+
+// ~~~~~~~ Private Functions ~~~~~~~
+
+/// Every entry must name a governable key that exists in the epoch config
+/// with a value of the stored variant and within the MPC parameter ranges.
+fun assert_valid_entries(hashi: &Hashi, entries: &VecMap<String, Value>) {
+    let (keys, values) = (*entries).into_keys_values();
     keys.zip_do!(values, |key, value| {
         // The keys the package pins for the deployment's lifetime are refused
         // on every config proposal, whichever store they are aimed at.
@@ -85,9 +107,5 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
                 && mpc_config::is_valid_value(&key, &value),
             EInvalidConfigEntry,
         );
-        hashi.epoch_config_mut().upsert(*key.as_bytes(), value);
     });
-    // Judged on the resulting store so both coupled keys can move in one
-    // proposal regardless of entry order.
-    assert!(mpc_config::is_consistent(hashi.epoch_config()), EInconsistentMpcConfig);
 }

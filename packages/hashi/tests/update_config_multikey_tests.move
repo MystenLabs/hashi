@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// `update_config` semantics on the instant config: multi-key batches apply
-/// atomically, unknown keys and type changes abort, and the MPC parameters
-/// (which live in the epoch config) are not reachable from here.
+/// atomically, unknown keys and type changes abort at proposal time, and the
+/// MPC parameters (which live in the epoch config) are not reachable from here.
 #[test_only]
 #[allow(implicit_const_copy, unused_variable)]
 module hashi::update_config_multikey_tests;
@@ -38,6 +38,17 @@ fun propose_and_execute(
         ctx,
     );
     update_config::execute(hashi, proposal_id, clock);
+}
+
+/// Proposes without executing: the entry checks must refuse a doomed
+/// proposal before it can collect a single vote.
+fun propose_only(
+    hashi: &mut hashi::hashi::Hashi,
+    entries: vec_map::VecMap<std::string::String, config_value::Value>,
+    clock: &clock::Clock,
+    ctx: &mut TxContext,
+) {
+    let _ = update_config::propose(hashi, VOTER1, entries, vec_map::empty(), clock, ctx);
 }
 
 #[test]
@@ -116,14 +127,14 @@ fun test_empty_entries_aborts_at_propose() {
 
 #[test]
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_unknown_key_aborts_at_execute() {
+fun test_unknown_key_aborts_at_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
     entries.insert(b"does_not_exist".to_string(), config_value::new_u64(42));
-    propose_and_execute(&mut hashi, entries, &clock, ctx);
+    propose_only(&mut hashi, entries, &clock, ctx);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -133,14 +144,14 @@ fun test_unknown_key_aborts_at_execute() {
 /// unknown key for the instant store, not a silent no-op.
 #[test]
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_mpc_key_aborts_at_execute() {
+fun test_mpc_key_aborts_at_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
     entries.insert(b"mpc_max_faulty_in_basis_points".to_string(), config_value::new_u64(2000));
-    propose_and_execute(&mut hashi, entries, &clock, ctx);
+    propose_only(&mut hashi, entries, &clock, ctx);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -148,14 +159,14 @@ fun test_mpc_key_aborts_at_execute() {
 
 #[test]
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_wrong_value_type_aborts_at_execute() {
+fun test_wrong_value_type_aborts_at_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
 
     let mut entries = vec_map::empty();
     entries.insert(deposit_minimum_key(), config_value::new_bool(true));
-    propose_and_execute(&mut hashi, entries, &clock, ctx);
+    propose_only(&mut hashi, entries, &clock, ctx);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -163,7 +174,7 @@ fun test_wrong_value_type_aborts_at_execute() {
 
 #[test]
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_batch_with_unknown_entry_aborts() {
+fun test_batch_with_unknown_entry_aborts_at_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
     let clock = clock::create_for_testing(ctx);
@@ -171,7 +182,7 @@ fun test_batch_with_unknown_entry_aborts() {
     let mut entries = vec_map::empty();
     entries.insert(deposit_minimum_key(), config_value::new_u64(50_000));
     entries.insert(b"does_not_exist".to_string(), config_value::new_u64(42));
-    propose_and_execute(&mut hashi, entries, &clock, ctx);
+    propose_only(&mut hashi, entries, &clock, ctx);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
