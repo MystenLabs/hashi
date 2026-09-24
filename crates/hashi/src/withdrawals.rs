@@ -793,6 +793,15 @@ impl Hashi {
         Ok(())
     }
 
+    // TODO(defence in depth): any registered member can get this request certified with a
+    // `seq` and `timestamp_secs` of its choosing. `seq` is not checked against the local
+    // limiter, and the timestamp only has to be within ±600 s of this node's checkpoint
+    // clock, which is wider than the guardian's +300 s future skew. The guardian proxy does
+    // not authenticate the submitter (the cert is the authorization), so a member can
+    // front-run the leader with ts ≈ now + 300 s. The guardian then sets `last_updated_at` to
+    // that ts, and the next withdrawal is rejected (`timestamp < last_updated_at`, or
+    // StaleTimestamp once the mirrors reconcile) until the clock catches up. Repeating this
+    // holds finalization to about one withdrawal per 5 min.
     #[tracing::instrument(level = "info", skip_all, fields(%withdrawal_txn_id, seq))]
     pub fn validate_and_sign_guardian_withdrawal_request(
         &self,
@@ -809,6 +818,16 @@ impl Hashi {
                 anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
 
+        // TODO(defence in depth): nothing checks that the txn's MPC signatures are all recorded
+        // and that it is not finalized yet (`txn.signing.is_complete() &&
+        // !txn.is_fully_signed()`), so members certify a guardian request as soon as the txn is
+        // committed. The honest leader asks only after MPC signing completes, but any
+        // registered member can obtain the cert earlier and submit it. The guardian then
+        // consumes limiter capacity and a seq before the txn can be finalized, possibly for a
+        // txn whose MPC signing then stalls, and possibly out of order, while the local mirrors
+        // advance only on `WithdrawalSigned`, so seqs mismatch until the stall reconcile. For an
+        // already finalized txn, only the proxy's wid cache prevents a second charge (the
+        // enclave's limiter is keyed by seq, not wid).
         let guardian_request = build_guardian_withdrawal_request(self, &txn, timestamp_secs, seq)?;
 
         self.sign_message_proto(&guardian_request)
@@ -1195,6 +1214,7 @@ impl Hashi {
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING)
                 .with_max_owned_shares(signing_manager.max_owned_count());
+        // TODO(defence in depth): check randomness is of the right length and not all zeros.
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let signing_manager_ref = &signing_manager;
