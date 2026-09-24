@@ -54,7 +54,7 @@ fun run_epoch_transition(
     let next_committee = committee_for_testing(next_epoch, next_voters);
     hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
 
-    let mpc_public_key = vector[1, 2, 3];
+    let mpc_public_key = test_utils::mpc_public_key_for_testing();
     hashi.committee_set_mut().set_mpc_public_key_for_testing(mpc_public_key);
     let mpc_message = reconfig::reconfig_completion_message_for_testing(
         next_epoch,
@@ -355,7 +355,7 @@ fun test_resign_mid_reconfig_survives_one_boundary() {
 
     // Complete the in-flight transition: VOTER3 is in the NEW committee, so
     // they serve epoch 1, registration and flag intact.
-    let mpc_public_key = vector[1, 2, 3];
+    let mpc_public_key = test_utils::mpc_public_key_for_testing();
     hashi.committee_set_mut().set_mpc_public_key_for_testing(mpc_public_key);
     let mpc_message = reconfig::reconfig_completion_message_for_testing(1, mpc_public_key);
     let mpc_cert = test_utils::sign_certificate(
