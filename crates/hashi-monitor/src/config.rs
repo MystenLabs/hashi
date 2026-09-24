@@ -20,7 +20,8 @@ pub struct Config {
     /// Maximum allowed delay between consecutive events.
     pub next_event_delays: NextEventDelays,
 
-    /// E_{i+1} is allowed to occur up to `clock_skew` before E_i (default: 300s).
+    /// E_{i+1} other than E3 may occur up to `clock_skew` before E_i (default: 300s).
+    /// Keep it at least the guardian's 5-minute request clock tolerance.
     #[serde(default = "default_clock_skew")]
     pub clock_skew: u64,
 
