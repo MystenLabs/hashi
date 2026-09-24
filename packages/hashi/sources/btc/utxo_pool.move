@@ -86,8 +86,14 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
 /// The UTXO is immediately selectable (`spent_by = None`) but flagged as
 /// unconfirmed until `confirm_pending()` is called after the producing
 /// transaction confirms on Bitcoin.
+///
+/// Change outpoints are derived from the committee-signed txid rather than
+/// observed on Bitcoin, so this insert carries the same replay guard as
+/// `insert_active`: an outpoint that is live or already spent is refused
+/// before any record is written.
 public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
     let utxo_id = utxo.id();
+    self.assert_not_spent_or_active(utxo_id);
     self
         .utxo_records
         .add(
