@@ -117,6 +117,11 @@ deployment:
 #   secret_key: "..."
 #   session_token: "..." # Only for temporary credentials.
 
+# Expected enclave build: git revision + PCR0 (hex).
+current_build:
+  git_revision: "0000000000000000000000000000000000000000"
+  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
   package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
