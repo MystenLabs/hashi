@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
-use crate::mpc::PreparedComplaint;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
@@ -131,37 +130,18 @@ impl MpcService for HttpService {
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
-            let prepared = {
+            let complaint = {
                 let mut mgr = mpc_manager.write().unwrap();
                 validate_epoch_current_or_previous(
                     mgr.mpc_config.epoch,
                     mgr.previous_epoch,
                     internal_request.epoch,
                 )?;
-                mgr.prepare_complaint(caller, &internal_request)
+                mgr.handle_complain_request(caller, &internal_request)
                     .map_err(|e| {
                         tracing::warn!("complain failed: {e}");
                         mpc_error_to_status(e)
                     })?
-            };
-            let complaint = match prepared {
-                PreparedComplaint::Ready(response) => response,
-                PreparedComplaint::Verify {
-                    cache_key,
-                    epoch,
-                    check,
-                } => {
-                    let response = check.run().map_err(|e| {
-                        tracing::warn!("complain failed: {e}");
-                        mpc_error_to_status(e)
-                    })?;
-                    mpc_manager.write().unwrap().cache_complaint_response(
-                        epoch,
-                        cache_key,
-                        response.clone(),
-                    );
-                    response
-                }
             };
             Ok(ComplainResponse::from(&complaint))
         })
