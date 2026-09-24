@@ -80,12 +80,16 @@ fn completed_checkpoint_for_scan(
     Ok((completed_checkpoint >= start_checkpoint).then_some(completed_checkpoint))
 }
 
-/// A fullnode that recycles a connection with `GOAWAY` fails the request racing
-/// it with `Internal`; `Unavailable` covers refused connections and overload.
+/// Connection-level failures that a fresh connection can clear, as the node's peer
+/// retries classify them: a `GOAWAY` surfaces as `Internal`, a broken pipe as `Unknown`.
 fn is_transient(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
-        tonic::Code::Unavailable | tonic::Code::Internal
+        tonic::Code::Unavailable
+            | tonic::Code::Unknown
+            | tonic::Code::Internal
+            | tonic::Code::Cancelled
+            | tonic::Code::DeadlineExceeded
     )
 }
 
@@ -300,34 +304,45 @@ impl SuiEventsPoller {
             Object::path_builder().object_type(),
             Object::path_builder().contents().finish(),
         ]));
-        let mut attempt = 0u32;
-        let object = loop {
-            match self
-                .client
-                .ledger_client()
-                .get_object(request.clone())
-                .await
-            {
-                Ok(response) => {
-                    break response
-                        .into_inner()
-                        .object
-                        .context("Sui GetObject response is missing the object")?;
-                }
-                Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-                Err(status) if attempt + 1 < MAX_LOOKUP_ATTEMPTS && is_transient(&status) => {
-                    let delay = INITIAL_RETRY_DELAY.saturating_mul(1 << attempt);
-                    attempt += 1;
-                    tracing::warn!(%wid, attempt, ?delay, ?status, "Sui object lookup failed; retrying");
-                    tokio::time::sleep(delay).await;
-                }
-                Err(status) => {
-                    return Err(status)
-                        .with_context(|| format!("failed to fetch withdrawal transaction {wid}"));
+        let lookup = async {
+            let mut attempt = 0u32;
+            loop {
+                match self
+                    .client
+                    .ledger_client()
+                    .get_object(request.clone())
+                    .await
+                {
+                    Ok(response) => {
+                        break response
+                            .into_inner()
+                            .object
+                            .context("Sui GetObject response is missing the object")
+                            .map(Some);
+                    }
+                    Err(status) if status.code() == tonic::Code::NotFound => break Ok(None),
+                    Err(status) if attempt + 1 < MAX_LOOKUP_ATTEMPTS && is_transient(&status) => {
+                        let delay = INITIAL_RETRY_DELAY.saturating_mul(1 << attempt);
+                        attempt += 1;
+                        tracing::warn!(%wid, attempt, ?delay, ?status, "Sui object lookup failed; retrying");
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(status) => {
+                        break Err(status).with_context(|| {
+                            format!("failed to fetch withdrawal transaction {wid}")
+                        });
+                    }
                 }
             }
         };
-        withdrawal_approval(&self.package_versions, wid, &object)
+        // Retries share one request's timeout, so a lookup never stalls the audit longer than one request.
+        let object = tokio::time::timeout(REQUEST_TIMEOUT, lookup)
+            .await
+            .with_context(|| format!("Sui lookup of withdrawal transaction {wid} timed out"))??;
+        match object {
+            Some(object) => withdrawal_approval(&self.package_versions, wid, &object),
+            None => Ok(None),
+        }
     }
 
     /// Find a safe checkpoint bracket `(before, at_or_after)` for a timestamp.
@@ -869,6 +884,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_transient_failure_before_not_found_is_no_approval() {
+        let ledger = FlakyLedger::new(
+            [tonic::Code::Unavailable],
+            OneObjectLedger {
+                object: None,
+                miss: tonic::Code::NotFound,
+            },
+        );
+        let mut poller = poller_for(ledger.clone()).await;
+
+        assert_eq!(poller.fetch_withdrawal_approval(WID).await.unwrap(), None);
+        assert_eq!(*ledger.requests.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn a_lookup_gives_up_after_its_last_attempt() {
         let ledger = FlakyLedger::new(
             [tonic::Code::Unavailable; MAX_LOOKUP_ATTEMPTS as usize],
@@ -897,6 +927,29 @@ mod tests {
             "{error:#}"
         );
         assert_eq!(*ledger.requests.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn connection_failures_are_transient_and_rejections_are_not() {
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::Unknown,
+            tonic::Code::Internal,
+            tonic::Code::Cancelled,
+            tonic::Code::DeadlineExceeded,
+        ] {
+            assert!(is_transient(&tonic::Status::new(code, "boom")), "{code:?}");
+        }
+        for code in [
+            tonic::Code::NotFound,
+            tonic::Code::InvalidArgument,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unauthenticated,
+            tonic::Code::ResourceExhausted,
+        ] {
+            assert!(!is_transient(&tonic::Status::new(code, "nope")), "{code:?}");
+        }
     }
 
     #[test]
