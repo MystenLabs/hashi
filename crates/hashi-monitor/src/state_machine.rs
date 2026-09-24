@@ -135,8 +135,8 @@ impl WithdrawalStateMachine {
     ///
     /// A missing predecessor is expected by the event timestamp plus
     /// `clock_skew`; a missing successor is expected by the configured
-    /// next-event deadline. A neighbor already seen is checked against both
-    /// deadlines of the pair, so findings do not depend on ingestion order.
+    /// next-event deadline. A neighbor already seen is checked against the
+    /// pair's deadlines, so findings do not depend on ingestion order.
     ///
     /// Event retention is based on structural validity, not finding category.
     /// `MonitorFinding::InvalidEventAdded` denotes a contradictory, definite
@@ -643,61 +643,57 @@ mod tests {
             }
         };
 
-        for (approved_at, signed_at) in [
-            (100, 150),
-            (100, 201),
-            (100, 400_000),
-            (110, 100),
-            (111, 100),
+        // The last case has a block time before the guardian signature.
+        for (approved_at, signed_at, confirmed_at) in [
+            (100, 150, 300),
+            (100, 200, 400),
+            (100, 201, 300),
+            (100, 400_000, 400_100),
+            (110, 100, 300),
+            (111, 100, 301),
+            (100, 150, 130),
         ] {
-            let approval = event(WithdrawalEventType::E1HashiApproved, 5, approved_at, 5);
-            let signature = event(WithdrawalEventType::E2GuardianApproved, 5, signed_at, 5);
-            let expected = if signed_at > approved_at + 100 {
-                vec![late(
-                    &signature,
+            let events = [
+                event(WithdrawalEventType::E1HashiApproved, 5, approved_at, 5),
+                event(WithdrawalEventType::E2GuardianApproved, 5, signed_at, 5),
+                event(WithdrawalEventType::E3BtcConfirmed, 5, confirmed_at, 5),
+            ];
+            let [approval, signature, confirmation] = &events;
+            let mut expected = Vec::new();
+            if signed_at > approved_at + 100 {
+                expected.push(late(signature, EventRelation::Successor, approved_at + 100));
+            }
+            if approved_at > signed_at + 10 {
+                expected.push(late(approval, EventRelation::Predecessor, signed_at + 10));
+            }
+            if confirmed_at > signed_at + 200 {
+                expected.push(late(
+                    confirmation,
                     EventRelation::Successor,
-                    approved_at + 100,
-                )]
-            } else if approved_at > signed_at + 10 {
-                vec![late(&approval, EventRelation::Predecessor, signed_at + 10)]
-            } else {
-                vec![]
-            };
+                    signed_at + 200,
+                ));
+            }
 
-            let mut approval_first = WithdrawalStateMachine::new(approval.clone(), &cfg);
-            let mut signature_first = WithdrawalStateMachine::new(signature.clone(), &cfg);
-            assert_eq!(approval_first.add_event(signature, &cfg), expected);
-            assert_eq!(signature_first.add_event(approval, &cfg), expected);
-        }
-    }
-
-    #[test]
-    fn a_bitcoin_block_time_bounds_only_its_own_lateness() {
-        let cfg = cfg();
-        for (confirmed_at, expected_deadline) in [(130, None), (350, None), (351, Some(350))] {
-            let mut sm = WithdrawalStateMachine::new(
-                event(WithdrawalEventType::E1HashiApproved, 6, 100, 6),
-                &cfg,
-            );
-            assert!(
-                sm.add_event(
-                    event(WithdrawalEventType::E2GuardianApproved, 6, 150, 6),
-                    &cfg
-                )
-                .is_empty()
-            );
-            let confirmation = event(WithdrawalEventType::E3BtcConfirmed, 6, confirmed_at, 6);
-
-            let expected = expected_deadline
-                .map(|deadline| MonitorFinding::EventOccurredAfterDeadline {
-                    event: MonitorEvent::Withdrawal(confirmation.clone()),
-                    relation: EventRelation::Successor,
-                    deadline,
-                    occurred_at: confirmed_at,
-                })
-                .into_iter()
-                .collect::<Vec<_>>();
-            assert_eq!(sm.add_event(confirmation, &cfg), expected);
+            for order in [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ] {
+                let mut sm = WithdrawalStateMachine::new(events[order[0]].clone(), &cfg);
+                let findings: Vec<_> = order[1..]
+                    .iter()
+                    .flat_map(|&i| sm.add_event(events[i].clone(), &cfg))
+                    .collect();
+                assert_eq!(findings.len(), expected.len(), "{order:?}: {findings:?}");
+                assert!(
+                    expected.iter().all(|finding| findings.contains(finding)),
+                    "{order:?}: {findings:?}"
+                );
+                assert!(!sm.is_expecting_events(), "{order:?}");
+            }
         }
     }
 
