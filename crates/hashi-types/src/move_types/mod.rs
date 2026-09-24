@@ -776,6 +776,11 @@ impl WithdrawalTransaction {
     }
 }
 
+impl MoveType for WithdrawalTransaction {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "WithdrawalTransaction";
+}
+
 /// Rust version of the Move hashi::withdrawal_queue::OutputUtxo type.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct OutputUtxo {

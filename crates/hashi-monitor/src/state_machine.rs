@@ -96,6 +96,15 @@ impl WithdrawalStateMachine {
             .any(|(event, _, _)| *event == event_type)
     }
 
+    /// Is the Hashi approval still missing after the Sui cursor passed its deadline?
+    pub fn is_missing_hashi_approval(&self, cursors: &Cursors) -> bool {
+        self.expected_events
+            .iter()
+            .any(|(event_type, deadline, _)| {
+                *event_type == WithdrawalEventType::E1HashiApproved && *deadline <= cursors.sui
+            })
+    }
+
     /// Are any expected neighboring events still outstanding?
     ///
     /// This does not mean that no timing finding was emitted during ingestion.
@@ -407,6 +416,7 @@ mod tests {
     use crate::config::BtcConfig;
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
+    use crate::findings::FindingCategory;
     use bitcoin::hashes::Hash as _;
     use hashi_types::guardian::DeploymentConfig;
     use hashi_types::guardian::S3Credentials;
@@ -639,6 +649,64 @@ mod tests {
                 cursor: 200,
             }
         );
+    }
+
+    #[test]
+    fn hashi_approval_is_missing_once_the_sui_cursor_passes_its_deadline() {
+        let cfg = cfg();
+        let mut sm = WithdrawalStateMachine::new(
+            event(WithdrawalEventType::E2GuardianApproved, 7, 100, 7),
+            &cfg,
+        );
+        let cursors = |sui| Cursors {
+            sui,
+            guardian: 1_000,
+        };
+
+        assert!(!sm.is_missing_hashi_approval(&cursors(109)));
+        assert!(sm.is_missing_hashi_approval(&cursors(110)));
+
+        assert!(
+            sm.add_event(event(WithdrawalEventType::E1HashiApproved, 7, 10, 7), &cfg)
+                .is_empty()
+        );
+        assert!(!sm.is_missing_hashi_approval(&cursors(1_000)));
+        assert!(sm.violations(&cursors(1_000)).is_empty());
+    }
+
+    #[test]
+    fn a_late_or_mismatched_hashi_approval_is_a_safety_finding() {
+        let cfg = cfg();
+        let guardian_approval = event(WithdrawalEventType::E2GuardianApproved, 8, 100, 8);
+
+        let mut late = WithdrawalStateMachine::new(guardian_approval.clone(), &cfg);
+        let approval = event(WithdrawalEventType::E1HashiApproved, 8, 111, 8);
+        let findings = late.add_event(approval.clone(), &cfg);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::EventOccurredAfterDeadline {
+                event: MonitorEvent::Withdrawal(approval),
+                relation: EventRelation::Predecessor,
+                deadline: 110,
+                occurred_at: 111,
+            }]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+
+        let mut mismatched = WithdrawalStateMachine::new(guardian_approval, &cfg);
+        let findings =
+            mismatched.add_event(event(WithdrawalEventType::E1HashiApproved, 8, 50, 9), &cfg);
+        assert_eq!(
+            findings,
+            vec![MonitorFinding::InvalidEventAdded(
+                "invalid btc_txid".to_string()
+            )]
+        );
+        assert_eq!(findings[0].category(), FindingCategory::Safety);
+        assert!(mismatched.is_missing_hashi_approval(&Cursors {
+            sui: 110,
+            guardian: 1_000,
+        }));
     }
 
     #[test]
