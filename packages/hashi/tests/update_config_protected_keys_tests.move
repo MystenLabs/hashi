@@ -109,6 +109,27 @@ fun test_bitcoin_chain_id_cannot_be_changed() {
 
 #[test]
 #[expected_failure(abort_code = update_config::EProtectedConfigKey)]
+fun test_protected_key_is_refused_at_propose() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = new_hashi(ctx);
+    config::set_guardian_btc_public_key(hashi.config_mut(), guardian_key(0));
+
+    let clock = clock::create_for_testing(ctx);
+    let _ = update_config::propose(
+        &mut hashi,
+        VOTER1,
+        single(guardian_btc_public_key_key(), config_value::new_bytes(guardian_key(1))),
+        vec_map::empty(),
+        &clock,
+        ctx,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = update_config::EProtectedConfigKey)]
 fun test_protected_key_aborts_the_whole_proposal() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
     let mut hashi = new_hashi(ctx);

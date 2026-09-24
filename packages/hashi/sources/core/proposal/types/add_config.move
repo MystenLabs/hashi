@@ -17,6 +17,10 @@
 /// fixes the key's type for good, since the update proposals enforce type
 /// stability. Entries bound for the epoch config also pass
 /// `mpc_config::is_valid_value`, which keeps the reserved MPC keys out.
+///
+/// The per-entry checks run at proposal time as well, so a doomed proposal is
+/// refused before it can collect votes. They run again at execution because
+/// another proposal can introduce the same key in between.
 module hashi::add_config;
 
 use hashi::{btc_config, config, config_value::Value, hashi::Hashi, mpc_config, proposal};
@@ -66,6 +70,8 @@ public fun propose(
 ): ID {
     hashi.versioning().assert_version_enabled();
     assert!(!entries.is_empty(), ENoEntriesProvided);
+    // Fast feedback for the proposer; state can still drift before execute.
+    assert_valid_entries(hashi, epoch, &entries);
     proposal::create(
         hashi,
         validator_address,
@@ -80,8 +86,24 @@ public fun propose(
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     hashi.versioning().assert_version_enabled();
     let AddConfig { epoch, entries } = proposal::execute(hashi, proposal_id, clock);
+    assert_valid_entries(hashi, epoch, &entries);
     let (keys, values) = entries.into_keys_values();
     let store = if (epoch) hashi.epoch_config_mut() else hashi.config_mut();
+    keys.zip_do!(values, |key, value| {
+        store.upsert(*key.as_bytes(), value);
+    });
+    if (epoch) {
+        assert!(mpc_config::is_consistent(hashi.epoch_config()), EInconsistentMpcConfig);
+    };
+}
+
+// ~~~~~~~ Private Functions ~~~~~~~
+
+/// Every entry must name a governable key absent from the target store, and
+/// an epoch-bound entry must also pass the MPC value rules.
+fun assert_valid_entries(hashi: &Hashi, epoch: bool, entries: &VecMap<String, Value>) {
+    let store = if (epoch) hashi.epoch_config() else hashi.config();
+    let (keys, values) = (*entries).into_keys_values();
     keys.zip_do!(values, |key, value| {
         // The pinned key names are refused in either store: a same-named epoch
         // entry would shadow nothing today, but the rule stays one rule.
@@ -91,9 +113,5 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
         );
         assert!(!store.contains(*key.as_bytes()), EKeyAlreadyExists);
         assert!(!epoch || mpc_config::is_valid_value(&key, &value), EInvalidConfigEntry);
-        store.upsert(*key.as_bytes(), value);
     });
-    if (epoch) {
-        assert!(mpc_config::is_consistent(hashi.epoch_config()), EInconsistentMpcConfig);
-    };
 }

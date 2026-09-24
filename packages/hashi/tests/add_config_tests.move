@@ -223,6 +223,31 @@ fun test_add_reserved_threshold_key_to_epoch_config_aborts() {
     std::unit_test::destroy(hashi);
 }
 
+/// The proposal-time check cannot see a key that another proposal adds
+/// afterwards, so the execution-time check must still refuse it.
+#[test]
+#[expected_failure(abort_code = add_config::EKeyAlreadyExists)]
+fun test_key_added_between_propose_and_execute_aborts_at_execute() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let first = test_utils::create_add_config_proposal(
+        &mut hashi,
+        VOTER1,
+        true,
+        NEW_KEY,
+        config_value::new_u64(64),
+        &clock,
+        ctx,
+    );
+    add_and_execute(&mut hashi, true, NEW_KEY, config_value::new_u64(65), &clock, ctx);
+    add_config::execute(&mut hashi, first, &clock);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
 #[test]
 #[expected_failure(abort_code = add_config::ENoEntriesProvided)]
 fun test_empty_entries_aborts_at_propose() {
