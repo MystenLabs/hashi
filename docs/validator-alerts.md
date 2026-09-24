@@ -73,5 +73,5 @@ Dashboard-worthy but **not** alerts:
 | `hashi_sui_balance`, `hashi_package_version_*`, `hashi_is_leader` | node |
 | `hashi_db_*` | node |
 | `hashi_presig_pool_remaining`, `hashi_num_consumed_presigs` | bridge |
-| `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_utxo_pool_*` | bridge |
+| `hashi_deposit_queue_size`, `hashi_withdrawal_queue_*`, `hashi_withdrawal_oldest_unsigned_age_seconds`, `hashi_utxo_pool_*` | bridge |
 | `hashi_paused`, `hashi_reconfig_in_progress`, `hashi_epoch`, `hashi_sui_epoch` | bridge (visible per node) |

@@ -362,6 +362,83 @@ fn validate_commitment_shape(
     Ok(())
 }
 
+pub(crate) fn check_commitment_outflow(
+    input_total: u64,
+    change_outputs: &[OutputUtxo],
+    max_bucket_capacity: Option<u64>,
+) -> anyhow::Result<()> {
+    let max_bucket_capacity = max_bucket_capacity
+        .ok_or_else(|| anyhow!("No local guardian limiter to check the commitment against"))?;
+    let change_total: u64 = change_outputs.iter().map(|o| o.amount).sum();
+    let outflow = input_total.saturating_sub(change_total);
+    anyhow::ensure!(
+        outflow <= max_bucket_capacity,
+        "Commitment spends {outflow} sats from the pool, above the limiter's max bucket \
+         capacity of {max_bucket_capacity} sats",
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitmentItem {
+    Request(Address),
+    Input(UtxoId),
+}
+
+impl CommitmentItem {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Request(_) => "request",
+            Self::Input(_) => "input",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RefusedItem {
+    pub item: CommitmentItem,
+    pub reason: &'static str,
+    message: String,
+}
+
+impl RefusedItem {
+    pub(crate) fn new(item: CommitmentItem, reason: &'static str, message: String) -> Self {
+        Self {
+            item,
+            reason,
+            message,
+        }
+    }
+}
+
+impl std::fmt::Display for RefusedItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+#[derive(Debug)]
+pub struct RefusedItems(pub Vec<RefusedItem>);
+
+impl std::fmt::Display for RefusedItems {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const SHOWN: usize = 3;
+        let messages: Vec<&str> = self
+            .0
+            .iter()
+            .take(SHOWN)
+            .map(|r| r.message.as_str())
+            .collect();
+        f.write_str(&messages.join("; "))?;
+        if self.0.len() > SHOWN {
+            write!(f, "; and {} more", self.0.len() - SHOWN)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RefusedItems {}
+
 /// The data that validators BLS-sign over to approve a single withdrawal request.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalRequestApproval {
@@ -508,25 +585,14 @@ impl Hashi {
 
         // 1. Verify each request_id exists, is approved, and is not already
         //    committed into another withdrawal txn.
-        let requests: Vec<WithdrawalRequest> = approval
-            .request_ids
-            .iter()
-            .map(|id| {
-                let request = self
-                    .onchain_state()
-                    .withdrawal_request(id)
-                    .ok_or_else(|| anyhow!("Withdrawal request {id} not found in queue"))?;
-                anyhow::ensure!(
-                    !request.is_committed(),
-                    "Withdrawal request {id} is already committed to a withdrawal transaction"
-                );
-                anyhow::ensure!(
-                    request.is_approved(),
-                    "Withdrawal request {id} has not been approved"
-                );
-                Ok(request)
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut refused = Vec::new();
+        let mut requests: Vec<WithdrawalRequest> = Vec::with_capacity(approval.request_ids.len());
+        for id in &approval.request_ids {
+            match self.commitment_request(id) {
+                Ok(request) => requests.push(request),
+                Err(refusal) => refused.push(refusal),
+            }
+        }
 
         // 2. Verify each selected UTXO exists, is not locked, and collect
         //    full UTXO data. We look up via utxo_records so we can
@@ -545,38 +611,47 @@ impl Hashi {
             )
         };
 
-        let selected_records: Vec<&UtxoRecord> = approval
-            .selected_utxos
-            .iter()
-            .map(|id| {
-                let record = utxo_records
-                    .get(id)
-                    .ok_or_else(|| anyhow!("UTXO {id:?} not found in the pool"))?;
-                anyhow::ensure!(
-                    record.spent_by.is_none(),
-                    "UTXO {id:?} is locked by pending withdrawal {:?}",
-                    record.spent_by.unwrap()
-                );
-                Ok(record)
-            })
-            .collect::<anyhow::Result<_>>()?;
+        let mut selected_records: Vec<&UtxoRecord> =
+            Vec::with_capacity(approval.selected_utxos.len());
+        for id in &approval.selected_utxos {
+            let refuse =
+                |reason, message| RefusedItem::new(CommitmentItem::Input(*id), reason, message);
+            let Some(record) = utxo_records.get(id) else {
+                refused.push(refuse(
+                    "input_missing",
+                    format!("UTXO {id:?} not found in the pool"),
+                ));
+                continue;
+            };
+            if let Some(spent_by) = record.spent_by {
+                refused.push(refuse(
+                    "input_locked",
+                    format!("UTXO {id:?} is locked by pending withdrawal {spent_by:?}"),
+                ));
+                continue;
+            }
 
-        // 2b. Verify that no selected UTXO has an unconfirmed ancestor
-        //     chain deeper than Bitcoin Core's relay limit. The limit
-        //     (DEFAULT_ANCESTOR_LIMIT = 25) counts the candidate tx
-        //     itself, so the existing chain must leave room for the
-        //     transaction we are about to construct.
-        for record in &selected_records {
+            // 2b. Verify that the UTXO's unconfirmed ancestor chain is not
+            //     deeper than Bitcoin Core's relay limit. The limit
+            //     (DEFAULT_ANCESTOR_LIMIT = 25) counts the candidate tx
+            //     itself, so the existing chain must leave room for the
+            //     transaction we are about to construct.
             let depth = unconfirmed_ancestor_depth(record, &withdrawal_txns, &utxo_records);
-            anyhow::ensure!(
-                depth < MAX_ANCESTOR_DEPTH,
-                "UTXO {:?} has an unconfirmed ancestor chain of depth {} \
-                 which, together with the new transaction, would exceed \
-                 Bitcoin Core's ancestor limit of {}",
-                record.utxo.id,
-                depth,
-                MAX_ANCESTOR_DEPTH,
-            );
+            if depth >= MAX_ANCESTOR_DEPTH {
+                refused.push(refuse(
+                    "input_ancestor_depth",
+                    format!(
+                        "UTXO {id:?} has an unconfirmed ancestor chain of depth {depth} \
+                         which, together with the new transaction, would exceed \
+                         Bitcoin Core's ancestor limit of {MAX_ANCESTOR_DEPTH}"
+                    ),
+                ));
+                continue;
+            }
+            selected_records.push(record);
+        }
+        if !refused.is_empty() {
+            return Err(RefusedItems(refused).into());
         }
 
         let selected_utxos: Vec<Utxo> = selected_records.iter().map(|r| r.utxo.clone()).collect();
@@ -616,13 +691,18 @@ impl Hashi {
         // request.btc_amount is the full withdrawal amount.
         for (i, request) in requests.iter().enumerate() {
             let output = &approval.outputs[i];
-            let expected_amount = request.btc_amount - per_user_miner_fee;
-            anyhow::ensure!(
-                expected_amount >= utxo_pool::TR_DUST_RELAY_MIN_VALUE,
-                "Withdrawal output {} sats is below dust threshold {} sats",
-                expected_amount,
-                utxo_pool::TR_DUST_RELAY_MIN_VALUE
-            );
+            let expected_amount = request.btc_amount.saturating_sub(per_user_miner_fee);
+            if expected_amount < utxo_pool::TR_DUST_RELAY_MIN_VALUE {
+                refused.push(RefusedItem::new(
+                    CommitmentItem::Request(request.id),
+                    "output_below_dust",
+                    format!(
+                        "Withdrawal output {expected_amount} sats is below dust threshold {} sats",
+                        utxo_pool::TR_DUST_RELAY_MIN_VALUE
+                    ),
+                ));
+                continue;
+            }
             anyhow::ensure!(
                 output.amount == expected_amount,
                 "Output {i} amount {} does not match expected {} for request {:?}",
@@ -635,6 +715,9 @@ impl Hashi {
                 "Output {i} address does not match request {:?}",
                 request.id
             );
+        }
+        if !refused.is_empty() {
+            return Err(RefusedItems(refused).into());
         }
 
         // 5. Verify every change output (the trailing outputs after the
@@ -655,6 +738,14 @@ impl Hashi {
                 );
             }
         }
+
+        // 5b. Verify the batch fits the guardian limiter's bucket.
+        check_commitment_outflow(
+            input_total,
+            &approval.outputs[request_count..],
+            self.local_limiter()
+                .map(|limiter| limiter.view().config.max_bucket_capacity),
+        )?;
 
         // 6. Validate fee is reasonable. The ceiling covers the whole CPFP
         //    package: a leader spending unconfirmed change must also cover
@@ -721,6 +812,35 @@ impl Hashi {
         );
 
         Ok(())
+    }
+
+    fn commitment_request(&self, id: &Address) -> Result<WithdrawalRequest, RefusedItem> {
+        let refuse = |reason, message| {
+            Err(RefusedItem::new(
+                CommitmentItem::Request(*id),
+                reason,
+                message,
+            ))
+        };
+        let Some(request) = self.onchain_state().withdrawal_request(id) else {
+            return refuse(
+                "request_missing",
+                format!("Withdrawal request {id} not found in queue"),
+            );
+        };
+        if request.is_committed() {
+            return refuse(
+                "request_committed",
+                format!("Withdrawal request {id} is already committed to a withdrawal transaction"),
+            );
+        }
+        if !request.is_approved() {
+            return refuse(
+                "request_unapproved",
+                format!("Withdrawal request {id} has not been approved"),
+            );
+        }
+        Ok(request)
     }
 
     fn sign_withdrawal_tx_commitment(
@@ -1342,11 +1462,13 @@ impl Hashi {
     /// Build a withdrawal commitment for a batch of approved requests: select
     /// UTXOs using the batching-aware coin selection algorithm, build the
     /// unsigned BTC tx, and return a `WithdrawalTxCommitment` covering the
-    /// selected requests.
+    /// selected requests. Coin selection never picks an input in
+    /// `excluded_inputs`.
     #[tracing::instrument(level = "debug", skip_all, fields(request_count = requests.len()))]
     pub async fn build_withdrawal_tx_commitment(
         &self,
         requests: &[WithdrawalRequest],
+        excluded_inputs: &BTreeSet<UtxoId>,
     ) -> Result<WithdrawalTxCommitment, WithdrawalCommitmentError> {
         // Fetch current fee rate from the Bitcoin node, clamped to a high
         // fee rate threshold to avoid overpaying during fee spikes.
@@ -1397,7 +1519,7 @@ impl Hashi {
         // Map available (unlocked) UTXOs to UtxoCandidates.
         let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
-            .filter(|r| r.spent_by.is_none())
+            .filter(|r| r.spent_by.is_none() && !excluded_inputs.contains(&r.utxo.id))
             .map(|r| {
                 let status =
                     build_utxo_status(self, r, &withdrawal_txns, &tx_confirmations, &utxo_records);
@@ -1709,6 +1831,7 @@ impl WithdrawalApprovalError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WithdrawalCommitmentErrorKind {
     BtcTxBuildFailed,
+    CommitmentCheckFailed,
     FailedQuorum,
     FeeEstimateFailed,
     UtxoSelectionFailed,
@@ -1740,6 +1863,9 @@ pub enum WithdrawalCommitmentError {
 
     #[error("UTXO selection failed: {0}")]
     UtxoSelectionFailed(#[source] anyhow::Error),
+
+    #[error("Commitment check failed: {0}")]
+    CommitmentCheckFailed(#[source] anyhow::Error),
 }
 
 impl WithdrawalCommitmentError {
@@ -1748,6 +1874,7 @@ impl WithdrawalCommitmentError {
             Self::BtcTxBuildFailed(_) => WithdrawalCommitmentErrorKind::BtcTxBuildFailed,
             Self::FeeEstimateFailed(_) => WithdrawalCommitmentErrorKind::FeeEstimateFailed,
             Self::UtxoSelectionFailed(_) => WithdrawalCommitmentErrorKind::UtxoSelectionFailed,
+            Self::CommitmentCheckFailed(_) => WithdrawalCommitmentErrorKind::CommitmentCheckFailed,
         }
     }
 }
@@ -2309,6 +2436,14 @@ mod tests {
             amount,
             bitcoin_address: vec![0; 32],
         }
+    }
+
+    #[test]
+    fn commitment_outflow_counts_everything_but_change_against_the_bucket() {
+        let change = [output(30_000)];
+        assert!(check_commitment_outflow(100_000, &change, Some(70_000)).is_ok());
+        assert!(check_commitment_outflow(100_000, &change, Some(69_999)).is_err());
+        assert!(check_commitment_outflow(100_000, &change, None).is_err());
     }
 
     fn make_txn(

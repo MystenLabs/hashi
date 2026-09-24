@@ -97,6 +97,9 @@ kp_roster:
 #     - /path/to/kp8.asc
 
 # Limiter parameters the withdraw-mode guardian will be initialized with.
+# Don't lower max_bucket_capacity below a withdrawal that is still in flight,
+# or it can never finish and all withdrawals stop. Pause the bridge first,
+# and unpause once every node has the new value.
 limiter_config:
   refill_rate: 1000
   max_bucket_capacity: 100000000
