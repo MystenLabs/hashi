@@ -9,7 +9,7 @@
 //! - E3 or E_btc: BTC transaction confirmed
 //!
 //! Predecessor checks: every E_{i+1} has a corresponding E_i, and E_i does not
-//! occur more than `clock_skew` after E_{i+1}.
+//! occur more than `clock_skew` after E_{i+1}. E3's block time is exempt.
 //! Successor checks: for every E_i, there exists a corresponding E_{i+1} within time `t`.
 //!
 //! Note: IOP-203 matches the withdrawal destination & amount that a user inputs with that in E_hashi.
