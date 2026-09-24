@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Drivers for the hashi Antithesis environment (`docker/antithesis`): a
+//! Drivers for the hashi Antithesis environment (sui-operations `docker/hashi-antithesis`): a
 //! one-shot `bootstrap` that turns a fresh Sui cluster + bitcoind into a
 //! running hashi deployment, a test `guardian`, and the `workload` that
 //! exercises deposits and withdrawals under fault injection.

@@ -268,8 +268,9 @@ pub fn committee_ready(onchain: &hashi::onchain::OnchainState) -> bool {
 mod tests {
     use super::*;
 
-    /// Pins the formats `docker/antithesis/config/genesis/generate.py` writes:
-    /// the key encoding, and the address it funds at genesis for that key.
+    /// Pins the formats that `docker/hashi-antithesis/config/genesis/generate.py`
+    /// (in sui-operations) writes: the key encoding, and the address it funds
+    /// at genesis for that key.
     #[test]
     fn env_file_matches_genesis_generator() {
         let env: EnvFile = serde_yaml::from_str(
