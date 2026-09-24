@@ -40,9 +40,14 @@ impl GuardianHarness {
     /// and provisioner-init both run in [`Self::finalize`] once DKG output exists
     /// (operator-init now carries the committee + BTC master key).
     pub async fn start(network: Network) -> Result<Self> {
+        Self::start_on(network, SocketAddr::from(([127, 0, 0, 1], 0))).await
+    }
+
+    /// [`Self::start`], serving on `bind_addr` instead of an ephemeral loopback port.
+    pub async fn start_on(network: Network, bind_addr: SocketAddr) -> Result<Self> {
         let enclave = Enclave::create_with_random_keys();
 
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind(bind_addr)
             .await
             .context("bind guardian harness listener")?;
         let addr: SocketAddr = listener.local_addr()?;
@@ -112,6 +117,16 @@ impl GuardianHarness {
 
     pub fn enclave(&self) -> &Arc<Enclave> {
         &self.enclave
+    }
+
+    /// Install a caller-chosen enclave BTC keypair, so a restarted guardian can
+    /// keep the pubkey already published on-chain. Must precede
+    /// [`Self::ensure_btc_pubkey`] and [`Self::finalize`].
+    pub fn set_btc_keypair(&self, keypair: bitcoin::secp256k1::Keypair) -> Result<()> {
+        self.enclave
+            .config
+            .set_btc_keypair(keypair)
+            .map_err(|e| anyhow::anyhow!("set_btc_keypair: {e:?}"))
     }
 
     /// Generate (or return the already-generated) enclave BTC pubkey

@@ -302,95 +302,167 @@ fn load_keys(dir: &Path) -> Result<NetworkKeys> {
     })
 }
 
+/// Split `requests` amounts of SUI off `private_key`'s coins and transfer them in
+/// one transaction.
+pub async fn fund(
+    client: &mut Client,
+    private_key: &Ed25519PrivateKey,
+    requests: &[(Address, u64)],
+) -> Result<()> {
+    let sender = private_key.public_key().derive_address();
+    let price = client.get_reference_gas_price().await?;
+
+    let gas_objects = client
+        .select_coins(
+            &sender,
+            &StructTag::sui().into(),
+            requests.iter().map(|request| request.1).sum(),
+            &[],
+        )
+        .await?;
+
+    let (inputs, transfers): (Vec<Input>, Vec<sui_sdk_types::Command>) = requests
+        .iter()
+        .enumerate()
+        .map(|(i, request)| {
+            (
+                Input::Pure(request.0.to_bcs().unwrap()),
+                sui_sdk_types::Command::TransferObjects(TransferObjects {
+                    objects: vec![Argument::NestedResult(0, i as u16)],
+                    address: Argument::Input(i as u16),
+                }),
+            )
+        })
+        .unzip();
+
+    let (input_amounts, argument_amounts) = requests
+        .iter()
+        .enumerate()
+        .map(|(i, request)| {
+            (
+                Input::Pure(request.1.to_bcs().unwrap()),
+                Argument::Input((i + inputs.len()) as u16),
+            )
+        })
+        .unzip();
+    let pt = ProgrammableTransaction {
+        inputs: [inputs, input_amounts].concat(),
+        commands: [
+            vec![sui_sdk_types::Command::SplitCoins(
+                sui_sdk_types::SplitCoins {
+                    coin: Argument::Gas,
+                    amounts: argument_amounts,
+                },
+            )],
+            transfers,
+        ]
+        .concat(),
+    };
+
+    let gas_payment_objects = gas_objects
+        .iter()
+        .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
+        .collect::<Result<Vec<_>>>()?;
+
+    let publish_transaction = Transaction {
+        kind: TransactionKind::ProgrammableTransaction(pt),
+        sender,
+        gas_payment: GasPayment {
+            objects: gas_payment_objects,
+            owner: sender,
+            price,
+            budget: 1_000_000_000,
+        },
+        expiration: TransactionExpiration::None,
+    };
+
+    let signature = private_key.sign_transaction(&publish_transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(publish_transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    anyhow::ensure!(
+        response.transaction().effects().status().success(),
+        "fund failed"
+    );
+    Ok(())
+}
+
+/// Touch `SuiSystemState` so genesis's v1 inner state is upgraded to v2, which
+/// hashi reads.
+pub async fn upgrade_sui_system_state(
+    client: &mut Client,
+    private_key: &Ed25519PrivateKey,
+) -> Result<()> {
+    let sender = private_key.public_key().derive_address();
+    let price = client.get_reference_gas_price().await?;
+
+    let gas_objects = client
+        .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
+        .await?;
+
+    let pt = ProgrammableTransaction {
+        inputs: vec![Input::Shared(SharedInput::new(
+            Address::from_static("0x5"),
+            1,
+            true,
+        ))],
+        commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
+            package: Address::from_static("0x3"),
+            module: Identifier::from_static("sui_system"),
+            function: Identifier::from_static("active_validator_addresses"),
+            type_arguments: vec![],
+            arguments: vec![Argument::Input(0)],
+        })],
+    };
+
+    let gas_payment_objects = gas_objects
+        .iter()
+        .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
+        .collect::<Result<Vec<_>>>()?;
+
+    let transaction = Transaction {
+        kind: TransactionKind::ProgrammableTransaction(pt),
+        sender,
+        gas_payment: GasPayment {
+            objects: gas_payment_objects,
+            owner: sender,
+            price,
+            budget: 1_000_000_000,
+        },
+        expiration: TransactionExpiration::None,
+    };
+
+    let signature = private_key.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    anyhow::ensure!(
+        response.transaction().effects().status().success(),
+        "upgrade_sui_system_state failed"
+    );
+    Ok(())
+}
+
 impl SuiNetworkHandle {
     pub async fn fund(&mut self, requests: &[(Address, u64)]) -> Result<()> {
-        let private_key = self.user_keys.first().unwrap();
-        let sender = private_key.public_key().derive_address();
-        let price = self.client.get_reference_gas_price().await?;
-
-        let gas_objects = self
-            .client
-            .select_coins(
-                &sender,
-                &StructTag::sui().into(),
-                requests.iter().map(|request| request.1).sum(),
-                &[],
-            )
-            .await?;
-
-        let (inputs, transfers): (Vec<Input>, Vec<sui_sdk_types::Command>) = requests
-            .iter()
-            .enumerate()
-            .map(|(i, request)| {
-                (
-                    Input::Pure(request.0.to_bcs().unwrap()),
-                    sui_sdk_types::Command::TransferObjects(TransferObjects {
-                        objects: vec![Argument::NestedResult(0, i as u16)],
-                        address: Argument::Input(i as u16),
-                    }),
-                )
-            })
-            .unzip();
-
-        let (input_amounts, argument_amounts) = requests
-            .iter()
-            .enumerate()
-            .map(|(i, request)| {
-                (
-                    Input::Pure(request.1.to_bcs().unwrap()),
-                    Argument::Input((i + inputs.len()) as u16),
-                )
-            })
-            .unzip();
-        let pt = ProgrammableTransaction {
-            inputs: [inputs, input_amounts].concat(),
-            commands: [
-                vec![sui_sdk_types::Command::SplitCoins(
-                    sui_sdk_types::SplitCoins {
-                        coin: Argument::Gas,
-                        amounts: argument_amounts,
-                    },
-                )],
-                transfers,
-            ]
-            .concat(),
-        };
-
-        let gas_payment_objects = gas_objects
-            .iter()
-            .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
-            .collect::<Result<Vec<_>>>()?;
-
-        let publish_transaction = Transaction {
-            kind: TransactionKind::ProgrammableTransaction(pt),
-            sender,
-            gas_payment: GasPayment {
-                objects: gas_payment_objects,
-                owner: sender,
-                price,
-                budget: 1_000_000_000,
-            },
-            expiration: TransactionExpiration::None,
-        };
-
-        let signature = private_key.sign_transaction(&publish_transaction)?;
-
-        let response = self
-            .client
-            .execute_transaction_and_wait_for_checkpoint(
-                ExecuteTransactionRequest::new(publish_transaction.into())
-                    .with_signatures(vec![signature.into()])
-                    .with_read_mask(FieldMask::from_str("*")),
-                std::time::Duration::from_secs(10),
-            )
-            .await?
-            .into_inner();
-
-        assert!(
-            response.transaction().effects().status().success(),
-            "fund failed"
-        );
-        Ok(())
+        let funder = self.user_keys.first().unwrap();
+        fund(&mut self.client, funder, requests).await
     }
 
     pub async fn current_sui_epoch(&mut self) -> Result<u64> {
@@ -448,65 +520,8 @@ impl SuiNetworkHandle {
     }
 
     async fn upgrade_sui_system_state(&mut self) -> Result<()> {
-        let private_key = self.user_keys.first().unwrap();
-        let sender = private_key.public_key().derive_address();
-        let price = self.client.get_reference_gas_price().await?;
-
-        let gas_objects = self
-            .client
-            .select_coins(&sender, &StructTag::sui().into(), 1_000_000_000, &[])
-            .await?;
-
-        let pt = ProgrammableTransaction {
-            inputs: vec![Input::Shared(SharedInput::new(
-                Address::from_static("0x5"),
-                1,
-                true,
-            ))],
-            commands: vec![sui_sdk_types::Command::MoveCall(MoveCall {
-                package: Address::from_static("0x3"),
-                module: Identifier::from_static("sui_system"),
-                function: Identifier::from_static("active_validator_addresses"),
-                type_arguments: vec![],
-                arguments: vec![Argument::Input(0)],
-            })],
-        };
-
-        let gas_payment_objects = gas_objects
-            .iter()
-            .map(|o| -> anyhow::Result<_> { Ok((&o.object_reference()).try_into()?) })
-            .collect::<Result<Vec<_>>>()?;
-
-        let transaction = Transaction {
-            kind: TransactionKind::ProgrammableTransaction(pt),
-            sender,
-            gas_payment: GasPayment {
-                objects: gas_payment_objects,
-                owner: sender,
-                price,
-                budget: 1_000_000_000,
-            },
-            expiration: TransactionExpiration::None,
-        };
-
-        let signature = private_key.sign_transaction(&transaction)?;
-
-        let response = self
-            .client
-            .execute_transaction_and_wait_for_checkpoint(
-                ExecuteTransactionRequest::new(transaction.into())
-                    .with_signatures(vec![signature.into()])
-                    .with_read_mask(FieldMask::from_str("*")),
-                std::time::Duration::from_secs(10),
-            )
-            .await?
-            .into_inner();
-
-        assert!(
-            response.transaction().effects().status().success(),
-            "upgrade_sui_system_state failed"
-        );
-        Ok(())
+        let signer = self.user_keys.first().unwrap();
+        upgrade_sui_system_state(&mut self.client, signer).await
     }
 }
 
