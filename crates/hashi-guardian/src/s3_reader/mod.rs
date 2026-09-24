@@ -53,7 +53,7 @@ impl GuardianReader {
         expected_deployment: DeploymentConfig,
         credentials: S3Credentials,
     ) -> GuardianResult<Self> {
-        let s3 = GuardianS3Client::new_checked(
+        let s3 = GuardianS3Client::new(
             &expected_deployment.bucket_info,
             expected_deployment.retention_environment,
             &credentials,

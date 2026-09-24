@@ -21,6 +21,7 @@ use GuardianError::*;
 /// Complete operator-init state ready for its fail-stop commit.
 pub struct OIInstall {
     deployment: DeploymentConfig,
+    attestation: NitroAttestation,
     logger: GuardianS3Client,
     withdraw_mode: Option<OIWithdrawModeInstall>,
 }
@@ -35,11 +36,13 @@ pub struct OIWithdrawModeInstall {
 impl OIInstall {
     fn new(
         deployment: DeploymentConfig,
+        attestation: NitroAttestation,
         logger: GuardianS3Client,
         withdraw_mode: Option<OIWithdrawModeInstall>,
     ) -> Self {
         Self {
             deployment,
+            attestation,
             logger,
             withdraw_mode,
         }
@@ -116,7 +119,7 @@ impl OIWithdrawModeInstall {
 /// installs the stable `InitConfig`, arming state, and fixed `config_hash`.
 ///
 /// Invariant: operator_init never returns an `Err` from a partially-initialized
-/// enclave. Every fallible step (request validation, S3 connectivity, S3 reads)
+/// enclave. Every fallible preparation step (validation, attestation, S3 access)
 /// runs before any state is mutated, so an early `Err` leaves the enclave
 /// untouched and retryable. The mutation then happens entirely in
 /// `commit_operator_init`, which returns `()` — it cannot report an error, so a
@@ -171,13 +174,14 @@ pub async fn operator_init(
         }
     };
     validate_deployment(&enclave, &deployment)?;
-    get_attestation(&enclave.signing_pubkey())?
+    let attestation = get_attestation(&enclave.signing_pubkey())?;
+    attestation
         .verify_live(
             &enclave.signing_pubkey(),
             deployment.pcr_allowlist.current_build(),
         )
         .map_err(|error| InvalidInputs(format!("deployment attestation check failed: {error}")))?;
-    let logger = GuardianS3Client::new_checked(
+    let logger = GuardianS3Client::new(
         &deployment.bucket_info,
         deployment.retention_environment,
         &s3_credentials,
@@ -192,7 +196,7 @@ pub async fn operator_init(
         }
         None => None,
     };
-    let install = OIInstall::new(deployment, logger, withdraw_mode);
+    let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
     info!("Committing S3 logger and mode-specific initialization state.");
@@ -215,11 +219,12 @@ fn validate_deployment(enclave: &Enclave, deployment: &DeploymentConfig) -> Guar
 
 /// Install the validated config on the enclave and write the operator_init logs.
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
-/// `set` here runs on a fresh enclave under the control lock, and the I/O steps
-/// (attestation, S3 logging) panic on failure rather than return.
+/// `set` here runs on a fresh enclave under the control lock, and S3 logging
+/// panics on failure rather than returning an error.
 async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     let OIInstall {
         deployment,
+        attestation,
         logger,
         withdraw_mode,
     } = install;
@@ -244,7 +249,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     let signing_pk = enclave.signing_pubkey();
     enclave
         .log_init(OIAttestationUnsigned {
-            attestation: get_attestation(&signing_pk).expect("Unable to get attestation"),
+            attestation,
             signing_public_key: signing_pk,
         })
         .await
@@ -325,7 +330,8 @@ mod tests {
             EnclaveMode::Ceremony => (DeploymentConfig::mock_for_testing(), None),
         };
 
-        let install = OIInstall::new(deployment, logger, withdraw_mode);
+        let attestation = get_attestation(&enclave.signing_pubkey()).unwrap();
+        let install = OIInstall::new(deployment, attestation, logger, withdraw_mode);
         commit_operator_init(&enclave, install).await;
         (enclave, captures)
     }

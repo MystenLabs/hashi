@@ -91,11 +91,12 @@ impl GuardianS3Client {
     // Constructors
     // ========================================================================
 
+    /// Construct the client and check S3 access and Object Lock support.
     pub async fn new(
         bucket_info: &S3BucketInfo,
         retention_environment: S3RetentionEnvironment,
         credentials: &S3Credentials,
-    ) -> Self {
+    ) -> GuardianResult<Self> {
         info!("S3 Configuration:");
         info!("   Bucket: {}", bucket_info.bucket);
         info!("   Region: {}", bucket_info.region);
@@ -124,21 +125,13 @@ impl GuardianS3Client {
         }
         let client = S3Client::from_conf(s3_builder.build());
 
-        Self {
+        let client = Self {
             client,
             bucket_info: bucket_info.clone(),
             object_lock_policy: S3ObjectLockPolicy::for_environment(retention_environment),
-        }
-    }
-
-    pub async fn new_checked(
-        bucket_info: &S3BucketInfo,
-        retention_environment: S3RetentionEnvironment,
-        credentials: &S3Credentials,
-    ) -> GuardianResult<Self> {
-        let logger = Self::new(bucket_info, retention_environment, credentials).await;
-        logger.test_s3_connectivity().await?;
-        Ok(logger)
+        };
+        client.test_s3_connectivity().await?;
+        Ok(client)
     }
 
     /// Construct an `GuardianS3Client` from an already-configured S3 client.
