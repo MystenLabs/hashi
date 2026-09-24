@@ -7,6 +7,7 @@
 //! tests. Faults make individual operations fail or stall, so failures are
 //! logged and retried; only violated invariants are reported as assertions.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -58,10 +59,15 @@ pub struct Args {
         default_value_t = 1_800
     )]
     withdrawal_timeout_secs: u64,
+
+    /// Survives workload restarts; holds each user's deposit ledger.
+    #[arg(long, env = "WORKLOAD_STATE_DIR", default_value = "/state")]
+    state_dir: PathBuf,
 }
 
 struct Workload {
     common: CommonArgs,
+    state_dir: PathBuf,
     deployment: Deployment,
     onchain: hashi::onchain::OnchainState,
     deposit_timeout: Duration,
@@ -99,6 +105,7 @@ pub async fn run(common: &CommonArgs, args: Args) -> Result<()> {
 
     let ctx = Arc::new(Workload {
         common: common.clone(),
+        state_dir: args.state_dir.clone(),
         deployment,
         onchain,
         deposit_timeout: Duration::from_secs(args.deposit_timeout_secs),
@@ -146,9 +153,33 @@ struct User {
     address: Address,
     executor: SuiTxExecutor,
     client: sui_rpc::Client,
-    /// Starting balance plus every deposit whose BTC was sent. Withdrawals are
-    /// not subtracted, so this stays an upper bound even if one is refunded.
-    max_balance: u64,
+    /// Every deposit ever sent for this user, persisted before the BTC is sent
+    /// so a restarted workload still counts deposits that credit after it
+    /// restarts. Withdrawals are not subtracted, so this stays an upper bound
+    /// on the hBTC balance even if one is refunded.
+    deposited: u64,
+}
+
+impl User {
+    fn ledger_path(&self, ctx: &Workload) -> PathBuf {
+        ctx.state_dir.join(format!("user-{}-deposited", self.index))
+    }
+
+    fn load_deposited(&mut self, ctx: &Workload) -> Result<()> {
+        self.deposited = match std::fs::read_to_string(self.ledger_path(ctx)) {
+            Ok(raw) => raw.trim().parse()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(())
+    }
+
+    fn record_deposit(&mut self, ctx: &Workload, amount: u64) -> Result<()> {
+        let deposited = self.deposited + amount;
+        crate::env::write_atomic(&self.ledger_path(ctx), deposited.to_string().as_bytes())?;
+        self.deposited = deposited;
+        Ok(())
+    }
 }
 
 async fn run_user(ctx: Arc<Workload>, index: usize, key: Ed25519PrivateKey) -> Result<()> {
@@ -161,17 +192,10 @@ async fn run_user(ctx: Arc<Workload>, index: usize, key: Ed25519PrivateKey) -> R
         address,
         executor,
         client,
-        max_balance: 0,
+        deposited: 0,
     };
-    user.max_balance =
-        crate::env::retry("initial hBTC balance", || {
-            let mut client = user.client.clone();
-            let package_id = ctx.deployment.package_id;
-            async move {
-                e2e_tests::test_helpers::get_hbtc_balance(&mut client, package_id, address).await
-            }
-        })
-        .await;
+    std::fs::create_dir_all(&ctx.state_dir)?;
+    user.load_deposited(&ctx)?;
 
     let mut rng = AntithesisRng;
     loop {
@@ -202,12 +226,12 @@ async fn balance(ctx: &Workload, user: &mut User) -> Result<u64> {
     )
     .await?;
     assert_always!(
-        balance <= user.max_balance,
+        balance <= user.deposited,
         "hBTC balance never exceeds the BTC deposited for it",
         &json!({
             "user": user.index,
             "balance": balance,
-            "max_balance": user.max_balance,
+            "deposited": user.deposited,
         })
     );
     Ok(balance)
@@ -231,8 +255,8 @@ async fn deposit(ctx: &Workload, user: &mut User, balance_before: u64, amount: u
         )?
     };
 
+    user.record_deposit(ctx, amount)?;
     let (txid, vout) = send_btc(&ctx.common, &deposit_address, amount)?;
-    user.max_balance += amount;
     tracing::info!(user = user.index, %txid, vout, amount, "sent deposit");
 
     // The BTC is already gone, so push through transient failures rather than

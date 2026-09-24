@@ -219,6 +219,7 @@ services:
       - ./genesis/files/hashi-env.yaml:/genesis/hashi-env.yaml:ro
       - ./shared:/shared:ro
       - ./sdk:/sdk:rw
+      - ./data/workload:/state:rw
     command: ["hashi-antithesis", "workload"]
 
 networks:
