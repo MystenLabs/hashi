@@ -12,7 +12,7 @@
         "secret_sharing_instance": null,
         "deployment_info": {
           "bucket_info": {
-            "bucket": "bucket",
+            "name": "bucket",
             "region": "us-east-1"
           },
           "retention_environment": "testnet",

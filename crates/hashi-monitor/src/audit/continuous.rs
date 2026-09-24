@@ -267,15 +267,17 @@ next_event_delays:
   - [E1HashiApproved, 1200]
   - [E2GuardianApproved, 86400]
 clock_skew: 300
-bitcoin_network: "signet"
-guardian_s3:
-  bucket: "bucket"
-  region: "us-west-2"
+deployment:
+  bucket_info:
+    name: "bucket"
+    region: "us-west-2"
   retention_environment: "testnet"
-current_build:
-  git_revision: "0000000000000000000000000000000000000000"
-  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-prev_builds: []
+  bitcoin_network: "signet"
+  pcr_allowlist:
+    current_build:
+      git_revision: "0000000000000000000000000000000000000000"
+      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    prev_builds: []
 sui:
   rpc_url: "http://sui"
   package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"

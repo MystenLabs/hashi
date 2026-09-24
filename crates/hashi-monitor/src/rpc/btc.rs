@@ -487,7 +487,8 @@ mod tests {
     use crate::config::NextEventDelays;
     use crate::config::SuiConfig;
     use crate::domain::WithdrawalEventType;
-    use hashi_types::guardian::UnresolvedS3Config;
+    use hashi_types::guardian::DeploymentConfig;
+    use hashi_types::guardian::S3Credentials;
 
     static TRACING_INIT: Once = Once::new();
 
@@ -509,21 +510,24 @@ mod tests {
             .expect("valid next event delays"),
             clock_skew: 10,
             withdrawal_predecessor_lookback: 60 * 60,
-            bitcoin_network: bitcoin::Network::Regtest,
-            guardian_s3: UnresolvedS3Config {
+            deployment: DeploymentConfig {
                 bucket_info: hashi_types::guardian::S3BucketInfo {
-                    bucket: "bucket".to_string(),
+                    name: "bucket".to_string(),
                     region: "us-east-1".to_string(),
                 },
-                access_key: Some("access-key".to_string()),
-                secret_key: Some("secret-key".to_string()),
                 retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
+                bitcoin_network: bitcoin::Network::Regtest,
+                pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
+                    hashi_types::guardian::BuildPcrs::new("", vec![]),
+                    vec![],
+                )
+                .expect("valid PCR allowlist"),
             },
-            pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
-                hashi_types::guardian::BuildPcrs::new("", vec![]),
-                vec![],
-            )
-            .expect("valid PCR allowlist"),
+            s3_credentials: Some(S3Credentials {
+                access_key: "access-key".to_string(),
+                secret_key: "secret-key".to_string(),
+                session_token: None,
+            }),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
                 package_id: format!("0x{}", "11".repeat(32)),

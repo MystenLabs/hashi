@@ -46,15 +46,16 @@ const ACTIVATION_HEARTBEAT_WAIT_BUFFER: Duration = Duration::from_mins(5);
 /// Activate a provisioner-initialized standby guardian.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
-    let allowlist = cfg.kp_roster.pcr_allowlist();
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
+    let allowlist = cfg.deployment.pcr_allowlist.clone();
 
     info!(
         phase = "setup",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         endpoint = %cfg.guardian_endpoint,
-        bitcoin_network = ?cfg.bitcoin_network,
+        bitcoin_network = ?cfg.deployment.bitcoin_network,
         limiter_refill_rate = cfg.limiter_config.refill_rate,
         limiter_max_capacity = cfg.limiter_config.max_bucket_capacity,
         "running operator activate flow",
@@ -62,14 +63,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "s3 connect",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         current_git_revision = %allowlist.current_build().git_revision(),
         current_pcr0 = hex::encode(allowlist.current_build().pcr0()),
         prev_build_count = allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
+    let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -229,9 +230,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     println!("  state_hash:       {}", hex::encode(state_hash));
     println!("  committee_epoch:  {committee_epoch}");
     println!("  limiter_next_seq: {}", limiter_state.next_seq);
-    println!("  bitcoin_network:  {}", cfg.bitcoin_network);
-    println!("  bucket:           {}", cfg.guardian_s3.bucket_info.bucket);
-    println!("  region:           {}", cfg.guardian_s3.bucket_info.region);
+    println!("  bitcoin_network:  {}", cfg.deployment.bitcoin_network);
+    println!("  bucket:           {}", cfg.deployment.bucket_info.name);
+    println!("  region:           {}", cfg.deployment.bucket_info.region);
 
     Ok(())
 }
@@ -324,9 +325,9 @@ fn verify_provisioned_standby_info(
         "Guardian has current_committee_epoch => operator activation already ran"
     );
     ensure!(
-        deployment == &cfg.deployment_config().summary(),
+        deployment == &cfg.deployment.summary(),
         "Guardian deployment mismatch: expected {:?}, got {:?}",
-        cfg.deployment_config().summary(),
+        cfg.deployment.summary(),
         deployment
     );
     ensure!(
@@ -344,7 +345,7 @@ fn verify_provisioned_standby_info(
     let init_config = InitConfig::new(
         cfg.limiter_config,
         *master_g,
-        cfg.deployment_config(),
+        cfg.deployment.clone(),
         cfg.hashi.hashi_ids.hashi_object_id,
     );
     let expected_config_hash = init_config.digest();

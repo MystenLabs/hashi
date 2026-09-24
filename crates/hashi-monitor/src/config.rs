@@ -7,8 +7,7 @@ use std::path::Path;
 use anyhow::Context;
 use anyhow::anyhow;
 use hashi_types::guardian::DeploymentConfig;
-use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::UnresolvedS3Config;
+use hashi_types::guardian::S3Credentials;
 use serde::Deserialize;
 
 use crate::domain::WithdrawalEventType;
@@ -30,10 +29,9 @@ pub struct Config {
     #[serde(default = "default_withdrawal_predecessor_lookback")]
     pub withdrawal_predecessor_lookback: u64,
 
-    pub bitcoin_network: bitcoin::Network,
-    pub guardian_s3: UnresolvedS3Config,
-    #[serde(flatten)]
-    pub pcr_allowlist: PcrAllowlist,
+    pub deployment: DeploymentConfig,
+    /// Omit to use AWS's default credential chain.
+    pub s3_credentials: Option<S3Credentials>,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
 }
@@ -165,21 +163,18 @@ impl Config {
     pub fn next_event_delay(&self, source: WithdrawalEventType) -> Option<u64> {
         self.next_event_delays.get_delay(source)
     }
-
-    /// Deployment identity and builds accepted when auditing Guardian logs.
-    pub fn deployment_config(&self) -> DeploymentConfig {
-        DeploymentConfig {
-            bucket_info: self.guardian_s3.bucket_info.clone(),
-            retention_environment: self.guardian_s3.retention_environment,
-            bitcoin_network: self.bitcoin_network,
-            pcr_allowlist: self.pcr_allowlist.clone(),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_config_contains_deployment_without_credentials() {
+        let config: Config = serde_yaml::from_str(include_str!("../audit.sample.yaml")).unwrap();
+        assert_eq!(config.deployment.bitcoin_network, bitcoin::Network::Signet);
+        assert!(config.s3_credentials.is_none());
+    }
 
     fn btc_config(rpc_url: &str, headers: &[(&str, &str)]) -> BtcConfig {
         BtcConfig {

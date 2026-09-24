@@ -38,12 +38,13 @@ use crate::kp_roster::decrypt_kp_share;
 /// separately written to disk by this flow.
 pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     cfg.kp_roster.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
 
     info!(
         phase = "setup",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         sui_rpc = %cfg.hashi.sui_rpc,
@@ -95,7 +96,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         .with_context(|| format!("connect to ceremony guardian at {}", cfg.guardian_endpoint))?;
     let verified = verified_ceremony_guardian_info(
         &cfg.guardian_endpoint,
-        cfg.kp_roster.pcr_allowlist.current_build(),
+        cfg.deployment.pcr_allowlist.current_build(),
     )
     .await?;
     ensure!(
@@ -103,7 +104,7 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
             || verified.info.lifecycle == CeremonyStage::Completed.into(),
         "guardian is not accepting key provisioner ceremony confirmations"
     );
-    let deployment = cfg.deployment_config();
+    let deployment = cfg.deployment.clone();
     ensure!(
         verified.info.deployment_info()? == &deployment.summary(),
         "ceremony deployment differs from expected configuration"
@@ -112,12 +113,12 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
 
     info!(
         phase = "s3 connect",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
-        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
+        current_pcr0 = hex::encode(cfg.deployment.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
+    let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");

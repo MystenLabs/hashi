@@ -1894,7 +1894,7 @@ pub struct SecretSharingInstance {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3BucketInfo {
     #[prost(string, optional, tag = "1")]
-    pub bucket: ::core::option::Option<::prost::alloc::string::String>,
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "2")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }

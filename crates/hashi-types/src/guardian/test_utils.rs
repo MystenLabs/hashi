@@ -108,7 +108,7 @@ impl GuardianInfo {
             deployment_info: Some(
                 super::DeploymentConfig {
                     bucket_info: S3BucketInfo {
-                        bucket: "bucket".into(),
+                        name: "bucket".into(),
                         region: "us-east-1".into(),
                     },
                     ..super::DeploymentConfig::mock_for_testing()
@@ -536,7 +536,7 @@ impl S3BucketInfo {
     /// Convenience helper for tests.
     pub fn mock_for_testing() -> Self {
         Self {
-            bucket: "test-bucket".to_string(),
+            name: "test-bucket".to_string(),
             region: "us-east-1".to_string(),
         }
     }

@@ -5,12 +5,26 @@ use super::*;
 
 /// Non-secret deployment policy installed once during operator initialization.
 /// KPs authorize the full policy in both ceremony and withdraw mode.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentConfig {
     pub bucket_info: S3BucketInfo,
     pub retention_environment: S3RetentionEnvironment,
+    #[serde(deserialize_with = "deserialize_network")]
     pub bitcoin_network: bitcoin::Network,
     pub pcr_allowlist: PcrAllowlist,
+}
+
+fn deserialize_network<'de, D>(deserializer: D) -> Result<bitcoin::Network, D::Error>
+where
+    D: ::serde::Deserializer<'de>,
+{
+    let network = String::deserialize(deserializer)?.to_ascii_lowercase();
+    // Preserve guardian-init's mainnet alias alongside bitcoin's network names.
+    if network == "mainnet" {
+        Ok(bitcoin::Network::Bitcoin)
+    } else {
+        network.parse().map_err(::serde::de::Error::custom)
+    }
 }
 
 /// Public view of the installed policy. Verifiers retain their own full allowlist;
@@ -58,7 +72,7 @@ mod tests {
         let init = InitConfig::mock_for_testing(None);
         let mut changes = Vec::new();
         let mut changed = original.clone();
-        changed.bucket_info.bucket.push_str("-other");
+        changed.bucket_info.name.push_str("-other");
         changes.push(changed);
         let mut changed = original.clone();
         changed.bucket_info.region = "us-west-2".into();

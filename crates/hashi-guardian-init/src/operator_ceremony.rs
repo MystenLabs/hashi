@@ -35,21 +35,22 @@ use crate::kp_roster::dealing_order;
 /// See the module docs for the full step-by-step flow. Each step is logged via
 /// `tracing` so the operator can follow exactly what is happening.
 pub async fn run(cfg: Config) -> Result<()> {
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
-    let retention_environment = cfg.guardian_s3.retention_environment;
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
+    let retention_environment = cfg.deployment.retention_environment;
 
     info!(
         phase = "setup",
         share_count = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         ?retention_environment,
         endpoint = %cfg.guardian_endpoint,
         sui_rpc = %cfg.hashi.sui_rpc,
         package_id = %cfg.hashi.hashi_ids.package_id,
         hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
-        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
+        current_pcr0 = hex::encode(cfg.deployment.pcr_allowlist.current_build().pcr0()),
         "running guardian key ceremony",
     );
 

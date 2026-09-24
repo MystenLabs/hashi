@@ -22,10 +22,6 @@ guardian_endpoint: "http://localhost:3000"
 # also uses this endpoint's GuardianInfo to pin the standby session.
 relay_endpoint: "http://localhost:50051"
 
-# Bitcoin network the withdraw-mode guardian validates withdrawal addresses for.
-# One of: mainnet, testnet, regtest, signet.
-bitcoin_network: "signet"
-
 # Path to the armored OpenPGP public cert this KP uses to identify itself.
 # Optional for operator commands. KP commands require it in the roster, use it
 # to select this KP's single encrypted share, and decrypt/sign with its private
@@ -33,18 +29,34 @@ bitcoin_network: "signet"
 # Requires matching PEM sidecars beside the .asc; see kp_roster comments below.
 kp_pgp_cert_path: /path/to/kp3.asc
 
-# S3 config for the guardian's log bucket. Must have object-lock enabled.
-# If access_key and secret_key are omitted, guardian-init uses the default AWS
-# credential chain.
-guardian_s3:
-  bucket: "hashi-guardian-logs"
-  region: "us-east-1"
-  access_key:
-  secret_key:
-  # S3 object-lock retention class. One of: devnet, mainnet, testnet.
-  # TODO: Should this be replaced by, or derived from, a
-  # repository-wide Hashi network identifier?
+# Shared deployment policy independently configured by the operator and every KP.
+deployment:
+  # Guardian log bucket; Object Lock must be enabled.
+  bucket_info:
+    name: "hashi-guardian-logs"
+    region: "us-east-1"
+  # S3 Object Lock retention class: devnet, mainnet, or testnet.
   retention_environment: "testnet"
+  # Bitcoin network: mainnet (or bitcoin), testnet, testnet4, regtest, or signet.
+  bitcoin_network: "signet"
+  pcr_allowlist:
+    # Expected live enclave build: git revision + PCR0 (hex). Select the
+    # ceremony or withdraw build for the mode being initialized.
+    current_build:
+      git_revision: "0000000000000000000000000000000000000000"
+      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+    # Older still-trusted builds accepted only for historical S3 logs during an upgrade window.
+    prev_builds: []
+    # prev_builds:
+    #   - git_revision: "1111111111111111111111111111111111111111"
+    #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+
+# Optional explicit credentials; omit this block to use AWS's default credential chain.
+# s3_credentials:
+#   access_key: "..."
+#   secret_key: "..."
+#   session_token: "..." # Only for temporary credentials.
 
 hashi:
   # Sui RPC URL used to fetch Hashi on-chain state.
@@ -72,21 +84,9 @@ kp_roster:
     - /path/to/kp4.asc
     - /path/to/kp5.asc
 
-  # Expected enclave build: git revision + PCR0 (hex). A ceremony enclave reports
-  # `<git_revision>-ceremony`: its own entry beside the same-commit withdraw build.
-  current_build:
-    git_revision: "0000000000000000000000000000000000000000"
-    pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-
-  # Older still-trusted builds accepted only for historical S3 logs during an upgrade window.
-  prev_builds: []
-  # prev_builds:
-  #   - git_revision: "1111111111111111111111111111111111111111"
-  #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
-
 # The KP set a rotate-kp-set proposes (rotate-kp-set commands only). kp_roster
-# stays the dealt set, and its allowlist must list every build that wrote the
-# logs the ceremony guardian reads. Cert order is irrelevant: the rotation
+# stays the dealt set. The deployment allowlist must list every build that
+# wrote the logs the ceremony guardian reads. Cert order is irrelevant: the rotation
 # deals share ids by fingerprint order, like a new ceremony.
 # new_kp_roster:
 #   num_shares: 3

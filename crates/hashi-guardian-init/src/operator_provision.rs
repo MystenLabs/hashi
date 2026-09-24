@@ -22,16 +22,17 @@ use crate::guardian_info::verified_live_guardian_info;
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
-    let retention_environment = cfg.guardian_s3.retention_environment;
-    let allowlist = cfg.kp_roster.pcr_allowlist();
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
+    let retention_environment = cfg.deployment.retention_environment;
+    let allowlist = cfg.deployment.pcr_allowlist.clone();
 
     info!(
         phase = "setup",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         endpoint = %cfg.guardian_endpoint,
-        bitcoin_network = ?cfg.bitcoin_network,
+        bitcoin_network = ?cfg.deployment.bitcoin_network,
         ?retention_environment,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
@@ -43,14 +44,14 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
 
     info!(
         phase = "s3 connect",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         current_git_revision = %allowlist.current_build().git_revision(),
         current_pcr0 = hex::encode(allowlist.current_build().pcr0()),
         prev_build_count = allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
+    let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -167,7 +168,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let init_config = InitConfig::new(
         cfg.limiter_config,
         master_g,
-        cfg.deployment_config(),
+        cfg.deployment.clone(),
         cfg.hashi.hashi_ids.hashi_object_id,
     );
     let config_hash = init_config.digest();
@@ -175,7 +176,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(
         phase = "config build",
         config_hash = hex::encode(config_hash),
-        bitcoin_network = ?cfg.bitcoin_network,
+        bitcoin_network = ?cfg.deployment.bitcoin_network,
         "built InitConfig",
     );
 
@@ -250,7 +251,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         session_id = %session_id,
         sharing_seq,
         config_hash = hex::encode(config_hash),
-        bitcoin_network = ?cfg.bitcoin_network,
+        bitcoin_network = ?cfg.deployment.bitcoin_network,
         "operator provision complete",
     );
     println!("Guardian operator provision complete.");
@@ -265,9 +266,9 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     println!("  sharing_seq:     {sharing_seq}");
     println!("  num_shares:      {}", scraped_instance.num_shares());
     println!("  threshold:       {}", scraped_instance.threshold());
-    println!("  bitcoin_network: {}", cfg.bitcoin_network);
-    println!("  bucket:          {}", cfg.guardian_s3.bucket_info.bucket);
-    println!("  region:          {}", cfg.guardian_s3.bucket_info.region);
+    println!("  bitcoin_network: {}", cfg.deployment.bitcoin_network);
+    println!("  bucket:          {}", cfg.deployment.bucket_info.name);
+    println!("  region:          {}", cfg.deployment.bucket_info.region);
 
     Ok(())
 }

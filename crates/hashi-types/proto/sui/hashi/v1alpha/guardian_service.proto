@@ -144,7 +144,7 @@ message SecretSharingInstance {
 }
 
 message S3BucketInfo {
-  optional string bucket = 1;
+  optional string name = 1;
   optional string region = 2;
 }
 

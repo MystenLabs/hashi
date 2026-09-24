@@ -39,7 +39,8 @@ pub async fn init(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
 
@@ -88,7 +89,8 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
     let new_params = new_kp_set.params()?;
@@ -111,7 +113,7 @@ pub async fn submit(cfg: Config, submission_paths: &[PathBuf]) -> Result<()> {
         &old,
         &Proposal {
             session_id: &guardian.session_id,
-            expected_deployment_config_hash: cfg.deployment_config().digest(),
+            expected_deployment_config_hash: cfg.deployment.digest(),
             new_certs_roster: &new_certs_roster,
             new_params,
         },
@@ -174,7 +176,8 @@ pub async fn wait(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
     let new_kp_set = cfg.require_new_kp_roster("operator rotate-kp-set")?;
     new_kp_set.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
     let new_certs_roster = new_kp_set.load_certs_roster()?;
 
     let mut guardian = CeremonyGuardian::resume(&cfg, &s3_credentials).await?;

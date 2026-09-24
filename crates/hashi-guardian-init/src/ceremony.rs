@@ -71,7 +71,7 @@ impl CeremonyGuardian {
         s3_credentials: &S3Credentials,
         operator_init: bool,
     ) -> Result<Self> {
-        let allowlist = cfg.kp_roster.pcr_allowlist();
+        let allowlist = cfg.deployment.pcr_allowlist.clone();
         info!(
             phase = "connect",
             endpoint = %cfg.guardian_endpoint,
@@ -89,12 +89,12 @@ impl CeremonyGuardian {
                 );
                 info!(
                     phase = "operator_init",
-                    bucket = cfg.guardian_s3.bucket_info.bucket,
-                    region = cfg.guardian_s3.bucket_info.region,
+                    bucket = cfg.deployment.bucket_info.name,
+                    region = cfg.deployment.bucket_info.region,
                     "calling OperatorInit (ceremony mode: shared deployment configuration)",
                 );
                 let request = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
-                    cfg.deployment_config(),
+                    cfg.deployment.clone(),
                     s3_credentials.clone(),
                 ))
                 .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
@@ -124,9 +124,9 @@ impl CeremonyGuardian {
             verified.session_id
         );
         ensure!(
-            verified.info.deployment_info()? == &cfg.deployment_config().summary(),
+            verified.info.deployment_info()? == &cfg.deployment.summary(),
             "guardian deployment mismatch: expected {:?}, got {:?}",
-            cfg.deployment_config().summary(),
+            cfg.deployment.summary(),
             verified.info.deployment_info
         );
         info!(
@@ -141,7 +141,7 @@ impl CeremonyGuardian {
             session_id = %verified.session_id,
             "connecting to guardian log bucket + verifying attestation against current build",
         );
-        let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
+        let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
             .await
             .context("connect to guardian log bucket")?;
         let verified_session = reader

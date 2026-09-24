@@ -1133,15 +1133,15 @@ impl TryFrom<pb::S3BucketInfo> for super::S3BucketInfo {
     type Error = GuardianError;
 
     fn try_from(info: pb::S3BucketInfo) -> Result<Self, Self::Error> {
-        let bucket = info.bucket.ok_or_else(|| missing("bucket"))?;
+        let name = info.name.ok_or_else(|| missing("name"))?;
         let region = info.region.ok_or_else(|| missing("region"))?;
-        Ok(Self { bucket, region })
+        Ok(Self { name, region })
     }
 }
 
 fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     pb::S3BucketInfo {
-        bucket: Some(info.bucket),
+        name: Some(info.name),
         region: Some(info.region),
     }
 }

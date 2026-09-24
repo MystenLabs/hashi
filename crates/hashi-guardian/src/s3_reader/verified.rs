@@ -299,7 +299,7 @@ mod tests {
             *expected.pcr_allowlist.current_build()
         );
         let mut wrong_bucket = reported.clone();
-        wrong_bucket.bucket_info.bucket.push_str("-other");
+        wrong_bucket.bucket_info.name.push_str("-other");
         let mut wrong_region = reported.clone();
         wrong_region.bucket_info.region = "us-west-2".into();
         let mut wrong_retention = reported.clone();

@@ -13,29 +13,32 @@ next_event_delays:
 # Sui withdrawal history searched before the guardian audit start (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600
 
-# Required: expected Bitcoin network for every Guardian writing session.
-bitcoin_network: "signet"
-
-guardian_s3:
-  bucket: "hashi-guardian-logs"
-  region: "us-east-1"
-  # Omit both keys to use the AWS default credential chain.
-  # access_key: "..."
-  # secret_key: "..."
+# Deployment identity and builds accepted when auditing Guardian logs.
+deployment:
+  bucket_info:
+    name: "hashi-guardian-logs"
+    region: "us-east-1"
   retention_environment: "testnet"
+  bitcoin_network: "signet"
+  pcr_allowlist:
+    # Expected enclave build: git revision + PCR0 (hex). The live guardian must
+    # report this revision, and its attestation PCR0 must match it.
+    current_build:
+      git_revision: "0000000000000000000000000000000000000000"
+      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
-# Expected enclave build: git revision + PCR0 (hex). The live guardian must
-# report this revision, and its attestation PCR0 must match it.
-current_build:
-  git_revision: "0000000000000000000000000000000000000000"
-  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    # Older still-trusted builds accepted only for historical S3 logs during an
+    # upgrade window. Omit or leave empty outside an upgrade.
+    prev_builds: []
+    # prev_builds:
+    #   - git_revision: "1111111111111111111111111111111111111111"
+    #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
 
-# Older still-trusted builds accepted only for historical S3 logs during an
-# upgrade window. Omit or leave empty outside an upgrade.
-prev_builds: []
-# prev_builds:
-#   - git_revision: "1111111111111111111111111111111111111111"
-#     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+# Optional explicit credentials; omit this block to use AWS's default credential chain.
+# s3_credentials:
+#   access_key: "..."
+#   secret_key: "..."
+#   session_token: "..." # Only for temporary credentials.
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"

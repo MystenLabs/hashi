@@ -32,7 +32,6 @@ pub use s3::S3Credentials;
 pub use s3::S3ObjectLockPolicy;
 pub use s3::S3RetentionEnvironment;
 pub use s3::TESTNET_S3_OBJECT_LOCK_POLICY;
-pub use s3::UnresolvedS3Config;
 pub use s3::log;
 pub use s3::log::*;
 pub use session::*;

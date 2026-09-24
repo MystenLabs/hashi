@@ -45,9 +45,10 @@ configured PCR allowlist.
 For a fully-local end-to-end run of this flow (local sui node + a dockerized
 guardian, no devnet), see [`docker/hashi-guardian-local`](../../docker/hashi-guardian-local).
 
-The guardian init config may omit `guardian_s3.access_key` and
-`guardian_s3.secret_key`; when both are omitted, the commands use the AWS SDK
-default credential chain.
+The required `deployment` block contains the bucket/region, retention environment,
+Bitcoin network, and PCR allowlist. The optional `s3_credentials` block supplies
+`access_key`, `secret_key`, and an optional `session_token`; omit the entire block
+to use the AWS SDK default credential chain.
 
 ## operator ceremony
 
@@ -165,7 +166,7 @@ the Hashi object id comes from config. All three require threshold KP
 authorization during PI.
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+command uses `guardian_endpoint`, `deployment`, `hashi`,
 `kp_roster`, and `limiter_config`.
 
 ## key-provisioner provision
@@ -306,7 +307,7 @@ cargo run -p hashi-guardian-init -- operator rotate-kp-set wait --config guardia
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). These
-commands use `guardian_endpoint`, `guardian_s3`, `kp_roster` (the dealt set)
+commands use `guardian_endpoint`, `deployment`, `kp_roster` (the dealt set)
 and `new_kp_roster`.
 
 ## key-provisioner rotate-kp-set
@@ -333,7 +334,7 @@ cargo run -p hashi-guardian-init -- key-provisioner rotate-kp-set --config guard
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `kp_pgp_cert_path`, `guardian_endpoint`, `guardian_s3`,
+command uses `kp_pgp_cert_path`, `guardian_endpoint`, `deployment`,
 `kp_roster` and `new_kp_roster`. Every KP must sign the same proposal (the
 new set, `n`, `t` and the deployment configuration): the enclave rejects a batch whose
 submissions disagree.
@@ -412,7 +413,7 @@ cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sam
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+command uses `guardian_endpoint`, `deployment`, `hashi`,
 `kp_roster`, and `limiter_config`.
 
 ## tools

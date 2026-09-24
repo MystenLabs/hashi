@@ -62,12 +62,13 @@ use crate::kp_roster::decrypt_kp_share;
 
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
 
     info!(
         phase = "setup",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         relay_endpoint = %cfg.relay_endpoint,
@@ -80,15 +81,15 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     // reads that session first.
     info!(
         phase = "s3 connect",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
-        current_git_revision = %cfg.kp_roster.pcr_allowlist.current_build().git_revision(),
-        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
-        prev_build_count = cfg.kp_roster.pcr_allowlist.prev_builds().len(),
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
+        current_git_revision = %cfg.deployment.pcr_allowlist.current_build().git_revision(),
+        current_pcr0 = hex::encode(cfg.deployment.pcr_allowlist.current_build().pcr0()),
+        prev_build_count = cfg.deployment.pcr_allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let allowlist = cfg.kp_roster.pcr_allowlist();
-    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
+    let allowlist = cfg.deployment.pcr_allowlist.clone();
+    let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -192,7 +193,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let enclave_bucket_info = &deployment.bucket_info;
     let enclave_git_revision = &deployment.git_revision;
     anyhow::ensure!(
-        deployment == &cfg.deployment_config().summary(),
+        deployment == &cfg.deployment.summary(),
         "Guardian deployment differs from expected configuration"
     );
     let enclave_config_hash = config_hash
@@ -210,7 +211,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     info!(
         phase = "guardian info",
         session_id = %session_id,
-        bucket = %enclave_bucket_info.bucket,
+        bucket = %enclave_bucket_info.name,
         region = %enclave_bucket_info.region,
         enc_pubkey = hex::encode(enclave_enc_pubkey_bytes),
         config_hash = hex::encode(enclave_config_hash),
@@ -301,7 +302,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     let expected_config = InitConfig::new(
         cfg.limiter_config,
         master_g,
-        cfg.deployment_config(),
+        cfg.deployment.clone(),
         cfg.hashi.hashi_ids.hashi_object_id,
     );
     let config_hash = expected_config.digest();

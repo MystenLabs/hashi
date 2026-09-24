@@ -27,8 +27,9 @@ use crate::kp_roster::decrypt_kp_share;
 
 pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
-    let s3_credentials = hashi_guardian::resolve_s3_credentials(&cfg.guardian_s3).await?;
-    let allowlist = cfg.kp_roster.pcr_allowlist();
+    let s3_credentials =
+        hashi_guardian::resolve_s3_credentials(cfg.s3_credentials.as_ref()).await?;
+    let allowlist = cfg.deployment.pcr_allowlist.clone();
     let certs_roster = cfg.kp_roster.load_certs_roster()?;
 
     let signing_cert =
@@ -56,15 +57,15 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
 
     info!(
         phase = "setup",
-        bucket = cfg.guardian_s3.bucket_info.bucket,
-        region = cfg.guardian_s3.bucket_info.region,
+        bucket = cfg.deployment.bucket_info.name,
+        region = cfg.deployment.bucket_info.region,
         relay_endpoint = %cfg.relay_endpoint,
         signing_fingerprint = %signing_fingerprint_hex,
         new_fingerprint = %new_fingerprint,
         "running individual KP certificate rotation",
     );
 
-    let mut reader = GuardianReader::new(cfg.deployment_config(), s3_credentials.clone())
+    let mut reader = GuardianReader::new(cfg.deployment.clone(), s3_credentials.clone())
         .await
         .context("connect to guardian log bucket")?;
     let mut client =
@@ -85,7 +86,7 @@ pub async fn run(cfg: Config, new_kp_pgp_cert_path: PathBuf) -> anyhow::Result<(
     let signing_pub_key = endpoint_verified.signing_pub_key;
     let endpoint_deployment = endpoint_verified.info.deployment_info()?;
     anyhow::ensure!(
-        endpoint_deployment == &cfg.deployment_config().summary(),
+        endpoint_deployment == &cfg.deployment.summary(),
         "Guardian deployment differs from expected configuration"
     );
     let verified_session = reader.get_current_session_info(&session_id).await?;

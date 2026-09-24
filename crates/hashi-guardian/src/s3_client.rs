@@ -11,7 +11,6 @@ use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Credentials;
 use hashi_types::guardian::S3ObjectLockPolicy;
 use hashi_types::guardian::S3RetentionEnvironment;
-use hashi_types::guardian::UnresolvedS3Config;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -33,46 +32,25 @@ use tracing::warn;
 /// Log PUTs override this because the Guardian log writer owns their retries.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 
-/// Resolve explicit credentials or, when both are omitted, use AWS's default
-/// provider chain.
-pub async fn resolve_s3_credentials(config: &UnresolvedS3Config) -> anyhow::Result<S3Credentials> {
-    let access_key = config
-        .access_key
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let secret_key = config
-        .secret_key
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
+/// Use explicit credentials or resolve them through AWS's default provider chain.
+pub async fn resolve_s3_credentials(
+    credentials: Option<&S3Credentials>,
+) -> anyhow::Result<S3Credentials> {
+    if let Some(credentials) = credentials {
+        return Ok(credentials.clone());
+    }
 
-    let (access_key, secret_key, session_token) = match (access_key, secret_key) {
-        (Some(access_key), Some(secret_key)) => {
-            (access_key.to_string(), secret_key.to_string(), None)
-        }
-        (None, None) => {
-            let provider =
-                aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
-                    .build()
-                    .await;
-            let credentials = provider
-                .provide_credentials()
-                .await
-                .context("failed to resolve AWS credentials from the default provider chain")?;
-            (
-                credentials.access_key_id().to_string(),
-                credentials.secret_access_key().to_string(),
-                credentials.session_token().map(ToOwned::to_owned),
-            )
-        }
-        _ => anyhow::bail!(
-            "guardian_s3 access_key and secret_key must either both be set or both be omitted"
-        ),
-    };
-
+    let provider = aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+        .build()
+        .await;
+    let credentials = provider
+        .provide_credentials()
+        .await
+        .context("failed to resolve AWS credentials from the default provider chain")?;
     Ok(S3Credentials {
-        access_key,
-        secret_key,
-        session_token,
+        access_key: credentials.access_key_id().to_string(),
+        secret_key: credentials.secret_access_key().to_string(),
+        session_token: credentials.session_token().map(ToOwned::to_owned),
     })
 }
 
@@ -98,7 +76,7 @@ impl GuardianS3Client {
         credentials: &S3Credentials,
     ) -> GuardianResult<Self> {
         info!("S3 Configuration:");
-        info!("   Bucket: {}", bucket_info.bucket);
+        info!("   Bucket: {}", bucket_info.name);
         info!("   Region: {}", bucket_info.region);
 
         let mut creds = CredentialsBuilder::default()
@@ -190,7 +168,7 @@ impl GuardianS3Client {
         // success if the existing immutable object is exactly this record.
         let result = s3_client
             .put_object()
-            .bucket(&self.bucket_info.bucket)
+            .bucket(&self.bucket_info.name)
             .key(key)
             .content_type("application/json")
             .object_lock_mode(ObjectLockMode::Compliance)
@@ -222,7 +200,7 @@ impl GuardianS3Client {
         info!("Object locked until: {:?}", expiry_time);
         info!(
             "Public URL: https://{}.s3.amazonaws.com/{}",
-            self.bucket_info.bucket, key
+            self.bucket_info.name, key
         );
 
         Ok(())
@@ -234,7 +212,7 @@ impl GuardianS3Client {
         let response = self
             .client
             .get_object()
-            .bucket(&self.bucket_info.bucket)
+            .bucket(&self.bucket_info.name)
             .key(key)
             .send()
             .await
@@ -285,7 +263,7 @@ impl GuardianS3Client {
         // Verify bucket exists and has Object Lock enabled
         let bucket_config = s3_client
             .get_object_lock_configuration()
-            .bucket(&self.bucket_info.bucket)
+            .bucket(&self.bucket_info.name)
             .send()
             .await;
 
@@ -302,7 +280,7 @@ impl GuardianS3Client {
 
                 match object_lock_enabled_config {
                     ObjectLockEnabled::Enabled => {
-                        info!("Bucket {} has Object Lock enabled", self.bucket_info.bucket);
+                        info!("Bucket {} has Object Lock enabled", self.bucket_info.name);
                     }
                     other => {
                         return Err(S3Error(format!(
@@ -330,7 +308,7 @@ impl GuardianS3Client {
 
         let bucket_objects = s3_client
             .list_objects_v2()
-            .bucket(&self.bucket_info.bucket)
+            .bucket(&self.bucket_info.name)
             .max_keys(10)
             .send()
             .await
@@ -346,14 +324,14 @@ impl GuardianS3Client {
         if objects.is_empty() {
             info!(
                 "Bucket {} has no objects (or no access to list)",
-                self.bucket_info.bucket
+                self.bucket_info.name
             );
             return Ok(());
         }
 
         info!(
             "Bucket {}: listing {} object(s) (max 10)",
-            self.bucket_info.bucket,
+            self.bucket_info.name,
             objects.len()
         );
 
@@ -406,7 +384,7 @@ impl GuardianS3Client {
             let response = self
                 .client
                 .list_object_versions()
-                .bucket(&self.bucket_info.bucket)
+                .bucket(&self.bucket_info.name)
                 .prefix(prefix)
                 .delimiter("/")
                 .set_key_marker(key_marker)
@@ -460,7 +438,7 @@ impl GuardianS3Client {
         loop {
             let mut req = s3_client
                 .list_object_versions()
-                .bucket(&self.bucket_info.bucket)
+                .bucket(&self.bucket_info.name)
                 .prefix(prefix);
             if let Some(ref marker) = key_marker {
                 req = req.key_marker(marker);
@@ -595,7 +573,7 @@ impl GuardianS3Client {
         let response = self
             .client
             .get_object()
-            .bucket(&self.bucket_info.bucket)
+            .bucket(&self.bucket_info.name)
             .key(key)
             .send()
             .await
@@ -688,7 +666,7 @@ mod tests {
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         GuardianS3Client::from_client_for_tests(
             S3BucketInfo {
-                bucket: "bucket".to_string(),
+                name: "bucket".to_string(),
                 region: "us-east-1".to_string(),
             },
             S3RetentionEnvironment::Testnet,

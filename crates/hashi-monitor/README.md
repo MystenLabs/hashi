@@ -42,23 +42,13 @@ such a finding as conclusive.
 
 ## Usage
 
-### Active testnet
+Start from `audit.sample.yaml` and fill in your deployment's identifiers and
+PCR allowlist. Supply AWS credentials through the default credential chain or
+the optional `s3_credentials` block, and set `BITCOIN_RPC_URL` to your Bitcoin
+JSON-RPC endpoint.
 
-`audit.testnet.yaml` contains the active Hashi Guardian testnet deployment
-identifiers and PCR allowlist. Supply AWS credentials through the default
-credential chain and keep the Signet provider URI in the environment:
-
-```bash
-export AWS_PROFILE=guardian-s3-testnet
-export HASHI_BITCOIN_RPC_URL="https://your-signet-json-rpc-endpoint"
-
-cargo run -p hashi-monitor -- continuous \
-  --config audit.testnet.yaml \
-  --start 2026-08-04T19:00:00Z
-```
-
-Run this from `crates/hashi-monitor`, or prefix the configuration path with
-`crates/hashi-monitor/` when running from the repository root.
+Run the examples below from `crates/hashi-monitor`, or prefix the configuration
+path with `crates/hashi-monitor/` when running from the repository root.
 
 ### Batch audit
 ```bash
@@ -82,9 +72,11 @@ still be pending, which is what a restarted service wants.
 ## Config
 See `audit.sample.yaml` for a complete batch/continuous example:
 
-`bitcoin_network` is required. Every Guardian writing session must match the
-configured network, S3 bucket/region, and retention environment. Historical
-builds remain accepted through `prev_builds`.
+The required `deployment` block contains the expected Bitcoin network, S3
+bucket/region, retention environment, and PCR allowlist. Every Guardian writing
+session must match that deployment. Historical builds remain accepted through
+`deployment.pcr_allowlist.prev_builds`. Omit `s3_credentials` to use the AWS default
+credential chain; explicit credentials require both keys and may include a session token.
 
 ```yaml
 # Liveness delay bounds (seconds)
@@ -98,16 +90,32 @@ next_event_delays:
 # Optional: Sui withdrawal history before the guardian window (default: 1 hour)
 # withdrawal_predecessor_lookback: 3600
 
-# Required: expected Bitcoin network for every Guardian writing session.
-bitcoin_network: "signet"
-
-guardian_s3:
-  bucket: "hashi-guardian-logs"
-  region: "us-east-1"
-  # Omit both keys to use the AWS default credential chain.
-  # access_key: "..."
-  # secret_key: "..."
+# Deployment identity and builds accepted when auditing Guardian logs.
+deployment:
+  bucket_info:
+    name: "hashi-guardian-logs"
+    region: "us-east-1"
   retention_environment: "testnet"
+  bitcoin_network: "signet"
+  pcr_allowlist:
+    # Expected enclave build: git revision + PCR0 (hex). The live guardian must
+    # report this revision, and its attestation PCR0 must match it.
+    current_build:
+      git_revision: "0000000000000000000000000000000000000000"
+      pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+    # Older still-trusted builds accepted only for historical S3 logs during an
+    # upgrade window. Omit or leave empty outside an upgrade.
+    prev_builds: []
+    # prev_builds:
+    #   - git_revision: "1111111111111111111111111111111111111111"
+    #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+
+# Optional explicit credentials; omit this block to use AWS's default credential chain.
+# s3_credentials:
+#   access_key: "..."
+#   secret_key: "..."
+#   session_token: "..." # Only for temporary credentials.
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"
