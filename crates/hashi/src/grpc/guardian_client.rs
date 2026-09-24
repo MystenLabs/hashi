@@ -19,6 +19,8 @@ use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+const GET_GUARDIAN_INFO_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Boxed transport handed to the tonic-generated `GuardianServiceClient`.
 /// Same shape as `crate::grpc::Client::BoxedChannel`, so the metrics
 /// callback layer wraps validator-validator and validator-guardian RPCs
@@ -112,10 +114,13 @@ impl GuardianClient {
     pub async fn get_guardian_info(
         &self,
     ) -> Result<hashi_types::proto::GetGuardianInfoResponse, tonic::Status> {
-        let response = self
-            .guardian_service_client()
-            .get_guardian_info(hashi_types::proto::GetGuardianInfoRequest {})
-            .await?;
+        let mut client = self.guardian_service_client();
+        let response = tokio::time::timeout(
+            GET_GUARDIAN_INFO_TIMEOUT,
+            client.get_guardian_info(hashi_types::proto::GetGuardianInfoRequest {}),
+        )
+        .await
+        .map_err(|_| tonic::Status::deadline_exceeded("GetGuardianInfo timed out"))??;
         Ok(response.into_inner())
     }
 

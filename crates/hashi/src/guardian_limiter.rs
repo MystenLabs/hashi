@@ -209,8 +209,13 @@ pub(crate) fn should_defer_guardian_finalize(
     next_seq: u64,
     last_finalized: Option<(u64, sui_sdk_types::Address)>,
     wid: sui_sdk_types::Address,
+    guardian_next_seq: Option<u64>,
 ) -> bool {
-    last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
+    last_finalized.is_some_and(|(last_seq, last_wid)| {
+        next_seq <= last_seq
+            && wid != last_wid
+            && guardian_next_seq.is_none_or(|guardian_seq| last_seq < guardian_seq)
+    })
 }
 
 /// 20 ticks ≈ 5 min at the reconcile cadence.
@@ -367,11 +372,20 @@ mod tests {
     fn defer_only_for_a_different_wid_at_an_already_consumed_seq() {
         let a = sui_sdk_types::Address::new([1u8; 32]);
         let b = sui_sdk_types::Address::new([2u8; 32]);
-        assert!(!should_defer_guardian_finalize(0, None, a));
-        assert!(should_defer_guardian_finalize(5, Some((5, a)), b));
-        assert!(should_defer_guardian_finalize(4, Some((5, a)), b));
-        assert!(!should_defer_guardian_finalize(5, Some((5, a)), a));
-        assert!(!should_defer_guardian_finalize(6, Some((5, a)), b));
+        assert!(!should_defer_guardian_finalize(0, None, a, None));
+        assert!(should_defer_guardian_finalize(5, Some((5, a)), b, None));
+        assert!(should_defer_guardian_finalize(4, Some((5, a)), b, None));
+        assert!(!should_defer_guardian_finalize(5, Some((5, a)), a, None));
+        assert!(!should_defer_guardian_finalize(6, Some((5, a)), b, None));
+    }
+
+    #[test]
+    fn defer_only_while_the_guardian_has_consumed_the_recorded_seq() {
+        let a = sui_sdk_types::Address::new([1u8; 32]);
+        let b = sui_sdk_types::Address::new([2u8; 32]);
+        assert!(!should_defer_guardian_finalize(7, Some((7, a)), b, Some(7)));
+        assert!(should_defer_guardian_finalize(5, Some((5, a)), b, Some(6)));
+        assert!(!should_defer_guardian_finalize(6, Some((5, a)), b, Some(6)));
     }
 
     #[test]
