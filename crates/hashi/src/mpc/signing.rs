@@ -1185,8 +1185,8 @@ async fn try_finalize_signature(
         let reason = match e {
             // The partials were ruled out as the cause, so collecting more cannot fix this.
             FastCryptoError::InconsistentInputs => {
-                "the presigning tuple, beacon, message or verifying key does not match the one \
-                 the signers used, so retrying will not help"
+                "the presigning tuple, beacon, message, verifying key or derivation address \
+                 does not match the ones the signers used, so retrying will not help"
                     .to_string()
             }
             e => e.to_string(),
