@@ -746,8 +746,11 @@ impl SigningManager {
     /// their partial signatures out for the rest of this call, and count the certain ones
     /// against their owners. Returns whether anything new was flagged.
     ///
-    /// The full Reed-Solomon attempt still takes every partial signature, since its decoding is
-    /// what corrects them.
+    /// The blame comes from an input that already finished, so the flags only help the inputs
+    /// still pending in this call.
+    ///
+    /// The full Reed-Solomon attempt is still given every partial signature, flagged ones
+    /// included, since its decoding is what corrects them.
     ///
     /// [Blame::Inconclusive] indices are flagged as well as [Blame::Certain] ones, since flagging
     /// only picks which partial signatures to try next and a wrong guess costs one more attempt.
