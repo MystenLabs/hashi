@@ -37,7 +37,7 @@ deployment:
     region: "us-east-1"
   # S3 Object Lock retention class: devnet, mainnet, or testnet.
   retention_environment: "testnet"
-  # Bitcoin network: mainnet (or bitcoin), testnet, testnet4, regtest, or signet.
+  # Bitcoin network: mainnet (or bitcoin), testnet, regtest, or signet.
   bitcoin_network: "signet"
   pcr_allowlist:
     # Expected live enclave build: git revision + PCR0 (hex). Select the

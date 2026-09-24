@@ -18,12 +18,19 @@ fn deserialize_network<'de, D>(deserializer: D) -> Result<bitcoin::Network, D::E
 where
     D: ::serde::Deserializer<'de>,
 {
-    let network = String::deserialize(deserializer)?.to_ascii_lowercase();
-    // Preserve guardian-init's mainnet alias alongside bitcoin's network names.
-    if network == "mainnet" {
-        Ok(bitcoin::Network::Bitcoin)
-    } else {
-        network.parse().map_err(::serde::de::Error::custom)
+    let s = String::deserialize(deserializer)?;
+    parse_network(&s).map_err(::serde::de::Error::custom)
+}
+
+fn parse_network(s: &str) -> anyhow::Result<bitcoin::Network> {
+    match s.to_ascii_lowercase().as_str() {
+        "mainnet" | "bitcoin" => Ok(bitcoin::Network::Bitcoin),
+        "testnet" => Ok(bitcoin::Network::Testnet),
+        "regtest" => Ok(bitcoin::Network::Regtest),
+        "signet" => Ok(bitcoin::Network::Signet),
+        _ => {
+            anyhow::bail!("unknown bitcoin_network `{s}`; expected mainnet/testnet/regtest/signet")
+        }
     }
 }
 
