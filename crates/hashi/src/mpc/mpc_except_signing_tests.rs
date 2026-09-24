@@ -4503,8 +4503,8 @@ fn test_handle_complain_request_withholds_valid_complaint_outside_policy() {
 
     // Neither the default policy nor entries for another epoch or dealer
     // release the response. It is verified and cached on the first attempt;
-    // the cache hit that answers the later ones is gated just the same.
-    for dealers in [
+    // the cache hits that answer the later ones are gated just the same.
+    for (attempt, dealers) in [
         vec![],
         vec![AllowedDealer {
             epoch: epoch + 1,
@@ -4514,7 +4514,10 @@ fn test_handle_complain_request_withholds_valid_complaint_outside_policy() {
             epoch,
             dealer: setup.address(3),
         }],
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         manager.complaint_response_policy = ComplaintResponsePolicy::AllowList { dealers };
         let result = manager.handle_complain_request(setup.address(1), &request);
         assert!(
@@ -4523,10 +4526,27 @@ fn test_handle_complain_request_withholds_valid_complaint_outside_policy() {
                 Err(MpcError::ComplaintWithheld { epoch: e, dealer: d })
                     if e == epoch && d == dealer_addr
             ),
-            "expected the complaint to be withheld, got {result:?}"
+            "attempt {attempt}: expected the complaint to be withheld, got {result:?}"
         );
         assert_eq!(manager.complaint_responses.len(), 1);
     }
+
+    // Another validator replaying that complaint is answered from the cache
+    // without being verified, and is withheld just the same.
+    let result = manager.handle_complain_request(setup.address(3), &request);
+    assert!(
+        matches!(result, Err(MpcError::ComplaintWithheld { .. })),
+        "expected the replay to be withheld, got {result:?}"
+    );
+    // Without the cache, the same complaint from that validator fails
+    // verification: it is not that validator's complaint.
+    let mut uncached = setup.create_manager(2);
+    receive_dealer_messages(&mut uncached, &cheating_message, dealer_addr).unwrap();
+    let result = uncached.handle_complain_request(setup.address(3), &request);
+    assert!(
+        matches!(result, Err(MpcError::CryptoError(_))),
+        "expected verification to fail, got {result:?}"
+    );
 
     // Allow-listing the (epoch, dealer) pair releases it.
     manager.complaint_response_policy = ComplaintResponsePolicy::AllowList {

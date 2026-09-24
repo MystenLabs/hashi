@@ -2831,7 +2831,6 @@ mod tests {
     /// node 0's key.
     async fn run_complaint_recovery_after_allowlist_update(restart_victim: bool) -> Result<()> {
         use hashi::config::AllowedDealer;
-        use hashi::metrics::MPC_LABEL_DKG;
 
         tracing_subscriber::fmt()
             .with_test_writer()
@@ -2845,13 +2844,8 @@ mod tests {
         const VICTIM: usize = 3;
         const RESTARTED_RESPONDERS: [usize; 2] = [0, 1];
         const UNTOUCHED_RESPONDER: usize = 2;
-        let complaints = |node: &HashiNodeHandle, outcome: &str| {
-            node.hashi()
-                .metrics
-                .mpc_complaints_received_total
-                .with_label_values(&[MPC_LABEL_DKG, outcome])
-                .get()
-        };
+        let withheld =
+            |node: &HashiNodeHandle| node.hashi().metrics.mpc_complaints_withheld_total.get();
 
         let mut test_networks = fault_tolerant_builder()
             .with_corrupt_shares_target(VICTIM)
@@ -2865,7 +2859,7 @@ mod tests {
             let nodes = test_networks.hashi_network().nodes();
             if RESTARTED_RESPONDERS
                 .iter()
-                .all(|&i| complaints(&nodes[i], "withheld") > 0)
+                .all(|&i| withheld(&nodes[i]) > 0)
             {
                 break;
             }
@@ -2880,9 +2874,6 @@ mod tests {
             nodes[VICTIM].hashi().signing_verifying_key().is_none(),
             "the victim must not get the key while its complaints are withheld"
         );
-        for node in nodes {
-            assert_eq!(complaints(node, "served"), 0);
-        }
 
         // 2. Allow-list every corrupting dealer for the DKG epoch on the
         //    restarted responders.
@@ -2928,15 +2919,9 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} did not get the MPC key: {e}"));
         }
         assert!(
-            RESTARTED_RESPONDERS
-                .iter()
-                .any(|&i| complaints(&nodes[i], "served") > 0),
-            "the victim's share must have been recovered through served complaints"
-        );
-        assert_eq!(
-            complaints(&nodes[UNTOUCHED_RESPONDER], "served"),
-            0,
-            "the untouched responder kept the default policy and must not serve complaints"
+            withheld(&nodes[UNTOUCHED_RESPONDER]) > 0,
+            "the untouched responder kept the default policy and must have withheld the \
+             victim's complaints"
         );
 
         // 4. The recovered share signs consistently with everyone else's.

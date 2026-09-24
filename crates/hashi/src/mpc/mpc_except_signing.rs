@@ -668,12 +668,13 @@ impl MpcManager {
 
     /// Answers a complaint, subject to `complaint_response_policy`.
     ///
-    /// The complaint is verified in full regardless of the policy, so an
-    /// invalid complaint is always an error. A valid complaint about a dealer
-    /// the policy does not allow is withheld: the response reveals this
-    /// node's share, and a bug in the complaint flow must not let a handful of
-    /// parties extract it. This is the only place a complaint response is
-    /// released.
+    /// The complaint is verified before the policy is applied, so an invalid
+    /// complaint is always an error, unless the response is already cached
+    /// from an earlier verified complaint about the same dealer: a cache hit
+    /// does not verify the caller. A complaint about a dealer the policy does
+    /// not allow is withheld: the response reveals this node's share, and a
+    /// bug in the complaint flow must not let a handful of parties extract
+    /// it. This is the only place a complaint response is released.
     pub fn handle_complain_request(
         &mut self,
         caller: Address,

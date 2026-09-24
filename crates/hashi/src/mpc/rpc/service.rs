@@ -2,9 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::grpc::HttpService;
-use crate::metrics::MPC_LABEL_DKG;
-use crate::metrics::MPC_LABEL_KEY_ROTATION;
-use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::mpc::RetrieveOutcome;
 use crate::mpc::finish_avid_retrieval;
 use crate::mpc::retrieve_from_store;
@@ -131,11 +128,6 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let label = match internal_request.protocol_type {
-            types::ProtocolTypeIndicator::Dkg => MPC_LABEL_DKG,
-            types::ProtocolTypeIndicator::KeyRotation => MPC_LABEL_KEY_ROTATION,
-            types::ProtocolTypeIndicator::NonceGeneration => MPC_LABEL_NONCE_GENERATION,
-        };
         let mpc_manager = self.mpc_manager()?;
         let result = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
@@ -147,18 +139,10 @@ impl MpcService for HttpService {
             Ok(mgr.handle_complain_request(caller, &internal_request))
         })
         .await?;
-        let outcome = match &result {
-            Ok(_) => "served",
-            Err(MpcError::ComplaintWithheld { .. }) => "withheld",
-            Err(_) => "failed",
-        };
-        self.metrics()
-            .mpc_complaints_received_total
-            .with_label_values(&[label, outcome])
-            .inc();
         let complaint = result.map_err(|e| {
-            // A withheld complaint is logged in full by the manager.
-            if outcome == "failed" {
+            if matches!(e, MpcError::ComplaintWithheld { .. }) {
+                self.metrics().mpc_complaints_withheld_total.inc();
+            } else {
                 tracing::warn!("complain failed: {e}");
             }
             mpc_error_to_status(e)

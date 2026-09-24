@@ -224,9 +224,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_corrupt_shares_for: Option<Address>,
 
-    /// Which complaints this node answers with its recovery shares. Every
-    /// complaint is still verified, logged and counted; this only decides
-    /// whether the response is returned.
+    /// Which complaints this node answers with its recovery shares.
+    /// Complaints are still verified and logged, and withheld ones counted in
+    /// `hashi_mpc_complaints_withheld_total`; this only decides whether the
+    /// response is returned.
     ///
     /// Defaults to an empty allow-list, i.e. no complaint is answered.
     #[serde(skip_serializing_if = "Option::is_none")]
