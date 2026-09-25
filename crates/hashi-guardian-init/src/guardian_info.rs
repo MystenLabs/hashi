@@ -118,7 +118,7 @@ pub fn ensure_oi_info_matches_post_init(
     oi_info: &OperatorInitInfo,
     live_info: &GuardianInfo,
 ) -> anyhow::Result<()> {
-    let expected_lifecycle = match &oi_info.initialization {
+    let expected_lifecycle = match &oi_info.mode {
         OperatorInitMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
         OperatorInitMode::Withdraw(_) => WithdrawStage::OperatorInitialized.into(),
     };
@@ -142,7 +142,7 @@ pub fn ensure_oi_info_matches_post_init(
             && live_info.current_committee_epoch.is_none(),
         "live post-OperatorInit GuardianInfo contains later-stage state"
     );
-    match &oi_info.initialization {
+    match &oi_info.mode {
         OperatorInitMode::Ceremony => ensure!(
             live_info.secret_sharing_instance.is_none()
                 && live_info.config_hash.is_none()
@@ -201,7 +201,7 @@ mod tests {
     fn post_init_comparison_preserves_withdraw_bindings_and_stage_checks() {
         let mut oi = OperatorInitInfo::mock_for_testing();
         for genesis_state_hash in [None, Some([3; 32])] {
-            let OperatorInitMode::Withdraw(withdraw) = &mut oi.initialization else {
+            let OperatorInitMode::Withdraw(withdraw) = &mut oi.mode else {
                 unreachable!();
             };
             withdraw.genesis_state_hash = genesis_state_hash;
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn post_init_comparison_accepts_ceremony_without_withdraw_state() {
         let mut oi = OperatorInitInfo::mock_for_testing();
-        oi.initialization = OperatorInitMode::Ceremony;
+        oi.mode = OperatorInitMode::Ceremony;
         let mut live = GuardianInfo::mock_for_testing();
         live.lifecycle = CeremonyStage::OperatorInitialized.into();
         live.deployment_info = Some(oi.deployment.summary());

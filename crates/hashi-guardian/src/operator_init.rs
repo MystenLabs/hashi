@@ -267,7 +267,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     let oi_info = OperatorInitInfo {
         deployment: deployment.clone(),
         encryption_pubkey: enclave.encryption_public_key().to_bytes().to_vec(),
-        initialization: match &withdraw_mode {
+        mode: match &withdraw_mode {
             None => OperatorInitMode::Ceremony,
             Some(withdraw) => OperatorInitMode::Withdraw(Box::new(WithdrawOperatorInitInfo {
                 secret_sharing_instance: withdraw.ceremony_state.secret_sharing_instance.clone(),
@@ -538,7 +538,7 @@ mod tests {
             info.encryption_pubkey,
             enclave.encryption_public_key().to_bytes().to_vec()
         );
-        if let OperatorInitMode::Withdraw(withdraw) = &info.initialization {
+        if let OperatorInitMode::Withdraw(withdraw) = &info.mode {
             let state = enclave.temporary_init_state().unwrap();
             assert_eq!(
                 withdraw.secret_sharing_instance,

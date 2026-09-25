@@ -27,7 +27,7 @@
           }
         },
         "encryption_pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
-        "initialization": {
+        "mode": {
           "Withdraw": {
             "secret_sharing_instance": {
               "commitments": {

@@ -342,7 +342,7 @@ fn verify_oi_info_matches_provisioned_standby(
     oi_info: &OperatorInitInfo,
     live_info: &GuardianInfo,
 ) -> anyhow::Result<()> {
-    let OperatorInitMode::Withdraw(withdraw) = &oi_info.initialization else {
+    let OperatorInitMode::Withdraw(withdraw) = &oi_info.mode else {
         anyhow::bail!("OI record is not withdraw-mode initialization");
     };
     ensure!(

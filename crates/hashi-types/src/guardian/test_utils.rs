@@ -133,17 +133,15 @@ impl super::OperatorInitInfo {
         Self {
             deployment: config.deployment().clone(),
             encryption_pubkey: vec![0u8; 32],
-            initialization: super::OperatorInitMode::Withdraw(Box::new(
-                super::WithdrawOperatorInitInfo {
-                    secret_sharing_instance: SetupNewKeyResponse::mock_for_testing()
-                        .secret_sharing_instance,
-                    config_hash: [2; 32],
-                    limiter_config: *config.limiter_config(),
-                    hashi_object_id,
-                    mpc_master_g,
-                    genesis_state_hash: None,
-                },
-            )),
+            mode: super::OperatorInitMode::Withdraw(Box::new(super::WithdrawOperatorInitInfo {
+                secret_sharing_instance: SetupNewKeyResponse::mock_for_testing()
+                    .secret_sharing_instance,
+                config_hash: [2; 32],
+                limiter_config: *config.limiter_config(),
+                hashi_object_id,
+                mpc_master_g,
+                genesis_state_hash: None,
+            })),
         }
     }
 }

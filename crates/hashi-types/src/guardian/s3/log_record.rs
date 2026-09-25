@@ -490,9 +490,9 @@ mod tests {
         let encrypted_shares = RotateKpSetResponse::mock_for_testing().encrypted_shares;
         let guardian_info = OperatorInitInfo::mock_for_testing();
         let mut ceremony_info = guardian_info.clone();
-        ceremony_info.initialization = OperatorInitMode::Ceremony;
+        ceremony_info.mode = OperatorInitMode::Ceremony;
         let mut bootstrap_info = guardian_info.clone();
-        let OperatorInitMode::Withdraw(withdraw) = &mut bootstrap_info.initialization else {
+        let OperatorInitMode::Withdraw(withdraw) = &mut bootstrap_info.mode else {
             unreachable!("withdraw dummy initialization");
         };
         withdraw.genesis_state_hash =
@@ -613,7 +613,7 @@ mod tests {
             LogMessage::Heartbeat(_) => "heartbeat/heartbeat",
             LogMessage::Init(message) => match message.as_ref() {
                 InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
-                InitLogMessage::OIGuardianInfo(info) => match &info.initialization {
+                InitLogMessage::OIGuardianInfo(info) => match &info.mode {
                     OperatorInitMode::Ceremony => "init/oi-ceremony-guardian-info",
                     OperatorInitMode::Withdraw(withdraw) => match withdraw.genesis_state_hash {
                         None => "init/oi-guardian-info",
