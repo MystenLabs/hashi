@@ -752,7 +752,7 @@ pub struct Config {
 }
 
 // This constant mirrors the value in btc_config.move and must be kept in sync.
-const DUST_RELAY_MIN_VALUE: u64 = 546;
+pub(crate) const DUST_RELAY_MIN_VALUE: u64 = 546;
 
 pub use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 pub use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;

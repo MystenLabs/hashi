@@ -529,10 +529,11 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                             "Committed"
                         };
                         println!(
-                            "  txid: {}  status: {}  requests: {}",
+                            "  txid: {}  status: {}  requests: {}  outflow: {} sats",
                             txid,
                             status,
-                            pw.request_ids.len()
+                            pw.request_ids.len(),
+                            crate::withdrawals::withdrawal_limiter_consumption_amount(pw)
                         );
                     }
                 }
@@ -596,6 +597,7 @@ fn withdrawal_txn_row(pw: &WithdrawalTransaction) -> serde_json::Value {
         "txid": txid.to_string(),
         "status": status,
         "request_count": pw.request_ids.len(),
+        "outflow_sats": crate::withdrawals::withdrawal_limiter_consumption_amount(pw),
     })
 }
 
