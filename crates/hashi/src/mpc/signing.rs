@@ -38,9 +38,9 @@ use crate::metrics::Metrics;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::PartialSigningOutput;
+use crate::mpc::types::PublicPresigs;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
-use crate::mpc::types::signing_nonce_bytes;
 use crate::mpc::types::signing_request_digest;
 
 const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100);
@@ -126,9 +126,14 @@ fn owned_counts_by_member(share_owners: &HashMap<ShareIndex, Address>) -> HashMa
         })
 }
 
+/// This node's contribution to one input's signature: the public presigs it
+/// binds, the bound nonce the partials were computed against, and the
+/// partials themselves.
+type LocalPartials = (PublicPresigs, [u8; POINT_SIZE_IN_BYTES], Vec<Eval<S>>);
+
 enum CacheOrPresig {
-    Cached(G, Vec<Eval<S>>),
-    Presig((Vec<S>, G)),
+    Cached(LocalPartials),
+    Presig(Presig, Presig),
 }
 
 struct SigningPoolState {
@@ -571,7 +576,6 @@ impl SigningManager {
         &self,
         p2p_channel: &impl P2PChannel,
         inputs: Vec<SignInput>,
-        beacon_value: &S,
         timeout: Duration,
         metrics: &Metrics,
         result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
@@ -596,22 +600,23 @@ impl SigningManager {
                     input.signing_id,
                     &input.message,
                     input.presig_pair,
-                    beacon_value,
                     input.derivation_address.as_ref(),
                     metrics,
                 )
                 .await
             {
-                Ok((public_nonce, partials)) => pending.push(InputSigningState::new(
-                    input.signing_id,
-                    input.message,
-                    public_nonce,
-                    beacon_value,
-                    input.derivation_address,
-                    partials,
-                    threshold as usize,
-                    all_peers.clone(),
-                )),
+                Ok((public_presigs, signing_nonce_bytes, partials)) => {
+                    pending.push(InputSigningState::new(
+                        input.signing_id,
+                        input.message,
+                        public_presigs,
+                        signing_nonce_bytes,
+                        input.derivation_address,
+                        partials,
+                        threshold as usize,
+                        all_peers.clone(),
+                    ))
+                }
                 Err(e) => {
                     if matches!(e, SigningError::RequestChanged { .. }) {
                         request_changed.push(input.signing_id);
@@ -623,7 +628,7 @@ impl SigningManager {
         if !request_changed.is_empty() {
             tracing::error!(
                 "Refused {} input(s) whose cached partials were computed under a \
-                 different message, derivation address or beacon: {:?}",
+                 different message or derivation address: {:?}",
                 request_changed.len(),
                 &request_changed[..request_changed.len().min(8)],
             );
@@ -927,10 +932,9 @@ impl SigningManager {
         signing_id: Address,
         message: &[u8],
         presig_pair: PresigPair,
-        beacon_value: &S,
         derivation_address: Option<&DerivationAddress>,
         metrics: &Metrics,
-    ) -> SigningResult<(G, Vec<Eval<S>>)> {
+    ) -> SigningResult<LocalPartials> {
         let config = &self.config;
         // Splitting the lock is safe because a given `signing_id` is never signed concurrently
         // on a node (distinct id per withdrawal input, retries sequential), and the presigs are
@@ -938,10 +942,11 @@ impl SigningManager {
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
+                // The bound nonce commits to the message and derivation
+                // address, so these partials may only ever be served for the
+                // request they were computed under.
                 let digest = signing_request_digest(message, derivation_address);
-                let nonce = signing_nonce_bytes(&existing.public_nonce(), beacon_value);
-                if existing.request_digest() != &digest || existing.signing_nonce_bytes() != &nonce
-                {
+                if existing.request_digest() != &digest {
                     return Err(SigningError::RequestChanged { signing_id });
                 }
                 tracing::info!(
@@ -949,9 +954,13 @@ impl SigningManager {
                      reusing cached partial sigs (batch_index={})",
                     state.batches.last().map_or(0, |b| b.batch_index),
                 );
-                CacheOrPresig::Cached(existing.public_nonce(), existing.partial_sigs.clone())
+                CacheOrPresig::Cached((
+                    existing.public_presigs(),
+                    *existing.signing_nonce_bytes(),
+                    existing.partial_sigs.clone(),
+                ))
             } else {
-                let (presig, _unbound) = self.take_presig_pair(&mut state, presig_pair)?;
+                let (first, second) = self.take_presig_pair(&mut state, presig_pair)?;
                 // Trigger refill based on the latest batch's consumption.
                 if let Some(latest) = state.batches.last() {
                     let remaining = latest.remaining();
@@ -966,43 +975,50 @@ impl SigningManager {
                 while state.batches.len() > 1 && state.batches[0].is_fully_consumed() {
                     state.batches.remove(0);
                 }
-                // Signing still binds only the first presig of the pair; the
-                // second is spent alongside it so both indices stay
-                // single-use and fully consumed batches can be pruned.
-                CacheOrPresig::Presig(presig)
+                CacheOrPresig::Presig(first, second)
             }
         }; // state write lock released
-        let (public_nonce, partial_sigs) = match taken {
-            CacheOrPresig::Cached(nonce, sigs) => (nonce, sigs),
-            CacheOrPresig::Presig(presig) => {
+        match taken {
+            CacheOrPresig::Cached(local) => Ok(local),
+            CacheOrPresig::Presig(first, second) => {
+                let public_presigs = PublicPresigs {
+                    first: first.1,
+                    second: second.1,
+                };
                 let _timer = metrics
                     .mpc_sign_partial_gen_duration_seconds
                     .with_label_values(&[MPC_LABEL_SIGNING])
                     .start_timer();
-                let result = generate_partial_signatures(
+                let (signing_nonce, partial_sigs) = generate_partial_signatures(
                     message,
-                    presig,
-                    beacon_value,
+                    first,
+                    second,
                     &config.key_shares,
                     &config.verifying_key,
                     derivation_address,
                 )
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
                 drop(_timer);
-                self.state.write().unwrap().partial_signing_outputs.insert(
-                    signing_id,
-                    PartialSigningOutput::new(
-                        result.0,
-                        beacon_value,
-                        message,
-                        derivation_address,
-                        result.1.clone(),
-                    ),
+                let output = PartialSigningOutput::new(
+                    public_presigs,
+                    &signing_nonce,
+                    message,
+                    derivation_address,
+                    partial_sigs,
                 );
-                result
+                let local = (
+                    public_presigs,
+                    *output.signing_nonce_bytes(),
+                    output.partial_sigs.clone(),
+                );
+                self.state
+                    .write()
+                    .unwrap()
+                    .partial_signing_outputs
+                    .insert(signing_id, output);
+                Ok(local)
             }
-        };
-        Ok((public_nonce, partial_sigs))
+        }
     }
 }
 
@@ -1016,10 +1032,9 @@ pub struct SignInput {
 struct InputSigningState {
     signing_id: Address,
     message: Vec<u8>,
-    public_nonce: G,
+    public_presigs: PublicPresigs,
     derivation_address: Option<DerivationAddress>,
     signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
-    beacon: S,
     partials: Vec<Eval<S>>,
     /// Floor on the partial count before a poll round may early-exit for
     /// this input; the real predicate is [`Self::can_attempt`]. Tests raise
@@ -1040,8 +1055,8 @@ impl InputSigningState {
     fn new(
         signing_id: Address,
         message: Vec<u8>,
-        public_nonce: G,
-        beacon: &S,
+        public_presigs: PublicPresigs,
+        signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
         derivation_address: Option<DerivationAddress>,
         partials: Vec<Eval<S>>,
         early_exit_floor: usize,
@@ -1050,10 +1065,9 @@ impl InputSigningState {
         Self {
             signing_id,
             message,
-            public_nonce,
+            public_presigs,
             derivation_address,
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
-            beacon: *beacon,
+            signing_nonce_bytes,
             early_exit_floor,
             partials,
             peers_remaining,
@@ -1139,8 +1153,7 @@ fn next_rs_attempt_at(threshold: usize, n: usize) -> usize {
 
 struct AggregationContext {
     message: Vec<u8>,
-    nonce: G,
-    beacon: S,
+    public_presigs: PublicPresigs,
     vk: G,
     deriv: Option<DerivationAddress>,
     threshold: u16,
@@ -1156,10 +1169,9 @@ impl AggregationContext {
             .mpc_sign_aggregation_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
             .start_timer();
-        let (message, nonce, beacon, vk, deriv, threshold) = (
+        let (message, presigs, vk, deriv, threshold) = (
             self.message.clone(),
-            self.nonce,
-            self.beacon,
+            self.public_presigs,
             self.vk,
             self.deriv,
             self.threshold,
@@ -1167,8 +1179,8 @@ impl AggregationContext {
         super::spawn_blocking(move || {
             aggregate_signatures(
                 &message,
-                &nonce,
-                &beacon,
+                &presigs.first,
+                &presigs.second,
                 &sigs,
                 threshold,
                 &vk,
@@ -1187,10 +1199,9 @@ impl AggregationContext {
             .mpc_sign_aggregation_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
             .start_timer();
-        let (message, nonce, beacon, vk, deriv, threshold) = (
+        let (message, presigs, vk, deriv, threshold) = (
             self.message.clone(),
-            self.nonce,
-            self.beacon,
+            self.public_presigs,
             self.vk,
             self.deriv,
             self.threshold,
@@ -1198,8 +1209,7 @@ impl AggregationContext {
         super::spawn_blocking(move || {
             aggregate_signatures_with_recovery(
                 &message,
-                &nonce,
-                &beacon,
+                &presigs,
                 &sigs,
                 threshold,
                 &vk,
@@ -1232,8 +1242,7 @@ async fn try_finalize_signature(
     }
     let ctx = AggregationContext {
         message: st.message.clone(),
-        nonce: st.public_nonce,
-        beacon: st.beacon,
+        public_presigs: st.public_presigs,
         vk: *verifying_key,
         deriv: st.derivation_address,
         threshold,
@@ -1494,8 +1503,7 @@ impl SigningManager {
 
 fn aggregate_signatures_with_recovery(
     message: &[u8],
-    public_presig: &G,
-    beacon_value: &S,
+    public_presigs: &PublicPresigs,
     partial_signatures: &[Eval<S>],
     threshold: u16,
     verifying_key: &G,
@@ -1506,8 +1514,8 @@ fn aggregate_signatures_with_recovery(
     let poly = RSDecoder::new(indices, threshold as usize).compute_message_polynomial(&values)?;
     let sig = finalize_schnorr_signature(
         message,
-        public_presig,
-        beacon_value,
+        &public_presigs.first,
+        &public_presigs.second,
         poly.c0(),
         verifying_key,
         derivation_address,
@@ -1600,7 +1608,6 @@ mod tests {
             signing_id: Address,
             message: &[u8],
             pair_slot: u64,
-            beacon_value: &S,
             derivation_address: Option<&DerivationAddress>,
             timeout: Duration,
             metrics: &Metrics,
@@ -1614,7 +1621,6 @@ mod tests {
                     presig_pair: slot_pair(pair_slot),
                     derivation_address: derivation_address.copied(),
                 }],
-                beacon_value,
                 timeout,
                 metrics,
                 result_tx,
@@ -2068,35 +2074,39 @@ mod tests {
         fn prepare_all(
             &self,
             message: &[u8],
-            beacon_value: &S,
             request_id: Address,
             pair_slot: u64,
             skip: Option<usize>,
-        ) -> (G, Vec<Vec<Eval<S>>>) {
-            let global_presig_index = slot_pair(pair_slot).first;
-            let mut public_nonce = None;
+        ) -> (PublicPresigs, Vec<Vec<Eval<S>>>) {
+            let pair = slot_pair(pair_slot);
+            let mut public_presigs = None;
             let mut all_sigs = Vec::new();
             for (idx, mgr) in self.managers.iter().enumerate() {
                 if skip == Some(idx) {
                     all_sigs.push(Vec::new());
                     continue;
                 }
-                let presig = {
+                let peek = |index: u64| {
                     let state = mgr.state.read().unwrap();
                     state
                         .batches
                         .iter()
-                        .find(|b| b.contains(global_presig_index))
+                        .find(|b| b.contains(index))
                         .and_then(|b| {
-                            let pos = (global_presig_index - b.start_index) as usize;
+                            let pos = (index - b.start_index) as usize;
                             b.pool.get(pos).and_then(|s| s.clone())
                         })
                         .unwrap()
                 };
-                let (pn, sigs) = generate_partial_signatures(
+                let (first, second) = (peek(pair.first), peek(pair.second));
+                let presigs = PublicPresigs {
+                    first: first.1,
+                    second: second.1,
+                };
+                let (nonce, sigs) = generate_partial_signatures(
                     message,
-                    presig,
-                    beacon_value,
+                    first,
+                    second,
                     &mgr.config.key_shares,
                     &mgr.config.verifying_key,
                     None,
@@ -2104,14 +2114,14 @@ mod tests {
                 .unwrap();
                 mgr.state.write().unwrap().partial_signing_outputs.insert(
                     request_id,
-                    PartialSigningOutput::new(pn, beacon_value, message, None, sigs.clone()),
+                    PartialSigningOutput::new(presigs, &nonce, message, None, sigs.clone()),
                 );
-                if public_nonce.is_none() {
-                    public_nonce = Some(pn);
+                if public_presigs.is_none() {
+                    public_presigs = Some(presigs);
                 }
                 all_sigs.push(sigs);
             }
-            (public_nonce.unwrap(), all_sigs)
+            (public_presigs.unwrap(), all_sigs)
         }
 
         /// Build a MockSigningP2PChannel containing all peers except `caller_index`.
@@ -2225,9 +2235,9 @@ mod tests {
     /// Pre-built partial sigs for aggregate_signatures_with_recovery tests.
     struct AggregateTestData {
         partial_sigs: Vec<Eval<S>>,
-        public_nonce: G,
+        public_presigs: PublicPresigs,
+        signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
         vk: G,
-        beacon: S,
         t: u16,
         rng: StdRng,
     }
@@ -2263,10 +2273,9 @@ mod tests {
             })
             .collect();
 
-        let beacon = S::rand(&mut rng);
-
-        let mut public_nonce = None;
         let mut partial_sigs: Vec<Eval<S>> = Vec::new();
+        let mut public_presigs = None;
+        let mut signing_nonce_bytes = None;
         for (i, sk_share) in sk_shares.iter().enumerate().take(6) {
             let index = ShareIndex::new(i as u16 + 1).unwrap();
             let key_shares = avss::SharesForNode {
@@ -2290,26 +2299,28 @@ mod tests {
                 Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f }, true)
                     .unwrap()
                     .collect();
-            let (pn, sigs) = generate_partial_signatures(
+            public_presigs.get_or_insert(PublicPresigs {
+                first: presigs[0].1,
+                second: presigs[1].1,
+            });
+            let (nonce, sigs) = generate_partial_signatures(
                 message,
                 presigs[0].clone(),
-                &beacon,
+                presigs[1].clone(),
                 &key_shares,
                 &vk,
                 None,
             )
             .unwrap();
-            if public_nonce.is_none() {
-                public_nonce = Some(pn);
-            }
+            signing_nonce_bytes.get_or_insert(nonce.to_byte_array());
             partial_sigs.extend(sigs);
         }
 
         AggregateTestData {
             partial_sigs,
-            public_nonce: public_nonce.unwrap(),
+            public_presigs: public_presigs.unwrap(),
+            signing_nonce_bytes: signing_nonce_bytes.unwrap(),
             vk,
-            beacon,
             t,
             rng,
         }
@@ -2496,11 +2507,9 @@ mod tests {
     fn test_handle_get_partial_signatures_found() {
         let setup = SigningTestSetup::new(4);
         let message = b"test";
-        let mut rng = StdRng::seed_from_u64(6501);
-        let beacon = S::rand(&mut rng);
         let req_id = test_request_id();
 
-        setup.prepare_all(message, &beacon, req_id, 0, None);
+        let (presigs, _) = setup.prepare_all(message, req_id, 0, None);
 
         let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
@@ -2508,17 +2517,17 @@ mod tests {
             })
             .unwrap();
         assert!(resp.partial_sigs.contains_key(&req_id));
-        let cached = setup.managers[0]
+        let cached = *setup.managers[0]
             .state
             .read()
             .unwrap()
             .partial_signing_outputs
             .get(&req_id)
             .unwrap()
-            .public_nonce();
+            .signing_nonce_bytes();
         assert_eq!(
             resp.signing_nonces.get(&req_id).map(Vec::as_slice),
-            Some(signing_nonce_bytes(&cached, &beacon).as_slice()),
+            Some(cached.as_slice()),
             "must report the nonce the returned partials were derived against"
         );
         assert_eq!(
@@ -2531,19 +2540,20 @@ mod tests {
             resp.signing_nonces.keys().collect::<Vec<_>>(),
             "the merge side rejects a partially filled map, so the key sets must match"
         );
-        assert_ne!(
-            resp.signing_nonces.get(&req_id).map(Vec::as_slice),
-            Some(cached.to_byte_array().as_slice()),
-        );
+        for raw in [presigs.first, presigs.second] {
+            assert_ne!(
+                resp.signing_nonces.get(&req_id).map(Vec::as_slice),
+                Some(raw.to_byte_array().as_slice()),
+                "the reported nonce is the bound one, not a raw public presig"
+            );
+        }
     }
 
     #[test]
     fn test_partial_signatures_response_survives_a_proto_round_trip() {
         let setup = SigningTestSetup::new(4);
         let req_id = test_request_id();
-        let mut rng = StdRng::seed_from_u64(6502);
-        let beacon = S::rand(&mut rng);
-        setup.prepare_all(b"test", &beacon, req_id, 0, None);
+        setup.prepare_all(b"test", req_id, 0, None);
 
         let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
@@ -2559,18 +2569,15 @@ mod tests {
         assert_eq!(
             round_tripped.signing_nonces.get(&req_id).map(Vec::as_slice),
             Some(
-                signing_nonce_bytes(
-                    &setup.managers[0]
-                        .state
-                        .read()
-                        .unwrap()
-                        .partial_signing_outputs
-                        .get(&req_id)
-                        .unwrap()
-                        .public_nonce(),
-                    &beacon,
-                )
-                .as_slice()
+                setup.managers[0]
+                    .state
+                    .read()
+                    .unwrap()
+                    .partial_signing_outputs
+                    .get(&req_id)
+                    .unwrap()
+                    .signing_nonce_bytes()
+                    .as_slice()
             ),
         );
     }
@@ -2603,11 +2610,10 @@ mod tests {
     async fn test_sign_happy_path() {
         let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
         let message = b"hello world";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
         // All peers (except caller) prepare their partial sigs first.
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
 
         let p2p = setup.mock_p2p_for(0);
         let sig = SigningManager::sign_one(
@@ -2616,7 +2622,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -2630,7 +2635,6 @@ mod tests {
     #[tokio::test]
     async fn test_sign_multi_input_all_succeed() {
         let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
-        let beacon = S::zero();
         let inputs: Vec<(Address, Vec<u8>, u64)> = (0..3u8)
             .map(|j| {
                 (
@@ -2641,7 +2645,7 @@ mod tests {
             })
             .collect();
         for (sid, msg, pidx) in &inputs {
-            setup.prepare_all(msg, &beacon, *sid, *pidx, Some(0));
+            setup.prepare_all(msg, *sid, *pidx, Some(0));
         }
         let requests: Vec<SignInput> = inputs
             .iter()
@@ -2656,14 +2660,7 @@ mod tests {
         let p2p = setup.mock_p2p_for(0);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         setup.managers[0]
-            .sign(
-                &p2p,
-                requests,
-                &beacon,
-                Duration::from_secs(30),
-                &test_metrics(),
-                tx,
-            )
+            .sign(&p2p, requests, Duration::from_secs(30), &test_metrics(), tx)
             .await;
 
         let mut results = HashMap::new();
@@ -2680,7 +2677,6 @@ mod tests {
     #[tokio::test]
     async fn test_sign_multi_input_one_fails_others_succeed() {
         let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
-        let beacon = S::zero();
         let good: Vec<(Address, Vec<u8>, u64)> = (0..2u8)
             .map(|j| {
                 (
@@ -2693,7 +2689,7 @@ mod tests {
         let bad_id = Address::new([0xBF; 32]);
 
         for (sid, msg, pidx) in &good {
-            setup.prepare_all(msg, &beacon, *sid, *pidx, Some(0));
+            setup.prepare_all(msg, *sid, *pidx, Some(0));
         }
         // Deliberately do NOT prepare peers for the bad input: they return no
         // partial for it, so it can never reach threshold.
@@ -2717,14 +2713,7 @@ mod tests {
         let p2p = setup.mock_p2p_for(0);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         setup.managers[0]
-            .sign(
-                &p2p,
-                requests,
-                &beacon,
-                Duration::from_secs(2),
-                &test_metrics(),
-                tx,
-            )
+            .sign(&p2p, requests, Duration::from_secs(2), &test_metrics(), tx)
             .await;
 
         let mut results = HashMap::new();
@@ -2751,10 +2740,10 @@ mod tests {
 
         let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
         let message = b"empty local sigs";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
-        let (public_nonce, _) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (public_presigs, _) = setup.prepare_all(message, req_id, 0, Some(0));
+        let nonce = G::from_byte_array(&cached_nonce(&setup.managers[1], req_id)).unwrap();
 
         // Pre-populate manager[0]'s cache with empty `partial_sigs` to simulate a
         // `w' = 0` party that produced no local sigs from `generate_partial_signatures`.
@@ -2765,7 +2754,7 @@ mod tests {
             .partial_signing_outputs
             .insert(
                 req_id,
-                PartialSigningOutput::new(public_nonce, &beacon, message, None, vec![]),
+                PartialSigningOutput::new(public_presigs, &nonce, message, None, vec![]),
             );
 
         let p2p = setup.mock_p2p_for(0);
@@ -2775,7 +2764,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -2792,20 +2780,26 @@ mod tests {
         // Give exactly 2 peers partial sigs, rest return errors.
         let setup = SigningTestSetup::new(7);
         let message = b"threshold";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
         // Only peers 1 and 2 prepare partial sigs.
         for i in [1, 2] {
             let mgr = &setup.managers[i];
-            let presig = {
+            let (first, second) = {
                 let state = mgr.state.read().unwrap();
-                state.batches[0].pool[0].clone().unwrap()
+                (
+                    state.batches[0].pool[0].clone().unwrap(),
+                    state.batches[0].pool[1].clone().unwrap(),
+                )
             };
-            let (pn, sigs) = generate_partial_signatures(
+            let presigs = PublicPresigs {
+                first: first.1,
+                second: second.1,
+            };
+            let (nonce, sigs) = generate_partial_signatures(
                 message,
-                presig,
-                &beacon,
+                first,
+                second,
                 &mgr.config.key_shares,
                 &mgr.config.verifying_key,
                 None,
@@ -2813,7 +2807,7 @@ mod tests {
             .unwrap();
             mgr.state.write().unwrap().partial_signing_outputs.insert(
                 req_id,
-                PartialSigningOutput::new(pn, &beacon, message, None, sigs),
+                PartialSigningOutput::new(presigs, &nonce, message, None, sigs),
             );
         }
 
@@ -2825,7 +2819,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -2842,10 +2835,9 @@ mod tests {
         // Caller's 1 + 6 peers = 7 total, 1 bad → RS capacity (7-3)/2=2 → corrects 1.
         let setup = SigningTestSetup::new(7);
         let message = b"recovery";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
-        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (_, all_sigs) = setup.prepare_all(message, req_id, 0, Some(0));
         let p2p = canned_p2p_with_corruptions(&all_sigs, &[1], &mut StdRng::seed_from_u64(999));
 
         let sig = SigningManager::sign_one(
@@ -2854,7 +2846,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -2871,10 +2862,9 @@ mod tests {
         // Caller's 1 + 9 peers = 10 total, 2 bad → RS capacity (10-4)/2=3 → corrects 2.
         let setup = SigningTestSetup::new(10);
         let message = b"multi-recovery";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
-        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (_, all_sigs) = setup.prepare_all(message, req_id, 0, Some(0));
         let p2p = canned_p2p_with_corruptions(&all_sigs, &[1, 2], &mut StdRng::seed_from_u64(888));
 
         let sig = SigningManager::sign_one(
@@ -2883,7 +2873,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -2892,6 +2881,17 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    /// The bound nonce `mgr` cached for `request_id`.
+    fn cached_nonce(mgr: &SigningManager, request_id: Address) -> [u8; POINT_SIZE_IN_BYTES] {
+        *mgr.state
+            .read()
+            .unwrap()
+            .partial_signing_outputs
+            .get(&request_id)
+            .unwrap()
+            .signing_nonce_bytes()
     }
 
     fn share_index(i: u16) -> ShareIndex {
@@ -2913,8 +2913,11 @@ mod tests {
         InputSigningState::new(
             signing_id,
             b"m".to_vec(),
-            G::generator(),
-            &S::zero(),
+            PublicPresigs {
+                first: G::generator(),
+                second: G::generator() + G::generator(),
+            },
+            G::generator().to_byte_array(),
             None,
             partials,
             // Helper-driven collect tests exercise full rounds; the
@@ -2928,13 +2931,12 @@ mod tests {
     async fn test_a_dropped_peer_still_leaves_a_verifiable_signature() {
         let setup = SigningTestSetup::new(7);
         let message = b"drop-and-aggregate";
-        let mut rng = StdRng::seed_from_u64(6503);
-        let beacon = S::rand(&mut rng);
         let req_id = test_request_id();
         let diverged = test_address(6);
 
-        let (public_nonce, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, None);
-        let honest_nonce = public_nonce + G::generator() * beacon;
+        let (public_presigs, all_sigs) = setup.prepare_all(message, req_id, 0, None);
+        let honest_nonce_bytes = cached_nonce(&setup.managers[0], req_id);
+        let honest_nonce = G::from_byte_array(&honest_nonce_bytes).unwrap();
 
         let mut responses = HashMap::new();
         let mut nonces = HashMap::new();
@@ -2960,8 +2962,8 @@ mod tests {
         let mut pending = vec![InputSigningState::new(
             req_id,
             message.to_vec(),
-            public_nonce,
-            &beacon,
+            public_presigs,
+            honest_nonce_bytes,
             None,
             all_sigs[0].clone(),
             usize::MAX,
@@ -3006,10 +3008,7 @@ mod tests {
             FinalizeOutcome::Done(sig, mismatched) => {
                 assert!(mismatched.is_empty(), "no share should mismatch");
                 verify_schnorr(&setup.verifying_key, message, &sig);
-                let reported = G::from_byte_array(&signing_nonce_bytes(&public_nonce, &beacon))
-                    .unwrap()
-                    .x_as_be_bytes()
-                    .unwrap();
+                let reported = honest_nonce.x_as_be_bytes().unwrap();
                 assert_eq!(
                     reported, sig.r,
                     "the nonce we report must be the one fastcrypto signed under"
@@ -3019,12 +3018,49 @@ mod tests {
         }
     }
 
+    /// The nonce is bound to the message: the same presig pair signing two
+    /// different messages yields two different nonces, and neither is a raw
+    /// public presig. Without the binding (and without a beacon) both
+    /// signatures would share `R`, which leaks the key.
+    #[tokio::test]
+    async fn test_nonce_is_bound_to_the_message() {
+        // Same seed, so both setups hold the same presigs at slot 0.
+        let (setup_a, setup_b) = (SigningTestSetup::new(4), SigningTestSetup::new(4));
+        let req_id = test_request_id();
+        let mut nonces = Vec::new();
+        for (setup, message) in [(&setup_a, b"message a"), (&setup_b, b"message b")] {
+            let (presigs, _) = setup.prepare_all(message, req_id, 0, Some(0));
+            let p2p = setup.mock_p2p_for(0);
+            let sig = SigningManager::sign_one(
+                &setup.managers[0],
+                &p2p,
+                req_id,
+                message,
+                0,
+                None,
+                Duration::from_secs(30),
+                &test_metrics(),
+            )
+            .await
+            .unwrap();
+            verify_schnorr(&setup.verifying_key, message, &sig);
+            for raw in [presigs.first, presigs.second] {
+                assert_ne!(sig.r, raw.x_as_be_bytes().unwrap());
+            }
+            nonces.push((presigs, sig.r));
+        }
+        assert_eq!(nonces[0].0, nonces[1].0, "both signed with the same pair");
+        assert_ne!(
+            nonces[0].1, nonces[1].1,
+            "the nonce must depend on the message"
+        );
+    }
+
     #[tokio::test]
     async fn test_a_cache_hit_under_a_changed_message_is_refused() {
         let setup = SigningTestSetup::new(7);
-        let beacon = S::zero();
         let req_id = test_request_id();
-        setup.prepare_all(b"first sighash", &beacon, req_id, 0, None);
+        setup.prepare_all(b"first sighash", req_id, 0, None);
 
         let p2p = setup.mock_p2p_for(0);
         let result = SigningManager::sign_one(
@@ -3033,7 +3069,6 @@ mod tests {
             req_id,
             b"second sighash",
             0,
-            &beacon,
             None,
             Duration::from_secs(5),
             &test_metrics(),
@@ -3051,9 +3086,8 @@ mod tests {
     async fn test_sign_fast_fails_when_every_peer_is_on_a_different_nonce() {
         let setup = SigningTestSetup::new(4);
         let message = b"nonce-fast-fail";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
 
         let mut rng = StdRng::seed_from_u64(9090);
         let elsewhere = G::generator() + G::generator();
@@ -3079,7 +3113,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -3123,8 +3156,11 @@ mod tests {
         let mut pending = vec![InputSigningState::new(
             test_request_id(),
             b"m".to_vec(),
-            G::generator(),
-            &S::zero(),
+            PublicPresigs {
+                first: G::generator(),
+                second: G::generator() + G::generator(),
+            },
+            G::generator().to_byte_array(),
             None,
             vec![
                 eval_at(1, S::zero()),
@@ -3183,8 +3219,11 @@ mod tests {
         let mut pending = vec![InputSigningState::new(
             test_request_id(),
             b"m".to_vec(),
-            G::generator(),
-            &S::zero(),
+            PublicPresigs {
+                first: G::generator(),
+                second: G::generator() + G::generator(),
+            },
+            G::generator().to_byte_array(),
             None,
             vec![
                 eval_at(4, S::rand(&mut rng)),
@@ -3337,11 +3376,10 @@ mod tests {
     async fn test_sign_succeeds_despite_a_garbage_flooder() {
         let setup = SigningTestSetup::new(4);
         let message = b"garbage-flood";
-        let beacon = S::zero();
         let req_id = test_request_id();
         let mut rng = StdRng::seed_from_u64(1717);
 
-        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (_, all_sigs) = setup.prepare_all(message, req_id, 0, Some(0));
         let flood: Vec<Eval<S>> = (1..=4u16).map(|i| eval_at(i, S::rand(&mut rng))).collect();
         let mut responses = HashMap::new();
         responses.insert(test_address(1), Ok(flood));
@@ -3359,7 +3397,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &metrics,
@@ -3693,11 +3730,11 @@ mod tests {
     async fn test_sign_recovers_from_corrupt_local_share() {
         let setup = SigningTestSetup::new(7);
         let message = b"self-corrupt";
-        let beacon = S::zero();
         let req_id = test_request_id();
         let mut rng = StdRng::seed_from_u64(31337);
 
-        let (public_nonce, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, None);
+        let (public_presigs, all_sigs) = setup.prepare_all(message, req_id, 0, None);
+        let nonce = G::from_byte_array(&cached_nonce(&setup.managers[0], req_id)).unwrap();
         let mut corrupted = all_sigs[0].clone();
         corrupted[0].value = S::rand(&mut rng);
         setup.managers[0]
@@ -3707,7 +3744,7 @@ mod tests {
             .partial_signing_outputs
             .insert(
                 req_id,
-                PartialSigningOutput::new(public_nonce, &beacon, message, None, corrupted),
+                PartialSigningOutput::new(public_presigs, &nonce, message, None, corrupted),
             );
 
         let p2p = setup.mock_p2p_for(0);
@@ -3718,7 +3755,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &metrics,
@@ -3733,9 +3769,8 @@ mod tests {
     async fn test_sign_early_exits_at_threshold_ignoring_hung_peers() {
         let setup = SigningTestSetup::new(7);
         let message = b"hung-peers";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (_, all_sigs) = setup.prepare_all(message, req_id, 0, Some(0));
 
         let mut responses = HashMap::new();
         responses.insert(test_address(1), all_sigs[1].clone());
@@ -3751,7 +3786,6 @@ mod tests {
                 req_id,
                 message,
                 0,
-                &beacon,
                 None,
                 Duration::from_secs(30),
                 &test_metrics(),
@@ -3773,10 +3807,9 @@ mod tests {
         // No remaining peers → TooManyInvalidSignatures.
         let setup = SigningTestSetup::new(4);
         let message = b"too-many";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
-        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (_, all_sigs) = setup.prepare_all(message, req_id, 0, Some(0));
         let p2p =
             canned_p2p_with_corruptions(&all_sigs, &[1, 2, 3], &mut StdRng::seed_from_u64(777));
 
@@ -3786,7 +3819,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -3805,7 +3837,6 @@ mod tests {
         // All peers fail → never reach threshold → timeout.
         let setup = SigningTestSetup::new(4);
         let message = b"timeout";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
         let mut responses = HashMap::new();
@@ -3826,7 +3857,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_millis(1), // very short timeout
             &test_metrics(),
@@ -3848,9 +3878,8 @@ mod tests {
         // time is the deadline, not PARTIAL_SIGS_CALL_TIMEOUT x attempts.
         let setup = SigningTestSetup::new(7);
         let message = b"hung-below-threshold";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        let (_, all_sigs) = setup.prepare_all(message, req_id, 0, Some(0));
 
         let mut responses = HashMap::new();
         responses.insert(test_address(1), all_sigs[1].clone());
@@ -3866,7 +3895,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             deadline,
             &test_metrics(),
@@ -3892,9 +3920,8 @@ mod tests {
         // being polled each round.
         let setup = SigningTestSetup::new(4);
         let message = b"cooldown";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
 
         let failing = test_address(1);
         let p2p = CountingP2PChannel {
@@ -3909,7 +3936,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(5),
             &test_metrics(),
@@ -3943,9 +3969,8 @@ mod tests {
         // every round, not cooled down.
         let setup = SigningTestSetup::new(4);
         let message = b"unavailable";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
 
         let reconciling = test_address(1);
         let p2p = CountingP2PChannel {
@@ -3960,7 +3985,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(5),
             &test_metrics(),
@@ -3984,9 +4008,8 @@ mod tests {
         // sleeps rather than re-polling the down fleet every backoff cycle.
         let setup = SigningTestSetup::new(4);
         let message = b"all-cooling";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
 
         let p2p = CountingP2PChannel {
             fail: (1..4usize).map(test_address).collect(),
@@ -4000,7 +4023,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             PARTIAL_SIGS_PEER_COOLDOWN / 2,
             &test_metrics(),
@@ -4025,9 +4047,8 @@ mod tests {
         // cooldown expiry and then re-polls the fleet at cooldown cadence.
         let setup = SigningTestSetup::new(4);
         let message = b"cooldown-cadence";
-        let beacon = S::zero();
         let req_id = test_request_id();
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
 
         let p2p = CountingP2PChannel {
             fail: (1..4usize).map(test_address).collect(),
@@ -4041,7 +4062,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             PARTIAL_SIGS_PEER_COOLDOWN * 2 + Duration::from_secs(1),
             &test_metrics(),
@@ -4085,8 +4105,8 @@ mod tests {
         let mut st = InputSigningState::new(
             test_request_id(),
             message.to_vec(),
-            data.public_nonce,
-            &data.beacon,
+            data.public_presigs,
+            data.signing_nonce_bytes,
             None,
             partials,
             data.t as usize,
@@ -4153,8 +4173,7 @@ mod tests {
 
         let (sig, mismatched) = aggregate_signatures_with_recovery(
             message,
-            &data.public_nonce,
-            &data.beacon,
+            &data.public_presigs,
             &data.partial_sigs,
             data.t,
             &data.vk,
@@ -4181,8 +4200,7 @@ mod tests {
 
         let result = aggregate_signatures_with_recovery(
             message,
-            &data.public_nonce,
-            &data.beacon,
+            &data.public_presigs,
             &data.partial_sigs,
             data.t,
             &data.vk,
@@ -4208,7 +4226,7 @@ mod tests {
         let req_id = Address::new([0xFF; 32]);
         // Use the first pair of batch 1.
         let first_slot_of_batch_1 = batch_size / 2;
-        setup.prepare_all(b"swap", &S::zero(), req_id, first_slot_of_batch_1, Some(0));
+        setup.prepare_all(b"swap", req_id, first_slot_of_batch_1, Some(0));
         let p2p = setup.mock_p2p_for(0);
         let sig = SigningManager::sign_one(
             &setup.managers[0],
@@ -4216,7 +4234,6 @@ mod tests {
             req_id,
             b"swap",
             first_slot_of_batch_1,
-            &S::zero(),
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4266,8 +4283,7 @@ mod tests {
             &p2p,
             Address::new([0xFF; 32]),
             b"stale",
-            batch_size / 2, // first pair of the not-yet-generated batch 1
-            &S::zero(),
+            batch_size / 2,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4300,8 +4316,7 @@ mod tests {
             &p2p,
             Address::new([0xFF; 32]),
             b"future",
-            batch_size / 2, // first pair of the missing batch 1
-            &S::zero(),
+            batch_size / 2,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4351,7 +4366,6 @@ mod tests {
             Address::new([0xFF; 32]),
             b"fail",
             0,
-            &S::zero(),
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4376,8 +4390,7 @@ mod tests {
             &p2p,
             Address::new([0xFF; 32]),
             b"beyond",
-            pool_size + 100, // beyond all batches
-            &S::zero(),
+            pool_size + 100,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4398,23 +4411,13 @@ mod tests {
         let setup = SigningTestSetup::new(4);
         let pool_size = setup.managers[0].initial_presig_count();
         let refill_at = pool_size / crate::constants::PRESIG_REFILL_DIVISOR;
-        let beacon = S::zero();
 
         // Consume presignatures on manager 0 until we cross the threshold.
         for i in 0..(pool_size - refill_at) {
             let mgr = &setup.managers[0];
             let mut state = mgr.state.write().unwrap();
             let batch = state.batches.last_mut().unwrap();
-            let presig = batch.pool[i].take().unwrap();
-            let _ = generate_partial_signatures(
-                b"msg",
-                presig,
-                &beacon,
-                &mgr.config.key_shares,
-                &mgr.config.verifying_key,
-                None,
-            )
-            .unwrap();
+            batch.pool[i].take().unwrap();
             // Simulate the threshold check that sign() does.
             let latest = state.batches.last().unwrap();
             let remaining = latest.remaining();
@@ -4440,7 +4443,6 @@ mod tests {
             Address::new([0xFF; 32]),
             b"fail",
             0,
-            &S::zero(),
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4457,20 +4459,18 @@ mod tests {
     async fn test_sign_prunes_batch_then_pool_exhausted() {
         let setup = SigningTestSetup::new(4);
         let pool_size = setup.managers[0].initial_presig_count();
-        let beacon = S::zero();
         let p2p = setup.mock_p2p_for(0);
 
         // Sign every presig pair in the batch through the normal sign() path.
         for i in 0..pool_size / 2 {
             let req = Address::new([i as u8; 32]);
-            setup.prepare_all(b"drain", &beacon, req, i as u64, Some(0));
+            setup.prepare_all(b"drain", req, i as u64, Some(0));
             let result = SigningManager::sign_one(
                 &setup.managers[0],
                 &p2p,
                 req,
                 b"drain",
                 i as u64,
-                &beacon,
                 None,
                 Duration::from_secs(30),
                 &test_metrics(),
@@ -4495,7 +4495,6 @@ mod tests {
             Address::new([0xFF; 32]),
             b"one-more",
             (pool_size / 2) as u64,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4529,9 +4528,8 @@ mod tests {
 
         // Sign with an index from batch 0 — should succeed because batch 0
         // is still retained with unconsumed presigs.
-        let beacon = S::zero();
         let req = Address::new([0x01; 32]);
-        setup.prepare_all(b"old-batch", &beacon, req, 0, Some(0));
+        setup.prepare_all(b"old-batch", req, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
         let result = SigningManager::sign_one(
             &setup.managers[0],
@@ -4539,7 +4537,6 @@ mod tests {
             req,
             b"old-batch",
             0, // batch 0, manager has both batch 0 and 1
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4674,11 +4671,10 @@ mod tests {
     #[tokio::test]
     async fn test_sign_presig_already_consumed() {
         let setup = SigningTestSetup::new(4);
-        let beacon = S::zero();
 
         // First sign with presig 0 — succeeds.
         let req1 = Address::new([0x01; 32]);
-        setup.prepare_all(b"msg1", &beacon, req1, 0, Some(0));
+        setup.prepare_all(b"msg1", req1, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
         let result1 = SigningManager::sign_one(
             &setup.managers[0],
@@ -4686,7 +4682,6 @@ mod tests {
             req1,
             b"msg1",
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4703,7 +4698,6 @@ mod tests {
             req2,
             b"msg2",
             0, // same index, already consumed
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4724,8 +4718,7 @@ mod tests {
             &p2p,
             Address::new([0x01; 32]),
             b"far-ahead",
-            batch_size, // first pair of batch 2
-            &S::zero(),
+            batch_size,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4739,14 +4732,13 @@ mod tests {
     async fn test_sign_retry_reuses_cached_partial_sigs() {
         let setup = SigningTestSetup::new(4);
         let message = b"retry-test";
-        let beacon = S::zero();
         let req_id = test_request_id();
 
         // Record presig pool size before first sign.
         let pool_before = setup.managers[0].presignatures_remaining();
 
         // First sign — consumes one presig pair, caches partial sigs.
-        setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+        setup.prepare_all(message, req_id, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
         let sig1 = SigningManager::sign_one(
             &setup.managers[0],
@@ -4754,7 +4746,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4776,7 +4767,6 @@ mod tests {
             req_id,
             message,
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4804,7 +4794,6 @@ mod tests {
     #[tokio::test]
     async fn test_sign_different_request_consumes_new_presig() {
         let setup = SigningTestSetup::new(4);
-        let beacon = S::zero();
 
         let req1 = Address::new([0x10; 32]);
         let req2 = Address::new([0x20; 32]);
@@ -4812,7 +4801,7 @@ mod tests {
         let pool_before = setup.managers[0].presignatures_remaining();
 
         // First request.
-        setup.prepare_all(b"msg1", &beacon, req1, 0, Some(0));
+        setup.prepare_all(b"msg1", req1, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
         SigningManager::sign_one(
             &setup.managers[0],
@@ -4820,7 +4809,6 @@ mod tests {
             req1,
             b"msg1",
             0,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),
@@ -4829,14 +4817,13 @@ mod tests {
         .unwrap();
 
         // Second request with different ID.
-        setup.prepare_all(b"msg2", &beacon, req2, 1, Some(0));
+        setup.prepare_all(b"msg2", req2, 1, Some(0));
         SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req2,
             b"msg2",
             1,
-            &beacon,
             None,
             Duration::from_secs(30),
             &test_metrics(),

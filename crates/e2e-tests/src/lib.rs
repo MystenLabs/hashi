@@ -848,7 +848,6 @@ mod tests {
     use bitcoin::Witness;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
-    use fastcrypto::hash::HashFunction;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::threshold_schnorr::G;
@@ -1210,13 +1209,6 @@ mod tests {
             >,
         >,
     > {
-        let beacon_value = {
-            let mut hasher = fastcrypto::hash::Blake2b256::default();
-            for (signing_id, _, _, _) in inputs {
-                hasher.update(signing_id.as_bytes());
-            }
-            S::from_bytes_mod_order(&hasher.finalize().digest)
-        };
         let order: Vec<sui_sdk_types::Address> = inputs.iter().map(|(sid, _, _, _)| *sid).collect();
         let sign_futures: Vec<_> = nodes
             .iter()
@@ -1231,7 +1223,6 @@ mod tests {
                     hashi::metrics::MPC_LABEL_SIGNING,
                 )
                 .with_max_owned_shares(signing_manager.max_owned_count());
-                let beacon = beacon_value;
                 let metrics = node.hashi().metrics.clone();
                 let requests: Vec<hashi::mpc::SignInput> = inputs
                     .iter()
@@ -1246,14 +1237,7 @@ mod tests {
                 async move {
                     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                     signing_manager
-                        .sign(
-                            &p2p_channel,
-                            requests,
-                            &beacon,
-                            SIGNING_TIMEOUT,
-                            &metrics,
-                            tx,
-                        )
+                        .sign(&p2p_channel, requests, SIGNING_TIMEOUT, &metrics, tx)
                         .await;
                     let mut by_id = std::collections::HashMap::new();
                     while let Some((sid, res)) = rx.recv().await {

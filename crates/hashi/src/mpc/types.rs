@@ -3,7 +3,6 @@
 
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::error::FastCryptoResult;
-use fastcrypto::groups::GroupElement;
 use fastcrypto::groups::secp256k1::POINT_SIZE_IN_BYTES;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
@@ -1122,10 +1121,6 @@ pub enum ComplaintResponsesKey {
     },
 }
 
-pub(crate) fn signing_nonce_bytes(public_presig: &G, beacon: &S) -> [u8; POINT_SIZE_IN_BYTES] {
-    (*public_presig + G::generator() * beacon).to_byte_array()
-}
-
 pub(crate) fn signing_request_digest(
     message: &[u8],
     derivation_address: Option<&DerivationAddress>,
@@ -1143,9 +1138,20 @@ pub(crate) fn signing_request_digest(
     h.finalize().digest
 }
 
+/// The public halves of the presig pair one signature binds, in binding
+/// order. Aggregation needs both to recompute the bound nonce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicPresigs {
+    pub first: G,
+    pub second: G,
+}
+
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
-    public_nonce: G,
+    public_presigs: PublicPresigs,
+    /// The message-bound nonce `R` the partials were computed against. Peers
+    /// report it with their partials so a mismatch is caught before
+    /// aggregation.
     signing_nonce_bytes: [u8; POINT_SIZE_IN_BYTES],
     request_digest: [u8; 32],
     pub partial_sigs: Vec<Eval<S>>,
@@ -1153,22 +1159,22 @@ pub struct PartialSigningOutput {
 
 impl PartialSigningOutput {
     pub fn new(
-        public_nonce: G,
-        beacon: &S,
+        public_presigs: PublicPresigs,
+        signing_nonce: &G,
         message: &[u8],
         derivation_address: Option<&DerivationAddress>,
         partial_sigs: Vec<Eval<S>>,
     ) -> Self {
         Self {
-            signing_nonce_bytes: signing_nonce_bytes(&public_nonce, beacon),
+            public_presigs,
+            signing_nonce_bytes: signing_nonce.to_byte_array(),
             request_digest: signing_request_digest(message, derivation_address),
-            public_nonce,
             partial_sigs,
         }
     }
 
-    pub fn public_nonce(&self) -> G {
-        self.public_nonce
+    pub fn public_presigs(&self) -> PublicPresigs {
+        self.public_presigs
     }
 
     pub fn signing_nonce_bytes(&self) -> &[u8; POINT_SIZE_IN_BYTES] {
@@ -1217,8 +1223,8 @@ pub enum SigningError {
     InvalidPresigPair(hashi_types::move_types::PresigPair),
 
     #[error(
-        "Cached partial signatures for {signing_id} were computed under a different message, \
-         derivation address or beacon"
+        "Cached partial signatures for {signing_id} were computed under a different message \
+         or derivation address"
     )]
     RequestChanged { signing_id: Address },
 }
