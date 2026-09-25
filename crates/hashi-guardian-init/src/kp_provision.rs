@@ -140,11 +140,11 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "relay endpoint GuardianInfo verified; pinned standby session",
     );
 
-    // 2. Fetch + verify the same session's signed `GuardianInfo` from S3.
+    // 2. Fetch + verify the same session's signed operator-init record from S3.
     info!(
         phase = "guardian info",
         session_id = %session_id,
-        "fetching + verifying pinned standby session's signed GuardianInfo from S3",
+        "fetching + verifying pinned standby session's signed operator-init record from S3",
     );
     let verified_session = reader.get_current_session_info(&session_id).await?;
     let GuardianInfo {
@@ -218,7 +218,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         "Guardian has current_committee_epoch => operator activation already ran"
     );
     ensure_oi_info_matches_post_init(verified_session.info(), &guardian_info)
-        .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
+        .with_context(|| format!("S3 operator-init info mismatch for session {session_id}"))?;
     info!(
         phase = "guardian info",
         session_id = %session_id,

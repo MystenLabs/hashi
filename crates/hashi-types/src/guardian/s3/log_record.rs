@@ -401,7 +401,6 @@ mod tests {
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
     use crate::guardian::GuardianError;
-    use crate::guardian::GuardianInfo;
     use crate::guardian::GuardianSigningIntentType;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
@@ -411,6 +410,8 @@ mod tests {
     use crate::guardian::LimiterState;
     use crate::guardian::MAINNET_S3_OBJECT_LOCK_POLICY;
     use crate::guardian::NitroAttestation;
+    use crate::guardian::OperatorInitInfo;
+    use crate::guardian::OperatorInitMode;
     use crate::guardian::RotateKpSetResponse;
     use crate::guardian::SecretSharingInstance;
     use crate::guardian::ShareCommitment;
@@ -487,9 +488,15 @@ mod tests {
         let request_data: StandardWithdrawalRequestWire = request_data.into();
         let response = StandardWithdrawalResponse::mock_for_testing();
         let encrypted_shares = RotateKpSetResponse::mock_for_testing().encrypted_shares;
-        let guardian_info = GuardianInfo::mock_for_testing();
+        let guardian_info = OperatorInitInfo::mock_for_testing();
         let mut ceremony_info = guardian_info.clone();
-        ceremony_info.lifecycle = crate::guardian::CeremonyStage::Uninitialized.into();
+        ceremony_info.initialization = OperatorInitMode::Ceremony;
+        let mut bootstrap_info = guardian_info.clone();
+        let OperatorInitMode::Withdraw(withdraw) = &mut bootstrap_info.initialization else {
+            unreachable!("withdraw dummy initialization");
+        };
+        withdraw.genesis_state_hash =
+            Some(crate::guardian::GenesisState::mock_for_testing().digest());
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;
@@ -505,6 +512,9 @@ mod tests {
             )))),
             LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
                 ceremony_info,
+            )))),
+            LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                bootstrap_info,
             )))),
             LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
@@ -594,11 +604,12 @@ mod tests {
             LogMessage::Heartbeat(_) => "heartbeat/heartbeat",
             LogMessage::Init(message) => match message.as_ref() {
                 InitLogMessage::OIAttestationUnsigned { .. } => "init/oi-attestation-unsigned",
-                InitLogMessage::OIGuardianInfo(info) => match info.lifecycle {
-                    crate::guardian::EnclaveLifecycle::Ceremony(_) => {
-                        "init/oi-ceremony-guardian-info"
-                    }
-                    crate::guardian::EnclaveLifecycle::Withdraw(_) => "init/oi-guardian-info",
+                InitLogMessage::OIGuardianInfo(info) => match &info.initialization {
+                    OperatorInitMode::Ceremony => "init/oi-ceremony-guardian-info",
+                    OperatorInitMode::Withdraw(withdraw) => match withdraw.genesis_state_hash {
+                        None => "init/oi-guardian-info",
+                        Some(_) => "init/oi-bootstrap-guardian-info",
+                    },
                 },
                 InitLogMessage::PIEnclaveFullyInitialized { .. } => {
                     "init/pi-enclave-fully-initialized"
