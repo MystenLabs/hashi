@@ -189,7 +189,7 @@ fun test_new_zero_inputs_aborts() {
 
 #[test]
 #[expected_failure(abort_code = EIndexOutOfRange)]
-fun test_pending_index_out_of_bounds_aborts() {
+fun test_pending_pair_out_of_bounds_aborts() {
     let b = mpc_signing::new(2, 0, 1, 4);
     let _ = b.pending_pair(5);
     b.destroy_for_testing();

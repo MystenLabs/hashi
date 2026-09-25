@@ -235,14 +235,6 @@ public(package) fun pending_pair(self: &SigningBatch, i: u64): Option<PresigPair
     }
 }
 
-public(package) fun first(self: &PresigPair): u64 {
-    self.first
-}
-
-public(package) fun second(self: &PresigPair): u64 {
-    self.second
-}
-
 /// Dense per-input signature vector for the final witness. Aborts unless every
 /// input is signed.
 public(package) fun to_signatures(self: &SigningBatch): vector<vector<u8>> {
