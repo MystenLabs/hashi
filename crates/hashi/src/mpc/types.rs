@@ -26,6 +26,7 @@ use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DealerSubmissionV1;
+use hashi_types::move_types::PresigPair;
 use hashi_types::move_types::StampedDealerSubmissionV1;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1148,6 +1149,10 @@ pub struct PublicPresigs {
 
 #[derive(Clone, Debug)]
 pub struct PartialSigningOutput {
+    /// The on-chain pair these partials consumed. Within an epoch a signing
+    /// id keeps one pair, so a cache lookup under a different pair means the
+    /// caller and the cache disagree and must not be papered over.
+    presig_pair: PresigPair,
     public_presigs: PublicPresigs,
     /// The message-bound nonce `R` the partials were computed against. Peers
     /// report it with their partials so a mismatch is caught before
@@ -1159,6 +1164,7 @@ pub struct PartialSigningOutput {
 
 impl PartialSigningOutput {
     pub fn new(
+        presig_pair: PresigPair,
         public_presigs: PublicPresigs,
         signing_nonce: &G,
         message: &[u8],
@@ -1166,11 +1172,16 @@ impl PartialSigningOutput {
         partial_sigs: Vec<Eval<S>>,
     ) -> Self {
         Self {
+            presig_pair,
             public_presigs,
             signing_nonce_bytes: signing_nonce.to_byte_array(),
             request_digest: signing_request_digest(message, derivation_address),
             partial_sigs,
         }
+    }
+
+    pub fn presig_pair(&self) -> PresigPair {
+        self.presig_pair
     }
 
     pub fn public_presigs(&self) -> PublicPresigs {
@@ -1220,11 +1231,11 @@ pub enum SigningError {
     PoolExhausted,
 
     #[error("Presignature pair {0:?} names the same index twice")]
-    InvalidPresigPair(hashi_types::move_types::PresigPair),
+    InvalidPresigPair(PresigPair),
 
     #[error(
-        "Cached partial signatures for {signing_id} were computed under a different message \
-         or derivation address"
+        "Cached partial signatures for {signing_id} were computed under a different message, \
+         derivation address or presig pair"
     )]
     RequestChanged { signing_id: Address },
 }

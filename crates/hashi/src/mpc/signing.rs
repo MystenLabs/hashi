@@ -628,7 +628,7 @@ impl SigningManager {
         if !request_changed.is_empty() {
             tracing::error!(
                 "Refused {} input(s) whose cached partials were computed under a \
-                 different message or derivation address: {:?}",
+                 different message, derivation address or presig pair: {:?}",
                 request_changed.len(),
                 &request_changed[..request_changed.len().min(8)],
             );
@@ -942,11 +942,11 @@ impl SigningManager {
         let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
-                // The bound nonce commits to the message and derivation
-                // address, so these partials may only ever be served for the
+                // The bound nonce commits to the message, derivation address,
+                // and pair, so these partials may only ever be served for the
                 // request they were computed under.
                 let digest = signing_request_digest(message, derivation_address);
-                if existing.request_digest() != &digest {
+                if existing.request_digest() != &digest || existing.presig_pair() != presig_pair {
                     return Err(SigningError::RequestChanged { signing_id });
                 }
                 tracing::info!(
@@ -1000,6 +1000,7 @@ impl SigningManager {
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
                 drop(_timer);
                 let output = PartialSigningOutput::new(
+                    presig_pair,
                     public_presigs,
                     &signing_nonce,
                     message,
@@ -2114,7 +2115,7 @@ mod tests {
                 .unwrap();
                 mgr.state.write().unwrap().partial_signing_outputs.insert(
                     request_id,
-                    PartialSigningOutput::new(presigs, &nonce, message, None, sigs.clone()),
+                    PartialSigningOutput::new(pair, presigs, &nonce, message, None, sigs.clone()),
                 );
                 if public_presigs.is_none() {
                     public_presigs = Some(presigs);
@@ -2754,7 +2755,14 @@ mod tests {
             .partial_signing_outputs
             .insert(
                 req_id,
-                PartialSigningOutput::new(public_presigs, &nonce, message, None, vec![]),
+                PartialSigningOutput::new(
+                    slot_pair(0),
+                    public_presigs,
+                    &nonce,
+                    message,
+                    None,
+                    vec![],
+                ),
             );
 
         let p2p = setup.mock_p2p_for(0);
@@ -2807,7 +2815,7 @@ mod tests {
             .unwrap();
             mgr.state.write().unwrap().partial_signing_outputs.insert(
                 req_id,
-                PartialSigningOutput::new(presigs, &nonce, message, None, sigs),
+                PartialSigningOutput::new(slot_pair(0), presigs, &nonce, message, None, sigs),
             );
         }
 
@@ -3080,6 +3088,37 @@ mod tests {
             "expected RequestChanged, got: {:?}",
             result.err()
         );
+    }
+
+    /// Partials cached for one pair are never served for another, and the
+    /// refusal spends nothing from the pool.
+    #[tokio::test]
+    async fn test_a_cache_hit_under_a_changed_pair_is_refused() {
+        let setup = SigningTestSetup::new(7);
+        let message = b"same sighash";
+        let req_id = test_request_id();
+        setup.prepare_all(message, req_id, 0, None);
+        let remaining = setup.managers[0].presignatures_remaining();
+
+        let p2p = setup.mock_p2p_for(0);
+        let result = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            1,
+            None,
+            Duration::from_secs(5),
+            &test_metrics(),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SigningError::RequestChanged { .. })),
+            "expected RequestChanged, got: {:?}",
+            result.err()
+        );
+        assert_eq!(setup.managers[0].presignatures_remaining(), remaining);
     }
 
     #[tokio::test]
@@ -3744,7 +3783,14 @@ mod tests {
             .partial_signing_outputs
             .insert(
                 req_id,
-                PartialSigningOutput::new(public_presigs, &nonce, message, None, corrupted),
+                PartialSigningOutput::new(
+                    slot_pair(0),
+                    public_presigs,
+                    &nonce,
+                    message,
+                    None,
+                    corrupted,
+                ),
             );
 
         let p2p = setup.mock_p2p_for(0);
