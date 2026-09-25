@@ -15905,6 +15905,11 @@ fn test_avid_voter_state_survives_restart() {
             response.signature,
         ));
     }
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(&voter.mpc_config.nodes, voter.mpc_config.max_faulty),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
     let (held_vote, held_echoes) = voter
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
@@ -16113,6 +16118,14 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
         dealer_addr,
         response.signature,
     ));
+    assert_eq!(
+        vote_sigs.len() as u32,
+        MpcManager::avid_vote_quorum(
+            &confirmers[0].mpc_config.nodes,
+            confirmers[0].mpc_config.max_faulty,
+        ),
+        "the fixture must supply a full W-f AvidVote quorum",
+    );
     let (held_vote, _) = confirmers[0]
         .avid_held_echoes
         .get(&(batch_index, dealer_addr))
