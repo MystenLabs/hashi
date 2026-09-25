@@ -606,25 +606,9 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    /// Live readers of an uninitialized session see no pending configuration.
+    /// Collect status; the RPC caller holds the control lock while reading it.
     pub async fn info(&self) -> GuardianInfo {
         let lifecycle = self.lifecycle();
-        if lifecycle.is_none() {
-            return GuardianInfo {
-                lifecycle,
-                encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
-                secret_sharing_instance: None,
-                deployment_info: None,
-                config_hash: None,
-                genesis_state_hash: None,
-                enclave_btc_pubkey: None,
-                limiter_state: None,
-                limiter_config: None,
-                current_committee_epoch: None,
-                mpc_master_g: None,
-                hashi_object_id: None,
-            };
-        }
         let temporary_init_state = self.temporary_init_state().ok();
         GuardianInfo {
             lifecycle,

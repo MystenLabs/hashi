@@ -550,24 +550,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_configuration_is_hidden_until_lifecycle_is_published() {
-        let enclave = Enclave::create_with_random_keys();
+    async fn info_waits_for_control_operation_to_publish_lifecycle() {
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+
+        let enclave = Arc::new(Enclave::create_with_random_keys());
         let before = enclave.info().await;
         assert_eq!(before.lifecycle, None);
         assert!(before.deployment_info.is_none());
-        enclave
-            .config
-            .set_deployment(DeploymentConfig::mock_for_testing())
+
+        let (installed_tx, installed_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let initializing = tokio::spawn(enclave.clone().spawn_control_task(
+            (),
+            move |enclave, ()| async move {
+                enclave
+                    .config
+                    .set_deployment(DeploymentConfig::mock_for_testing())?;
+                enclave
+                    .config
+                    .set_s3_logger(crate::test_utils::mock_logger())?;
+                installed_tx.send(()).unwrap();
+                resume_rx.await.unwrap();
+                enclave.advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+            },
+        ));
+        installed_rx.await.unwrap();
+
+        // The request must wait while initialization holds the control lock.
+        let mut response = std::pin::pin!(crate::task_spawner::get_guardian_info(enclave.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut response)
+                .await
+                .is_err()
+        );
+
+        resume_tx.send(()).unwrap();
+        initializing.await.unwrap().unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("status request should finish after initialization")
             .unwrap();
-        enclave
-            .config
-            .set_s3_logger(crate::test_utils::mock_logger())
-            .unwrap();
-        assert_eq!(enclave.info().await, before);
-        enclave
-            .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
-            .unwrap();
-        let after = enclave.info().await;
+        let (after, _) = response.into_info_unchecked();
         assert_eq!(after.lifecycle, CeremonyStage::OperatorInitialized.into());
         assert_eq!(
             after.deployment_info,
